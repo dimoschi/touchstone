@@ -62,8 +62,11 @@ if [ "${1:-}" = "--revoke" ]; then
 fi
 
 GO_SPEC=('*.go' ':(exclude)*_test.go' ':(exclude)*mock_*.go' ':(exclude)*.sql.go')
-mapfile -t CHANGED < <(git diff --name-only --cached -- "${GO_SPEC[@]}")
-if [ "${#CHANGED[@]}" -eq 0 ] || [ -z "${CHANGED[0]}" ]; then
+CHANGED=()
+while IFS= read -r f; do
+  [ -n "$f" ] && CHANGED+=("$f")
+done < <(git diff --name-only --cached -- "${GO_SPEC[@]}")
+if [ "${#CHANGED[@]}" -eq 0 ]; then
   echo "deadcode-check: no staged Go files"
   exit 0
 fi
@@ -136,42 +139,22 @@ if [ ! -s "$ADDED" ]; then
   exit 0
 fi
 
-# Group by nearest enclosing go.mod: deadcode must run inside a module.
-declare -A bymod=()
-for f in "${CHANGED[@]}"; do
-  d="$(dirname "$f")"
-  while [ "$d" != "." ] && [ ! -f "$d/go.mod" ]; do d="$(dirname "$d")"; done
-  [ -f "$d/go.mod" ] || d="."
-  bymod["$d"]=1
-done
+# Group by nearest enclosing go.mod: deadcode must run inside a module. The
+# resolution, the module paths and the replace closure all come from
+# lib/go_modules.py, which crap-check-go.sh and mutation-check-go.sh also use,
+# so the three gates cannot disagree about which module owns a file.
+MODDIRS=()
+while IFS= read -r d; do
+  [ -n "$d" ] && MODDIRS+=("$d")
+done < <(printf '%s\n' "${CHANGED[@]}" | python3 "$LIB_DIR/go_modules.py" group \
+         | cut -f1 | sort -u)
 
-# A library module's callers live in another module, so analysing only the one
-# the file sits in reports a shared package's whole exported API as unreachable.
-mapfile -t ALL_MODS < <(git ls-files '*go.mod' | xargs -n1 dirname | sort -u)
-declare -A MOD_PATH=()
-for m in "${ALL_MODS[@]}"; do
-  MOD_PATH["$m"]="$(awk '/^module /{print $2; exit}' "$m/go.mod")"
-done
+mod_path() { python3 "$LIB_DIR/go_modules.py" modpath "$1"; }
 
-# Modules that pull in $1, transitively, plus $1 itself.
-analysis_roots() {
-  local target="$1" changed=1 m dep
-  declare -A want=(["$target"]=1)
-  while [ "$changed" -eq 1 ]; do
-    changed=0
-    for m in "${ALL_MODS[@]}"; do
-      [ -n "${want[$m]:-}" ] && continue
-      while read -r dep; do
-        [ -n "$dep" ] || continue
-        # replace targets are relative to the module directory.
-        dep="$(cd "$m" && cd "$dep" 2>/dev/null && git rev-parse --show-prefix)" || continue
-        dep="${dep%/}"; [ -n "$dep" ] || dep="."
-        if [ -n "${want[$dep]:-}" ]; then want["$m"]=1; changed=1; fi
-      done < <(awk '/^replace .* => *\.\.?\//{print $NF}' "$m/go.mod")
-    done
-  done
-  printf '%s\n' "${!want[@]}"
-}
+# Modules that pull in $1, transitively, plus $1 itself. A library module's
+# callers live in another module, so analysing only the one the file sits in
+# reports a shared package's whole exported API as unreachable.
+analysis_roots() { python3 "$LIB_DIR/go_modules.py" roots "$1"; }
 
 # deadcode prints paths relative to the root it ran in; the keys are
 # repo-relative, and a root outside $mod reports it as "../<mod>/...".
@@ -194,8 +177,8 @@ setup_staged_tree
 total=0
 skipped=0
 unanalysed=0
-for mod in "${!bymod[@]}"; do
-  modpath="${MOD_PATH[$mod]}"
+for mod in ${MODDIRS[@]+"${MODDIRS[@]}"}; do
+  modpath="$(mod_path "$mod")"
   MANIFEST="$(mktemp)"
   SCOPE="$(mktemp -d)"
   roots_with_main=0

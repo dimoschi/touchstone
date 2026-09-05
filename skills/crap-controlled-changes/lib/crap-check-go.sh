@@ -24,6 +24,7 @@ EXIT_UNMEASURABLE=4
 DIAG_LINES=30
 
 SKILL_LIB="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+. "$SKILL_LIB/read-lines.sh"
 . "$SKILL_LIB/ignored-files.sh"
 
 REPO_ROOT="$(git rev-parse --show-toplevel 2>/dev/null)" || {
@@ -33,9 +34,9 @@ REPO_ROOT="$(git rev-parse --show-toplevel 2>/dev/null)" || {
 cd "$REPO_ROOT"
 
 if [ -n "${CRAP_FILES:-}" ]; then
-  mapfile -t CHANGED <<< "$CRAP_FILES"
+  read_lines CHANGED <<< "$CRAP_FILES"
 else
-  mapfile -t CHANGED < <(git diff --name-only --cached -- '*.go' ':(exclude)*_test.go' ':(exclude)*mock_*.go' ':(exclude)*_mock.go' ':(exclude)*.sql.go' ':(exclude)*.pb.go')
+  read_lines CHANGED < <(git diff --name-only --cached -- '*.go' ':(exclude)*_test.go' ':(exclude)*mock_*.go' ':(exclude)*_mock.go' ':(exclude)*.sql.go' ':(exclude)*.pb.go')
 fi
 if [ "${#CHANGED[@]}" -eq 0 ] || [ -z "${CHANGED[0]}" ]; then
   exit 0
@@ -163,21 +164,18 @@ measure() {
   # Multi-module repos: go-crap must run from inside a module, not the repo
   # root (a rootless-go.mod monorepo measures nothing and false-passes).
   # Group changed files by nearest enclosing go.mod; "." keeps the historic
-  # single-module behavior.
-  local -A bymod=() bypkg=()
-  local f d
-  for f in "${existing[@]}"; do
-    d="$(dirname "$f")"
-    while [ "$d" != "." ] && [ ! -f "$root/$d/go.mod" ]; do d="$(dirname "$d")"; done
-    [ -f "$root/$d/go.mod" ] || d="."
-    bymod["$d"]+="$f"$'\n'
-    bypkg["$(dirname "$f")"]="$d"
-  done
+  # single-module behavior. lib/go_modules.py does the resolution, shared with
+  # deadcode-check.sh and mutation-check-go.sh so all three gates agree on which
+  # module owns a file. Rows are "<moddir>\t<pkgdir>\t<repo-relative-file>".
+  local grouped
+  grouped="$(mktemp)"
+  printf '%s\n' "${existing[@]}" \
+    | (cd "$root" && python3 "$SKILL_LIB/go_modules.py" group) | cut -f1-3 > "$grouped"
 
   # One coverage run per module, then a cheap scan per changed package: profiles
   # are module-wide, so re-running the suite per package would be waste.
   local mod status prof pkgdir pattern base bases
-  for mod in "${!bymod[@]}"; do
+  while IFS= read -r mod; do
     prof="$(mktemp)"
     if ! gen_coverage "$root/$mod" "$prof" "$phase"; then
       rm -f "$prof"
@@ -186,7 +184,6 @@ measure() {
 
     while IFS= read -r pkgdir; do
       [ -n "$pkgdir" ] || continue
-      [ "${bypkg[$pkgdir]}" = "$mod" ] || continue
 
       # Package pattern relative to the module go-crap is invoked from.
       if [ "$mod" = "." ]; then pattern="./$pkgdir"; else pattern="./${pkgdir#"$mod"/}"; fi
@@ -196,8 +193,8 @@ measure() {
       bases=()
       while IFS= read -r f; do
         [ -n "$f" ] || continue
-        [ "$(dirname "$f")" = "$pkgdir" ] && bases+=("$(basename "$f")")
-      done <<< "${bymod[$mod]}"
+        bases+=("$(basename "$f")")
+      done < <(awk -F'\t' -v m="$mod" -v p="$pkgdir" '$1 == m && $2 == p { print $3 }' "$grouped")
 
       status=0
       (cd "$root/$mod" && "${GOCRAP[@]}" "$pattern" --format json \
@@ -212,9 +209,10 @@ measure() {
       fi
 
       python3 "$SKILL_LIB/parse_gocrap.py" "$RAW_OUT" "${bases[@]}" >> "$out"
-    done < <(printf '%s\n' "${!bypkg[@]}")
+    done < <(awk -F'\t' -v m="$mod" '$1 == m { print $2 }' "$grouped" | sort -u)
     rm -f "$prof"
-  done
+  done < <(cut -f1 "$grouped" | sort -u)
+  rm -f "$grouped"
 }
 
 

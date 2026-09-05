@@ -70,6 +70,9 @@ Needed for the pipeline itself:
 
 - **Claude Code** with dynamic workflows enabled (`/config`).
 - **`gh`**, authenticated. Reads GitHub issues and opens the PR.
+- **python3**, which the gates already use for all of their real logic.
+- **Any bash**, including the 3.2 macOS ships. The gates carry no bash 4
+  dependency and CI checks that on every push, so there is nothing to install.
 
 Needed per language you gate, and only then:
 
@@ -142,6 +145,17 @@ to override.
 bash scripts/run-hook-tests.sh          # hook suites; needs only python3 and git
 bash scripts/check-no-private-refs.sh   # no machine- or org-specific references
 ```
+
+Two rules the CI enforces, both easy to break by habit:
+
+- **No bash 4+ constructs.** No `mapfile`, `readarray`, `declare -A` or
+  `local -A`. Use `lib/read-lines.sh` to fill an array from a stream, and
+  `lib/go_modules.py` for anything keyed by module or package. macOS still ships
+  bash 3.2, and a gate that fails to start is worse than one that runs slowly.
+- **Module resolution lives in one place.** `lib/go_modules.py` answers "which
+  module owns this file" for all three Go gates. It used to be copy-pasted into
+  each of them, which meant the gates could disagree about what to measure while
+  all reporting green.
 
 The skill's own suites live in `skills/crap-controlled-changes/test/` and need the
 relevant language toolchain. Each builds its fixture repository on first run.

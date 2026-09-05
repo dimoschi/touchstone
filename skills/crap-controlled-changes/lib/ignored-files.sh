@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# shellcheck source=read-lines.sh
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/read-lines.sh"
 # ignored-files.sh: shared diagnostic for gitignored files that contaminate a
 # measurement phase. Sourced by the per-language modules; not executable alone.
 #
@@ -36,7 +38,7 @@ collect_ignored_files() {
   shift
   IGNORED_FILES=()
   [ "$phase" = "$PHASE_BASELINE" ] || return 0
-  mapfile -t IGNORED_FILES < <(
+  read_lines IGNORED_FILES < <(
     git ls-files --others --ignored --exclude-standard -- "$@" 2>/dev/null || true
   )
 }

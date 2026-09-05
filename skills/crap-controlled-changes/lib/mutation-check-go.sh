@@ -48,8 +48,11 @@ if ! git diff --quiet || ! git diff --cached --quiet; then
   exit 2
 fi
 
-mapfile -t CHANGED <<< "${MUTATION_FILES:-}"
-if [ "${#CHANGED[@]}" -eq 0 ] || [ -z "${CHANGED[0]}" ]; then
+CHANGED=()
+while IFS= read -r f; do
+  [ -n "$f" ] && CHANGED+=("$f")
+done <<< "${MUTATION_FILES:-}"
+if [ "${#CHANGED[@]}" -eq 0 ]; then
   exit 0
 fi
 
@@ -62,25 +65,34 @@ fi
 # package and mutates every changed line in it, so an excluded sibling still
 # shows up. parse_mutago.py takes the same list and drops those rows.
 # Paths are made module-relative for the cd below.
-declare -A bymod=()
+# Module resolution comes from lib/go_modules.py, shared with crap-check-go.sh
+# and deadcode-check.sh so the three gates cannot disagree about which module
+# owns a file. Deleted files are dropped first: mutating a file that is gone is
+# not possible, and go_modules resolves by path without checking the disk.
+BYMOD="$(mktemp)"
+# Set here rather than beside RAW_OUT: the "nothing to mutate" exit below comes
+# first and would otherwise leak this file. The rest are unset then, which the
+# :- guards make harmless.
+trap 'rm -f "$BYMOD" "${RAW_OUT:-}" "${RAW_ERR:-}"' EXIT
 for f in "${CHANGED[@]}"; do
   [ -f "$f" ] || continue
-  d="$(dirname "$f")"
-  while [ "$d" != "." ] && [ ! -f "$d/go.mod" ]; do d="$(dirname "$d")"; done
-  [ -f "$d/go.mod" ] || d="."
-  rel="$f"
-  [ "$d" != "." ] && rel="${f#"$d"/}"
-  bymod["$d"]+="./$rel"$'\n'
-done
+  printf '%s\n' "$f"
+done | python3 "$SKILL_LIB/go_modules.py" group | cut -f1,4 > "$BYMOD"
 
-if [ "${#bymod[@]}" -eq 0 ]; then
+if [ ! -s "$BYMOD" ]; then
   echo "mutation-check[go]: all changed Go files are deleted; nothing to mutate."
   exit 0
 fi
 
+MODS=()
+while IFS= read -r m; do
+  [ -n "$m" ] && MODS+=("$m")
+done < <(cut -f1 "$BYMOD" | sort -u)
+
+targets_for() { awk -F'\t' -v m="$1" '$1 == m { print $2 }' "$BYMOD"; }
+
 RAW_OUT="$(mktemp)"
 RAW_ERR="$(mktemp)"
-trap 'rm -f "$RAW_OUT" "$RAW_ERR"' EXIT
 
 # mutago defaults to --workers=0, i.e. one worker per CPU, and every worker
 # shells out to `go test`, which itself parallelizes to GOMAXPROCS. Unbounded
@@ -119,9 +131,12 @@ fi
 # A tag-excluded file yields no mutants, which reads as "nothing mutable
 # changed": a pass on code nothing compiled. go list omits it from GoFiles.
 UNANALYSED=""
-for mod in "${!bymod[@]}"; do
-  mapfile -t SEEN <<< "${bymod[$mod]%$'\n'}"
-  for t in "${SEEN[@]}"; do
+for mod in ${MODS[@]+"${MODS[@]}"}; do
+  SEEN=()
+  while IFS= read -r t; do
+    [ -n "$t" ] && SEEN+=("$t")
+  done < <(targets_for "$mod")
+  for t in ${SEEN[@]+"${SEEN[@]}"}; do
     listed="$(cd "$mod" && go list -f \
       '{{range .GoFiles}}{{.}} {{end}}{{range .CgoFiles}}{{.}} {{end}}' \
       "$(dirname "$t")" 2>/dev/null || true)"
@@ -171,9 +186,12 @@ if [ -n "$UNANALYSED" ]; then
 fi
 
 total_rows=0
-for mod in "${!bymod[@]}"; do
+for mod in ${MODS[@]+"${MODS[@]}"}; do
   status=0
-  mapfile -t TARGETS <<< "${bymod[$mod]%$'\n'}"
+  TARGETS=()
+  while IFS= read -r t; do
+    [ -n "$t" ] && TARGETS+=("$t")
+  done < <(targets_for "$mod")
   (cd "$mod" && GOMAXPROCS="$GO_MAXPROCS" \
     ${MUTATION_GO_RUNNER:+$MUTATION_GO_RUNNER} \
     go run "$MUTAGO_PKG@$MUTAGO_VERSION" "${MUTAGO_ARGS[@]}" "${TARGETS[@]}") \

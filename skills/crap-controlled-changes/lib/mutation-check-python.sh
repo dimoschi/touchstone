@@ -22,10 +22,11 @@ EXIT_UNMEASURABLE=4
 DIAG_LINES=20
 
 SKILL_LIB="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+. "$SKILL_LIB/read-lines.sh"
 
 [ -n "${MUTATION_BASE:-}" ] || { echo "mutation-check[python]: MUTATION_BASE not set" >&2; exit 2; }
 
-mapfile -t CHANGED <<< "${MUTATION_FILES:-}"
+read_lines CHANGED <<< "${MUTATION_FILES:-}"
 if [ "${#CHANGED[@]}" -eq 0 ] || [ -z "${CHANGED[0]}" ]; then
   exit 0
 fi

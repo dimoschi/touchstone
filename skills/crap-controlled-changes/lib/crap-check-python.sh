@@ -22,13 +22,14 @@
 set -euo pipefail
 
 SKILL_LIB="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+. "$SKILL_LIB/read-lines.sh"
 . "$SKILL_LIB/ignored-files.sh"
 . "$SKILL_LIB/repo-lock.sh"
 
 if [ -n "${CRAP_FILES:-}" ]; then
-  mapfile -t CHANGED <<< "$CRAP_FILES"
+  read_lines CHANGED <<< "$CRAP_FILES"
 else
-  mapfile -t CHANGED < <(git diff --name-only --cached -- '*.py' \
+  read_lines CHANGED < <(git diff --name-only --cached -- '*.py' \
     ':(exclude)**/test_*.py' ':(exclude)**/*_test.py' \
     ':(exclude)tests/**' ':(exclude)**/tests/**' ':(exclude)conftest.py' ':(exclude)**/conftest.py')
 fi
