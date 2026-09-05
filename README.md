@@ -64,6 +64,30 @@ ledger can always be made green by writing tests, but some codebases carry mutan
 no test can ever kill (a string-heavy module where the mutator only flips the case
 of case-insensitive keys). One shared marker made those repos unmergeable.
 
+## Every run needs a ticket. This is deliberate
+
+`--ticket` is required and the pipeline refuses without it. It will not infer
+one from your task text.
+
+```
+/touchstone:deliver --ticket 216            # GitHub issue 216 in this repo
+/touchstone:deliver --ticket PROJ-4821      # Jira key, via the Atlassian MCP
+/touchstone:deliver refactor the retry path # refused: no --ticket
+```
+
+A bare number is read as a GitHub issue in the repo you are in, so **any repo
+with Issues enabled already satisfies this** — you do not need Jira, or a
+project, or any tracker beyond GitHub. `gh issue create` is the whole setup.
+
+The reason it refuses rather than guessing: the ticket goes into the branch
+name (`feat/gh-216-retry-path`), and every metric downstream reads it from
+there. A guessed ticket bakes a fabricated link into that name permanently, and
+nothing later can tell it was invented. Refusing is cheap; an unfabricated link
+is not recoverable after the fact.
+
+If a ticket cannot be *fetched* — Jira is down, the issue is private — the run
+continues without its prose. Only the reference is mandatory, not the text.
+
 ## Requirements
 
 Needed for the pipeline itself:
