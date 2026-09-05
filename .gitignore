@@ -1,0 +1,19 @@
+# Test fixtures are git repositories the suite creates on first run (each
+# runner does its own guarded `git init`). Committing them would make them
+# gitlinks, which clone as empty directories and break every test.
+skills/crap-controlled-changes/test/fixture*/.git/
+
+# Fixture build and dependency trees, created by the language-specific runs.
+skills/crap-controlled-changes/test/fixture*/vendor/
+skills/crap-controlled-changes/test/fixture*/.venv/
+skills/crap-controlled-changes/test/fixture*/mutants/
+skills/crap-controlled-changes/test/fixture*/node_modules/
+
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.DS_Store
+
+# Local term list for scripts/check-no-private-refs.sh. Never tracked: the
+# point of keeping it out of the repo is that the terms stay unpublished.
+.private-terms

@@ -1,0 +1,1042 @@
+export const meta = {
+  name: 'deliver-pipeline',
+  description: 'Triage -> plan -> implement (TDD) -> gates -> adversarial review -> mutation -> PR, bounded',
+  whenToUse: 'Ticket-driven delivery in a repo that has opted into gating. Prefer the /deliver command, which parses flags and refuses without a ticket. Pass args: {ticket: "..."}; task is optional and narrows the ticket. Pass {plan: "..."} to reuse a plan an earlier run produced, which skips the Plan phase and starts at Implement.',
+  phases: [
+    { title: 'Worktree', detail: 'canonically named branch and worktree from a freshly pulled base, then fetch the ticket once for every later phase' },
+    { title: 'Triage', detail: 'one cheap agent checks the premise and sizes the job; a disproved premise halts, small work skips straight to Implement' },
+    { title: 'Plan', detail: 'planner produces plan + acceptance criteria + risk areas' },
+    { title: 'Implement', detail: 'one implementer, TDD via crap-controlled-changes, many small signed commits' },
+    { title: 'Review', detail: 'adversarial reviewers on distinct lenses, chosen by diff size: correctness and devil\'s advocate normally, plus requirements coverage on a big diff, none on a one-liner. Runs again on any commits a later phase adds' },
+    { title: 'Fix', detail: 'fix confirmed findings, one verifier re-checks them all, then an adversary reads the fix\'s own commits; bounded rounds' },
+    { title: 'Mutation', detail: 'pre-PR mutation gate; kill survivors with tests, never weaken code. Its own commits are reviewed before the PR' },
+    { title: 'PR', detail: 'push and open a PR against the repo template, only when every gate is green' },
+  ],
+}
+
+// Boundaries. Wall-clock deadlines are not expressible here (no Date.now, by
+// design); the bounds are rounds, counts, and token budget instead.
+// The ticket is the specification: its description and comments are fetched
+// below and given to Triage, which checks its claims, and to Plan, which works
+// from it. No other phase sees the text. A task string is therefore optional,
+// and when given it narrows or reframes rather than restates -- "just the retry
+// path of this ticket".
+let task = typeof args === 'string' ? args : args?.task
+
+// Every task traces to a ticket, by rule. Failing here rather than cutting an
+// unmarked branch keeps the link unfabricated: a branch with no jira-/gh- marker
+// is reported untracked forever, and nothing downstream can recover the ticket.
+const ticket = args?.ticket
+if (!ticket) {
+  throw new Error(
+    'deliver-pipeline: pass args {ticket: "PROJ-4821"} or {ticket: "216"}. ' +
+    'Every task must trace to a Jira ticket or GH issue. Do not infer one from ' +
+    'the task text; supply it explicitly or do the work outside this workflow.')
+}
+// Phase recording goes to agent-eval, a separate optional tool. Default on so a
+// machine that has it keeps its ground truth without opting in every run; the
+// prompt tells each phase to skip a missing command rather than halt, so this
+// flag exists to silence the instruction entirely, not to make it safe.
+const recordPhases = args?.record !== false
+
+// Stacking on a PR still in flight. The review range is the merge base with the
+// base and the PR opens against it, so defaulting here puts the parent's commits
+// in this PR's diff.
+const baseOverride = typeof args?.base === 'string' && args.base.trim()
+  ? args.base.trim() : null
+
+const MAX_GATE_ATTEMPTS = args?.maxGateAttempts ?? 3
+// Three, not two: a fix round that introduces a new finding now spends a round
+// discovering that, so two left no round to actually resolve it.
+const MAX_REVIEW_ROUNDS = args?.maxReviewRounds ?? 3
+const BUDGET_FLOOR = 30_000
+const outOfBudget = () => budget.total && budget.remaining() < BUDGET_FLOOR
+
+// A change this small is cheaper to plan than to orchestrate around: Triage
+// sends it straight to Implement, and Review skips its lenses for a diff under
+// the same bar.
+const INLINE_LOC = args?.inlineLoc ?? 10
+
+// Long briefs make agents thorough about the wrong things, and the task text is
+// re-sent to every agent in the pipeline. Clamp what gets forwarded.
+const BRIEF_CHARS = args?.briefChars ?? 4000
+const brief = (s) => {
+  const t = String(s ?? '')
+  return t.length <= BRIEF_CHARS ? t : `${t.slice(0, BRIEF_CHARS)}\n[brief truncated]`
+}
+
+// Per-stage token ceilings (output tokens). Tripwires, not aborts: a running
+// agent can't be stopped from here, so over() is read only after the agent has
+// returned. On a single-shot stage that makes the ceiling retrospective -- it
+// cannot prevent the spend, it can only discard the finished work, which is why
+// plan and implement carry none. A ceiling is a real bound only where over()
+// gates a further iteration (the fix rounds, the mutation attempts, the
+// re-review latches), and those keep theirs. triage and branch keep theirs too:
+// both halt before any code exists, so tripping them forfeits nothing.
+// null means uncapped; args.stageBudgets can set a number to opt one back in.
+const CEILINGS = {
+  triage: 15_000,
+  branch: 10_000,
+  plan: null,
+  implement: null,
+  gate: 120_000,
+  review: 80_000,
+  // Carries the tail review of each fix round as well as the fixing itself.
+  fix: 170_000,
+  mutation: 150_000,
+  pr: 30_000,
+  ...(args?.stageBudgets ?? {}),
+}
+const stageSpend = {}
+const stage = (name) => {
+  const start = budget.spent()
+  const cap = CEILINGS[name]
+  return {
+    over: () => cap != null && budget.spent() - start > cap,
+    close: () => {
+      stageSpend[name] = budget.spent() - start
+      log(`${name}: ${Math.round(stageSpend[name] / 1000)}k output tokens ` +
+          (cap == null ? '(no ceiling)' : `(ceiling ${Math.round(cap / 1000)}k)`))
+    },
+  }
+}
+const halted = (at, extra) => ({
+  task, halted_at: at, stage_spend: stageSpend, needs_user: true, ...extra,
+})
+
+// task_demands_implementation is asked of the planner rather than pattern-matched
+// here because the contradiction arrives as prose. A real run was handed a task
+// reading "the plan below is already written... then implement", obeyed the task
+// over the phase rule, and committed 51 edits from the Plan stage; the review that
+// would have compared its reasoning to its code never ran.
+const PLAN = {
+  type: 'object', additionalProperties: false,
+  required: ['plan', 'acceptance_criteria', 'risky_areas',
+             'task_demands_implementation'],
+  properties: {
+    plan: { type: 'string' },
+    acceptance_criteria: { type: 'array', items: { type: 'string' } },
+    risky_areas: { type: 'array', items: { type: 'string' } },
+    task_demands_implementation: { type: 'boolean' },
+    conflict_note: { type: 'string' },
+  },
+}
+// Scalars first, prose last. A required integer serialized after a long
+// free-text field is where the value drifts into the prose and validation
+// fails; premise_note is explicitly asked to be discursive. estimated_loc is
+// optional because the branch that needs it least is the one that fires most:
+// when premise_ok is false the latch trips regardless, and demanding a line
+// count for a change nobody has scoped yet forces a number out of thin air.
+const BRANCH = {
+  type: 'object', additionalProperties: false,
+  required: ['created', 'branch', 'base', 'path', 'detail'],
+  properties: {
+    created: { type: 'boolean' },
+    branch: { type: 'string' },
+    base: { type: 'string' },
+    path: { type: 'string' },
+    ticket: { type: 'string' },
+    detail: { type: 'string' },
+  },
+}
+
+const TRIAGE = {
+  type: 'object', additionalProperties: false,
+  required: ['scope', 'premise_ok', 'evidence', 'premise_note'],
+  properties: {
+    scope: { type: 'string', enum: ['inline', 'team'] },
+    premise_ok: { type: 'boolean' },
+    estimated_loc: { type: 'integer' },
+    evidence: { type: 'array', items: { type: 'string' } },
+    premise_note: { type: 'string' },
+  },
+}
+// commit_range is what downstream phases are handed. summary exists for the
+// halt returns a human reads, and is deliberately NOT forwarded to the
+// reviewer: an adversarial reviewer told what the implementer believes it did
+// is anchored before it opens a file. files_changed is forwarded, because scope
+// is a fact rather than the implementer's account of itself.
+const IMPL = {
+  type: 'object', additionalProperties: false,
+  required: ['summary', 'files_changed', 'commit_range', 'insertions'],
+  properties: {
+    summary: { type: 'string' },
+    files_changed: { type: 'array', items: { type: 'string' } },
+    commit_range: { type: 'string' },
+    insertions: { type: 'integer' },
+  },
+}
+// head_sha is required, not optional: it is how the script learns what this
+// phase committed, and an absent one is indistinguishable from "committed
+// nothing" -- which is exactly the case that must not silently skip review.
+const GATE = {
+  type: 'object', additionalProperties: false,
+  required: ['green', 'head_sha', 'detail'],
+  properties: {
+    green: { type: 'boolean' }, head_sha: { type: 'string' },
+    detail: { type: 'string' },
+    needs_user_run: { type: 'boolean' },
+  },
+}
+const FINDINGS = {
+  type: 'object', additionalProperties: false, required: ['findings'],
+  properties: {
+    findings: {
+      type: 'array',
+      items: {
+        type: 'object', additionalProperties: false,
+        required: ['title', 'file', 'claim', 'evidence'],
+        properties: {
+          title: { type: 'string' }, file: { type: 'string' },
+          claim: { type: 'string' }, evidence: { type: 'string' },
+        },
+      },
+    },
+  },
+}
+const VERDICTS = {
+  type: 'object', additionalProperties: false, required: ['verdicts'],
+  properties: {
+    verdicts: {
+      type: 'array',
+      items: {
+        type: 'object', additionalProperties: false,
+        required: ['title', 'fixed', 'note'],
+        properties: {
+          title: { type: 'string' },
+          fixed: { type: 'boolean' },
+          note: { type: 'string' },
+        },
+      },
+    },
+  },
+}
+// A fix round is a code change like any other, so the script has to know where
+// it landed to hand the next reviewer a range.
+const FIXED = {
+  type: 'object', additionalProperties: false, required: ['head_sha', 'note'],
+  properties: { head_sha: { type: 'string' }, note: { type: 'string' } },
+}
+const PR = {
+  type: 'object', additionalProperties: false, required: ['opened', 'url', 'note'],
+  properties: {
+    opened: { type: 'boolean' }, url: { type: 'string' }, note: { type: 'string' },
+  },
+}
+const TICKET = {
+  type: 'object', additionalProperties: false,
+  required: ['found', 'summary', 'description', 'comments'],
+  properties: {
+    found: { type: 'boolean' },
+    summary: { type: 'string' },
+    description: { type: 'string' },
+    comments: { type: 'string' },
+  },
+}
+
+// Worktree before triage, not just before planning. Triage often routes small
+// work back to be done inline, and that work still needs to land somewhere
+// named: without the jira-/gh- marker the session is reported untracked
+// forever. Creating the worktree first means inline work happens in the right
+// place too. The cost is one unused worktree when triage rejects the premise.
+// Recording is the sanctioned way to finish, not an extra step. A phase that
+// halts never reaches the moment a human would report it, so halted runs used
+// to leave no trace at all and the evaluation data described only work that
+// completed -- it could not show this workflow failing, because failure never
+// arrived. The script cannot record on a phase's behalf: it has no shell, and a
+// phase that dies mid-flight returns nothing for it to write.
+// Set once the worktree exists. RECORD is called while building the worktree
+// agents' own prompts, before `wt` is initialised, so reading wt there is a
+// temporal dead zone crash on every run.
+let recordedBranch = ''
+
+const RECORD = (label) => !recordPhases ? '' :
+  `\n\nBefore you return, record this phase. It is the only reason a stopped ` +
+  `run leaves any evidence:\n` +
+  `  agent-eval record-phase --session "$CLAUDE_CODE_SESSION_ID" ` +
+  `--phase '${label}' --status <completed|halted|failed> [--reason '<why>'] `+
+  `--branch '${recordedBranch}'\n` +
+  `Use completed when you did the job; halted when you deliberately stopped ` +
+  `because the work should not continue; failed when you stopped without ` +
+  `deciding anything, such as running out of budget or hitting an error. ` +
+  `halted and failed look identical from outside and mean opposite things, so ` +
+  `do not use one for the other.\n` +
+  `agent-eval is an optional companion tool. If the command is not installed ` +
+  `(command not found), skip this step silently and carry on: it records ` +
+  `metrics and has no bearing on the work. Report any other error verbatim, ` +
+  `and never set CLAUDE_CONFIG_DIR to make it work.`
+
+// One fetch, before anything reads the envelope. A failed fetch is not a halt:
+// the ticket is required to exist as a reference, but its prose is enrichment,
+// and a Jira outage is not a reason to refuse to do the work.
+const fetched = await agent(
+  `[touchstone: ticket]\n` +
+  `Fetch the details of ticket ${ticket} and STOP. Do not plan, implement, ` +
+  `branch, or comment on anything.\n` +
+  `A key like PROJ-4821 or ABC-36 is a Jira issue: read it with the Atlassian ` +
+  `tools, which you can find via ToolSearch. A bare number like 216 is a ` +
+  `GitHub issue in the repo you are currently in: read it with ` +
+  `gh issue view <number> --json title,body,comments.\n` +
+  `Return found=true with summary (the title), description, and comments ` +
+  `(concatenated, newest last, each prefixed with its author; empty string if ` +
+  `none). Return found=false with empty strings if the ticket cannot be read ` +
+  `at all: say why in summary. Do not invent or infer any field.` +
+  RECORD('ticket'),
+  { label: 'ticket', schema: TICKET, model: 'haiku', effort: 'low' })
+
+const ticketDetail = fetched?.found
+  ? fetched
+  : { found: false, summary: fetched?.summary ?? 'not fetched', description: '', comments: '' }
+if (!ticketDetail.found) {
+  log(`ticket ${ticket} details unavailable (${ticketDetail.summary}); ` +
+      `continuing without it`)
+}
+
+// With no task given, the ticket's own title is the task. If neither exists
+// there is nothing to name a branch after and nothing to plan against, which is
+// a real dead end rather than something to invent a slug for.
+if (!task) {
+  if (!ticketDetail.found) {
+    throw new Error(
+      `touchstone: no task given and ticket ${ticket} could not be read ` +
+      `(${ticketDetail.summary}). Pass args {task: "..."} or make the ticket ` +
+      `readable; naming a branch after neither is how a fabricated link gets in.`)
+  }
+  task = ticketDetail.summary
+  log(`no task given; using ticket summary: ${task}`)
+}
+
+phase('Worktree')
+const sBranch = stage('branch')
+
+// --show-toplevel returns the worktree's own path when run from inside one,
+// not the repository; every session now runs inside a worktree, so a new
+// worktree path built from it nests inside the current one instead of sitting
+// beside it. The repo root must come from --git-common-dir instead.
+//
+// Re-running the same ticket is normal, not an error, and git will not let a
+// branch be checked out twice: both prompts below must find an existing
+// branch or worktree and reuse it rather than treat a collision as a halt.
+
+// existingBranch is for follow-up work on an open PR: review feedback, or scope
+// added to a ticket already in flight. Cutting a fresh branch there strands the
+// delta away from the PR it belongs to. The ticket stays mandatory either way.
+const wt = args?.existingBranch
+  ? await agent(
+      `[touchstone: branch:existing]\n` +
+      `Find the worktree that already holds the current branch, then STOP. Do ` +
+      `not create a branch, do not create a worktree, do not fetch, do not ` +
+      `pull, do not plan or implement.\n` +
+      `This task continues work on an existing branch for ticket ${ticket}.\n` +
+      `1. Return created=false if the working tree has uncommitted changes. Say ` +
+      `what is dirty. Never stash, reset, or discard the user's work.\n` +
+      `2. Run git worktree prune. It only removes registrations for worktree ` +
+      `directories that no longer exist on disk; it never touches a directory ` +
+      `that does exist. Run it before listing worktrees so a stale record left ` +
+      `behind by a hand-deleted directory cannot be matched below.\n` +
+      `3. Return created=false if HEAD is detached, or if the current branch is ` +
+      `the repo's base branch (main, master, or whatever origin/HEAD names). ` +
+      `Committing follow-up work straight onto the base is not what this mode is ` +
+      `for.\n` +
+      `4. Note the current branch name (git branch --show-current), then run ` +
+      `git worktree list --porcelain. It prints one record per worktree: a ` +
+      `"worktree <path>" line followed by a "branch refs/heads/<name>" line (or ` +
+      `"detached"/"bare"). A branch already checked out somewhere cannot also ` +
+      `have a worktree created for it here, git refuses that outright, so the ` +
+      `existing record is what this task must use, not a new one.\n` +
+      `5. Find the record whose branch matches the current branch name and take ` +
+      `its path. That path is correct whether it is the main checkout or a ` +
+      `linked worktree: the branch lives there and nowhere else.\n` +
+      `6. If no record matches (the branch is checked out in no worktree at ` +
+      `all), return created=false and say so. Do not create one for it; that is ` +
+      `what the default (non-existingBranch) mode is for.\n` +
+      `7. Otherwise return created=true, branch set to the current branch name, ` +
+      `base set to the repo's base branch, and path set to the absolute path ` +
+      `from the matching record. Note in detail whether that path is the main ` +
+      `checkout or a linked worktree, and whether the branch name carries a ` +
+      `jira- or gh- marker. An unmarked pre-existing branch is allowed here and ` +
+      `is not a failure: it predates the convention. Say so plainly so the ` +
+      `session is known to be untrackable by branch name.` + RECORD('branch:existing'),
+      { label: 'branch:existing', schema: BRANCH, model: 'haiku', effort: 'low' })
+  : await agent(
+  `[touchstone: branch]\n` +
+  `Create the working branch and a git worktree for it, then STOP. Do not ` +
+  `plan, implement, or commit any code.\n` +
+  `Task: ${brief(task)}\n` +
+  `Ticket: ${ticket}\n` +
+  `Branch type prefix: ${args?.branchType ?? 'feat'}\n` +
+  `1. Refuse and return created=false if the working tree has uncommitted ` +
+  `changes. Say what is dirty. Never stash, reset, or discard the user's work.\n` +
+  `2. Run git worktree prune. It only removes registrations for worktree ` +
+  `directories that no longer exist on disk, never a directory that does ` +
+  `exist, so it is safe to run unconditionally; it clears the way for ` +
+  `re-adding a worktree whose directory was deleted by hand.\n` +
+  `3. Find the repo root: dirname "$(git rev-parse --path-format=absolute ` +
+  `--git-common-dir)". Do not use git rev-parse --show-toplevel for this.\n` +
+  (baseOverride
+    ? `4. The base for this branch is given: ${baseOverride}. Do not read the ` +
+      `remote HEAD and do not substitute main or master; this work is stacked ` +
+      `on that branch deliberately. Verify the ref resolves ` +
+      `(git rev-parse --verify ${baseOverride}) and return created=false naming ` +
+      `it if it does not.\n`
+    : `4. Find this repo's base branch: read the remote HEAD ` +
+      `(git symbolic-ref --short refs/remotes/origin/HEAD), falling back to ` +
+      `whichever of main or master exists. Do not assume main.\n`) +
+  `5. Name the branch exactly: <type>/jira-<KEY>-<slug> when the ticket is a ` +
+  `Jira key such as PROJ-4821, or <type>/gh-<NUMBER>-<slug> when it is a ` +
+  `GitHub issue number such as 216 or #216. The literal jira- or gh- marker ` +
+  `is required. Derive <slug> from the task: lowercase, hyphen-separated, at ` +
+  `most 6 words, no trailing hyphen. If the ticket is malformed and you cannot ` +
+  `classify it as either, return created=false and say so. Never cut an ` +
+  `unmarked branch: it would be reported untracked with no way to recover the ` +
+  `link.\n` +
+  `6. The worktree path is <repo-root>/.claude/worktrees/<slug>, where <slug> ` +
+  `is the branch name with its <type>/ prefix stripped (for example ` +
+  `feat/jira-PROJ-4821-session-reset gives jira-PROJ-4821-session-reset).\n` +
+  `7. Run git worktree list --porcelain and look for a record whose "branch ` +
+  `refs/heads/<name>" line matches the branch name from step 5. If one ` +
+  `exists, the branch is already checked out somewhere; git refuses to check ` +
+  `it out twice, so return created=true using that record's own path (even ` +
+  `if it differs from the path in step 6), note in detail that the branch ` +
+  `was reused rather than created, and stop: do not fetch, pull, or run any ` +
+  `worktree add.\n` +
+  `8. Otherwise check whether the branch exists at all (git show-ref --verify ` +
+  `--quiet refs/heads/<name>). If it does, the fetch and fast-forward in step ` +
+  `10 are not needed; go straight to step 9.\n` +
+  `9. Check whether the path from step 6 already exists on disk. If it does, ` +
+  `return created=false naming the exact path and explaining what is there. ` +
+  `Do not delete it, do not rename around it, and do not pick a different ` +
+  `slug: a surprising second worktree is worse than a clear halt.\n` +
+  `10. If the branch exists (step 8) and the path is clear (step 9), run ` +
+  `git worktree add <path> <branch>, without -b since the branch already ` +
+  `exists; a branch cannot be created twice. Note in detail that the branch ` +
+  `was reused rather than created, and set base to ` +
+  (baseOverride ? `${baseOverride}.\n` : `the repo's base branch.\n`) +
+  (baseOverride
+    ? `11. If the branch does not exist, run ` +
+      `git worktree add <path> -b <branch> ${baseOverride} directly. Do not ` +
+      `fetch, do not check out the base, and do not pull or rebase it: it is a ` +
+      `branch under review whose head the user chose, and it may itself be ` +
+      `checked out in another worktree, where checking it out again would fail.\n`
+    : `11. If the branch does not exist, git fetch origin, check out the base ` +
+      `branch, and fast-forward it (git pull --ff-only). If the pull is not a ` +
+      `fast-forward, return created=false and say so rather than merging or ` +
+      `rebasing. Then run git worktree add <path> -b <branch> <base>.\n`) +
+  `Do not check out the new branch in this working tree; the worktree is a ` +
+  `separate checkout.\n` +
+  `Return the branch you created or reused, the base you cut it from (or ` +
+  (baseOverride ? `${baseOverride}` : `the repo's base branch`) +
+  ` if the branch already existed), and the absolute ` +
+  `worktree path.` + RECORD('branch'),
+  { label: 'branch', schema: BRANCH, model: 'haiku', effort: 'low' })
+sBranch.close()
+
+// A failed worktree step halts rather than falling through: implementing onto
+// whatever tree happened to be checked out is how unrelated work lands in a PR.
+if (!wt?.created) {
+  return halted('Worktree', {
+    branch: wt?.branch,
+    base: wt?.base,
+    detail: wt?.detail,
+    note: args?.existingBranch
+      ? 'No usable worktree, so nothing was planned or implemented. Check out ' +
+        'the branch this work belongs on, commit or stash any changes, then ' +
+        're-run.'
+      : 'No worktree was created, so nothing was planned or implemented. ' +
+        'Commit or stash your changes, or resolve the base branch problem in ' +
+        'detail, then re-run. If fetch or pull cannot run here (a remote ' +
+        'needing a hardware key, for example), pull the base branch manually ' +
+        'first, or pass existingBranch: true if this work belongs on a branch ' +
+        'that already exists.',
+  })
+}
+// The review range and the PR target both read wt.base, and a reused branch or
+// the existingBranch path reports the repo default regardless of what it was
+// actually cut from.
+if (baseOverride) wt.base = baseOverride
+recordedBranch = wt.branch
+log(args?.existingBranch
+  ? `worktree ${wt.path} reused for branch ${wt.branch} (base ${wt.base})`
+  : `worktree ${wt.path} created for branch ${wt.branch} (base ${wt.base})`)
+
+
+// Every agent dispatch below inherits the session's working directory, which
+// is the main checkout, not the worktree; each prompt must say so explicitly
+// or the agent will silently plan, implement, or push from the wrong tree.
+// Nothing passed to agent() reaches disk as an identity: opts.label is display
+// only, and the workflow journal records just an agent id and a prompt hash. The
+// tag below is the only durable name a workflow agent gets, so it is read back
+// out of the transcript's first user message rather than restated at each call.
+// The envelope: facts every phase needs, and nothing else. Deliberately not a
+// shared conversation. Withholding each phase's reasoning from the others is
+// what keeps the devil's advocate and the reviewers unbiased, so the envelope
+// carries only what is true regardless of who is reading -- where the code is,
+// what the ticket asks for -- and never what another phase concluded about it.
+//
+// Fetched once. Every phase used to rediscover the ticket, or more often work
+// without it, from a task string clamped short enough to lose the requirement.
+// The ticket is the specification, so it is never clamped: clamping it here cut
+// one ticket mid-acceptance-criterion and three phases planned against a spec
+// whose second half they could not see.
+// The envelope carries the ticket's identity, never its prose. Only Triage is
+// given the text to scrutinise, and Plan to work from as the specification.
+// Handing it to every phase made the devil's advocate a critic of the ticket's
+// own reasoning and burned a whole plan-and-challenge cycle without changing a
+// line of code.
+const envelope = () =>
+  `Ticket ${ticket}${ticketDetail.found ? `: ${ticketDetail.summary}` : ' (details unavailable)'}\n` +
+  `Repo worktree: ${wt.path}\nBranch: ${wt.branch} (base ${wt.base})\n`
+
+// Never clamped: brief() once cut a ticket mid-acceptance-criterion and three
+// phases planned against a spec whose second half they could not see.
+const ticketSpec = () => ticketDetail.found
+  ? `Ticket description:\n${ticketDetail.description}\n` +
+    (ticketDetail.comments.trim()
+      ? `Ticket comments:\n${ticketDetail.comments}\n` : '')
+  : `Ticket ${ticket} could not be read; work from the task text alone.\n`
+
+const treeAgent = (prompt, opts) =>
+  agent(
+    `[touchstone: ${opts.label}]\n` +
+    `Work in the git worktree at ${wt.path}. Run every command there, ` +
+    `including all git commands. Do not operate in the main checkout.\n\n` +
+    envelope() + `\n` + prompt + RECORD(opts.label),
+    opts)
+
+// Latch 1. The premise checks that matter most are usually one grep, and a task
+// whose stated facts are wrong must not be planned around. Buying that check
+// for one cheap agent is the difference between a 2-agent run and an 11-agent
+// one, so it runs before anything expensive.
+phase('Triage')
+const sTriage = stage('triage')
+let triage = null
+try {
+  triage = await treeAgent(
+  `You are triage. Do the cheapest investigation that settles two questions, ` +
+  `then STOP. Do not implement, do not commit, do not write a plan.\n` +
+  `Task: ${brief(task)}\n` +
+  `You are the ONLY phase that scrutinises the ticket itself. No later phase ` +
+  `sees this text, so a claim in it that you do not check goes unchecked for ` +
+  `the whole run:\n` +
+  ticketSpec() +
+  `1. Is every factual claim the task makes actually true of the code? Check ` +
+  `them with grep/read. A false premise is your single most valuable output: ` +
+  `report it in premise_note with the command that disproves it.\n` +
+  `   Absence of evidence in the repo is not evidence of absence, and calling ` +
+  `a premise false on a negative grep is the most expensive mistake this ` +
+  `phase makes. Deployment config, infrastructure and runtime state often ` +
+  `live outside the repo, and something wanted but not yet built is still a ` +
+  `real requirement. Set premise_ok=false only for a claim you positively ` +
+  `contradicted by reading code that says otherwise, never for one you merely ` +
+  `could not find.\n` +
+  `2. How large is the real change, in lines?\n` +
+  `scope is about SIZE only, never about whether the task is a good idea: a ` +
+  `wrong premise goes in premise_ok and premise_note, and setting scope from it ` +
+  `would route a task that needs rethinking into being built immediately. ` +
+  `Return scope='inline' if a competent engineer would finish this in roughly ` +
+  `ten tool calls or fewer (a comment, a rename, a one-line fix, a config ` +
+  `value). Return scope='team' only when the work genuinely needs a plan, new ` +
+  `tests, and independent review.`,
+  { label: 'triage', schema: TRIAGE, model: 'sonnet', effort: 'medium' })
+} catch (e) {
+  log(`triage returned no verdict: ${e?.message ?? e}`)
+}
+
+// An absent verdict halts rather than fails open: planning on an unverified
+// premise is the one failure this latch exists to prevent.
+if (!triage) {
+  sTriage.close()
+  return halted('Triage', {
+    note: 'Triage produced no verdict, so the task premise is unverified and ' +
+          'nothing was planned or implemented. Re-run; if it repeats, the task ' +
+          'text or the TRIAGE schema is at fault, not the model.',
+  })
+}
+
+// A disproved premise halts: that is a fact about the task, and planning around
+// it is the one thing this latch exists to stop.
+if (!triage.premise_ok) {
+  sTriage.close()
+  return halted('Triage', {
+    scope: triage.scope,
+    premise_ok: false,
+    premise_note: triage.premise_note,
+    estimated_loc: triage.estimated_loc,
+    evidence: triage.evidence,
+    note: 'The task\'s premise does not hold. Fix the brief before planning ' +
+      'around it; see premise_note.',
+  })
+}
+
+// Size does not. The old latch halted here and told the user to do the work
+// themselves, which delivers nothing: triage's finding was that the change is
+// SMALL, not that it is unwanted, and handing back a ten-line edit costs more
+// of the user's attention than making it. Small work now runs, with the
+// planning and multi-lens review phases skipped instead of the work.
+const inlineMode = triage.scope === 'inline'
+  || (triage.estimated_loc ?? Infinity) < INLINE_LOC
+if (inlineMode) {
+  log(`triage sized this as ` +
+      (triage.estimated_loc != null
+        ? `~${triage.estimated_loc} LOC (< ${INLINE_LOC})`
+        : 'inline') +
+      `; implementing it directly, skipping the Plan phase`)
+}
+sTriage.close()
+
+// A plan an earlier run already produced arrives as args.plan and starts this
+// run at Implement. Without it the only way to reuse a plan was to paste it into
+// the task, which routed it back through the planner and asked that phase to
+// carry out work it is forbidden to do.
+const givenPlan = typeof args?.plan === 'string' && args.plan.trim()
+  ? args.plan.trim() : null
+let plan = givenPlan
+  ? {
+      plan: givenPlan,
+      acceptance_criteria: args?.acceptanceCriteria ?? [],
+      risky_areas: args?.riskyAreas ?? [],
+      task_demands_implementation: false,
+    }
+  : null
+
+if (givenPlan) log('Plan supplied in args; Plan phase skipped.')
+
+if (!plan && inlineMode) {
+  plan = {
+    plan: `Triage sized this as a small, self-contained change and no planning ` +
+      `phase ran. What triage found: ${triage.premise_note}\n` +
+      `Make the change the task asks for and nothing more.`,
+    acceptance_criteria: [],
+    risky_areas: [],
+    task_demands_implementation: false,
+  }
+}
+
+if (!givenPlan && !inlineMode) {
+phase('Plan')
+const sPlan = stage('plan')
+plan = await treeAgent(
+  `You are the planner for this task; do NOT implement anything. You have no ` +
+  `Edit or Write tool, and must not reach for another route to the same thing.\n` +
+  `Task: ${brief(task)}\n` +
+  `Triage found: ${triage?.premise_note ?? 'n/a'}\n` +
+  `The ticket is the specification. Triage has already checked its factual ` +
+  `claims, so take its requirement and do not re-litigate its reasoning; no ` +
+  `later phase sees this text, so every requirement it states must survive ` +
+  `into your plan and acceptance criteria:\n` +
+  ticketSpec() +
+  `Read the relevant code first. Return a concrete implementation plan, ` +
+  `testable acceptance criteria, and the risky areas a reviewer should probe.\n` +
+  `If the task itself tells you to implement, or says a plan already exists and ` +
+  `only needs carrying out, set task_demands_implementation and explain in ` +
+  `conflict_note. Do not resolve the contradiction by obeying the task: pass a ` +
+  `plan already in hand as args.plan instead, which starts the run at Implement.`,
+  { label: 'planner', schema: PLAN, model: 'opus', agentType: 'touchstone:planner' })
+if (!plan) throw new Error('planner failed')
+
+// This used to halt and ask the user to re-run with args.plan. The script is
+// already holding that plan, so the halt bought nothing but a round trip: the
+// planner cannot implement anyway, having no Edit or Write tool.
+if (plan.task_demands_implementation) {
+  log(`planner reports the task itself demands implementation ` +
+      `(${plan.conflict_note ?? 'no note given'}); using its plan as-is and ` +
+      `going straight to Implement`)
+}
+
+sPlan.close()
+if (sPlan.over()) {
+  return halted('Plan', {
+    plan: plan.plan,
+    note: 'plan stage exceeded its token ceiling; the run stopped before Implement. ' +
+      'Check the branch before re-running: a planner that overruns has sometimes ' +
+      'written code despite being forbidden to.',
+  })
+}
+}
+
+phase('Implement')
+const sImpl = stage('implement')
+const impl = await treeAgent(
+  `Implement this task in the current repo.\n` +
+  `Task: ${brief(task)}\nPlan: ${brief(plan.plan)}\n` +
+  (plan.acceptance_criteria.length
+    ? `Acceptance criteria:\n- ${plan.acceptance_criteria.join('\n- ')}\n`
+    : `Acceptance criteria: none were supplied with this plan. Derive them from ` +
+      `it before you write anything, and state them in your summary.\n`) +
+  `Follow the crap-controlled-changes skill: TDD first, iterating with the ` +
+  `repo's own test command. Commit with crap-commit.sh, which runs the gate ` +
+  `itself and refuses if it is red; do not run crap-check.sh first, since that ` +
+  `doubles a check that already runs the suite twice, and do not use either as ` +
+  `your test loop. Run it in the foreground with a Bash timeout of 600000; ` +
+  `never background it and wait with sleep. Follow its NEXT_ACTION until ` +
+  `green. Commit signed, in as many commits as the work naturally takes. Never run ` +
+  `--accept or --mark-scored yourself; both need explicit user approval. ` +
+  `Do not push and do not open a PR: those are the user's to authorise.\n` +
+  `Return commit_range as '<base-sha>..<head-sha>' using the merge base with ` +
+  `${wt.base} and your final HEAD, both as full 40-character SHAs: later ` +
+  `phases compare their own HEAD against the head of this range to work out ` +
+  `what is still unreviewed, and an abbreviated SHA never matches. ` +
+  `Downstream phases are given that range and ` +
+  `read the diff themselves, so it is how your work is handed on: a summary of ` +
+  `it is not, and will not be forwarded.`,
+  { label: 'implementer', schema: IMPL, model: 'sonnet', effort: 'xhigh' })
+if (!impl) throw new Error('implementer failed')
+sImpl.close()
+if (sImpl.over()) {
+  return halted('Implement', {
+    plan: plan.plan, implemented: impl.summary,
+    note: 'implementer exceeded its token ceiling; any work is on the branch, gates and review did not run',
+  })
+}
+
+phase('Review')
+const sReview = stage('review')
+// risky_areas is deliberately not part of this: it is a required schema field
+// and a planner asked for risky areas always returns some, so including it
+// pinned `big` to true and made the diffstat agent's answer decorative.
+const big = impl.files_changed.length > 5 || (impl.insertions ?? 999) > 200
+const trivial = impl.files_changed.length <= 1 && (impl.insertions ?? 999) < INLINE_LOC
+// Named, not positional. The count used to slice a list from the front, so the
+// third lens ran only when someone passed reviewers: 3 by hand, and the size
+// latches silently decided WHICH lenses existed rather than how many. The
+// dropped one was design fit; the devil's advocate covers that ground now and
+// has to demonstrate the claim, which design fit never did.
+const LENS = {
+  correctness: {
+    label: 'correctness',
+    charge: `You are an adversarial reviewer. REFUTE the claim that this ` +
+      `implementation is correct, through one lens: hunt for inputs or states ` +
+      `where the new code returns wrong results or breaks existing callers.`,
+  },
+  requirements: {
+    label: 'requirements',
+    charge: `You are an adversarial reviewer. REFUTE the claim that this ` +
+      `implementation is complete, through one lens: hunt for acceptance ` +
+      `criteria that are unmet, half-met, or untested.`,
+  },
+  advocate: {
+    label: 'advocate',
+    charge: `You are the devil's advocate: a reviewer whose lens is whether ` +
+      `this should exist at all, or exist in this shape. The others assume the ` +
+      `change is wanted and ask whether it is right; you are the one who does ` +
+      `not assume it. Run the repo's own tests, then hunt for a simpler route ` +
+      `that is only visible now the code exists (a config value, an existing ` +
+      `utility, deleting code instead), scope the change took on that nothing ` +
+      `asked for, and cost it imposes that the diff hides.\n` +
+      `Report a finding only where you DEMONSTRATED the gap against the ` +
+      `working code, and put that demonstration in evidence: a test that fails ` +
+      `and the assertion in it that fails, or the exact command with its ` +
+      `actual output beside what you expected. This is why you run against ` +
+      `built code instead of a plan. Something you could not reproduce is not ` +
+      `a finding however strongly you hold it, and a preference between two ` +
+      `working designs is never one.\n` +
+      `You are deliberately not shown the ticket text; triage owns its claims. ` +
+      `Absence of evidence in the repo is not evidence of absence, so never ` +
+      `rest a finding on a negative grep.`,
+  },
+}
+
+// The advocate is a reviewer, counted and gated with the rest: a one-line diff
+// used to get zero reviewers and an advocate anyway, which is the ratio the
+// trivial latch exists to prevent.
+const lensKeys = trivial ? [] : (big
+  ? ['correctness', 'advocate', 'requirements']
+  : ['correctness', 'advocate'])
+const lenses = (args?.reviewers != null
+    ? lensKeys.slice(0, Math.max(0, Math.min(args.reviewers, lensKeys.length)))
+    : lensKeys)
+  .filter(k => !(k === 'advocate' && args?.devilsAdvocate === false))
+  .map(k => LENS[k])
+const reviewerCount = lenses.length
+if (!reviewerCount) {
+  log(`review skipped: ${impl.files_changed.length} file(s) / ${impl.insertions} insertion(s) ` +
+      `is under the ${INLINE_LOC}-line bar; adversarial lenses on a one-liner is the ratio this workflow is trying to avoid`)
+} else {
+  log(`review: ${lenses.map(l => l.label).join(', ')}`)
+}
+// Review is a function of a range, not a one-shot on the implementer's commits.
+// Reviewing only impl.commit_range meant every later phase that commits -- the
+// fix rounds and the mutation gate -- shipped unread. On one run that was 314
+// insertions across 6 files, two of which no reviewer had ever opened, and it
+// silently reverted an earlier context-cancellation fix on every mutating
+// handler. The PR was green on every gate and carried a new bug.
+const reviewOf = async (range, tag, picked) => {
+  const out = await parallel(picked.map((lens) => () =>
+    treeAgent(
+      `${lens.charge}\n` +
+      `Task: ${brief(task)}\n` +
+      `Commit range: ${range}\n` +
+      `You are given the range, not an account of what was done, on purpose: ` +
+      `read git diff ${range} yourself and form your own view. Read the ` +
+      `surrounding code as well: a change is wrong in its context, not in ` +
+      `isolation, and a line this range only deletes may be load-bearing ` +
+      `somewhere the range does not show you.\n` +
+      `Report only findings you can defend with file:line evidence. Do NOT ` +
+      `report coverage, complexity, test quality, or style: deterministic ` +
+      `gates own those.`,
+      { label: `${tag}:${lens.label}`, phase: 'Review', schema: FINDINGS,
+        model: 'opus' })))
+  return out.filter(Boolean).flatMap(r => r.findings)
+}
+
+// Everything from here to the PR is measured against reviewedThrough: the SHA
+// an adversary has actually read up to. It only ever advances by way of a
+// review, so a phase that commits without one leaves it behind and the PR
+// guard below refuses.
+let reviewedThrough = impl.commit_range.includes('..')
+  ? impl.commit_range.split('..')[1].trim()
+  : impl.commit_range.trim()
+
+let open = reviewerCount
+  ? await reviewOf(impl.commit_range, 'review', lenses)
+  : []
+sReview.close()
+
+const sFix = stage('fix')
+// A finding a verifier confirmed fixed must not come back through the tail
+// review as a fresh one: the loop would never converge, and the fixer would be
+// sent to undo its own work.
+const settled = new Set()
+let round = 0
+while (open.length && round < MAX_REVIEW_ROUNDS && !outOfBudget() && !sFix.over()) {
+  round++
+  phase('Fix')
+  const fixed = await treeAgent(
+    `Fix these confirmed review findings in the current repo, TDD first, ` +
+    `iterating with the repo's own test command. Commit with crap-commit.sh, ` +
+    `which gates and commits in one call: run it in the foreground with a Bash ` +
+    `timeout of 600000, never background it and wait with sleep, and do not ` +
+    `pre-run crap-check.sh. Do not push or open a PR.\n` +
+    `Task: ${brief(task)}\n` +
+    `The work under review is ${impl.commit_range}; read that diff for context ` +
+    `rather than guessing what the change was meant to do.\n` +
+    `Fix what the findings name and no more. If fixing one requires reverting ` +
+    `or weakening a deliberate part of the change that no finding objected to, ` +
+    `say so in note and leave it: an unasked-for revert is how this workflow ` +
+    `has shipped regressions before.\n` +
+    `Return head_sha: the full 40-character SHA of HEAD after your last commit, ` +
+    `or of the unchanged HEAD if you committed nothing. Your commits are ` +
+    `reviewed as <previous head>..<your head_sha>, so a wrong or abbreviated ` +
+    `SHA there is how unreviewed code reaches the PR.\n` +
+    `Findings:\n` +
+    open.map(f => `- ${f.title} (${f.file}): ${f.claim}`).join('\n'),
+    { label: `fix:${round}`, schema: FIXED, model: 'sonnet', effort: 'xhigh' })
+  // One verifier for every finding, not one each. Six findings meant six agents
+  // that each re-read the same diff to answer six questions about it; the
+  // reading is the expensive part and it is identical across them.
+  const verdicts = await treeAgent(
+    `Verify, finding by finding, whether each is now actually fixed in the ` +
+    `repo. Read the code for each one; do not trust any claim that it was ` +
+    `fixed, including your own reasoning about a neighbouring finding.\n` +
+    `Return one verdict per finding below, in the same order, with the same ` +
+    `title verbatim so they can be matched up.\n` +
+    open.map((f, i) =>
+      `${i + 1}. ${f.title} (${f.file}): ${f.claim}. Evidence was: ${f.evidence}`
+    ).join('\n'),
+    { label: `verify:${round}`, schema: VERDICTS, model: 'opus' })
+  const byTitle = new Map(
+    (verdicts?.verdicts ?? []).map(v => [v.title, v.fixed === true]))
+  // Unmatched means unverified, which stays open: a finding silently dropped
+  // because a title came back reworded is the one failure this must not have.
+  for (const f of open) if (byTitle.get(f.title) === true) settled.add(f.title)
+  open = open.filter(f => byTitle.get(f.title) !== true)
+
+  // The point of the loop: a fix is a change, so it faces the same adversary.
+  // One lens, not all of them -- correctness is where a fix round goes wrong,
+  // and the range is small.
+  const head = fixed?.head_sha?.trim()
+  if (reviewerCount && head && head !== reviewedThrough && !outOfBudget()) {
+    const fresh = (await reviewOf(
+      `${reviewedThrough}..${head}`, `review:fix:${round}`, [LENS.correctness]))
+      .filter(f => !settled.has(f.title) && !open.some(o => o.title === f.title))
+    if (fresh.length) log(`round ${round}: the fix itself introduced ${fresh.length} new finding(s)`)
+    open = open.concat(fresh)
+    reviewedThrough = head
+  } else if (head) {
+    reviewedThrough = head
+  }
+  log(`round ${round}: ${open.length} finding(s) still open`)
+}
+sFix.close()
+
+if (open.length) {
+  return halted('Fix', {
+    plan: plan.plan, implemented: impl.summary, gates: { green: true, detail: 'enforced by crap-commit-gate on every commit' },
+    unresolved_findings: open, fix_rounds: round,
+    note: `${open.length} review finding(s) survived ${MAX_REVIEW_ROUNDS} fix round(s). ` +
+          `Stopping before the mutation stage rather than spending it on work that ` +
+          `cannot open a PR. Judge each finding: fix it, or reject it as wrong.`,
+  })
+}
+
+// Mutation is a pre-PR gate, not a per-commit one: it costs a full test-suite
+// run per mutant, so it runs once here, on a clean tree, rather than inside the
+// implement/fix loops. mutation-pr-gate.py blocks `gh pr create` while it is
+// red, so a red gate here means the PR phase below cannot succeed anyway.
+phase('Mutation')
+const sMut = stage('mutation')
+let mutation = { green: false, detail: 'not run' }
+// needs_user_run breaks the loop instead of retrying: a run that cannot fit the
+// Bash ceiling returns the same answer every attempt, and each one costs the
+// ceiling in wall clock before saying so.
+for (let attempt = 1; attempt <= MAX_GATE_ATTEMPTS && !mutation.green
+     && !mutation.needs_user_run && !outOfBudget() && !sMut.over(); attempt++) {
+  mutation = await treeAgent(
+    `Run mutation-check.sh from the crap-controlled-changes skill in this repo. ` +
+    `It mutates files in place and needs a clean working tree, so commit anything ` +
+    `outstanding first.\n` +
+    `HOW TO RUN IT, in this order. The skill's Signal C settles all of this ` +
+    `from measurements; do not re-derive a policy of your own, which is why ` +
+    `this phase has been inconsistent run to run.\n` +
+    `1. mutation-check.sh --verify first. It reads the ledger and costs ` +
+    `milliseconds. If it reports the branch already green, you owe no run at ` +
+    `all: return green=true saying so. A branch stayed green for two hours ` +
+    `once while four full runs re-measured it.\n` +
+    `2. If the repo has scripts/gate-env.sh, run ` +
+    `eval "$(scripts/gate-env.sh mutation)" in the same shell invocation as the ` +
+    `check. It exports the build tags, test runner and database DSN the gate ` +
+    `needs. Without it the suite falls back to one throwaway container per test, ` +
+    `turning a one-minute run into ten, and on a split build it measures the ` +
+    `wrong build entirely. Read the comments it prints: they name any second ` +
+    `pass the repo needs.\n` +
+    `3. Run it in the FOREGROUND with a Bash timeout of 600000, no flags, so ` +
+    `the run is incremental. Do not use run_in_background: past runs here were ` +
+    `killed by a SIGTERM nobody has explained, so it is not a route to rely ` +
+    `on. Do not poll with sleep either.\n` +
+    `4. If one pass will not fit inside that ceiling, SPLIT IT. Do not hand it ` +
+    `back. The ledger records per path, so scoped passes accumulate into one ` +
+    `green: run MUTATION_ONLY='<glob>' over one module or package at a time, ` +
+    `each pass inside the ceiling, until mutation-check.sh --verify reports the ` +
+    `branch green. Name every glob you ran in detail. Asking the user to run ` +
+    `the gate in their own terminal is not an acceptable outcome, and neither ` +
+    `is reporting it unrunnable because of a timeout.\n` +
+    `5. Only if one indivisible path exceeds the ceiling on its own, so there ` +
+    `is nothing left to split, return green=false with needs_user_run=true and ` +
+    `the exact command in detail, including the gate-env eval from step 2. ` +
+    `That is a last resort and it means the split failed, so say which glob ` +
+    `was too big and how long it ran.\n` +
+    `6. --full re-measures every changed source, which you need when something ` +
+    `outside the ledger's key changed: a fixture, a compose file, a toolchain ` +
+    `pin. A narrowed pass records only what it measured, so say what is still ` +
+    `unmeasured.\n` +
+    `On KILL_SURVIVORS, write a test that fails on the mutated ` +
+    `code and passes on the original, TDD-style, and commit it. Never weaken or ` +
+    `restructure production code to dodge a mutant. If a survivor instead reveals ` +
+    `a genuine defect (dead branch, wrong condition), fix that properly, TDD ` +
+    `first, and commit; that is a real bug the suite was blind to. Never run ` +
+    `--accept yourself: if a mutant is provably equivalent, report it and stop. ` +
+    `Report the final state, and return head_sha: the full 40-character SHA of ` +
+    `HEAD after your last commit, or of the unchanged HEAD if you committed ` +
+    `nothing. ` +
+    `Anything you commit is reviewed before the PR opens, and that review is ` +
+    `keyed off this SHA.`,
+    { label: `mutation:${attempt}`, schema: GATE, model: 'sonnet', effort: 'high' }) ?? mutation
+}
+sMut.close()
+
+if (!mutation.green) {
+  return halted('Mutation', {
+    plan: plan.plan, implemented: impl.summary, gates: { green: true, detail: 'enforced by crap-commit-gate on every commit' },
+    mutation, unresolved_findings: open,
+    note: mutation.needs_user_run
+      ? `The mutation run does not fit the 600000 ms Bash ceiling, which for ` +
+        `this repo is expected rather than a fault. Run the command in detail ` +
+        `in your own terminal, then re-run this workflow: --verify will find ` +
+        `the ledger green and the gate will cost milliseconds. No PR was ` +
+        `opened, and mutation-pr-gate.py would block one anyway.`
+      : `Mutation gate still red after ${MAX_GATE_ATTEMPTS} attempt(s). Surviving ` +
+        `mutants are behaviour the tests cannot detect. No PR was opened, and ` +
+        `mutation-pr-gate.py would block one anyway. Kill them with tests, or ` +
+        `approve a provably equivalent mutant with mutation-check.sh --accept.`,
+  })
+}
+
+// The mutation gate commits: new tests, and real fixes when a survivor exposes
+// a genuine defect. Those are production changes nobody has read yet.
+const mutHead = mutation.head_sha?.trim()
+if (reviewerCount && mutHead && mutHead !== reviewedThrough && !outOfBudget()) {
+  phase('Review')
+  const fresh = (await reviewOf(
+    `${reviewedThrough}..${mutHead}`, 'review:mutation', [LENS.correctness]))
+    .filter(f => !settled.has(f.title))
+  if (fresh.length) {
+    return halted('Review', {
+      plan: plan.plan, implemented: impl.summary, mutation,
+      unresolved_findings: fresh, fix_rounds: round,
+      note: `The mutation gate's own commits (${reviewedThrough}..${mutHead}) ` +
+            `introduced ${fresh.length} finding(s). The fix rounds are spent, so ` +
+            `no PR was opened. Judge each: fix it, or reject it as wrong.`,
+    })
+  }
+  reviewedThrough = mutHead
+} else if (mutHead) {
+  reviewedThrough = mutHead
+}
+
+// Reaching here means every gate is green: the Gate, Fix and Mutation halts
+// above are terminal, so there is no red state left to guard against.
+let pr = null
+if (args?.openPr !== false && !outOfBudget()) {
+  phase('PR')
+  const sPr = stage('pr')
+  pr = await treeAgent(
+    `Open a pull request for the work on this branch.\n` +
+    (reviewerCount
+      ? `FIRST, run git rev-list --count ${reviewedThrough}..HEAD. Every commit ` +
+        `through ${reviewedThrough} has been adversarially reviewed. Compare as ` +
+        `revisions like this, never by string-matching SHAs, which differ in ` +
+        `abbreviation and would fail on an honest branch. If the count is not ` +
+        `0, commits exist that no reviewer has read: return opened=false, name ` +
+        `them with git log --oneline ${reviewedThrough}..HEAD, and do not push. ` +
+        `Do not review them yourself and do not judge them harmless; you are ` +
+        `the phase that opens PRs, not the one that vouches for them.\n`
+      : '') +
+    `Task: ${brief(task)}\nWhat was implemented: ${impl.summary}\n` +
+    `Commit range: ${impl.commit_range}. Read that diff rather than relying on ` +
+    `the summary above; a PR body that describes the diff is worth more than ` +
+    `one that repeats a claim.\n` +
+    `First look for a PR template: .github/pull_request_template.md, ` +
+    `docs/pull_request_template.md, or any file under .github/PULL_REQUEST_TEMPLATE/. ` +
+    `If one exists, fill in its sections and keep its structure; do not ` +
+    `substitute your own. If none exists, write a short body: what changed, why, ` +
+    `and how it was verified. Keep it tight; a few bullets, not an essay.\n` +
+    `Verification means the repo's own tests and checks. The CRAP gate, mutation ` +
+    `gate, this workflow, its reviewers and the fact that an agent wrote the ` +
+    `change are local process: never mention them in the title, body or commits. ` +
+    `A control the repo itself declares (its CI config, a documented pre-commit ` +
+    `hook, CONTRIBUTING.md) is fair to reference once you have seen it in the ` +
+    `repo.\n` +
+    (baseOverride
+      ? `This branch is stacked: open the PR with --base ${baseOverride}, not ` +
+        `against the repo's default branch, and say in the body that it targets ` +
+        `that branch and why. gh defaults to the default branch, which would ` +
+        `show the parent's commits as this PR's own.\n`
+      : '') +
+    `Push the branch and open the PR with gh. Do not ` +
+    `merge it, and do not mark a draft ready. Return the PR url.`,
+    { label: 'pr', schema: PR, model: 'sonnet', effort: 'medium' })
+  sPr.close()
+} else if (args?.openPr === false) {
+  log('PR skipped: openPr=false; the branch is green and committed, PR is yours to open')
+} else {
+  log('PR skipped: out of token budget with every gate green; open the PR manually')
+}
+
+return {
+  task,
+  branch: wt.branch,
+  base: wt.base,
+  ticket: wt.ticket,
+  worktree: wt.path,
+  plan: plan.plan,
+  stage_spend: stageSpend,
+  implemented: impl.summary,
+  gates: { green: true, detail: 'enforced by crap-commit-gate on every commit' },
+  mutation,
+  reviewers: reviewerCount,
+  reviewed_through: reviewedThrough,
+  fix_rounds: round,
+  unresolved_findings: open,
+  pr,
+  needs_user: args?.openPr !== false && !pr?.opened,
+}

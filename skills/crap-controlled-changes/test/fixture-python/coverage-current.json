@@ -1,0 +1,12 @@
+{
+  "meta": {"format": 3},
+  "files": {
+    "src/branchy.py": {
+      "functions": {
+        "simple":  {"summary": {"percent_covered": 100.0}, "start_line": 1},
+        "branchy": {"summary": {"percent_covered": 0.0},   "start_line": 5}
+      }
+    }
+  },
+  "totals": {}
+}

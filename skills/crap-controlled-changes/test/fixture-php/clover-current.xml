@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<coverage generated="1700000000">
+  <project timestamp="1700000000" name="fixture">
+    <file name="__REPO_ROOT__/src/Branchy.php">
+      <class name="Branchy" namespace="CrapFixture">
+        <metrics complexity="6" methods="2" coveredmethods="1" conditionals="0" coveredconditionals="0" statements="9" coveredstatements="1" elements="11" coveredelements="2"/>
+      </class>
+      <line num="7" type="method" name="simple" visibility="public" complexity="1" crap="1" count="1"/>
+      <line num="9" type="stmt" count="1"/>
+      <line num="12" type="method" name="branchy" visibility="public" complexity="5" crap="30.0" count="0"/>
+      <line num="14" type="stmt" count="0"/>
+      <line num="15" type="stmt" count="0"/>
+      <line num="17" type="stmt" count="0"/>
+      <line num="18" type="stmt" count="0"/>
+      <line num="20" type="stmt" count="0"/>
+      <line num="21" type="stmt" count="0"/>
+      <line num="23" type="stmt" count="0"/>
+      <line num="24" type="stmt" count="0"/>
+      <line num="26" type="stmt" count="0"/>
+      <metrics loc="28" ncloc="25" classes="1" methods="2" coveredmethods="1" conditionals="0" coveredconditionals="0" statements="10" coveredstatements="1" elements="12" coveredelements="2"/>
+    </file>
+  </project>
+</coverage>

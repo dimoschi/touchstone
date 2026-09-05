@@ -1,0 +1,66 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  hooks:
+    # Both, because the hooks are the part users install and they resolve paths
+    # and symlinks differently: macOS reaches /tmp through /private, which is the
+    # case that broke contributing-gate.py's transcript comparison.
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+      - name: Configure git
+        run: |
+          git config --global user.email ci@example.com
+          git config --global user.name CI
+          git config --global init.defaultBranch main
+      - name: Hook test suites
+        run: bash scripts/run-hook-tests.sh
+
+  scrub:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: No machine-specific or private references
+        run: bash scripts/check-no-private-refs.sh
+
+  shellcheck:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: Syntax-check every shell script
+        run: |
+          status=0
+          while IFS= read -r f; do
+            bash -n "$f" || { echo "syntax error: $f"; status=1; }
+          done < <(git ls-files '*.sh')
+          exit $status
+
+  manifests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: Plugin manifests and workflow parse
+        run: |
+          for f in .claude-plugin/plugin.json .claude-plugin/marketplace.json hooks/hooks.json; do
+            python3 -c "import json,sys; json.load(open('$f'))" && echo "json ok: $f"
+          done
+          # The workflow body uses top-level return, which the runtime supplies a
+          # function wrapper for, so parse it the same way rather than as a module.
+          node -e "
+            const fs = require('fs'), vm = require('vm');
+            const src = fs.readFileSync('workflows/deliver-pipeline.js', 'utf8');
+            vm.compileFunction('(async()=>{' + src.replace(/^export const meta/m, 'const meta') + '})');
+            console.log('workflow parses');
+          "

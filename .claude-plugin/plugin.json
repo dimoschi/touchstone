@@ -1,0 +1,25 @@
+{
+  "$schema": "https://json.schemastore.org/claude-code-plugin-manifest.json",
+  "name": "touchstone",
+  "displayName": "Touchstone",
+  "version": "0.1.0",
+  "description": "Ticket-driven delivery pipeline that refuses to pass unmeasured code: triage, plan, TDD implement, adversarial review, then CRAP, dead-code and mutation gates before a PR can open.",
+  "author": {
+    "name": "Dimosthenis Schizas",
+    "url": "https://github.com/dimoschi"
+  },
+  "homepage": "https://github.com/dimoschi/touchstone",
+  "repository": "https://github.com/dimoschi/touchstone",
+  "license": "MIT",
+  "keywords": [
+    "claude-code",
+    "claude-code-plugin",
+    "code-quality",
+    "mutation-testing",
+    "crap-metric",
+    "tdd",
+    "quality-gate",
+    "dead-code",
+    "workflow"
+  ]
+}

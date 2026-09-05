@@ -1,0 +1,6 @@
+{
+  "src/branchy.py": [
+    {"type": "function", "rank": "A", "complexity": 1, "lineno": 1, "endline": 2, "name": "simple", "closures": []},
+    {"type": "function", "rank": "B", "complexity": 5, "lineno": 5, "endline": 14, "name": "branchy", "closures": []}
+  ]
+}
