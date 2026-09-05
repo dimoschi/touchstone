@@ -72,9 +72,11 @@ jobs:
           git config --global init.defaultBranch main
           cd skills/crap-controlled-changes/test
           fails=0
-          for s in run-go-modules.sh run-deadcode-scope.sh run-ignored-files.sh \
-                   run-next-action.sh run-scored-ledger.sh run-repo-lock.sh \
-                   run-mutation-ledger.sh; do
+          # Only the suites that need no language toolchain. run-scored-ledger,
+          # run-mutation-ledger and run-deadcode drive a real Go build and are
+          # run separately where Go is installed.
+          for s in run-go-modules.sh run-deadcode-scope.sh run-unsupported-sources.sh \
+                   run-ignored-files.sh run-next-action.sh run-repo-lock.sh; do
             echo "== $s"
             /bin/bash "$s" || fails=$((fails + 1))
           done

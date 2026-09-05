@@ -112,7 +112,12 @@ def build_class_map(file_el, lines):
     for cls in file_el.findall("class"):
         ns = cls.get("namespace") or ""
         name = cls.get("name") or "<anon>"
-        full = f"{ns}\\{name}" if ns else name
+        # PHPUnit 11 writes name="E2E\Risky" *and* namespace="E2E", where older
+        # versions wrote the bare name alongside the namespace. Prepending
+        # unconditionally rendered every class as "E2E\E2E\Risky", which then
+        # failed to join against the complexity side and showed up in the gate's
+        # own output.
+        full = name if not ns or name.startswith(f"{ns}\\") else f"{ns}\\{name}"
         start = cls.get("start") or cls.get("line")
         try:
             start_num = int(start) if start else None

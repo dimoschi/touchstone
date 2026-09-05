@@ -76,6 +76,15 @@ Needed for the pipeline itself:
 
 Needed per language you gate, and only then:
 
+The gates score **Go, PHP and Python**. In a gated repo, staged source in any
+other language that carries functions (TypeScript, Rust, Java, Ruby, Swift, C#,
+Elixir and the like) is **refused**, not waved through: a gate that silently
+passes what it cannot measure reports a guarantee it never checked. A repo that
+genuinely mixes languages exempts paths by listing gitignore-style patterns in
+its `.crap-gated` marker, one per line, so a Go service with a TypeScript
+frontend can gate the Go and exempt `web/**`. Files that are not program source
+— docs, config, SQL, shell — never trigger it.
+
 | Language | Gate tooling |
 |---|---|
 | Go | [`go-crap`](https://github.com/padiazg/go-crap), [`mutago`](https://github.com/quality-gates/mutago), `golang.org/x/tools/cmd/deadcode` |

@@ -28,6 +28,7 @@ LIB_DIR="$SKILL_DIR/lib"
 source "$LIB_DIR/head-pairs.sh"
 source "$LIB_DIR/tool-versions.sh"
 source "$LIB_DIR/tool-fingerprint.sh"
+source "$LIB_DIR/unsupported-sources.sh"
 
 crap_fingerprint() {
   tool_fingerprint "$1" gocrap "${CRAP_GO_GOCRAP_VERSION:-$GOCRAP_VERSION_DEFAULT}"
@@ -162,6 +163,12 @@ fi
 GO_FILES="$(git diff --name-only --cached -- "${GO_SPEC[@]}" || true)"
 PHP_FILES="$(git diff --name-only --cached -- "${PHP_SPEC[@]}" || true)"
 PY_FILES="$(git diff --name-only --cached -- "${PY_SPEC[@]}" || true)"
+
+# Checked before any module runs, so a mixed diff is refused too. The gate
+# scores the staged diff as a whole and cannot certify one it only partly
+# measured, so an unmeasurable file is refused whether or not Go, PHP or Python
+# files sit beside it.
+report_unsupported_sources "$REPO_ROOT" || exit 2
 
 ran_any=0
 CAPTURE="$(mktemp)"

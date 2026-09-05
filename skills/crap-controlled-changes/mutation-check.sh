@@ -229,6 +229,7 @@ PY_FILES="$( (git diff --name-only "$BASE" -- '*.py' \
   ':(exclude)tests/**' ':(exclude)**/tests/**' ':(exclude)conftest.py' ':(exclude)**/conftest.py' || true) | filter_only)"
 
 ran_any=0
+RAN_LANGS=""
 CAPTURE="$(mktemp)"
 INVALIDATED="$(mktemp)"
 
@@ -280,6 +281,7 @@ run_module() {
   echo "== $lang (vs $BASE) =="
   MUTATION_FILES="$files" "$module" | tee -a "$CAPTURE"
   ran_any=1
+  RAN_LANGS="$RAN_LANGS $lang"
 }
 
 run_module go     "$GO_FILES"  "$LIB_DIR/mutation-check-go.sh"
@@ -314,7 +316,17 @@ if [ "$SURVIVORS" -gt 0 ]; then
   echo "If (and only if) a mutant is provably equivalent to the original code,"
   echo "surface it to the user; on their explicit approval record it with:"
   echo "  mutation-check.sh --accept '<id>'"
-  echo "  Go: reproduce one survivor with mutago --run-mutant-id=<id>"
+  # Only the language that actually ran: a Go reproduce line on a PHP run sends
+  # the reader after a tool the project does not have.
+  case " $RAN_LANGS " in
+    *" go "*) echo "  Go: reproduce one survivor with mutago --run-mutant-id=<id>" ;;
+  esac
+  case " $RAN_LANGS " in
+    *" php "*) echo "  PHP: reproduce one survivor with vendor/bin/infection --mutators=<Mutator>" ;;
+  esac
+  case " $RAN_LANGS " in
+    *" python "*) echo "  Python: reproduce one survivor with mutmut show <id>" ;;
+  esac
   exit 1
 fi
 printf '%s\n' "$MUTATION_PATHS" | head_pairs HEAD \

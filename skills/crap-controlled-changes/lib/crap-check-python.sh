@@ -60,9 +60,24 @@ fi
 
 restore() {
   if [ "$STASHED" -eq 1 ]; then
+    # The baseline suite runs against HEAD's tree and can write to tracked
+    # files as it goes (a committed .coverage, a snapshot fixture, a cache).
+    # Those writes then collide with the pop and used to strand the user's
+    # entire change set in a stash they were told to sort out by hand. The
+    # baseline's own writes are worthless, so discard them first; only tracked
+    # files are touched, so nothing the stash holds is at risk.
+    git checkout -q -- . 2>/dev/null || true
     # --index restores the staged/unstaged split; a plain `pop` reinstates every change as unstaged.
     git stash pop --index -q >/dev/null || {
-      echo "crap-check[python]: failed to restore stash; resolve manually" >&2
+      {
+        echo "crap-check[python]: FAILED TO RESTORE YOUR WORKING TREE."
+        echo "  Your changes are safe but still stashed. Recover them with:"
+        echo ""
+        echo "    git -C $(pwd) stash pop --index"
+        echo ""
+        echo "  If that reports a conflict, the file it names was also written by"
+        echo "  the test suite; discard that one file and retry the pop."
+      } >&2
       exit 3
     }
     STASHED=0
