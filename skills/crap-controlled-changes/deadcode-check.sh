@@ -250,8 +250,24 @@ for mod in ${MODDIRS[@]+"${MODDIRS[@]}"}; do
   fi
 
   scope_err="$(mktemp)"
+  # deadcode_scope.py contracts to always exit 0 and let this caller judge its
+  # output. When it broke that contract the bare call tripped set -e, so the
+  # script died before reading scope_err and the crash reached the user as a
+  # silent exit 1, which crap-commit.sh reports as a red gate. An internal
+  # failure is a setup problem, not a finding, and must say so.
+  scope_status=0
   python3 "$LIB_DIR/deadcode_scope.py" "$ADDED" "$mod" "$modpath" "$MANIFEST" \
-    >"$RAW.dead" 2>"$scope_err"
+    >"$RAW.dead" 2>"$scope_err" || scope_status=$?
+  if [ "$scope_status" -ne 0 ]; then
+    {
+      echo "deadcode-check: FAILED TO ANALYSE - deadcode_scope.py exited $scope_status."
+      echo "  This is an internal failure of the gate, not a finding about your code."
+      echo "  module: $mod ($modpath)"
+      sed 's/^/    /' "$scope_err"
+    } >&2
+    rm -f "$scope_err"
+    exit 2
+  fi
   [ -s "$scope_err" ] && { cat "$scope_err" >&2; unanalysed=$((unanalysed + 1)); }
   rm -f "$scope_err"
 

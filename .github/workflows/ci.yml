@@ -72,8 +72,9 @@ jobs:
           git config --global init.defaultBranch main
           cd skills/crap-controlled-changes/test
           fails=0
-          for s in run-go-modules.sh run-ignored-files.sh run-next-action.sh \
-                   run-scored-ledger.sh run-repo-lock.sh run-mutation-ledger.sh; do
+          for s in run-go-modules.sh run-deadcode-scope.sh run-ignored-files.sh \
+                   run-next-action.sh run-scored-ledger.sh run-repo-lock.sh \
+                   run-mutation-ledger.sh; do
             echo "== $s"
             /bin/bash "$s" || fails=$((fails + 1))
           done

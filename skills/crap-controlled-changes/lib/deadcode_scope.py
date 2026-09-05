@@ -38,8 +38,16 @@ FINDING = re.compile(r'^(?P<file>[^:]+):(?P<line>\d+):(?P<col>\d+): unreachable 
 
 
 def package_of(repo_file, mod_dir, mod_path):
-    """Import path of the package holding repo_file."""
-    rel = os.path.relpath(os.path.dirname(repo_file), mod_dir)
+    """Import path of the package holding repo_file.
+
+    `or '.'` is load-bearing: dirname of a file at the repo root is the empty
+    string, and relpath('', ...) raises ValueError rather than returning '.'.
+    That crashed the gate for every single-module repo keeping its Go files at
+    the module root, and because the caller redirects this script's stderr and
+    dies on the non-zero exit before reading it, the crash surfaced as exit 1
+    with no output at all, which the commit wrapper then reported as findings.
+    """
+    rel = os.path.relpath(os.path.dirname(repo_file) or '.', mod_dir or '.')
     return mod_path if rel == '.' else f"{mod_path}/{rel}"
 
 
