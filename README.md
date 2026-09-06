@@ -177,8 +177,17 @@ to override.
 
 ```bash
 bash scripts/run-hook-tests.sh          # hook suites; needs only python3 and git
+bash scripts/run-go-tests.sh            # the skill's Go suites; needs a Go toolchain and an ssh signing key
 bash scripts/check-no-private-refs.sh   # no machine- or org-specific references
 ```
+
+`run-go-tests.sh` runs every suite in `skills/crap-controlled-changes/test/` that
+needs a real `go` binary: dead-code, CRAP and mutation, plus the two
+`crap-commit.sh` suites, which additionally need an ssh key for
+`CRAP_SIGNING_KEY` (defaults to `~/.ssh/id_ed25519`) and a matching entry in
+`gpg.ssh.allowedSignersFile`. Prerequisites installed but a suite still prints a
+`SKIP:` line is treated as a failure, not a pass: it means an assumption the
+suite makes did not hold.
 
 Two rules the CI enforces, both easy to break by habit:
 

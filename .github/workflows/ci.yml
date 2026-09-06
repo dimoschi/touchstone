@@ -40,6 +40,29 @@ jobs:
           bash -c 'echo "bash ${BASH_VERSION}"; [ "${BASH_VERSINFO[0]}" -ge 4 ]'
           bash scripts/run-hook-tests.sh
 
+  go:
+    # The skill's Go suites (crap-check.sh, deadcode-check.sh, mutation-check.sh)
+    # have never run anywhere with a real toolchain. This job is that toolchain:
+    # a suite that only skips locally for lack of `go` must go red here, not skip.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-go@v5
+        with:
+          go-version: 'stable'
+          cache: false
+      - name: Configure git and a throwaway commit-signing key
+        run: |
+          git config --global user.email ci@example.com
+          git config --global user.name CI
+          mkdir -p "$HOME/.ssh"
+          ssh-keygen -q -t ed25519 -N "" -C ci@example.com -f "$HOME/.ssh/id_ed25519"
+          echo "ci@example.com $(cat "$HOME/.ssh/id_ed25519.pub")" > "$HOME/.ssh/allowed_signers"
+          git config --global gpg.ssh.allowedSignersFile "$HOME/.ssh/allowed_signers"
+          echo "CRAP_SIGNING_KEY=$HOME/.ssh/id_ed25519" >> "$GITHUB_ENV"
+      - name: Go-dependent test suites
+        run: bash scripts/run-go-tests.sh
+
   scrub:
     runs-on: ubuntu-latest
     steps:

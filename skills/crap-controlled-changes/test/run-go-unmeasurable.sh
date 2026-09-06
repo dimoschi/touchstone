@@ -12,6 +12,8 @@ SKILL_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 FIXTURE_DIR="$SKILL_DIR/test/fixture-go-unmeasurable"
 SCRIPT="$SKILL_DIR/crap-check.sh"
 
+command -v go >/dev/null || { echo "SKIP: go not on PATH"; exit 0; }
+
 # Fixture commits must not inherit the user's signing config; gpg has no TTY here.
 fixture_commit() {
   GIT_AUTHOR_NAME=test GIT_AUTHOR_EMAIL=t@t GIT_COMMITTER_NAME=test GIT_COMMITTER_EMAIL=t@t \

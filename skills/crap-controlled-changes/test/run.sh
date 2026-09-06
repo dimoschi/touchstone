@@ -8,6 +8,8 @@ SKILL_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 FIXTURE_DIR="$SKILL_DIR/test/fixture"
 SCRIPT="$SKILL_DIR/crap-check.sh"
 
+command -v go >/dev/null || { echo "SKIP: go not on PATH"; exit 0; }
+
 # Fixture must be a git repo for the script to work.
 if [ ! -d "$FIXTURE_DIR/.git" ]; then
   (cd "$FIXTURE_DIR" && git init -q && git add . && \
