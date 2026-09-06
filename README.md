@@ -181,13 +181,15 @@ bash scripts/run-go-tests.sh            # the skill's Go suites; needs a Go tool
 bash scripts/check-no-private-refs.sh   # no machine- or org-specific references
 ```
 
-`run-go-tests.sh` runs every suite in `skills/crap-controlled-changes/test/` that
-needs a real `go` binary: dead-code, CRAP and mutation, plus the two
-`crap-commit.sh` suites, which additionally need an ssh key for
-`CRAP_SIGNING_KEY` (defaults to `~/.ssh/id_ed25519`) and a matching entry in
-`gpg.ssh.allowedSignersFile`. Prerequisites installed but a suite still prints a
-`SKIP:` line is treated as a failure, not a pass: it means an assumption the
-suite makes did not hold.
+`run-go-tests.sh` runs every suite in `skills/crap-controlled-changes/test/`
+except the ones needing a live PHP toolchain or `uv`, which this job does not
+install. That includes dead-code, CRAP and mutation, the two `crap-commit.sh`
+suites (which additionally need an ssh key for `CRAP_SIGNING_KEY`, defaulting
+to `~/.ssh/id_ed25519`, and a matching entry in `gpg.ssh.allowedSignersFile`),
+and `lib/go_modules.py`'s own test, which is pure Python and runs here for lack
+of anywhere else. Prerequisites installed but a suite still prints a `SKIP:`
+line is treated as a failure, not a pass: it means an assumption the suite
+makes did not hold.
 
 Two rules the CI enforces, both easy to break by habit:
 
