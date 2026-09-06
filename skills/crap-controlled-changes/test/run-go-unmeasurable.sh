@@ -20,10 +20,12 @@ fixture_commit() {
     git -c commit.gpgsign=false -c gpg.format=openpgp commit -q -m "$1"
 }
 
-# See run.sh for why this checks for a baseline commit, and why the guard
-# must confirm the discovered gitdir is the fixture's own rather than just
-# checking `-d .git`.
+# See run.sh for why this checks for a baseline commit, why the guard must
+# confirm the discovered gitdir is the fixture's own rather than just
+# checking `-d .git`, and why it restores tracked content before committing.
 if [ "$(git -C "$FIXTURE_DIR" rev-parse --git-dir 2>/dev/null)" != .git ] || ! git -C "$FIXTURE_DIR" rev-parse --verify --quiet HEAD >/dev/null 2>&1; then
+  git -C "$SKILL_DIR" checkout -q -- test/fixture-go-unmeasurable
+  git -C "$SKILL_DIR" clean -qfd -- test/fixture-go-unmeasurable
   (cd "$FIXTURE_DIR" && git init -q && git add . && fixture_commit "baseline")
 fi
 

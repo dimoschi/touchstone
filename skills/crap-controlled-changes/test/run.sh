@@ -19,6 +19,14 @@ command -v go >/dev/null || { echo "SKIP: go not on PATH"; exit 0; }
 # from a broken one. Confirm the discovered gitdir is the fixture's own
 # before trusting the HEAD it resolves.
 if [ "$(git -C "$FIXTURE_DIR" rev-parse --git-dir 2>/dev/null)" != .git ] || ! git -C "$FIXTURE_DIR" rev-parse --verify --quiet HEAD >/dev/null 2>&1; then
+  # This branch is also reached right after a crash that left the fixture's
+  # tracked files mutated with no .git (git init ran, the commit or the
+  # closing reset below did not). Restore this checkout's tracked content
+  # before sealing it as the baseline: otherwise the leftover mutation gets
+  # committed as "baseline" and the assert further down fails forever, since
+  # the pattern it looks for is already gone from the file it resets to.
+  git -C "$SKILL_DIR" checkout -q -- test/fixture
+  git -C "$SKILL_DIR" clean -qfd -- test/fixture
   (cd "$FIXTURE_DIR" && git init -q && git add . && \
    GIT_AUTHOR_NAME=test GIT_AUTHOR_EMAIL=t@t GIT_COMMITTER_NAME=test GIT_COMMITTER_EMAIL=t@t \
    GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=commit.gpgsign GIT_CONFIG_VALUE_0=false \
