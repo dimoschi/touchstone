@@ -47,41 +47,6 @@ jobs:
           done < <(git ls-files '*.sh')
           exit $status
 
-  no-bash4:
-    # The gates carry no bash 4 dependency: the module grouping that needed
-    # associative arrays lives in lib/go_modules.py, and mapfile is replaced by
-    # lib/read-lines.sh. Asserting that in a comment is worthless, so it is
-    # checked here and exercised on the bash 3.2 macOS still ships.
-    runs-on: macos-latest
-    steps:
-      - uses: actions/checkout@v5
-      - name: No bash 4+ constructs
-        run: |
-          if git grep -nE '\bmapfile\b|\breadarray\b|declare -A|local -A' \
-               -- '*.sh' ':(exclude)skills/crap-controlled-changes/lib/read-lines.sh' \
-             | grep -vE '^[^:]+:[0-9]+:\s*#'; then
-            echo "bash 4+ construct found; see lib/read-lines.sh and lib/go_modules.py"
-            exit 1
-          fi
-          echo "no bash 4+ constructs"
-      - name: Suites under /bin/bash (3.2)
-        run: |
-          /bin/bash --version | head -1
-          git config --global user.email ci@example.com
-          git config --global user.name CI
-          git config --global init.defaultBranch main
-          cd skills/crap-controlled-changes/test
-          fails=0
-          # Only the suites that need no language toolchain. run-scored-ledger,
-          # run-mutation-ledger and run-deadcode drive a real Go build and are
-          # run separately where Go is installed.
-          for s in run-go-modules.sh run-deadcode-scope.sh run-unsupported-sources.sh \
-                   run-ignored-files.sh run-next-action.sh run-repo-lock.sh; do
-            echo "== $s"
-            /bin/bash "$s" || fails=$((fails + 1))
-          done
-          exit $fails
-
   manifests:
     runs-on: ubuntu-latest
     steps:

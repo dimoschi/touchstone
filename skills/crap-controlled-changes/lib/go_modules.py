@@ -10,9 +10,7 @@ each one has to run its tool from inside a module. That resolution lived three
 times over, once in each of deadcode-check.sh, crap-check-go.sh and
 mutation-check-go.sh, as bash 4 associative arrays. Three copies of a rule that
 decides *what gets measured* can drift apart while all three gates still report
-green, which is the failure this file exists to prevent. Putting it here also
-drops the last thing in the skill that needed bash 4, so the gates run under
-whatever bash or zsh a machine happens to have.
+green, which is the failure this file exists to prevent.
 
 Paths are repo-relative throughout; the repo root is git's toplevel. A module
 directory is "." for the root module, matching the historic shell behaviour.

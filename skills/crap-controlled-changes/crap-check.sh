@@ -25,6 +25,7 @@ set -euo pipefail
 
 SKILL_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 LIB_DIR="$SKILL_DIR/lib"
+. "$LIB_DIR/require-bash.sh"
 source "$LIB_DIR/head-pairs.sh"
 source "$LIB_DIR/tool-versions.sh"
 source "$LIB_DIR/tool-fingerprint.sh"

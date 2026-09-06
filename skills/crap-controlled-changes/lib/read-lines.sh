@@ -1,9 +1,8 @@
 #!/usr/bin/env bash
 # read_lines: fill an array variable from stdin, one element per non-empty line.
 #
-# Replaces `mapfile -t`, which needs bash 4 and so is unavailable on the bash
-# 3.2 that macOS still ships. Sourced rather than repeated: nine call sites all
-# wanted the same read-and-filter, and nine copies drift.
+# Sourced rather than repeated: nine call sites all wanted the same
+# read-and-filter, and nine copies drift.
 #
 #   read_lines ARR < <(git ls-files)
 #   read_lines ARR <<< "$SOME_STRING"

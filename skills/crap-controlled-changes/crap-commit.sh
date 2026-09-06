@@ -24,6 +24,7 @@ set -euo pipefail
 SKILL_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CRAP_CHECK="$SKILL_DIR/crap-check.sh"
 DEADCODE_CHECK="$SKILL_DIR/deadcode-check.sh"
+. "$SKILL_DIR/lib/require-bash.sh"
 # Injected git config outranks the repo's own .git/config, so imposing a key
 # here silently overrides a repo that signs with a different one. Only ever set
 # from CRAP_SIGNING_KEY, where someone has asked for exactly that.

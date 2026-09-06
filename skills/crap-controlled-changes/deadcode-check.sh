@@ -32,6 +32,7 @@ set -euo pipefail
 
 SKILL_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 LIB_DIR="$SKILL_DIR/lib"
+. "$LIB_DIR/require-bash.sh"
 DEADCODE_VERSION="${DEADCODE_GO_VERSION:-latest}"
 DEADCODE_PKG="golang.org/x/tools/cmd/deadcode"
 # go/packages takes build tags as an explicit flag, not from GOFLAGS, so a

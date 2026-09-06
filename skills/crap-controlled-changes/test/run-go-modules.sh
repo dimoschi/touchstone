@@ -2,10 +2,10 @@
 # Tests lib/go_modules.py, which resolves changed Go files to their enclosing
 # go.mod and computes the transitive `replace` closure.
 #
-# This logic used to be copy-pasted into three shell scripts as bash 4
-# associative arrays. Three copies of "which module owns this file" could drift,
-# and the gates would then measure different file sets while all reporting
-# green. It is one module with one test now.
+# This logic used to be copy-pasted into three shell scripts. Three copies of
+# "which module owns this file" could drift, and the gates would then measure
+# different file sets while all reporting green. It is one module with one test
+# now.
 #
 # The fixture is a multi-module repo:
 #

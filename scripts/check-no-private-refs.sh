@@ -22,8 +22,6 @@ set -euo pipefail
 
 cd "$(git rev-parse --show-toplevel)"
 
-# A read loop rather than mapfile: macOS ships bash 3.2, where mapfile does not
-# exist, and this script is meant to run wherever the plugin is checked out.
 FILES=()
 if [ "$#" -gt 0 ]; then
   FILES=("$@")
