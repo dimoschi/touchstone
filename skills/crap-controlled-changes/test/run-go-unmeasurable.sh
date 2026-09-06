@@ -12,13 +12,39 @@ SKILL_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 FIXTURE_DIR="$SKILL_DIR/test/fixture-go-unmeasurable"
 SCRIPT="$SKILL_DIR/crap-check.sh"
 
+command -v go >/dev/null || { echo "SKIP: go not on PATH"; exit 0; }
+
 # Fixture commits must not inherit the user's signing config; gpg has no TTY here.
 fixture_commit() {
   GIT_AUTHOR_NAME=test GIT_AUTHOR_EMAIL=t@t GIT_COMMITTER_NAME=test GIT_COMMITTER_EMAIL=t@t \
     git -c commit.gpgsign=false -c gpg.format=openpgp commit -q -m "$1"
 }
 
-if [ ! -d "$FIXTURE_DIR/.git" ]; then
+# Refuse over uncommitted work below rather than reset/clean it. See run.sh
+# for the rest: why a baseline commit (not just -d .git) is required, why
+# the gitdir must be confirmed as the fixture's own, and why this skips when
+# there's nothing to compare against (no outer repo, or none tracking
+# this path).
+if [ -n "$(git -C "$SKILL_DIR" ls-files -- test/fixture-go-unmeasurable 2>/dev/null)" ]; then
+  dirty="$(git -C "$SKILL_DIR" status --porcelain --untracked-files=normal --ignored=matching -- test/fixture-go-unmeasurable)"
+  if [ -n "$dirty" ]; then
+    {
+      echo "run-go-unmeasurable.sh: test/fixture-go-unmeasurable has uncommitted changes."
+      echo "$dirty" | sed 's/^/  /'
+      echo "This script resets or seals that content on every run, so it" \
+           "must match HEAD first."
+      echo "Nothing was changed. Discard the changes yourself if that is what" \
+           "you want:"
+      echo "  git -C \"$SKILL_DIR\" checkout HEAD -- test/fixture-go-unmeasurable"
+      echo "  git -C \"$SKILL_DIR\" clean -fd test/fixture-go-unmeasurable"
+    } >&2
+    exit 1
+  fi
+fi
+
+# See run.sh for why a baseline commit is required and the discovered
+# gitdir must be confirmed as the fixture's own.
+if [ "$(git -C "$FIXTURE_DIR" rev-parse --git-dir 2>/dev/null)" != .git ] || ! git -C "$FIXTURE_DIR" rev-parse --verify --quiet HEAD >/dev/null 2>&1; then
   (cd "$FIXTURE_DIR" && git init -q && git add . && fixture_commit "baseline")
 fi
 
