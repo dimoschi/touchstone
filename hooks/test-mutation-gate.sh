@@ -123,6 +123,22 @@ echo "=== cd <repo> && git ... gates the repo cd names, not the session cwd ==="
 expect "cd into gated repo, unrecorded source -> blocked" BLOCK "$NONREPO" "cd $WORK && git push origin other:main"
 expect "cd into gated repo, recorded source -> allowed"   ALLOW "$NONREPO" "cd $WORK && git push origin feature:main"
 
+echo "=== a draft PR is not a review request, but ready always is ==="
+# On `other`, whose ledger was never recorded, so a gated command blocks and an
+# exempt one does not. On `feature` every case would pass the ledger check and
+# prove nothing about the exemption.
+git checkout -q other
+# Opening a draft is how work in progress is made visible; gating it would force
+# the work to stay invisible until finished. `gh pr ready` is where review is
+# asked for. The compound cases matter: an exemption keyed on "a draft create is
+# present" let `gh pr create --draft; gh pr ready` through with no check at all.
+expect "draft create, unrecorded -> allowed"       ALLOW "$WORK" "gh pr create --draft --title x"
+expect "draft flag last -> allowed"                ALLOW "$WORK" "gh pr create --title x --draft"
+expect "non-draft create, unrecorded -> blocked"   BLOCK "$WORK" "gh pr create --title x"
+expect "draft then ready -> blocked"               BLOCK "$WORK" "gh pr create --draft --title x; gh pr ready 7"
+expect "ready then draft -> blocked"               BLOCK "$WORK" "gh pr ready 7 && gh pr create --draft"
+expect "--draft-mode is not --draft -> blocked"    BLOCK "$WORK" "gh pr create --draft-mode"
+
 echo "=== a non-trigger command passes straight through ==="
 expect "unrelated command" ALLOW "$WORK" "git status"
 

@@ -7,10 +7,11 @@ export const meta = {
     { title: 'Triage', detail: 'one cheap agent checks the premise, sizes the job and judges its difficulty; a disproved premise halts, small work skips Plan, and the difficulty sets every later phase\'s reasoning effort' },
     { title: 'Plan', detail: 'planner produces plan + acceptance criteria + risk areas' },
     { title: 'Implement', detail: 'one implementer, TDD via crap-controlled-changes, many small signed commits' },
+    { title: 'Draft PR', detail: 'push the branch and open a draft PR, so the work is visible and any later halt has somewhere durable to be reported' },
     { title: 'Review', detail: 'adversarial reviewers on distinct lenses, chosen by diff size: correctness and devil\'s advocate normally, plus requirements coverage on a big diff, none on a one-liner. Runs again on any commits a later phase adds' },
     { title: 'Fix', detail: 'fix confirmed findings, then a verifier and an adversary read the result in parallel; bounded rounds' },
     { title: 'Mutation', detail: 'pre-PR mutation gate; kill survivors with tests, never weaken code. Its own commits are reviewed before the PR' },
-    { title: 'PR', detail: 'push and open a PR against the repo template, only when every gate is green' },
+    { title: 'PR', detail: 'push, fill in the PR against the repo template, and mark the draft ready for review, only when every gate is green' },
   ],
 }
 
@@ -100,9 +101,47 @@ const stage = (name) => {
     },
   }
 }
-const halted = (at, extra) => ({
-  task, halted_at: at, stage_spend: stageSpend, needs_user: true, ...extra,
-})
+// Set once the draft PR exists; read by halted() so a stop has somewhere
+// durable to be reported. Declared here because halted() is defined before the
+// phase that opens it.
+let draftPr = null
+
+// A halt is a result, not an absence of one. When a draft PR is open it gets
+// the halt note as a comment, so the run's ending survives the session that
+// produced it. Async for that reason alone -- every call site is `return await`.
+const halted = async (at, extra) => {
+  const payload = {
+    task, halted_at: at, stage_spend: stageSpend, needs_user: true, ...extra,
+  }
+  if (draftPr?.number) {
+    const posted = await agent(
+      `Post a comment on PR #${draftPr.number} in the current repo, then STOP.\n` +
+      `Use: gh pr comment ${draftPr.number} --body-file - with the body on stdin, ` +
+      `or --body. Do not edit the PR title or body, do not mark it ready, do ` +
+      `not close it, and do not push anything.\n` +
+      `The comment reports that an automated run stopped at the ${at} phase ` +
+      `and what a human has to decide. Write it for whoever opens this PR next ` +
+      `week with no memory of the run. Lead with the decision they owe, then ` +
+      `the reason. Keep it short.\n` +
+      `Do not name this workflow, its phases, its gates, or the fact that an ` +
+      `agent produced the change: none of that is actionable to a reviewer. ` +
+      `Say what is unfinished and what has to be judged.\n` +
+      `Stopped at: ${at}\n` +
+      `Reason: ${extra?.note ?? 'no note given'}\n` +
+      (extra?.unresolved_findings?.length
+        ? `Open findings a human must judge, fix or reject:\n` +
+          extra.unresolved_findings
+            .map((f, i) => `${i + 1}. ${f.title} (${f.file}): ${f.claim}`)
+            .join('\n')
+        : ''),
+      { label: `halt-notice:${at}`, model: 'haiku', effort: 'low' })
+    payload.halt_reported_to = posted ? draftPr.url : null
+    log(posted
+      ? `halt at ${at} reported on ${draftPr.url}`
+      : `halt at ${at}: could not comment on the draft PR; it is in this session only`)
+  }
+  return payload
+}
 
 // task_demands_implementation is asked of the planner rather than pattern-matched
 // here because the contradiction arrives as prose. A real run was handed a task
@@ -442,7 +481,7 @@ sBranch.close()
 // A failed worktree step halts rather than falling through: implementing onto
 // whatever tree happened to be checked out is how unrelated work lands in a PR.
 if (!wt?.created) {
-  return halted('Worktree', {
+  return await halted('Worktree', {
     branch: wt?.branch,
     base: wt?.base,
     detail: wt?.detail,
@@ -570,7 +609,7 @@ try {
 // premise is the one failure this latch exists to prevent.
 if (!triage) {
   sTriage.close()
-  return halted('Triage', {
+  return await halted('Triage', {
     note: 'Triage produced no verdict, so the task premise is unverified and ' +
           'nothing was planned or implemented. Re-run; if it repeats, the task ' +
           'text or the TRIAGE schema is at fault, not the model.',
@@ -581,7 +620,7 @@ if (!triage) {
 // it is the one thing this latch exists to stop.
 if (!triage.premise_ok) {
   sTriage.close()
-  return halted('Triage', {
+  return await halted('Triage', {
     scope: triage.scope,
     premise_ok: false,
     premise_note: triage.premise_note,
@@ -708,7 +747,7 @@ if (plan.task_demands_implementation) {
 
 sPlan.close()
 if (sPlan.over()) {
-  return halted('Plan', {
+  return await halted('Plan', {
     plan: plan.plan,
     note: 'plan stage exceeded its token ceiling; the run stopped before Implement. ' +
       'Check the branch before re-running: a planner that overruns has sometimes ' +
@@ -746,10 +785,67 @@ const impl = await treeAgent(
 if (!impl) throw new Error('implementer failed')
 sImpl.close()
 if (sImpl.over()) {
-  return halted('Implement', {
+  return await halted('Implement', {
     plan: plan.plan, implemented: impl.summary,
     note: 'implementer exceeded its token ceiling; any work is on the branch, gates and review did not run',
   })
+}
+
+// A draft PR, opened as soon as there is a commit to hang it on.
+//
+// The alternative, and what this used to do, was to produce a PR only on the
+// happy path. Every other ending left the work in a worktree nobody opens and a
+// halt note in a session that scrolls away, so a run that spent an hour and
+// stopped one step short was indistinguishable from one that never happened.
+// That is the worst outcome this pipeline can produce, and it produced it
+// silently.
+//
+// So the artefact comes first and the *readiness* is what the run earns. From
+// here on every halt has somewhere durable to be written, GitHub notifies, and
+// the branch is pushed rather than stranded on one machine. Nothing about the
+// gates changes: a draft is not a review request, and the PR phase still
+// refuses to mark it ready until they are green.
+//
+// Deliberately not earlier: `gh pr create` needs a commit, and the halts before
+// this point (a disproved premise, a dirty tree, a planner that overran) are
+// cheap, immediate, and have no code to show. The expensive halts are all
+// downstream of here.
+const DRAFT = {
+  type: 'object', additionalProperties: false,
+  required: ['opened', 'detail'],
+  properties: {
+    opened: { type: 'boolean' },
+    url: { type: 'string' },
+    number: { type: 'integer' },
+    detail: { type: 'string' },
+  },
+}
+phase('Draft PR')
+const draft = await treeAgent(
+  `Push this branch and open a DRAFT pull request for it, then STOP.\n` +
+  `Task: ${brief(task)}\nWhat has been implemented so far: ${impl.summary}\n` +
+  `Run: git push -u origin ${wt.branch}, then gh pr create --draft` +
+  (baseOverride ? ` --base ${baseOverride}` : '') + `.\n` +
+  `The body is a short statement of intent, not a report: two or three ` +
+  `sentences on what this branch sets out to do and why, from the ticket. Do ` +
+  `not describe the diff, do not claim it is finished, and do not list what ` +
+  `you verified -- review has not run yet and the gates are not the subject. ` +
+  `Open it as a draft and leave it a draft: something later in this run marks ` +
+  `it ready, and only once every gate is green.\n` +
+  `This exists so the work is visible even if the run stops early, so a ` +
+  `failure to open it is worth reporting but is never fatal: if push or ` +
+  `gh fails, return opened=false with the error in detail and stop. Do not ` +
+  `retry in a loop, do not open a non-draft PR instead, and do not merge.\n` +
+  `Return the PR url and number when you opened one.`,
+  { label: 'draft-pr', phase: 'Draft PR', schema: DRAFT, model: 'haiku',
+    effort: 'low' })
+if (draft?.opened) {
+  draftPr = { url: draft.url, number: draft.number }
+  log(`draft PR open: ${draft.url ?? '(no url returned)'} -- every later halt ` +
+      `will be reported there rather than only in this session`)
+} else {
+  log(`draft PR not opened (${draft?.detail ?? 'no detail'}); continuing. ` +
+      `A halt from here on is only visible in this session`)
 }
 
 phase('Review')
@@ -861,6 +957,19 @@ const sFix = stage('fix')
 // sent to undo its own work.
 const settled = new Set()
 let round = 0
+// Which of the loop's four exits fired. Checked in the same order the loop
+// tests them, so the answer matches the condition that actually stopped it.
+const fixStopReason = () =>
+  !open.length ? 'every finding was resolved'
+  : round >= MAX_REVIEW_ROUNDS
+    ? `the ${MAX_REVIEW_ROUNDS}-round limit was reached, so these survived every round`
+  : sFix.over()
+    ? `the fix stage passed its ${Math.round(CEILINGS.fix / 1000)}k output-token ` +
+      `ceiling, so the loop stopped early -- these have not had every round`
+  : outOfBudget()
+    ? 'the run passed its overall token budget, so the loop stopped early'
+  : 'the loop ended without reaching any of its limits, which should not happen'
+
 while (open.length && round < MAX_REVIEW_ROUNDS && !outOfBudget() && !sFix.over()) {
   round++
   phase('Fix')
@@ -951,12 +1060,18 @@ while (open.length && round < MAX_REVIEW_ROUNDS && !outOfBudget() && !sFix.over(
 sFix.close()
 
 if (open.length) {
-  return halted('Fix', {
+  return await halted('Fix', {
     plan: plan.plan, implemented: impl.summary, gates: { green: true, detail: 'enforced by crap-commit-gate on every commit' },
-    unresolved_findings: open, fix_rounds: round,
-    note: `${open.length} review finding(s) survived ${MAX_REVIEW_ROUNDS} fix round(s). ` +
-          `Stopping before the mutation stage rather than spending it on work that ` +
-          `cannot open a PR. Judge each finding: fix it, or reject it as wrong.`,
+    unresolved_findings: open, fix_rounds: round, stopped_because: fixStopReason(),
+    // Report the round count that actually ran and why the loop ended. This
+    // said "survived MAX_REVIEW_ROUNDS rounds" unconditionally, so a loop that
+    // stopped early on its token ceiling was reported as findings surviving
+    // three rounds it never got. The two need opposite remedies -- raise the
+    // ceiling, or judge the findings -- and the note pointed at the wrong one.
+    note: `${open.length} review finding(s) still open after ${round} fix ` +
+          `round(s); ${fixStopReason()}. Stopping before the mutation stage ` +
+          `rather than spending it on work that cannot open a PR. Judge each ` +
+          `finding: fix it, or reject it as wrong.`,
   })
 }
 
@@ -1026,7 +1141,7 @@ for (let attempt = 1; attempt <= MAX_GATE_ATTEMPTS && !mutation.green
 sMut.close()
 
 if (!mutation.green) {
-  return halted('Mutation', {
+  return await halted('Mutation', {
     plan: plan.plan, implemented: impl.summary, gates: { green: true, detail: 'enforced by crap-commit-gate on every commit' },
     mutation, unresolved_findings: open,
     note: mutation.needs_user_run
@@ -1051,7 +1166,7 @@ if (reviewerCount && mutHead && mutHead !== reviewedThrough && !outOfBudget()) {
     `${reviewedThrough}..${mutHead}`, 'review:mutation', [LENS.correctness]))
     .filter(f => !settled.has(f.title))
   if (fresh.length) {
-    return halted('Review', {
+    return await halted('Review', {
       plan: plan.plan, implemented: impl.summary, mutation,
       unresolved_findings: fresh, fix_rounds: round,
       note: `The mutation gate's own commits (${reviewedThrough}..${mutHead}) ` +
@@ -1103,8 +1218,16 @@ if (args?.openPr !== false && !outOfBudget()) {
         `that branch and why. gh defaults to the default branch, which would ` +
         `show the parent's commits as this PR's own.\n`
       : '') +
-    `Push the branch and open the PR with gh. Do not ` +
-    `merge it, and do not mark a draft ready. Return the PR url.`,
+    (draftPr?.number
+      ? `A draft PR already exists for this branch: #${draftPr.number}. Do NOT ` +
+        `open a second one. Push the branch, update that PR's title and body to ` +
+        `describe the finished change, then mark it ready for review with ` +
+        `gh pr ready ${draftPr.number}. Marking it ready is the last thing you ` +
+        `do and the only thing that signals the work is finished; a PR left in ` +
+        `draft reads as abandoned. Return its url with opened=true.\n`
+      : `No draft PR exists for this branch, so push it and open the PR with ` +
+        `gh. Return the PR url.\n`) +
+    `Do not merge it.`,
     { label: 'pr', schema: PR, model: 'sonnet', effort: 'medium' })
   sPr.close()
 } else if (args?.openPr === false) {

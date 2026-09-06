@@ -19,7 +19,7 @@ ready`, which is one *route* to a base branch, not the condition that
 matters. It now fires on three routes -- kept as one file, not renamed,
 because hooks.json references it by this exact path:
 
-  - `gh pr create` / `gh pr ready`
+  - `gh pr create` (except `--draft`) / `gh pr ready`
   - `git merge <branch>` while HEAD is a base branch
   - `git push` whose destination refspec names a base branch, or whose HEAD is one
 
@@ -58,7 +58,21 @@ from base_branch import base_branch_names, git, is_gated, target_repo
 
 MUTATION_CHECK = Path(__file__).resolve().parent.parent / \
     'skills/crap-controlled-changes/mutation-check.sh'
-GH_PR = re.compile(r'(?:^|[;&|(]\s*)gh\s+pr\s+(?:create|ready)\b')
+# `ready` and `create` are matched separately, and ready is checked first,
+# because a command can contain both. Treating "a draft create is present" as
+# grounds to skip let `gh pr create --draft && gh pr ready 7` through with no
+# check at all -- the exemption became the bypass.
+GH_PR_READY = re.compile(r'(?:^|[;&|(]\s*)gh\s+pr\s+ready\b')
+GH_PR_CREATE = re.compile(r'(?:^|[;&|(]\s*)gh\s+pr\s+create\b')
+# A draft is not a request to review. Opening one is how work in progress is
+# made visible -- pushed, discoverable, and reportable if a run stops early --
+# and gating that would force the work to stay invisible until it is finished,
+# which is exactly backwards. `gh pr ready` is the moment review is asked for,
+# and that stays gated.
+# `(?=\s|$)` not `\b`: a word boundary matches inside `--draft-mode`, so any
+# future flag merely starting with "--draft" would have silently exempted a
+# real create.
+GH_PR_DRAFT = re.compile(r'(?:^|[;&|(]\s*)gh\s+pr\s+create\b[^;&|]*\s--draft(?=\s|$)')
 GIT_MERGE = re.compile(
     r'(?:^|[;&|(]\s*)git\s+merge\s+(?:-\S+\s+)*(?P<branch>[A-Za-z0-9][\w./-]*)')
 GIT_PUSH = re.compile(r'(?:^|[;&|(]\s*)git\s+push\b(?P<rest>[^;&|]*)')
@@ -91,7 +105,12 @@ def trigger(cmd, cwd):
     branch_arg is None for "verify current HEAD" (mutation-check.sh's own
     default); otherwise it names the branch to verify explicitly.
     """
-    if GH_PR.search(cmd):
+    if GH_PR_READY.search(cmd):
+        return cwd, None
+    if GH_PR_CREATE.search(cmd):
+        # Only a create, and only a draft one, is exempt.
+        if GH_PR_DRAFT.search(cmd):
+            return None
         return cwd, None
 
     repo = target_repo(cmd, cwd).resolve()
