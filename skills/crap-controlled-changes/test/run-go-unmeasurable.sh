@@ -22,10 +22,24 @@ fixture_commit() {
 
 # See run.sh for why this checks for a baseline commit, why the guard must
 # confirm the discovered gitdir is the fixture's own rather than just
-# checking `-d .git`, and why it restores tracked content before committing.
+# checking `-d .git`, and why a dirty fixture here is refused rather than
+# restored.
 if [ "$(git -C "$FIXTURE_DIR" rev-parse --git-dir 2>/dev/null)" != .git ] || ! git -C "$FIXTURE_DIR" rev-parse --verify --quiet HEAD >/dev/null 2>&1; then
-  git -C "$SKILL_DIR" checkout -q -- test/fixture-go-unmeasurable
-  git -C "$SKILL_DIR" clean -qfd -- test/fixture-go-unmeasurable
+  dirty="$(git -C "$SKILL_DIR" status --porcelain -- test/fixture-go-unmeasurable)"
+  if [ -n "$dirty" ]; then
+    {
+      echo "run-go-unmeasurable.sh: test/fixture-go-unmeasurable has uncommitted" \
+           "changes and no baseline commit."
+      echo "$dirty" | sed 's/^/  /'
+      echo "This fixture is about to be sealed as the baseline every later run" \
+           "resets to, so it must match HEAD first."
+      echo "Nothing was changed. Discard the changes yourself if that is what" \
+           "you want:"
+      echo "  git -C \"$SKILL_DIR\" checkout HEAD -- test/fixture-go-unmeasurable"
+      echo "  git -C \"$SKILL_DIR\" clean -fd test/fixture-go-unmeasurable"
+    } >&2
+    exit 1
+  fi
   (cd "$FIXTURE_DIR" && git init -q && git add . && fixture_commit "baseline")
 fi
 
