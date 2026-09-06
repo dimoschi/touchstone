@@ -822,10 +822,18 @@ const DRAFT = {
 }
 phase('Draft PR')
 const draft = await treeAgent(
-  `Push this branch and open a DRAFT pull request for it, then STOP.\n` +
+  `Make sure this branch has a pull request to hang the run's progress on, ` +
+  `then STOP.\n` +
   `Task: ${brief(task)}\nWhat has been implemented so far: ${impl.summary}\n` +
-  `Run: git push -u origin ${wt.branch}, then gh pr create --draft` +
-  (baseOverride ? ` --base ${baseOverride}` : '') + `.\n` +
+  `FIRST check whether one already exists: gh pr view ${wt.branch} ` +
+  `--json number,url,isDraft,state. A branch resumed with --existing normally ` +
+  `has one, and opening a second is not possible anyway. If an open PR is ` +
+  `already there, adopt it: return its number and url with opened=true, say so ` +
+  `in detail, and change nothing about it. In particular do not re-draft a PR ` +
+  `that is already marked ready for review -- someone did that deliberately.\n` +
+  `Only if there is none: git push -u origin ${wt.branch}, then gh pr create --draft` +
+  (baseOverride ? ` --base ${baseOverride}` : '') + `. Push the branch either ` +
+  `way, so the commits are on the remote rather than on one machine.\n` +
   `The body is a short statement of intent, not a report: two or three ` +
   `sentences on what this branch sets out to do and why, from the ticket. Do ` +
   `not describe the diff, do not claim it is finished, and do not list what ` +
@@ -836,13 +844,16 @@ const draft = await treeAgent(
   `failure to open it is worth reporting but is never fatal: if push or ` +
   `gh fails, return opened=false with the error in detail and stop. Do not ` +
   `retry in a loop, do not open a non-draft PR instead, and do not merge.\n` +
-  `Return the PR url and number when you opened one.`,
+  `Return the PR url and number for the PR this branch now has, whether you ` +
+  `opened it or adopted one that was already there.`,
   { label: 'draft-pr', phase: 'Draft PR', schema: DRAFT, model: 'haiku',
     effort: 'low' })
-if (draft?.opened) {
+// number, not opened: the halt reporter needs something to comment on, and a
+// url with no number is not addressable by `gh pr comment`.
+if (draft?.number) {
   draftPr = { url: draft.url, number: draft.number }
-  log(`draft PR open: ${draft.url ?? '(no url returned)'} -- every later halt ` +
-      `will be reported there rather than only in this session`)
+  log(`PR #${draft.number} carries this run: ${draft.url ?? '(no url)'} -- ` +
+      `every later halt is reported there rather than only in this session`)
 } else {
   log(`draft PR not opened (${draft?.detail ?? 'no detail'}); continuing. ` +
       `A halt from here on is only visible in this session`)
