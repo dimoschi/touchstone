@@ -51,10 +51,12 @@ jobs:
         with:
           go-version: 'stable'
           cache: false
-      # run-go-modules.sh, run-index-preservation.sh, run-php.sh, run-python.sh
-      # and run.sh are pure Python or invoke python3 directly; only setup-go
-      # runs above, so without this the job depends on the runner image
-      # happening to ship python3 rather than declaring the dependency.
+      # Several of the selected suites shell out to python3 directly, and
+      # crap-check.sh, deadcode-check.sh and mutation-check.sh themselves do
+      # too (module grouping, the scored ledger, NEXT_ACTION), so python3 is
+      # a prerequisite of nearly every suite here, not a handful. Only
+      # setup-go runs above, so without this the job depends on the runner
+      # image happening to ship python3 rather than declaring the dependency.
       - uses: actions/setup-python@v6
         with:
           python-version: '3.12'
