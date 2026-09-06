@@ -20,19 +20,19 @@ fixture_commit() {
     git -c commit.gpgsign=false -c gpg.format=openpgp commit -q -m "$1"
 }
 
-# See run.sh for why this checks for a baseline commit, why the guard must
-# confirm the discovered gitdir is the fixture's own rather than just
-# checking `-d .git`, and why a dirty fixture here is refused rather than
-# restored.
-if [ "$(git -C "$FIXTURE_DIR" rev-parse --git-dir 2>/dev/null)" != .git ] || ! git -C "$FIXTURE_DIR" rev-parse --verify --quiet HEAD >/dev/null 2>&1; then
-  dirty="$(git -C "$SKILL_DIR" status --porcelain -- test/fixture-go-unmeasurable)"
+# Refuse over uncommitted work below rather than reset/clean it. See run.sh
+# for the rest: why a baseline commit (not just -d .git) is required, why
+# the gitdir must be confirmed as the fixture's own, and why this skips when
+# there's nothing to compare against (no outer repo, or none tracking
+# this path).
+if [ -n "$(git -C "$SKILL_DIR" ls-files -- test/fixture-go-unmeasurable 2>/dev/null)" ]; then
+  dirty="$(git -C "$SKILL_DIR" status --porcelain --untracked-files=normal --ignored=matching -- test/fixture-go-unmeasurable)"
   if [ -n "$dirty" ]; then
     {
-      echo "run-go-unmeasurable.sh: test/fixture-go-unmeasurable has uncommitted" \
-           "changes and no baseline commit."
+      echo "run-go-unmeasurable.sh: test/fixture-go-unmeasurable has uncommitted changes."
       echo "$dirty" | sed 's/^/  /'
-      echo "This fixture is about to be sealed as the baseline every later run" \
-           "resets to, so it must match HEAD first."
+      echo "This script resets or seals that content on every run, so it" \
+           "must match HEAD first."
       echo "Nothing was changed. Discard the changes yourself if that is what" \
            "you want:"
       echo "  git -C \"$SKILL_DIR\" checkout HEAD -- test/fixture-go-unmeasurable"
@@ -40,6 +40,11 @@ if [ "$(git -C "$FIXTURE_DIR" rev-parse --git-dir 2>/dev/null)" != .git ] || ! g
     } >&2
     exit 1
   fi
+fi
+
+# See run.sh for why a baseline commit is required and the discovered
+# gitdir must be confirmed as the fixture's own.
+if [ "$(git -C "$FIXTURE_DIR" rev-parse --git-dir 2>/dev/null)" != .git ] || ! git -C "$FIXTURE_DIR" rev-parse --verify --quiet HEAD >/dev/null 2>&1; then
   (cd "$FIXTURE_DIR" && git init -q && git add . && fixture_commit "baseline")
 fi
 
