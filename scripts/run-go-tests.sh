@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Run every suite in skills/crap-controlled-changes/test/ this job can run.
-# The job installs a Go toolchain and a throwaway ssh signing key, so that
-# covers everything except the suites that need a live PHP toolchain
+# The job installs a Go toolchain, python3, and a throwaway ssh signing key,
+# so that covers everything except the suites that need a live PHP toolchain
 # (infection, phpunit) or uv. Those stay out of run-hook-tests.sh (python3 and
 # git only) and this job alike, until a job installs them.
 #
@@ -30,20 +30,19 @@ cd "$TEST_DIR" || { echo "!! cd $TEST_DIR failed" >&2; exit 1; }
 NEEDS_OTHER_TOOLCHAIN=(run-mutation-php-live.sh run-mutation-python.sh run-python-e2e.sh)
 
 all_suites=(run*.sh)
-# `printf '%s\n' "${all_suites[@]}"` runs its format at least once even with a
-# zero-element array, which would smuggle one empty line back in as a suite
-# name; only pipe through sort when there is something to sort.
+suites=()
+# Guard both expansions below: under `set -u`, bash before 4.4 treats a
+# zero-element array's "${arr[@]}" as unbound, and the repo's floor is 4.0.
 if [ "${#all_suites[@]}" -gt 0 ]; then
   mapfile -t all_suites < <(printf '%s\n' "${all_suites[@]}" | sort)
-fi
-suites=()
-for suite in "${all_suites[@]}"; do
-  skip=0
-  for excluded in "${NEEDS_OTHER_TOOLCHAIN[@]}"; do
-    [ "$suite" = "$excluded" ] && { skip=1; break; }
+  for suite in "${all_suites[@]}"; do
+    skip=0
+    for excluded in "${NEEDS_OTHER_TOOLCHAIN[@]}"; do
+      [ "$suite" = "$excluded" ] && { skip=1; break; }
+    done
+    [ "$skip" -eq 0 ] && suites+=("$suite")
   done
-  [ "$skip" -eq 0 ] && suites+=("$suite")
-done
+fi
 
 if [ "${#suites[@]}" -eq 0 ]; then
   echo "!! no suites discovered in $TEST_DIR" >&2

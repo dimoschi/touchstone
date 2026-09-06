@@ -14,6 +14,7 @@ command -v go >/dev/null || { echo "SKIP: go not on PATH"; exit 0; }
 if [ ! -d "$FIXTURE_DIR/.git" ]; then
   (cd "$FIXTURE_DIR" && git init -q && git add . && \
    GIT_AUTHOR_NAME=test GIT_AUTHOR_EMAIL=t@t GIT_COMMITTER_NAME=test GIT_COMMITTER_EMAIL=t@t \
+   GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=commit.gpgsign GIT_CONFIG_VALUE_0=false \
    git commit -q -m "baseline")
 fi
 
