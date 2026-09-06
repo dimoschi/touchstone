@@ -142,7 +142,7 @@ hooks/                           seven PreToolUse gates
 ### The phases
 
 1. **Worktree** — canonical branch and worktree off a freshly pulled base, then one ticket fetch shared by every later phase.
-2. **Triage** — one cheap agent checks the ticket's premise and sizes the job. A disproved premise halts. Work under ten lines skips straight to Implement.
+2. **Triage** — one cheap agent checks the ticket's premise, sizes the job, and judges how hard it is to get right. A disproved premise halts. Work under ten lines skips straight to Implement. The difficulty judgement sets the reasoning effort every later phase runs at, so an easy change does not get paid for like a hard one.
 3. **Plan** — a planner with no write tools produces a plan, acceptance criteria and risk areas.
 4. **Implement** — TDD via the skill, committing through `crap-commit.sh`, which runs both commit-time gates and refuses while either is red.
 5. **Review** — adversarial reviewers on distinct lenses, chosen by diff size. Re-runs on commits any later phase adds.

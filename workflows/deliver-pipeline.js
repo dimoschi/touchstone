@@ -4,7 +4,7 @@ export const meta = {
   whenToUse: 'Ticket-driven delivery in a repo that has opted into gating. Prefer the /deliver command, which parses flags and refuses without a ticket. Pass args: {ticket: "..."}; task is optional and narrows the ticket. Pass {plan: "..."} to reuse a plan an earlier run produced, which skips the Plan phase and starts at Implement.',
   phases: [
     { title: 'Worktree', detail: 'canonically named branch and worktree from a freshly pulled base, then fetch the ticket once for every later phase' },
-    { title: 'Triage', detail: 'one cheap agent checks the premise and sizes the job; a disproved premise halts, small work skips straight to Implement' },
+    { title: 'Triage', detail: 'one cheap agent checks the premise, sizes the job and judges its difficulty; a disproved premise halts, small work skips Plan, and the difficulty sets every later phase\'s reasoning effort' },
     { title: 'Plan', detail: 'planner produces plan + acceptance criteria + risk areas' },
     { title: 'Implement', detail: 'one implementer, TDD via crap-controlled-changes, many small signed commits' },
     { title: 'Review', detail: 'adversarial reviewers on distinct lenses, chosen by diff size: correctness and devil\'s advocate normally, plus requirements coverage on a big diff, none on a one-liner. Runs again on any commits a later phase adds' },
@@ -142,9 +142,17 @@ const BRANCH = {
 
 const TRIAGE = {
   type: 'object', additionalProperties: false,
-  required: ['scope', 'premise_ok', 'evidence', 'premise_note'],
+  required: ['scope', 'complexity', 'complexity_note', 'premise_ok', 'evidence',
+             'premise_note'],
   properties: {
     scope: { type: 'string', enum: ['inline', 'team'] },
+    // Judgement, not arithmetic. A line count is a proxy for risk and a poor
+    // one: five lines in a signing path are harder than two hundred in a test
+    // file. Triage has already read the ticket and the code by the time it
+    // answers, so it is the right place to say how hard this is, and the only
+    // place that knows before anything expensive runs.
+    complexity: { type: 'string', enum: ['trivial', 'routine', 'involved'] },
+    complexity_note: { type: 'string' },
     premise_ok: { type: 'boolean' },
     estimated_loc: { type: 'integer' },
     evidence: { type: 'array', items: { type: 'string' } },
@@ -536,7 +544,23 @@ try {
   `Return scope='inline' if a competent engineer would finish this in roughly ` +
   `ten tool calls or fewer (a comment, a rename, a one-line fix, a config ` +
   `value). Return scope='team' only when the work genuinely needs a plan, new ` +
-  `tests, and independent review.`,
+  `tests, and independent review.\n` +
+  `3. How hard is it to get right? This is a separate question from size, and ` +
+  `it sets how much reasoning every later phase is given, so answer it on its ` +
+  `own terms rather than reading it off the line count.\n` +
+  `  trivial  - mechanical and locally verifiable. Config, docs, a rename, a ` +
+  `version bump, a value change with an obvious correct answer.\n` +
+  `  routine  - ordinary feature or fix work in a well-understood area, where ` +
+  `the shape of the answer is clear once you have read the code.\n` +
+  `  involved - concurrency, migrations, auth or crypto, protocol or data ` +
+  `formats, anything whose failure is silent, anything touching a boundary ` +
+  `other systems depend on, or anywhere you are genuinely unsure what correct ` +
+  `looks like.\n` +
+  `Size and difficulty are independent. A two-hundred-line test file is ` +
+  `trivial; a five-line change to a signing path is involved. When torn ` +
+  `between two levels, choose the higher one: under-reasoning a hard change ` +
+  `costs far more than over-reasoning an easy one. Put the deciding factor in ` +
+  `complexity_note, in one sentence.`,
   { label: 'triage', schema: TRIAGE, model: 'sonnet', effort: 'medium' })
 } catch (e) {
   log(`triage returned no verdict: ${e?.message ?? e}`)
@@ -582,6 +606,44 @@ if (inlineMode) {
         : 'inline') +
       `; implementing it directly, skipping the Plan phase`)
 }
+
+// Reasoning effort, scaled by the difficulty triage just judged.
+//
+// This is the lever that actually bounds spend, and the only one available
+// before an agent starts. The stage ceilings below cannot do it: they are read
+// after an agent returns, so on a single-shot stage a ceiling spends the tokens
+// and then discards the work, which is why plan and implement deliberately
+// carry none. effort is set on the call.
+//
+// It is also the lever that matters most, for a reason that is not obvious from
+// the token counts. On a measured run of this pipeline, output was 15% of cost
+// and re-read context was 85%: every turn an agent takes re-reads everything it
+// has accumulated. Lower effort earns its saving mainly by taking fewer turns,
+// so the context is re-read fewer times -- not by writing shorter replies.
+//
+// Levels follow Anthropic's published effort/cost measurements: on long-horizon
+// coding `medium` gave up about two points of pass rate for half the cost,
+// while research-shaped work was near flat between `medium` and the default. So
+// the phases that reason about code drop a level on routine work, and the
+// phases that mostly read and report drop further.
+//
+// `involved` keeps every default. The point of asking triage is to spend less
+// on easy work, never less on hard work.
+const EFFORT = {
+  trivial:  { plan: 'low',    implement: 'medium', review: 'medium', verify: 'low' },
+  routine:  { plan: 'medium', implement: 'high',   review: 'high',   verify: 'low' },
+  involved: { plan: 'high',   implement: 'xhigh',  review: 'xhigh',  verify: 'medium' },
+}
+const complexity = EFFORT[triage.complexity] ? triage.complexity : 'involved'
+const effortFor = EFFORT[complexity]
+if (triage.complexity && complexity !== triage.complexity) {
+  log(`triage returned an unrecognised complexity (${triage.complexity}); ` +
+      `treating it as involved, which spends the most rather than the least`)
+}
+log(`triage judged this ${complexity}` +
+    (triage.complexity_note ? `: ${triage.complexity_note}` : '') +
+    ` -- plan/implement/review/verify effort ` +
+    `${effortFor.plan}/${effortFor.implement}/${effortFor.review}/${effortFor.verify}`)
 sTriage.close()
 
 // A plan an earlier run already produced arrives as args.plan and starts this
@@ -631,7 +693,8 @@ plan = await treeAgent(
   `only needs carrying out, set task_demands_implementation and explain in ` +
   `conflict_note. Do not resolve the contradiction by obeying the task: pass a ` +
   `plan already in hand as args.plan instead, which starts the run at Implement.`,
-  { label: 'planner', schema: PLAN, model: 'opus', agentType: 'touchstone:planner' })
+  { label: 'planner', schema: PLAN, model: 'opus', effort: effortFor.plan,
+    agentType: 'touchstone:planner' })
 if (!plan) throw new Error('planner failed')
 
 // This used to halt and ask the user to re-run with args.plan. The script is
@@ -679,7 +742,7 @@ const impl = await treeAgent(
   `Downstream phases are given that range and ` +
   `read the diff themselves, so it is how your work is handed on: a summary of ` +
   `it is not, and will not be forwarded.`,
-  { label: 'implementer', schema: IMPL, model: 'sonnet', effort: 'xhigh' })
+  { label: 'implementer', schema: IMPL, model: 'sonnet', effort: effortFor.implement })
 if (!impl) throw new Error('implementer failed')
 sImpl.close()
 if (sImpl.over()) {
@@ -775,7 +838,7 @@ const reviewOf = async (range, tag, picked) => {
       `report coverage, complexity, test quality, or style: deterministic ` +
       `gates own those.`,
       { label: `${tag}:${lens.label}`, phase: 'Review', schema: FINDINGS,
-        model: 'opus' })))
+        model: 'opus', effort: effortFor.review })))
   return out.filter(Boolean).flatMap(r => r.findings)
 }
 
@@ -820,7 +883,7 @@ while (open.length && round < MAX_REVIEW_ROUNDS && !outOfBudget() && !sFix.over(
     `SHA there is how unreviewed code reaches the PR.\n` +
     `Findings:\n` +
     open.map(f => `- ${f.title} (${f.file}): ${f.claim}`).join('\n'),
-    { label: `fix:${round}`, schema: FIXED, model: 'sonnet', effort: 'xhigh' })
+    { label: `fix:${round}`, schema: FIXED, model: 'sonnet', effort: effortFor.implement })
   // Verification and the tail review both read the fix's finished commits and
   // answer independent questions of them -- "are the named findings closed?"
   // and "did the fix break something new?" -- so they run together. Sequenced,
@@ -852,7 +915,8 @@ while (open.length && round < MAX_REVIEW_ROUNDS && !outOfBudget() && !sFix.over(
       ).join('\n'),
       // phase is explicit: inside parallel() the global phase() cursor races
       // with the Review group the tail lens opens beside it.
-      { label: `verify:${round}`, phase: 'Fix', schema: VERDICTS, model: 'opus' }),
+      { label: `verify:${round}`, phase: 'Fix', schema: VERDICTS, model: 'opus',
+        effort: effortFor.verify }),
     // The point of the loop: a fix is a change, so it faces the same adversary.
     // One lens, not all of them -- correctness is where a fix round goes wrong,
     // and the range is small.
