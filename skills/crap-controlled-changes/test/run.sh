@@ -12,11 +12,13 @@ command -v go >/dev/null || { echo "SKIP: go not on PATH"; exit 0; }
 
 # Fixture must have a baseline commit, not just a .git/: a bootstrap that
 # died between `git init` and `git commit` would otherwise wedge every
-# later run at `git reset --hard -q HEAD` below. The `-d .git` check must
-# run first and short-circuit: on a fresh clone fixture/.git is gitignored
-# and absent, and `git -C` with no .git there ascends into this checkout,
-# so a bare rev-parse would resolve the wrong repo's HEAD.
-if [ ! -d "$FIXTURE_DIR/.git" ] || ! git -C "$FIXTURE_DIR" rev-parse --verify --quiet HEAD >/dev/null 2>&1; then
+# later run at `git reset --hard -q HEAD` below. Checking `-d .git` isn't
+# enough either: git's repo discovery ascends into this checkout whenever
+# the fixture's own .git is absent *or* invalid (interrupted `git init`, or
+# a manual `rm -rf fixture/.git/*`), so `-d` alone can't tell a good gitdir
+# from a broken one. Confirm the discovered gitdir is the fixture's own
+# before trusting the HEAD it resolves.
+if [ "$(git -C "$FIXTURE_DIR" rev-parse --git-dir 2>/dev/null)" != .git ] || ! git -C "$FIXTURE_DIR" rev-parse --verify --quiet HEAD >/dev/null 2>&1; then
   (cd "$FIXTURE_DIR" && git init -q && git add . && \
    GIT_AUTHOR_NAME=test GIT_AUTHOR_EMAIL=t@t GIT_COMMITTER_NAME=test GIT_COMMITTER_EMAIL=t@t \
    GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=commit.gpgsign GIT_CONFIG_VALUE_0=false \
