@@ -8,7 +8,7 @@ export const meta = {
     { title: 'Plan', detail: 'planner produces plan + acceptance criteria + risk areas' },
     { title: 'Implement', detail: 'one implementer, TDD via crap-controlled-changes, many small signed commits' },
     { title: 'Review', detail: 'adversarial reviewers on distinct lenses, chosen by diff size: correctness and devil\'s advocate normally, plus requirements coverage on a big diff, none on a one-liner. Runs again on any commits a later phase adds' },
-    { title: 'Fix', detail: 'fix confirmed findings, one verifier re-checks them all, then an adversary reads the fix\'s own commits; bounded rounds' },
+    { title: 'Fix', detail: 'fix confirmed findings, then a verifier and an adversary read the result in parallel; bounded rounds' },
     { title: 'Mutation', detail: 'pre-PR mutation gate; kill survivors with tests, never weaken code. Its own commits are reviewed before the PR' },
     { title: 'PR', detail: 'push and open a PR against the repo template, only when every gate is green' },
   ],
@@ -821,19 +821,48 @@ while (open.length && round < MAX_REVIEW_ROUNDS && !outOfBudget() && !sFix.over(
     `Findings:\n` +
     open.map(f => `- ${f.title} (${f.file}): ${f.claim}`).join('\n'),
     { label: `fix:${round}`, schema: FIXED, model: 'sonnet', effort: 'xhigh' })
-  // One verifier for every finding, not one each. Six findings meant six agents
-  // that each re-read the same diff to answer six questions about it; the
-  // reading is the expensive part and it is identical across them.
-  const verdicts = await treeAgent(
-    `Verify, finding by finding, whether each is now actually fixed in the ` +
-    `repo. Read the code for each one; do not trust any claim that it was ` +
-    `fixed, including your own reasoning about a neighbouring finding.\n` +
-    `Return one verdict per finding below, in the same order, with the same ` +
-    `title verbatim so they can be matched up.\n` +
-    open.map((f, i) =>
-      `${i + 1}. ${f.title} (${f.file}): ${f.claim}. Evidence was: ${f.evidence}`
-    ).join('\n'),
-    { label: `verify:${round}`, schema: VERDICTS, model: 'opus' })
+  // Verification and the tail review both read the fix's finished commits and
+  // answer independent questions of them -- "are the named findings closed?"
+  // and "did the fix break something new?" -- so they run together. Sequenced,
+  // they made every round three model turns deep, and rounds are the whole
+  // wall-clock cost of this phase: the review lenses above are parallel, so
+  // trimming those buys tokens and almost no time, while a round does not.
+  //
+  // They stay two separate agents on purpose. Merging them would hand the
+  // "did anything break?" question to the agent that has just finished
+  // deciding the fixes are good, and a reviewer grading work it has already
+  // blessed is not a reviewer. Independence is the point; the sequencing was
+  // never part of it.
+  const head = fixed?.head_sha?.trim()
+  const tailReviewable =
+    reviewerCount && head && head !== reviewedThrough && !outOfBudget()
+
+  const [verdicts, freshRaw] = await parallel([
+    // One verifier for every finding, not one each. Six findings meant six
+    // agents that each re-read the same diff to answer six questions about it;
+    // the reading is the expensive part and it is identical across them.
+    () => treeAgent(
+      `Verify, finding by finding, whether each is now actually fixed in the ` +
+      `repo. Read the code for each one; do not trust any claim that it was ` +
+      `fixed, including your own reasoning about a neighbouring finding.\n` +
+      `Return one verdict per finding below, in the same order, with the same ` +
+      `title verbatim so they can be matched up.\n` +
+      open.map((f, i) =>
+        `${i + 1}. ${f.title} (${f.file}): ${f.claim}. Evidence was: ${f.evidence}`
+      ).join('\n'),
+      // phase is explicit: inside parallel() the global phase() cursor races
+      // with the Review group the tail lens opens beside it.
+      { label: `verify:${round}`, phase: 'Fix', schema: VERDICTS, model: 'opus' }),
+    // The point of the loop: a fix is a change, so it faces the same adversary.
+    // One lens, not all of them -- correctness is where a fix round goes wrong,
+    // and the range is small.
+    // async, so the skip path still hands parallel() a promise rather than a
+    // bare array.
+    async () => tailReviewable
+      ? reviewOf(`${reviewedThrough}..${head}`, `review:fix:${round}`, [LENS.correctness])
+      : [],
+  ])
+
   const byTitle = new Map(
     (verdicts?.verdicts ?? []).map(v => [v.title, v.fixed === true]))
   // Unmatched means unverified, which stays open: a finding silently dropped
@@ -841,13 +870,11 @@ while (open.length && round < MAX_REVIEW_ROUNDS && !outOfBudget() && !sFix.over(
   for (const f of open) if (byTitle.get(f.title) === true) settled.add(f.title)
   open = open.filter(f => byTitle.get(f.title) !== true)
 
-  // The point of the loop: a fix is a change, so it faces the same adversary.
-  // One lens, not all of them -- correctness is where a fix round goes wrong,
-  // and the range is small.
-  const head = fixed?.head_sha?.trim()
-  if (reviewerCount && head && head !== reviewedThrough && !outOfBudget()) {
-    const fresh = (await reviewOf(
-      `${reviewedThrough}..${head}`, `review:fix:${round}`, [LENS.correctness]))
+  // Filtered after the verdicts land, not before, so a finding the fix closed
+  // cannot come back as a fresh one. That ordering is what the sequencing used
+  // to give for free, and it is the only thing that had to be preserved here.
+  if (tailReviewable) {
+    const fresh = (freshRaw ?? [])
       .filter(f => !settled.has(f.title) && !open.some(o => o.title === f.title))
     if (fresh.length) log(`round ${round}: the fix itself introduced ${fresh.length} new finding(s)`)
     open = open.concat(fresh)

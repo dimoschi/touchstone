@@ -146,7 +146,7 @@ hooks/                           seven PreToolUse gates
 3. **Plan** — a planner with no write tools produces a plan, acceptance criteria and risk areas.
 4. **Implement** — TDD via the skill, committing through `crap-commit.sh`, which runs both commit-time gates and refuses while either is red.
 5. **Review** — adversarial reviewers on distinct lenses, chosen by diff size. Re-runs on commits any later phase adds.
-6. **Fix** — confirmed findings only, bounded rounds, with a verifier and then an adversary reading the fix's own commits.
+6. **Fix** — confirmed findings only, bounded rounds. A verifier and an adversary then read the fix's own commits in parallel: independent questions, one turn.
 7. **Mutation** — kill every survivor with a test. Its own commits get reviewed too.
 8. **PR** — pushes and opens against the repo's template, only once every gate is green.
 
