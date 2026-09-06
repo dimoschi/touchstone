@@ -20,8 +20,9 @@ fixture_commit() {
     git -c commit.gpgsign=false -c gpg.format=openpgp commit -q -m "$1"
 }
 
-# See run.sh for why this checks for a baseline commit rather than for .git/.
-if ! git -C "$FIXTURE_DIR" rev-parse --verify --quiet HEAD >/dev/null 2>&1; then
+# See run.sh for why this checks for a baseline commit, and why the -d .git
+# check must come first and short-circuit the rev-parse.
+if [ ! -d "$FIXTURE_DIR/.git" ] || ! git -C "$FIXTURE_DIR" rev-parse --verify --quiet HEAD >/dev/null 2>&1; then
   (cd "$FIXTURE_DIR" && git init -q && git add . && fixture_commit "baseline")
 fi
 
