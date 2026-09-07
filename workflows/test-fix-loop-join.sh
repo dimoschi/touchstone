@@ -754,8 +754,10 @@ async function scenarioV() {
   })
   check('halted at Fix (the leak was never fixed)', result.halted_at, 'Fix')
   check('a suspect was recorded', result.regression_suspects?.length, 1)
-  check('the halt note points the reader at them',
-    (result.note ?? '').includes('regression_suspects'), true)
+  check('the halt note says the fixes need checking, without naming a JSON field',
+    (result.note ?? '').includes('check by hand that those fixes held'), true)
+  check('the halt note does not leak the field name into prose',
+    (result.note ?? '').includes('regression_suspects'), false)
   check('the comment prompt carries the suspect claim',
     (captured.haltNoticePrompt ?? '').includes('off-by-one at the array end'), true)
   check('the comment prompt says the fix was verified and not reopened',
@@ -793,10 +795,58 @@ async function scenarioW() {
     (captured.regressionNoticePrompt ?? '').includes('Do not name this workflow'), true)
 }
 
+// Scenarios X and Y -- the two exits past the fix loop, where a suspect from a
+// round that converged is still live and must reach the comment.
+function convergedWithSuspect(overrides) {
+  return {
+    draftPr: { opened: true, number: 23, url: 'https://example.invalid/pr/23', detail: 'stub draft' },
+    initialReview: {
+      correctness: [{ title: 'Off-by-one in parser', file: 'src/parser.js',
+        claim: 'boundary is wrong', evidence: 'parser.js:12' }],
+      advocate: [],
+    },
+    verify: (id) => id === 'f1' ? true : undefined,
+    fixHead: () => 'fix00000000000000000000000000000000000001',
+    tailReview: [{ title: 'Boundary check excludes the last element', file: 'parser.js',
+      claim: 'off-by-one at the array end', evidence: 'see loop condition',
+      duplicate_of: 'f1' }],
+    staleness: () => [],
+    mutationGated: true,
+    ...overrides,
+  }
+}
+
+async function scenarioX() {
+  console.log('\n== scenario X: the Mutation halt carries the regression suspects')
+  const { result, captured } = await run(convergedWithSuspect({
+    mutationResult: () => ({ green: false, head_sha: 'mut0000000000000000000000000000000000001',
+      detail: 'stub red', survivors: 1 }),
+  }))
+  check('halted at Mutation', result.halted_at, 'Mutation')
+  check('the suspect is in the payload', result.regression_suspects?.length, 1)
+  check('the comment prompt carries the suspect claim',
+    (captured.haltNoticePrompt ?? '').includes('off-by-one at the array end'), true)
+}
+
+async function scenarioY() {
+  console.log('\n== scenario Y: the post-mutation Review halt carries the regression suspects')
+  const { result, captured } = await run(convergedWithSuspect({
+    mutationResult: () => ({ green: true, head_sha: 'mut0000000000000000000000000000000000001', detail: 'stub green' }),
+    postMutationReview: [{ title: 'New nil deref in the added test helper',
+      file: 'src/helper.js', claim: 'deref before the guard', evidence: 'helper.js:8' }],
+  }))
+  check('halted at Review', result.halted_at, 'Review')
+  check('the suspect is in the payload', result.regression_suspects?.length, 1)
+  check('the comment prompt carries the suspect claim',
+    (captured.haltNoticePrompt ?? '').includes('off-by-one at the array end'), true)
+  check('the genuinely new finding is still reported',
+    result.unresolved_findings?.length, 1)
+}
+
 for (const scenario of [scenarioA, scenarioB, scenarioG, scenarioC, scenarioD, scenarioE, scenarioH,
                         scenarioI, scenarioJ, scenarioK, scenarioL, scenarioM, scenarioN,
                         scenarioO, scenarioP, scenarioQ, scenarioR, scenarioS, scenarioT,
-                        scenarioU, scenarioV, scenarioW]) {
+                        scenarioU, scenarioV, scenarioW, scenarioX, scenarioY]) {
   await scenario()
 }
 

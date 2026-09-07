@@ -106,8 +106,6 @@ const stage = (name) => {
 // phase that opens it.
 let draftPr = null
 
-// Rendered into both the halt comment and the success-path comment. A suspect
-// only exists in the run's return value otherwise, which dies with the session.
 const renderSuspects = (suspects) => suspects
   .map((s, i) => `${i + 1}. ${s.title} (${s.file}): ${s.claim}. Evidence: ` +
     `${s.evidence}. Reported again in fix round ${s.round}, after an earlier ` +
@@ -265,9 +263,8 @@ const FINDINGS = {
         properties: {
           title: { type: 'string' }, file: { type: 'string' },
           claim: { type: 'string' }, evidence: { type: 'string' },
-          // Set only when this finding restates one from the known-findings
-          // list a reviewer was handed (see reviewOf's `known` parameter): the
-          // id of the one it restates, copied from that list, not invented.
+          // An id copied from reviewOf's `known` list, never invented. Each
+          // call site states what a reference there means.
           duplicate_of: { type: 'string' },
         },
       },
@@ -1070,10 +1067,9 @@ const sFix = stage('fix')
 // or a content hash, so a later reviewOf call can be handed their title/file/
 // claim as the known-findings list a duplicate_of reference joins against.
 const settled = []
-// A lens pointing a fresh finding at an already-settled one may be restating
-// the claim it was handed, or reporting that the fix did not hold. Not
-// reopened, which would send the fixer to undo its own work; recorded instead,
-// because silently dropping a regression is what this stage exists to catch.
+// A lens pointing a fresh finding at a settled one may be restating the claim
+// it was handed, or reporting the fix did not hold. Not reopened, which would
+// send the fixer to undo its own work; recorded so it is not dropped in silence.
 const regressionSuspects = []
 let round = 0
 // Which of the loop's four exits fired. Checked in the same order the loop
@@ -1252,9 +1248,9 @@ if (open.length) {
           `rather than spending it on work that cannot open a PR. Judge each ` +
           `finding: fix it, or reject it as wrong.` +
           (regressionSuspects.length
-            ? ` ${regressionSuspects.length} finding(s) were reported again ` +
-              `after being verified fixed and were not reopened; see ` +
-              `regression_suspects.`
+            ? ` Separately, ${regressionSuspects.length} finding(s) were ` +
+              `reported again after being verified fixed, and were not ` +
+              `reopened: check by hand that those fixes held.`
             : '') +
           (staleCount
             ? ` ${staleCount} of them have code that changed since they were ` +
@@ -1365,7 +1361,7 @@ sMut.close()
 if (!mutation.green) {
   return await halted('Mutation', {
     plan: plan.plan, implemented: impl.summary, gates: { green: true, detail: 'enforced by crap-commit-gate on every commit' },
-    mutation, unresolved_findings: open,
+    mutation, unresolved_findings: open, regression_suspects: regressionSuspects,
     note: mutation.needs_user_run
       ? `The mutation run does not fit the 600000 ms Bash ceiling, which for ` +
         `this repo is expected rather than a fault. Run the command in detail ` +
@@ -1385,13 +1381,9 @@ if (!mutation.green) {
 const mutHead = mutation.head_sha?.trim()
 if (reviewerCount && mutHead && mutHead !== reviewedThrough && !outOfBudget()) {
   phase('Review')
-  // Only a byte-identical restatement is dropped here. A lens *referencing* a
-  // settled finding against the mutation gate's own commits is saying that gate
-  // undid a verified fix, and there is no loop left to reopen it into: the
-  // right outcome is the halt below. Because a reference is that expensive
-  // here, the charge below narrows what one is allowed to mean -- the general
-  // instruction above would otherwise have a lens reference any old bug it
-  // still perceives, and end the run.
+  // A reference here means the gate undid a verified fix, and there is no loop
+  // left to reopen it into, so it halts. The charge narrows it to that: the
+  // general instruction would have a lens reference any bug it still perceives.
   const fresh = (await reviewOf(
     `${reviewedThrough}..${mutHead}`, 'review:mutation', [LENS.correctness], settled,
     `\nEach of those was fixed and the fix was verified, all of it before the ` +
@@ -1410,6 +1402,7 @@ if (reviewerCount && mutHead && mutHead !== reviewedThrough && !outOfBudget()) {
     return await halted('Review', {
       plan: plan.plan, implemented: impl.summary, mutation,
       unresolved_findings: fresh, fix_rounds: round,
+      regression_suspects: regressionSuspects,
       note: `The mutation gate's own commits (${reviewedThrough}..${mutHead}) ` +
             `introduced ${fresh.length} finding(s). The fix rounds are spent, so ` +
             `no PR was opened. Judge each: fix it, or reject it as wrong.`,
@@ -1471,10 +1464,8 @@ if (args?.openPr !== false && !outOfBudget()) {
     `Do not merge it.`,
     { label: 'pr', schema: PR, model: 'sonnet', effort: 'medium' })
   sPr.close()
-  // A green run can still carry a suspect, and it does not belong in the PR
-  // body: the body describes the change, and this is a note to whoever reviews
-  // it. Same reasoning as the halt comment -- unposted, it lives only in a
-  // return value nobody reads next week.
+  // Not in the PR body: the body describes the change, this is a note to its
+  // reviewer. Unposted it lives only in a return value that dies with the run.
   if (pr?.opened && regressionSuspects.length) {
     const posted = await agent(
       `Post a comment on PR ${draftPr?.number ?? pr.url} in the current repo, ` +
