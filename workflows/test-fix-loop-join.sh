@@ -184,6 +184,11 @@ function makeAgent(scenario, captured) {
       captured.haltNoticePrompt = prompt
       return true
     }
+    if (label === 'run-record') {
+      captured.runRecordPrompt = prompt
+      if (scenario.runRecordFails) return null
+      return '/stub/main/.claude/touchstone-runs/21.json'
+    }
     if (label === 'regression-notice') {
       captured.regressionNoticePrompt = prompt
       return scenario.regressionNoticePosts !== false
@@ -250,7 +255,8 @@ function makeAgent(scenario, captured) {
 }
 
 async function run(scenario) {
-  const captured = { calls: [], haltNoticePrompt: null, regressionNoticePrompt: null, logs: [] }
+  const captured = { calls: [], haltNoticePrompt: null, regressionNoticePrompt: null,
+    runRecordPrompt: null, logs: [] }
   const sandbox = {
     args: baseArgs(scenario.args),
     agent: makeAgent(scenario, captured),
@@ -843,10 +849,73 @@ async function scenarioY() {
     result.unresolved_findings?.length, 1)
 }
 
+// Scenario Z -- the halt exits must write the record, since a halt is the case
+// that most needs one, and it must be keyed and located so a later session can
+// find it: by ticket, under the main checkout, not the worktree that goes away.
+async function scenarioZ() {
+  console.log('\n== scenario Z: a halt writes the run record into the repo')
+  const { result, captured } = await run({
+    args: { maxReviewRounds: 1 },
+    initialReview: {
+      correctness: [{ title: 'Unrelated leak', file: 'src/pool.js',
+        claim: 'connection is never released', evidence: 'pool.js:40' }],
+      advocate: [],
+    },
+    verify: () => false,
+    fixHead: () => 'fix00000000000000000000000000000000000001',
+    staleness: () => [],
+  })
+  const p = captured.runRecordPrompt ?? ''
+  check('halted at Fix', result.halted_at, 'Fix')
+  check('the record was written once', callCount(captured, 'run-record'), 1)
+  check('its path is reported back in the payload',
+    result.record_path, '/stub/main/.claude/touchstone-runs/21.json')
+  check('it is keyed by ticket', p.includes('touchstone-runs/21.json'), true)
+  check('it is written to the main checkout, not the worktree',
+    p.includes('--git-common-dir'), true)
+  check('the record carries the unresolved finding',
+    p.includes('connection is never released'), true)
+  check('the record carries the halt phase', p.includes('"halted_at": "Fix"'), true)
+}
+
+// Scenario AA -- the green path writes it too. A run that opened a PR is the
+// one a later session is most likely to come back to.
+async function scenarioAA() {
+  console.log('\n== scenario AA: a green run writes the run record')
+  const { result, captured } = await run({
+    args: { openPr: true },
+    prResult: { opened: true, url: 'https://example.invalid/pr/23', note: 'stub ready' },
+    initialReview: { correctness: [], advocate: [] },
+    verify: () => undefined,
+    staleness: () => [],
+  })
+  check('halted_at is absent', result.halted_at, undefined)
+  check('the record was written once', callCount(captured, 'run-record'), 1)
+  check('the record carries the PR url',
+    (captured.runRecordPrompt ?? '').includes('https://example.invalid/pr/23'), true)
+}
+
+// Scenario AB -- the write is best-effort. A dead record agent must not take
+// down a run whose work is already committed.
+async function scenarioAB() {
+  console.log('\n== scenario AB: a failed record write does not take the run down')
+  const { result } = await run({
+    args: { openPr: true },
+    runRecordFails: true,
+    prResult: { opened: true, url: 'https://example.invalid/pr/23', note: 'stub ready' },
+    initialReview: { correctness: [], advocate: [] },
+    verify: () => undefined,
+    staleness: () => [],
+  })
+  check('the run still returns its result', result.pr?.opened, true)
+  check('record_path is null rather than missing', result.record_path, null)
+}
+
 for (const scenario of [scenarioA, scenarioB, scenarioG, scenarioC, scenarioD, scenarioE, scenarioH,
                         scenarioI, scenarioJ, scenarioK, scenarioL, scenarioM, scenarioN,
                         scenarioO, scenarioP, scenarioQ, scenarioR, scenarioS, scenarioT,
-                        scenarioU, scenarioV, scenarioW, scenarioX, scenarioY]) {
+                        scenarioU, scenarioV, scenarioW, scenarioX, scenarioY,
+                        scenarioZ, scenarioAA, scenarioAB]) {
   await scenario()
 }
 
