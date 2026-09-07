@@ -39,6 +39,8 @@ jobs:
         run: |
           bash -c 'echo "bash ${BASH_VERSION}"; [ "${BASH_VERSINFO[0]}" -ge 4 ]'
           bash scripts/run-hook-tests.sh
+      - name: Workflow opt-in test suite
+        run: bash workflows/test-mutation-optin.sh
 
   go:
     # The skill's Go suites (crap-check.sh, deadcode-check.sh, mutation-check.sh)
