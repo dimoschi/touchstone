@@ -96,11 +96,27 @@ around once.
 
 ## Before invoking
 
-Confirm the repo has opted into gating: `.crap-gated` at its root, and
-`.mutation-gated` too if the mutation phase should be enforced. The workflow runs
-`crap-check.sh` and a mutation gate, and both are meaningless in a repo that has not
-opted in. If the marker is missing, say so and ask rather than running it. Creating
-the marker is the user's decision, not yours.
+Nothing to confirm. Invoke the workflow.
+
+**A missing marker is not a reason to stop.** The markers control enforcement, not
+measurement, so the run is worth making either way:
+
+- `crap-check.sh` and `crap-commit.sh` never read a marker. They run on every
+  invocation and score any staged Go, PHP or Python. Those numbers carry full
+  weight in an unmarked repo.
+- `.crap-gated` arms `crap-commit-gate.py` (intercepts a raw `git commit`),
+  `contributing-gate.py`, and the unsupported-language refusal.
+- `.mutation-gated` arms `mutation-pr-gate.py` (intercepts `gh pr ready`) and is
+  what makes the mutation phase run at all; unmarked, that phase skips itself.
+
+So report which gates were inert when the run returns, and never stop to ask for a
+marker first: stopping delivers nothing, which is worse than delivering a change
+whose mutation gate did not run.
+
+**Never create a marker.** That is the repo owner's decision and it is repo-wide and
+permanent. It can also break the repo it is added to: a language in
+`lib/unsupported-sources.sh`'s list refuses every commit touching it once
+`.crap-gated` exists, and a language whose tests the gate cannot measure refuses too.
 
 ## After it returns
 
