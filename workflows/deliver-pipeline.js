@@ -969,6 +969,11 @@ const stripBrackets = (s) => {
   const m = /^\[(.+)\]$/.exec(t)
   return (m ? m[1] : t).trim()
 }
+// The settled/fresh-finding dedup below cannot key on id: every reviewOf call
+// mints a brand-new one, even for a finding that is, in substance, the same
+// one reported again. Content is the only thing two independent reports of
+// the same finding actually share.
+const contentKeyOf = (f) => JSON.stringify([f.title, f.file, f.claim, f.evidence])
 
 // Review is a function of a range, not a one-shot on the implementer's commits.
 // Reviewing only impl.commit_range meant every later phase that commits -- the
@@ -1106,9 +1111,10 @@ while (open.length && round < MAX_REVIEW_ROUNDS && !outOfBudget() && !sFix.over(
   // because its id came back missing or mistyped is the one failure this must
   // not have.
   //
-  // settled is keyed on id, not title: a fresh finding gets its own id from
-  // reviewOf, so it never collides here even if its title does.
-  for (const f of open) if (byId.get(f.id) === true) settled.add(f.id)
+  // settled is keyed on content, not id: a fresh finding gets its own id from
+  // reviewOf every time, even when it is an identical re-report of one just
+  // settled, so id can never join the two back up.
+  for (const f of open) if (byId.get(f.id) === true) settled.add(contentKeyOf(f))
   open = open.filter(f => byId.get(f.id) !== true)
 
   // Filtered after the verdicts land, not before, so a finding the fix closed
@@ -1116,7 +1122,7 @@ while (open.length && round < MAX_REVIEW_ROUNDS && !outOfBudget() && !sFix.over(
   // to give for free, and it is the only thing that had to be preserved here.
   if (tailReviewable) {
     const fresh = (freshRaw ?? [])
-      .filter(f => !settled.has(f.id) && !open.some(o => o.id === f.id))
+      .filter(f => !settled.has(contentKeyOf(f)) && !open.some(o => contentKeyOf(o) === contentKeyOf(f)))
     if (fresh.length) log(`round ${round}: the fix itself introduced ${fresh.length} new finding(s)`)
     open = open.concat(fresh)
     reviewedThrough = head
@@ -1130,10 +1136,13 @@ sFix.close()
 if (open.length) {
   // Advisory only: a finding's evidence may have moved since it was
   // recorded. One cheap agent checks each against its evidence, not just its
-  // file. Skipped when out of budget; any rejection degrades to nothing
-  // marked, never to losing the halt.
+  // file. Skipped only when the loop ran zero rounds, since nothing could
+  // have changed then; a loop that stopped on budget after a round already
+  // committed is exactly the case this exists for, so it runs regardless of
+  // budget. Any rejection degrades to nothing marked, never to losing the
+  // halt.
   let staleness = null
-  if (!outOfBudget()) {
+  if (round > 0) {
     try {
       staleness = await treeAgent(
         `For each finding below, report whether the code its evidence ` +
@@ -1305,7 +1314,7 @@ if (reviewerCount && mutHead && mutHead !== reviewedThrough && !outOfBudget()) {
   phase('Review')
   const fresh = (await reviewOf(
     `${reviewedThrough}..${mutHead}`, 'review:mutation', [LENS.correctness]))
-    .filter(f => !settled.has(f.id))
+    .filter(f => !settled.has(contentKeyOf(f)))
   if (fresh.length) {
     return await halted('Review', {
       plan: plan.plan, implemented: impl.summary, mutation,

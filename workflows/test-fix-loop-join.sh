@@ -537,8 +537,80 @@ async function scenarioN() {
     result.unresolved_findings[0]?.code_changed_since_recorded, undefined)
 }
 
+// Scenario O -- an identical re-report: the tail review re-detects the exact
+// same finding (same title, file, claim, evidence) that a verifier just
+// confirmed fixed. Unlike K, nothing here differs -- this is the case the
+// settled guard exists for, and keying it on id (which is always freshly
+// minted) can never catch it.
+async function scenarioO() {
+  console.log('\n== scenario O: an identical re-report of a settled finding is not reopened')
+  const { result } = await run({
+    initialReview: {
+      correctness: [{ title: 'Off-by-one in parser', file: 'src/parser.js',
+        claim: 'boundary is wrong', evidence: 'parser.js:12' }],
+      advocate: [],
+    },
+    verify: (id) => id === 'f1' ? true : undefined,
+    fixHead: () => 'fix00000000000000000000000000000000000001',
+    tailReview: [{ title: 'Off-by-one in parser', file: 'src/parser.js',
+      claim: 'boundary is wrong', evidence: 'parser.js:12' }],
+    staleness: () => [],
+  })
+  check('halted_at is absent (the run finished, the re-report was suppressed)',
+    result.halted_at, undefined)
+  check('unresolved_findings is empty', result.unresolved_findings, [])
+}
+
+// Scenario P -- same identical re-report, one stage later: the post-mutation
+// review re-detects a finding the fix loop already settled. It must not
+// reach the halt.
+async function scenarioP() {
+  console.log('\n== scenario P: an identical re-report at the post-mutation stage is not reopened')
+  const { result } = await run({
+    initialReview: {
+      correctness: [{ title: 'Off-by-one in parser', file: 'src/parser.js',
+        claim: 'boundary is wrong', evidence: 'parser.js:12' }],
+      advocate: [],
+    },
+    verify: (id) => id === 'f1' ? true : undefined,
+    staleness: () => [],
+    mutationGated: true,
+    mutationResult: () => ({ green: true, head_sha: 'mut0000000000000000000000000000000000001', detail: 'stub green' }),
+    postMutationReview: [{ title: 'Off-by-one in parser', file: 'src/parser.js',
+      claim: 'boundary is wrong', evidence: 'parser.js:12' }],
+  })
+  check('halted_at is absent (the run finished, the re-report was suppressed)',
+    result.halted_at, undefined)
+}
+
+// Scenario Q -- the staleness probe must run even when the loop stopped on
+// budget only after a round already ran and committed, not merely when the
+// loop never got to run at all. Round 0 (scenario M) is the only state where
+// skipping it is safe.
+async function scenarioQ() {
+  console.log('\n== scenario Q: the staleness probe still runs when budget ran out after a round already committed')
+  let roundsRan = 0
+  const { result, captured } = await run({
+    budget: { total: 200000, spent: () => 0, remaining: () => (roundsRan > 0 ? 100 : 999999) },
+    args: { maxReviewRounds: 3 },
+    initialReview: {
+      correctness: [{ title: 'Needs more rounds', file: 'fileA.js', claim: 'c', evidence: 'e' }],
+      advocate: [],
+    },
+    verify: (id, round) => { roundsRan = round; return undefined },
+    staleness: (ids) => ids.map(id => ({ id, changed: true })),
+  })
+  check('staleness ran despite the loop stopping on budget after a round',
+    callCount(captured, 'staleness'), 1)
+  check('halted at Fix', result.halted_at, 'Fix')
+  check('the loop ran exactly 1 round before budget stopped it', result.fix_rounds, 1)
+  check('the surviving finding is marked as changed since it was recorded',
+    result.unresolved_findings[0]?.code_changed_since_recorded, true)
+}
+
 for (const scenario of [scenarioA, scenarioB, scenarioG, scenarioC, scenarioD, scenarioE, scenarioH,
-                        scenarioI, scenarioJ, scenarioK, scenarioL, scenarioM, scenarioN]) {
+                        scenarioI, scenarioJ, scenarioK, scenarioL, scenarioM, scenarioN,
+                        scenarioO, scenarioP, scenarioQ]) {
   await scenario()
 }
 
