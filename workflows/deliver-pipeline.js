@@ -179,6 +179,15 @@ const BRANCH = {
   },
 }
 
+const GATED = {
+  type: 'object', additionalProperties: false,
+  required: ['gated', 'detail'],
+  properties: {
+    gated: { type: 'boolean' },
+    detail: { type: 'string' },
+  },
+}
+
 const TRIAGE = {
   type: 'object', additionalProperties: false,
   required: ['scope', 'complexity', 'complexity_note', 'premise_ok', 'evidence',
@@ -1088,11 +1097,45 @@ if (open.length) {
 
 // Mutation is a pre-PR gate, not a per-commit one: it costs a full test-suite
 // run per mutant, so it runs once here, on a clean tree, rather than inside the
-// implement/fix loops. mutation-pr-gate.py blocks `gh pr create` while it is
-// red, so a red gate here means the PR phase below cannot succeed anyway.
+// implement/fix loops. In an opted-in repo mutation-pr-gate.py blocks
+// `gh pr create` while it is red, so a red gate here means the PR phase below
+// cannot succeed anyway.
 phase('Mutation')
 const sMut = stage('mutation')
 let mutation = { green: false, detail: 'not run' }
+
+// Mutation gating is opt-in, on the same marker mutation-pr-gate.py reads. A
+// repo with no marker has nothing enforcing the gate and may have none of the
+// tooling installed, so a red result there is unclearable by any amount of work.
+//
+// Fail safe: only a confirmed absence skips it. An unknown answer counts as
+// gated, costing a mutation run rather than dropping a gate the repo relies on.
+const gateProbe = await treeAgent(
+  `[touchstone: mutation opt-in]\n` +
+  `Report whether this repo opts into mutation gating, then STOP. Run no ` +
+  `tests, no mutation tooling, and change nothing.\n` +
+  `1. Find the repo root: dirname "$(git rev-parse --path-format=absolute ` +
+  `--git-common-dir)".\n` +
+  `2. Test for a file named exactly .mutation-gated at that root.\n` +
+  `3. Return gated=true if it is there, gated=false only if you confirmed it ` +
+  `is absent. If you could not determine either way, return gated=true and ` +
+  `explain why in detail: treating an unknown as ungated would drop a real ` +
+  `gate.\n` +
+  `Report the path you checked in detail.`,
+  { label: 'mutation:opt-in', schema: GATED, model: 'haiku', effort: 'low' })
+
+const mutationGated = gateProbe?.gated !== false
+if (!mutationGated) {
+  mutation = {
+    green: true,
+    detail: `skipped: repo has not opted into mutation gating ` +
+      `(.mutation-gated absent at the repo root). ${gateProbe?.detail ?? ''}`.trim(),
+  }
+  log(`mutation gate skipped: no .mutation-gated marker, so nothing enforces it ` +
+      `(the CRAP and dead-code gates still ran on every commit)`)
+} else if (!gateProbe) {
+  log('mutation opt-in probe returned nothing; treating the repo as gated')
+}
 // needs_user_run breaks the loop instead of retrying: a run that cannot fit the
 // Bash ceiling returns the same answer every attempt, and each one costs the
 // ceiling in wall clock before saying so.
@@ -1162,9 +1205,10 @@ if (!mutation.green) {
         `the ledger green and the gate will cost milliseconds. No PR was ` +
         `opened, and mutation-pr-gate.py would block one anyway.`
       : `Mutation gate still red after ${MAX_GATE_ATTEMPTS} attempt(s). Surviving ` +
-        `mutants are behaviour the tests cannot detect. No PR was opened, and ` +
-        `mutation-pr-gate.py would block one anyway. Kill them with tests, or ` +
-        `approve a provably equivalent mutant with mutation-check.sh --accept.`,
+        `mutants are behaviour the tests cannot detect. The PR was left as a ` +
+        `draft, and mutation-pr-gate.py would block marking it ready. Kill them ` +
+        `with tests, or approve a provably equivalent mutant with ` +
+        `mutation-check.sh --accept.`,
   })
 }
 
