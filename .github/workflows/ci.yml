@@ -41,6 +41,8 @@ jobs:
           bash scripts/run-hook-tests.sh
       - name: Workflow opt-in test suite
         run: bash workflows/test-mutation-optin.sh
+      - name: Fix-loop verdict join test suite
+        run: bash workflows/test-fix-loop-join.sh
       - name: Version bump test suite
         run: bash scripts/test-version-bump.sh
 

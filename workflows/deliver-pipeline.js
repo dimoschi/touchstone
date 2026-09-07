@@ -131,7 +131,10 @@ const halted = async (at, extra) => {
       (extra?.unresolved_findings?.length
         ? `Open findings a human must judge, fix or reject:\n` +
           extra.unresolved_findings
-            .map((f, i) => `${i + 1}. ${f.title} (${f.file}): ${f.claim}`)
+            .map((f, i) => `${i + 1}. ${f.title} (${f.file}): ${f.claim}` +
+              (f.code_changed_since_recorded
+                ? ` [code changed since recorded; re-check against HEAD]`
+                : ''))
             .join('\n')
         : ''),
       { label: `halt-notice:${at}`, model: 'haiku', effort: 'low' })
@@ -257,8 +260,11 @@ const VERDICTS = {
       type: 'array',
       items: {
         type: 'object', additionalProperties: false,
-        required: ['title', 'fixed', 'note'],
+        required: ['id', 'fixed', 'note'],
         properties: {
+          id: { type: 'string' },
+          // Ignored for matching. Present only so a verifier that still echoes
+          // a finding's title cannot fail schema validation over it.
           title: { type: 'string' },
           fixed: { type: 'boolean' },
           note: { type: 'string' },
@@ -272,6 +278,22 @@ const VERDICTS = {
 const FIXED = {
   type: 'object', additionalProperties: false, required: ['head_sha', 'note'],
   properties: { head_sha: { type: 'string' }, note: { type: 'string' } },
+}
+const STALENESS = {
+  type: 'object', additionalProperties: false, required: ['results'],
+  properties: {
+    results: {
+      type: 'array',
+      items: {
+        type: 'object', additionalProperties: false,
+        required: ['id', 'changed'],
+        properties: {
+          id: { type: 'string' }, changed: { type: 'boolean' },
+          detail: { type: 'string' },
+        },
+      },
+    },
+  },
 }
 const PR = {
   type: 'object', additionalProperties: false, required: ['opened', 'url', 'note'],
@@ -933,6 +955,14 @@ if (!reviewerCount) {
 } else {
   log(`review: ${lenses.map(l => l.label).join(', ')}`)
 }
+// Every finding gets an id and a recorded_at the moment it enters the script,
+// here and nowhere else: the initial review, every fix round's tail review,
+// and the post-mutation review all return through reviewOf. Neither is asked
+// of the model -- a model-supplied id is exactly as unreliable as the
+// model-supplied title this replaces, so the script stamps its own.
+let findingSeq = 0
+const headOf = (range) => range.includes('..') ? range.split('..')[1].trim() : range.trim()
+
 // Review is a function of a range, not a one-shot on the implementer's commits.
 // Reviewing only impl.commit_range meant every later phase that commits -- the
 // fix rounds and the mutation gate -- shipped unread. On one run that was 314
@@ -956,15 +986,14 @@ const reviewOf = async (range, tag, picked) => {
       { label: `${tag}:${lens.label}`, phase: 'Review', schema: FINDINGS,
         model: 'opus', effort: effortFor.review })))
   return out.filter(Boolean).flatMap(r => r.findings)
+    .map(f => ({ ...f, id: `f${++findingSeq}`, recorded_at: headOf(range) }))
 }
 
 // Everything from here to the PR is measured against reviewedThrough: the SHA
 // an adversary has actually read up to. It only ever advances by way of a
 // review, so a phase that commits without one leaves it behind and the PR
 // guard below refuses.
-let reviewedThrough = impl.commit_range.includes('..')
-  ? impl.commit_range.split('..')[1].trim()
-  : impl.commit_range.trim()
+let reviewedThrough = headOf(impl.commit_range)
 
 let open = reviewerCount
   ? await reviewOf(impl.commit_range, 'review', lenses)
@@ -1037,10 +1066,13 @@ while (open.length && round < MAX_REVIEW_ROUNDS && !outOfBudget() && !sFix.over(
       `Verify, finding by finding, whether each is now actually fixed in the ` +
       `repo. Read the code for each one; do not trust any claim that it was ` +
       `fixed, including your own reasoning about a neighbouring finding.\n` +
-      `Return one verdict per finding below, in the same order, with the same ` +
-      `title verbatim so they can be matched up.\n` +
-      open.map((f, i) =>
-        `${i + 1}. ${f.title} (${f.file}): ${f.claim}. Evidence was: ${f.evidence}`
+      `Each finding below is listed with its id in brackets. Return one ` +
+      `verdict per finding with that id copied exactly into id; order does ` +
+      `not matter. A verdict whose id is not in this list is discarded, and a ` +
+      `finding with no verdict stays open. Nothing is matched on the title, ` +
+      `so rewording it costs nothing.\n` +
+      open.map(f =>
+        `[${f.id}] ${f.title} (${f.file}): ${f.claim}. Evidence was: ${f.evidence}`
       ).join('\n'),
       // phase is explicit: inside parallel() the global phase() cursor races
       // with the Review group the tail lens opens beside it.
@@ -1056,12 +1088,18 @@ while (open.length && round < MAX_REVIEW_ROUNDS && !outOfBudget() && !sFix.over(
       : [],
   ])
 
-  const byTitle = new Map(
-    (verdicts?.verdicts ?? []).map(v => [v.title, v.fixed === true]))
+  // Keyed on the id the script assigned in reviewOf, never the title: a model
+  // asked to echo a title verbatim reworded it anyway, which stalled every
+  // finding until the round limit and halted the run for good.
+  const byId = new Map(
+    (verdicts?.verdicts ?? [])
+      .filter(v => typeof v.id === 'string')
+      .map(v => [v.id.trim(), v.fixed === true]))
   // Unmatched means unverified, which stays open: a finding silently dropped
-  // because a title came back reworded is the one failure this must not have.
-  for (const f of open) if (byTitle.get(f.title) === true) settled.add(f.title)
-  open = open.filter(f => byTitle.get(f.title) !== true)
+  // because its id came back missing or mistyped is the one failure this must
+  // not have.
+  for (const f of open) if (byId.get(f.id) === true) settled.add(f.title)
+  open = open.filter(f => byId.get(f.id) !== true)
 
   // Filtered after the verdicts land, not before, so a finding the fix closed
   // cannot come back as a fresh one. That ordering is what the sequencing used
@@ -1080,9 +1118,34 @@ while (open.length && round < MAX_REVIEW_ROUNDS && !outOfBudget() && !sFix.over(
 sFix.close()
 
 if (open.length) {
+  // Advisory only, and only here: a finding's file may have moved on since it
+  // was recorded (a later round fixed a neighbour in the same file), so what
+  // survived to the halt may no longer describe the code at HEAD. One cheap
+  // agent reports on every finding, rather than one agent each, since the
+  // check itself is a single git log per file, not a diff worth a whole agent.
+  // It never removes a finding from open, never turns the halt into a pass,
+  // and a null or malformed result degrades to "nothing marked" rather than
+  // an exception -- the halt must still fire either way.
+  const staleness = await treeAgent(
+    `For each finding below, report whether its file has any commit in the ` +
+    `given range. For each one, run: git log --oneline <recorded_at>..HEAD ` +
+    `-- <file>, substituting that finding's own recorded_at and file. Return ` +
+    `changed=true if that prints any commit, changed=false if it is empty. ` +
+    `This does not judge whether the finding is still valid, only whether the ` +
+    `code moved; do not read or reason about the diff itself.\n` +
+    open.map(f => `[${f.id}] ${f.file} recorded at ${f.recorded_at}`).join('\n'),
+    { label: 'staleness', schema: STALENESS, model: 'haiku', effort: 'low' })
+  const staleIds = new Set(
+    (Array.isArray(staleness?.results) ? staleness.results : [])
+      .filter(r => r?.changed === true && typeof r?.id === 'string')
+      .map(r => r.id.trim()))
+  const reported = open.map(f =>
+    staleIds.has(f.id) ? { ...f, code_changed_since_recorded: true } : f)
+  const staleCount = reported.filter(f => f.code_changed_since_recorded).length
+
   return await halted('Fix', {
     plan: plan.plan, implemented: impl.summary, gates: { green: true, detail: 'enforced by crap-commit-gate on every commit' },
-    unresolved_findings: open, fix_rounds: round, stopped_because: fixStopReason(),
+    unresolved_findings: reported, fix_rounds: round, stopped_because: fixStopReason(),
     // Report the round count that actually ran and why the loop ended. This
     // said "survived MAX_REVIEW_ROUNDS rounds" unconditionally, so a loop that
     // stopped early on its token ceiling was reported as findings surviving
@@ -1091,7 +1154,11 @@ if (open.length) {
     note: `${open.length} review finding(s) still open after ${round} fix ` +
           `round(s); ${fixStopReason()}. Stopping before the mutation stage ` +
           `rather than spending it on work that cannot open a PR. Judge each ` +
-          `finding: fix it, or reject it as wrong.`,
+          `finding: fix it, or reject it as wrong.` +
+          (staleCount
+            ? ` ${staleCount} of them have code that changed since they were ` +
+              `recorded; re-check those against HEAD before acting on them.`
+            : ''),
   })
 }
 
