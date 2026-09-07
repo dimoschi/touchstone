@@ -106,6 +106,12 @@ const stage = (name) => {
 // phase that opens it.
 let draftPr = null
 
+const renderSuspects = (suspects) => suspects
+  .map((s, i) => `${i + 1}. ${s.title} (${s.file}): ${s.claim}. Evidence: ` +
+    `${s.evidence}. Reported again in fix round ${s.round}, after an earlier ` +
+    `finding of the same issue had been fixed and verified.`)
+  .join('\n')
+
 // A halt is a result, not an absence of one. When a draft PR is open it gets
 // the halt note as a comment, so the run's ending survives the session that
 // produced it. Async for that reason alone -- every call site is `return await`.
@@ -131,8 +137,20 @@ const halted = async (at, extra) => {
       (extra?.unresolved_findings?.length
         ? `Open findings a human must judge, fix or reject:\n` +
           extra.unresolved_findings
-            .map((f, i) => `${i + 1}. ${f.title} (${f.file}): ${f.claim}`)
+            .map((f, i) => `${i + 1}. ${f.title} (${f.file}): ${f.claim}` +
+              (f.code_changed_since_recorded
+                ? ` [code changed since recorded; re-check against HEAD]`
+                : ''))
             .join('\n')
+        : '') +
+      (extra?.regression_suspects?.length
+        ? `\nAlso report these, as a separate list headed so a reader sees they ` +
+          `are a different kind of item from the open findings above: a fix ` +
+          `landed for each and was verified, then a later review reported the ` +
+          `same issue again. They were deliberately not reopened, so nobody has ` +
+          `judged whether the fix held. Say that plainly and say it needs ` +
+          `checking:\n` +
+          renderSuspects(extra.regression_suspects)
         : ''),
       { label: `halt-notice:${at}`, model: 'haiku', effort: 'low' })
     payload.halt_reported_to = posted ? draftPr.url : null
@@ -245,6 +263,9 @@ const FINDINGS = {
         properties: {
           title: { type: 'string' }, file: { type: 'string' },
           claim: { type: 'string' }, evidence: { type: 'string' },
+          // An id copied from reviewOf's `known` list, never invented. Each
+          // call site states what a reference there means.
+          duplicate_of: { type: 'string' },
         },
       },
     },
@@ -257,8 +278,11 @@ const VERDICTS = {
       type: 'array',
       items: {
         type: 'object', additionalProperties: false,
-        required: ['title', 'fixed', 'note'],
+        required: ['id', 'fixed', 'note'],
         properties: {
+          id: { type: 'string' },
+          // Ignored for matching. Present only so a verifier that still echoes
+          // a finding's title cannot fail schema validation over it.
           title: { type: 'string' },
           fixed: { type: 'boolean' },
           note: { type: 'string' },
@@ -272,6 +296,22 @@ const VERDICTS = {
 const FIXED = {
   type: 'object', additionalProperties: false, required: ['head_sha', 'note'],
   properties: { head_sha: { type: 'string' }, note: { type: 'string' } },
+}
+const STALENESS = {
+  type: 'object', additionalProperties: false, required: ['results'],
+  properties: {
+    results: {
+      type: 'array',
+      items: {
+        type: 'object', additionalProperties: false,
+        required: ['id', 'changed'],
+        properties: {
+          id: { type: 'string' }, changed: { type: 'boolean' },
+          detail: { type: 'string' },
+        },
+      },
+    },
+  },
 }
 const PR = {
   type: 'object', additionalProperties: false, required: ['opened', 'url', 'note'],
@@ -933,13 +973,53 @@ if (!reviewerCount) {
 } else {
   log(`review: ${lenses.map(l => l.label).join(', ')}`)
 }
+// Every finding gets an id and a recorded_at the moment it enters the script,
+// here and nowhere else: the initial review, every fix round's tail review,
+// and the post-mutation review all return through reviewOf. Neither is asked
+// of the model -- a model-supplied id is exactly as unreliable as the
+// model-supplied title this replaces, so the script stamps its own.
+let findingSeq = 0
+const headOf = (range) => range.includes('..') ? range.split('..')[1].trim() : range.trim()
+// A verifier told to copy an id "in brackets" sometimes copies the brackets
+// too. Strip a matching pair before joining, so [f1] lines up with f1.
+const stripBrackets = (s) => {
+  const t = s.trim()
+  const m = /^\[(.+)\]$/.exec(t)
+  return (m ? m[1] : t).trim()
+}
+// The settled/fresh-finding dedup below cannot key on id alone: every
+// reviewOf call mints a brand-new one, even for a finding that is, in
+// substance, the same one reported again. contentKeyOf catches a
+// byte-identical re-report without needing the model's cooperation.
+// duplicate_of is the other half: a reworded re-report can't match by
+// content either, so the reviewer is handed the known findings by id (the
+// `known` param below) and asked to reference one back instead of restating
+// it, the same way the verdict join below matches an id rather than text.
+const contentKeyOf = (f) => JSON.stringify([f.title, f.file, f.claim, f.evidence])
+const dupOf = (f) => (typeof f.duplicate_of === 'string' && f.duplicate_of.trim())
+  ? stripBrackets(f.duplicate_of) : null
+// Reports how the duplicate matched, not just that it did: referencing a
+// settled finding and restating one byte for byte mean different things, and
+// only the caller knows which it can afford to discard.
+// Order matters: all four fields matching byte for byte means the text was
+// copied from the known list the lens was handed, so it is a restatement even
+// if duplicate_of is set too.
+const duplicateTargetOf = (f, known) => {
+  const key = contentKeyOf(f)
+  const restated = known.find(k => contentKeyOf(k) === key)
+  if (restated) return { hit: restated, byReference: false }
+  const dup = dupOf(f)
+  const referenced = dup ? known.find(k => k.id === dup) : undefined
+  return referenced ? { hit: referenced, byReference: true } : null
+}
+
 // Review is a function of a range, not a one-shot on the implementer's commits.
 // Reviewing only impl.commit_range meant every later phase that commits -- the
 // fix rounds and the mutation gate -- shipped unread. On one run that was 314
 // insertions across 6 files, two of which no reviewer had ever opened, and it
 // silently reverted an earlier context-cancellation fix on every mutating
 // handler. The PR was green on every gate and carried a new bug.
-const reviewOf = async (range, tag, picked) => {
+const reviewOf = async (range, tag, picked, known = [], knownCharge = '') => {
   const out = await parallel(picked.map((lens) => () =>
     treeAgent(
       `${lens.charge}\n` +
@@ -952,19 +1032,28 @@ const reviewOf = async (range, tag, picked) => {
       `somewhere the range does not show you.\n` +
       `Report only findings you can defend with file:line evidence. Do NOT ` +
       `report coverage, complexity, test quality, or style: deterministic ` +
-      `gates own those.`,
+      `gates own those.` +
+      (known.length
+        ? `\nThe findings below were already reported earlier this run, each ` +
+          `with its id in brackets, whether already fixed and verified or ` +
+          `still tracked as open. If what you would report is the same ` +
+          `underlying issue as one of these, even worded quite differently, ` +
+          `set duplicate_of to that id instead of inventing a new one; report ` +
+          `a finding with no duplicate_of only for a genuinely different bug.\n` +
+          known.map(k => `[${k.id}] ${k.title} (${k.file}): ${k.claim}`).join('\n') +
+          knownCharge
+        : ''),
       { label: `${tag}:${lens.label}`, phase: 'Review', schema: FINDINGS,
         model: 'opus', effort: effortFor.review })))
   return out.filter(Boolean).flatMap(r => r.findings)
+    .map(f => ({ ...f, id: `f${++findingSeq}`, recorded_at: headOf(range) }))
 }
 
 // Everything from here to the PR is measured against reviewedThrough: the SHA
 // an adversary has actually read up to. It only ever advances by way of a
 // review, so a phase that commits without one leaves it behind and the PR
 // guard below refuses.
-let reviewedThrough = impl.commit_range.includes('..')
-  ? impl.commit_range.split('..')[1].trim()
-  : impl.commit_range.trim()
+let reviewedThrough = headOf(impl.commit_range)
 
 let open = reviewerCount
   ? await reviewOf(impl.commit_range, 'review', lenses)
@@ -974,8 +1063,14 @@ sReview.close()
 const sFix = stage('fix')
 // A finding a verifier confirmed fixed must not come back through the tail
 // review as a fresh one: the loop would never converge, and the fixer would be
-// sent to undo its own work.
-const settled = new Set()
+// sent to undo its own work. Holds the finding objects themselves, not an id
+// or a content hash, so a later reviewOf call can be handed their title/file/
+// claim as the known-findings list a duplicate_of reference joins against.
+const settled = []
+// A lens pointing a fresh finding at a settled one may be restating the claim
+// it was handed, or reporting the fix did not hold. Not reopened, which would
+// send the fixer to undo its own work; recorded so it is not dropped in silence.
+const regressionSuspects = []
 let round = 0
 // Which of the loop's four exits fired. Checked in the same order the loop
 // tests them, so the answer matches the condition that actually stopped it.
@@ -1037,10 +1132,13 @@ while (open.length && round < MAX_REVIEW_ROUNDS && !outOfBudget() && !sFix.over(
       `Verify, finding by finding, whether each is now actually fixed in the ` +
       `repo. Read the code for each one; do not trust any claim that it was ` +
       `fixed, including your own reasoning about a neighbouring finding.\n` +
-      `Return one verdict per finding below, in the same order, with the same ` +
-      `title verbatim so they can be matched up.\n` +
-      open.map((f, i) =>
-        `${i + 1}. ${f.title} (${f.file}): ${f.claim}. Evidence was: ${f.evidence}`
+      `Each finding below is listed with its id in brackets. Return one ` +
+      `verdict per finding with that id copied exactly into id; order does ` +
+      `not matter. A verdict whose id is not in this list is discarded, and a ` +
+      `finding with no verdict stays open. Nothing is matched on the title, ` +
+      `so rewording it costs nothing.\n` +
+      open.map(f =>
+        `[${f.id}] ${f.title} (${f.file}): ${f.claim}. Evidence was: ${f.evidence}`
       ).join('\n'),
       // phase is explicit: inside parallel() the global phase() cursor races
       // with the Review group the tail lens opens beside it.
@@ -1052,23 +1150,42 @@ while (open.length && round < MAX_REVIEW_ROUNDS && !outOfBudget() && !sFix.over(
     // async, so the skip path still hands parallel() a promise rather than a
     // bare array.
     async () => tailReviewable
-      ? reviewOf(`${reviewedThrough}..${head}`, `review:fix:${round}`, [LENS.correctness])
+      ? reviewOf(`${reviewedThrough}..${head}`, `review:fix:${round}`, [LENS.correctness],
+          [...settled, ...open])
       : [],
   ])
 
-  const byTitle = new Map(
-    (verdicts?.verdicts ?? []).map(v => [v.title, v.fixed === true]))
+  // Keyed on the id the script assigned in reviewOf, never the title: a model
+  // asked to echo a title verbatim reworded it anyway, which stalled every
+  // finding until the round limit and halted the run for good.
+  const byId = new Map(
+    (verdicts?.verdicts ?? [])
+      .filter(v => typeof v.id === 'string')
+      .map(v => [stripBrackets(v.id), v.fixed === true]))
   // Unmatched means unverified, which stays open: a finding silently dropped
-  // because a title came back reworded is the one failure this must not have.
-  for (const f of open) if (byTitle.get(f.title) === true) settled.add(f.title)
-  open = open.filter(f => byTitle.get(f.title) !== true)
+  // because its id came back missing or mistyped is the one failure this must
+  // not have.
+  for (const f of open) if (byId.get(f.id) === true) settled.push(f)
+  open = open.filter(f => byId.get(f.id) !== true)
 
   // Filtered after the verdicts land, not before, so a finding the fix closed
   // cannot come back as a fresh one. That ordering is what the sequencing used
   // to give for free, and it is the only thing that had to be preserved here.
   if (tailReviewable) {
-    const fresh = (freshRaw ?? [])
-      .filter(f => !settled.has(f.title) && !open.some(o => o.title === f.title))
+    const known = [...settled, ...open]
+    const settledIds = new Set(settled.map(k => k.id))
+    const fresh = []
+    for (const f of freshRaw ?? []) {
+      const dupe = duplicateTargetOf(f, known)
+      if (!dupe) { fresh.push(f); continue }
+      if (dupe.byReference && settledIds.has(dupe.hit.id)) {
+        regressionSuspects.push({ ...f, duplicate_of: dupe.hit.id, round })
+        log(`round ${round}: a lens reports [${dupe.hit.id}] again after it was ` +
+            `verified fixed; not reopened, carried to the report`)
+      } else {
+        log(`round ${round}: dropped a re-report of [${dupe.hit.id}]`)
+      }
+    }
     if (fresh.length) log(`round ${round}: the fix itself introduced ${fresh.length} new finding(s)`)
     open = open.concat(fresh)
     reviewedThrough = head
@@ -1080,9 +1197,47 @@ while (open.length && round < MAX_REVIEW_ROUNDS && !outOfBudget() && !sFix.over(
 sFix.close()
 
 if (open.length) {
+  // Advisory only: a finding's evidence may have moved since it was
+  // recorded. One cheap agent checks each against its evidence, not just its
+  // file. Skipped only when the loop ran zero rounds, since nothing could
+  // have changed then; a loop that stopped on budget after a round already
+  // committed is exactly the case this exists for, so it runs regardless of
+  // budget. Any rejection degrades to nothing marked, never to losing the
+  // halt.
+  let staleness = null
+  if (round > 0) {
+    try {
+      staleness = await treeAgent(
+        `For each finding below, report whether the code its evidence ` +
+        `describes has changed since it was recorded, not merely whether its ` +
+        `file has any commit at all. For each one, run: git log -p ` +
+        `<recorded_at>..HEAD -- <file>, substituting that finding's own ` +
+        `recorded_at and file, and read the diff. Return changed=true only if ` +
+        `a commit in that range touches the location or behaviour the ` +
+        `evidence describes; changed=false if the file has no commits in ` +
+        `range, or its commits do not touch what the evidence describes. This ` +
+        `does not judge whether the finding is still valid, only whether the ` +
+        `code it points at moved.\n` +
+        open.map(f =>
+          `[${f.id}] ${f.file} recorded at ${f.recorded_at}. Evidence: ${f.evidence}`
+        ).join('\n'),
+        { label: 'staleness', schema: STALENESS, model: 'haiku', effort: 'low' })
+    } catch (e) {
+      log(`staleness probe failed, reporting findings unmarked: ${e?.message ?? e}`)
+    }
+  }
+  const staleIds = new Set(
+    (Array.isArray(staleness?.results) ? staleness.results : [])
+      .filter(r => r?.changed === true && typeof r?.id === 'string')
+      .map(r => stripBrackets(r.id)))
+  const reported = open.map(f =>
+    staleIds.has(f.id) ? { ...f, code_changed_since_recorded: true } : f)
+  const staleCount = reported.filter(f => f.code_changed_since_recorded).length
+
   return await halted('Fix', {
     plan: plan.plan, implemented: impl.summary, gates: { green: true, detail: 'enforced by crap-commit-gate on every commit' },
-    unresolved_findings: open, fix_rounds: round, stopped_because: fixStopReason(),
+    unresolved_findings: reported, fix_rounds: round, stopped_because: fixStopReason(),
+    regression_suspects: regressionSuspects,
     // Report the round count that actually ran and why the loop ended. This
     // said "survived MAX_REVIEW_ROUNDS rounds" unconditionally, so a loop that
     // stopped early on its token ceiling was reported as findings surviving
@@ -1091,7 +1246,16 @@ if (open.length) {
     note: `${open.length} review finding(s) still open after ${round} fix ` +
           `round(s); ${fixStopReason()}. Stopping before the mutation stage ` +
           `rather than spending it on work that cannot open a PR. Judge each ` +
-          `finding: fix it, or reject it as wrong.`,
+          `finding: fix it, or reject it as wrong.` +
+          (regressionSuspects.length
+            ? ` Separately, ${regressionSuspects.length} finding(s) were ` +
+              `reported again after being verified fixed, and were not ` +
+              `reopened: check by hand that those fixes held.`
+            : '') +
+          (staleCount
+            ? ` ${staleCount} of them have code that changed since they were ` +
+              `recorded; re-check those against HEAD before acting on them.`
+            : ''),
   })
 }
 
@@ -1197,7 +1361,7 @@ sMut.close()
 if (!mutation.green) {
   return await halted('Mutation', {
     plan: plan.plan, implemented: impl.summary, gates: { green: true, detail: 'enforced by crap-commit-gate on every commit' },
-    mutation, unresolved_findings: open,
+    mutation, unresolved_findings: open, regression_suspects: regressionSuspects,
     note: mutation.needs_user_run
       ? `The mutation run does not fit the 600000 ms Bash ceiling, which for ` +
         `this repo is expected rather than a fault. Run the command in detail ` +
@@ -1217,13 +1381,28 @@ if (!mutation.green) {
 const mutHead = mutation.head_sha?.trim()
 if (reviewerCount && mutHead && mutHead !== reviewedThrough && !outOfBudget()) {
   phase('Review')
+  // A reference here means the gate undid a verified fix, and there is no loop
+  // left to reopen it into, so it halts. The charge narrows it to that: the
+  // general instruction would have a lens reference any bug it still perceives.
   const fresh = (await reviewOf(
-    `${reviewedThrough}..${mutHead}`, 'review:mutation', [LENS.correctness]))
-    .filter(f => !settled.has(f.title))
+    `${reviewedThrough}..${mutHead}`, 'review:mutation', [LENS.correctness], settled,
+    `\nEach of those was fixed and the fix was verified, all of it before the ` +
+    `commits you are reviewing. So set duplicate_of ONLY to report that these ` +
+    `commits undid one of those fixes, and say in the evidence which line here ` +
+    `does it. Doing so ends the run with no pull request, on the grounds that a ` +
+    `verified fix was reverted. A defect you still perceive in code these ` +
+    `commits do not touch is not a finding against this range: leave it out.`))
+    .filter(f => {
+      const dupe = duplicateTargetOf(f, settled)
+      if (!dupe || dupe.byReference) return true
+      log(`post-mutation review: dropped a re-report of [${dupe.hit.id}]`)
+      return false
+    })
   if (fresh.length) {
     return await halted('Review', {
       plan: plan.plan, implemented: impl.summary, mutation,
       unresolved_findings: fresh, fix_rounds: round,
+      regression_suspects: regressionSuspects,
       note: `The mutation gate's own commits (${reviewedThrough}..${mutHead}) ` +
             `introduced ${fresh.length} finding(s). The fix rounds are spent, so ` +
             `no PR was opened. Judge each: fix it, or reject it as wrong.`,
@@ -1285,6 +1464,29 @@ if (args?.openPr !== false && !outOfBudget()) {
     `Do not merge it.`,
     { label: 'pr', schema: PR, model: 'sonnet', effort: 'medium' })
   sPr.close()
+  // Not in the PR body: the body describes the change, this is a note to its
+  // reviewer. Unposted it lives only in a return value that dies with the run.
+  if (pr?.opened && regressionSuspects.length) {
+    const posted = await agent(
+      `Post a comment on PR ${draftPr?.number ?? pr.url} in the current repo, ` +
+      `then STOP. Use gh pr comment with --body-file - and the body on stdin, ` +
+      `or --body. Do not edit the PR title or body, do not close it, do not ` +
+      `push anything, and do not un-ready it.\n` +
+      `The comment flags work a reviewer should check by hand. For each item ` +
+      `below: a fix for it landed on this branch and was confirmed, then a ` +
+      `later review of the same branch reported the same problem again. Nobody ` +
+      `judged which reading is right, so ask the reviewer to confirm the fix ` +
+      `holds. Be brief and concrete, quote the file, and do not speculate ` +
+      `about the cause.\n` +
+      `Do not name this workflow, its phases, its gates, its reviewers, or the ` +
+      `fact that an agent wrote the change: none of it is actionable.\n` +
+      renderSuspects(regressionSuspects),
+      { label: 'regression-notice', model: 'haiku', effort: 'low' })
+    log(posted
+      ? `${regressionSuspects.length} regression suspect(s) reported on the PR`
+      : `could not comment the ${regressionSuspects.length} regression ` +
+        `suspect(s) on the PR; they are in this run's result only`)
+  }
 } else if (args?.openPr === false) {
   log('PR skipped: openPr=false; the branch is green and committed, PR is yours to open')
 } else {
@@ -1303,6 +1505,7 @@ return {
   gates: { green: true, detail: 'enforced by crap-commit-gate on every commit' },
   mutation,
   reviewers: reviewerCount,
+  regression_suspects: regressionSuspects,
   reviewed_through: reviewedThrough,
   fix_rounds: round,
   unresolved_findings: open,
