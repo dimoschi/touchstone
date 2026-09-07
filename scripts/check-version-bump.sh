@@ -96,10 +96,13 @@ BASE="$(git merge-base "$BASE_REF" HEAD)" || {
 # --no-renames: a detected rename prints only the destination path, so
 # moving a gated file out of a gated directory (skills/x/SKILL.md ->
 # docs/x.md) would otherwise report no gated change at all.
+# -z, read -d '': default --name-only quotes a path with a non-ASCII byte,
+# quote or backslash, which would defeat every match below. NUL-delimited
+# output is never quoted.
 CHANGED=()
-while IFS= read -r f; do
+while IFS= read -r -d '' f; do
   is_gated "$f" && CHANGED+=("$f")
-done < <(git diff --no-renames --name-only "$BASE" HEAD)
+done < <(git diff --no-renames --name-only -z "$BASE" HEAD)
 
 if [ "${#CHANGED[@]}" -eq 0 ]; then
   echo "check-version-bump: ok (nothing gated changed since $BASE_REF at $(git rev-parse --short "$BASE"))"
@@ -120,10 +123,9 @@ fi
 
 # The bump itself has to be new: reusing a version main has already shipped,
 # under different content, serves that old cached copy, same as not bumping.
-# --full-history: default history simplification drops a merge parent's side
-# entirely once the merge is TREESAME to the other parent for $MANIFEST, so a
-# version main's own history genuinely carried (then overwritten by a merge
-# resolution favouring the other side) would otherwise never be visited.
+# --first-parent: walks only main's own tip history, so a version that lived
+# only on a merged-in side branch and was discarded by the merge resolution
+# (never actually served) is not visited, unlike --full-history.
 while IFS= read -r c; do
   v="$(version_at "$c")" || continue
   if [ "$v" = "$CURRENT_VERSION" ]; then
@@ -134,7 +136,7 @@ while IFS= read -r c; do
     } >&2
     exit 1
   fi
-done < <(git rev-list --full-history "$BASE_REF" -- "$MANIFEST")
+done < <(git rev-list --first-parent "$BASE_REF" -- "$MANIFEST")
 
 echo "check-version-bump: ok ($MANIFEST bumped to $CURRENT_VERSION, covers everything changed since $BASE_REF at $(git rev-parse --short "$BASE"))"
 exit 0

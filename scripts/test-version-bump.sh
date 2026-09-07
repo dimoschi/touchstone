@@ -237,7 +237,7 @@ fork_pr "$REPO"
 run_check "$REPO" >/tmp/out.n 2>&1
 check "exit code" "$?" 0
 
-echo "case O: PR reuses a version main's own history carried behind a merge-simplified commit -> fail (needs --full-history)"
+echo "case O: PR reuses a version main's own history carried behind a merge-simplified commit -> fail (needs main's own first-parent history, not the default path-simplified walk)"
 REPO="$WORK/o"
 new_fixture "$REPO" 0.1.0
 bump_version "$REPO" 0.5.0 "release: bump to 0.5.0"
@@ -275,9 +275,33 @@ git -C "$REPO" commit -q --no-edit
 run_check "$REPO" >/tmp/out.m 2>&1
 check "exit code" "$?" 0
 
+echo "case P: PR adds a gated file whose path git C-quotes (embedded double quote), no bump -> fail"
+REPO="$WORK/p"
+new_fixture "$REPO" 0.1.0
+fork_pr "$REPO"
+write_file "$REPO" 'skills/one"two.md' "one" "skills: add a quoted path"
+run_check "$REPO" >/tmp/out.p 2>&1
+check "exit code" "$?" 1
+
+echo "case Q: PR reuses a version that only ever lived on a discarded merge side, never on main's own tip -> ok, not flagged as already published"
+REPO="$WORK/q"
+new_fixture "$REPO" 0.1.0
+bump_version "$REPO" 0.5.0 "release: bump to 0.5.0"
+git -C "$REPO" checkout -q -b side main~1
+bump_version "$REPO" 0.7.0 "side: bump to 0.7.0, never lands on main"
+git -C "$REPO" checkout -q main
+git -C "$REPO" merge --no-ff side -m "merge side, resolve to main's own 0.5.0" >/dev/null 2>&1 || true
+printf '{\n  "name": "fixture",\n  "version": "0.5.0"\n}\n' > "$REPO/.claude-plugin/plugin.json"
+git -C "$REPO" add .claude-plugin/plugin.json
+git -C "$REPO" commit -q --no-edit
+fork_pr "$REPO"
+bump_version "$REPO" 0.7.0 "release: reuse 0.7.0, which main's tip never carried"
+run_check "$REPO" >/tmp/out.q 2>&1
+check "exit code" "$?" 0
+
 echo ""
 if [ "$failures" -eq 0 ]; then
-  echo "OK (18 cases)"
+  echo "OK (19 cases)"
 else
   echo "FAILED: $failures assertion(s)"
   exit 1
