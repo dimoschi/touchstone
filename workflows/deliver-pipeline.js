@@ -984,11 +984,18 @@ const stripBrackets = (s) => {
 const contentKeyOf = (f) => JSON.stringify([f.title, f.file, f.claim, f.evidence])
 const dupOf = (f) => (typeof f.duplicate_of === 'string' && f.duplicate_of.trim())
   ? stripBrackets(f.duplicate_of) : null
-const isDuplicateOfKnown = (f, known) => {
+// Reports how the duplicate matched, not just that it did: referencing a
+// settled finding and restating one byte for byte mean different things, and
+// only the caller knows which it can afford to discard.
+const duplicateTargetOf = (f, known) => {
   const dup = dupOf(f)
-  if (dup && known.some(k => k.id === dup)) return true
+  if (dup) {
+    const referenced = known.find(k => k.id === dup)
+    if (referenced) return { hit: referenced, byReference: true }
+  }
   const key = contentKeyOf(f)
-  return known.some(k => contentKeyOf(k) === key)
+  const restated = known.find(k => contentKeyOf(k) === key)
+  return restated ? { hit: restated, byReference: false } : null
 }
 
 // Review is a function of a range, not a one-shot on the implementer's commits.
@@ -1044,6 +1051,11 @@ const sFix = stage('fix')
 // or a content hash, so a later reviewOf call can be handed their title/file/
 // claim as the known-findings list a duplicate_of reference joins against.
 const settled = []
+// A lens pointing a fresh finding at an already-settled one may be restating
+// the claim it was handed, or reporting that the fix did not hold. Not
+// reopened, which would send the fixer to undo its own work; recorded instead,
+// because silently dropping a regression is what this stage exists to catch.
+const regressionSuspects = []
 let round = 0
 // Which of the loop's four exits fired. Checked in the same order the loop
 // tests them, so the answer matches the condition that actually stopped it.
@@ -1146,7 +1158,19 @@ while (open.length && round < MAX_REVIEW_ROUNDS && !outOfBudget() && !sFix.over(
   // to give for free, and it is the only thing that had to be preserved here.
   if (tailReviewable) {
     const known = [...settled, ...open]
-    const fresh = (freshRaw ?? []).filter(f => !isDuplicateOfKnown(f, known))
+    const settledIds = new Set(settled.map(k => k.id))
+    const fresh = []
+    for (const f of freshRaw ?? []) {
+      const dupe = duplicateTargetOf(f, known)
+      if (!dupe) { fresh.push(f); continue }
+      if (dupe.byReference && settledIds.has(dupe.hit.id)) {
+        regressionSuspects.push({ ...f, duplicate_of: dupe.hit.id, round })
+        log(`round ${round}: a lens reports [${dupe.hit.id}] again after it was ` +
+            `verified fixed; not reopened, carried to the report`)
+      } else {
+        log(`round ${round}: dropped a re-report of [${dupe.hit.id}]`)
+      }
+    }
     if (fresh.length) log(`round ${round}: the fix itself introduced ${fresh.length} new finding(s)`)
     open = open.concat(fresh)
     reviewedThrough = head
@@ -1198,6 +1222,7 @@ if (open.length) {
   return await halted('Fix', {
     plan: plan.plan, implemented: impl.summary, gates: { green: true, detail: 'enforced by crap-commit-gate on every commit' },
     unresolved_findings: reported, fix_rounds: round, stopped_because: fixStopReason(),
+    regression_suspects: regressionSuspects,
     // Report the round count that actually ran and why the loop ended. This
     // said "survived MAX_REVIEW_ROUNDS rounds" unconditionally, so a loop that
     // stopped early on its token ceiling was reported as findings surviving
@@ -1207,6 +1232,11 @@ if (open.length) {
           `round(s); ${fixStopReason()}. Stopping before the mutation stage ` +
           `rather than spending it on work that cannot open a PR. Judge each ` +
           `finding: fix it, or reject it as wrong.` +
+          (regressionSuspects.length
+            ? ` ${regressionSuspects.length} finding(s) were reported again ` +
+              `after being verified fixed and were not reopened; see ` +
+              `regression_suspects.`
+            : '') +
           (staleCount
             ? ` ${staleCount} of them have code that changed since they were ` +
               `recorded; re-check those against HEAD before acting on them.`
@@ -1336,9 +1366,18 @@ if (!mutation.green) {
 const mutHead = mutation.head_sha?.trim()
 if (reviewerCount && mutHead && mutHead !== reviewedThrough && !outOfBudget()) {
   phase('Review')
+  // Only a byte-identical restatement is dropped here. A lens *referencing* a
+  // settled finding against the mutation gate's own commits is saying that gate
+  // undid a verified fix, and there is no loop left to reopen it into: the
+  // right outcome is the halt below.
   const fresh = (await reviewOf(
     `${reviewedThrough}..${mutHead}`, 'review:mutation', [LENS.correctness], settled))
-    .filter(f => !isDuplicateOfKnown(f, settled))
+    .filter(f => {
+      const dupe = duplicateTargetOf(f, settled)
+      if (!dupe || dupe.byReference) return true
+      log(`post-mutation review: dropped a re-report of [${dupe.hit.id}]`)
+      return false
+    })
   if (fresh.length) {
     return await halted('Review', {
       plan: plan.plan, implemented: impl.summary, mutation,
@@ -1422,6 +1461,7 @@ return {
   gates: { green: true, detail: 'enforced by crap-commit-gate on every commit' },
   mutation,
   reviewers: reviewerCount,
+  regression_suspects: regressionSuspects,
   reviewed_through: reviewedThrough,
   fix_rounds: round,
   unresolved_findings: open,

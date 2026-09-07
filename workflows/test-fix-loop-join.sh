@@ -635,6 +635,10 @@ async function scenarioR() {
   check('halted_at is absent (the run finished, the reworded re-report was recognized)',
     result.halted_at, undefined)
   check('unresolved_findings is empty', result.unresolved_findings, [])
+  check('the re-report is recorded as a regression suspect, not dropped in silence',
+    result.regression_suspects?.length, 1)
+  check('the suspect names the settled finding it was pointed at',
+    result.regression_suspects?.[0]?.duplicate_of, 'f1')
 }
 
 // Scenario S -- a finding that stays open gets re-reported each round with
@@ -663,9 +667,35 @@ async function scenarioS() {
     result.halted_at, undefined)
 }
 
+// Scenario T -- the mirror of P, one word different in kind: the post-mutation
+// lens does not restate a settled finding, it *references* it against the
+// mutation gate's own commits. That is a claim the gate undid a verified fix,
+// and there are no fix rounds left to absorb it, so it must halt rather than
+// be filtered away like P's byte-identical restatement.
+async function scenarioT() {
+  console.log('\n== scenario T: a referenced re-report at the post-mutation stage halts')
+  const { result } = await run({
+    initialReview: {
+      correctness: [{ title: 'Off-by-one in parser', file: 'src/parser.js',
+        claim: 'boundary is wrong', evidence: 'parser.js:12' }],
+      advocate: [],
+    },
+    verify: (id) => id === 'f1' ? true : undefined,
+    staleness: () => [],
+    mutationGated: true,
+    mutationResult: () => ({ green: true, head_sha: 'mut0000000000000000000000000000000000001', detail: 'stub green' }),
+    postMutationReview: [{ title: 'Boundary check excludes the last element', file: 'parser.js',
+      claim: 'the mutation commits reverted the guard', evidence: 'parser.js:14',
+      duplicate_of: 'f1' }],
+  })
+  check('halted at Review', result.halted_at, 'Review')
+  check('the finding reaches the halt rather than being filtered',
+    result.unresolved_findings?.length, 1)
+}
+
 for (const scenario of [scenarioA, scenarioB, scenarioG, scenarioC, scenarioD, scenarioE, scenarioH,
                         scenarioI, scenarioJ, scenarioK, scenarioL, scenarioM, scenarioN,
-                        scenarioO, scenarioP, scenarioQ, scenarioR, scenarioS]) {
+                        scenarioO, scenarioP, scenarioQ, scenarioR, scenarioS, scenarioT]) {
   await scenario()
 }
 
