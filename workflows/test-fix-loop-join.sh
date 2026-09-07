@@ -60,11 +60,20 @@ check "the verifier's brief lists each finding's id in brackets" \
   "$(grep -c '\[\${f\.id}\]' "$SCRIPT" || true)" 2
 
 echo ""
+echo "== static: the staleness probe checks evidence, not merely the file"
+# Wrapped across two lines in the source, same as the old --oneline check, so
+# checked as two substrings rather than one.
+check "the probe reads the diff (git log -p), not just the commit list" \
+  "$(grep -Fc 'git log -p' "$SCRIPT" || true)" 1
+check "the probe still scopes the diff to <recorded_at>..HEAD" \
+  "$(grep -Fc '<recorded_at>..HEAD' "$SCRIPT" || true)" 1
+check "the probe hands the finding's evidence to the agent" \
+  "$(grep -Fc 'Evidence: ${f.evidence}' "$SCRIPT" || true)" 1
+
+echo ""
 echo "== staleness probe: the git command against a real scratch repo"
 # The prompt wraps this across two lines; checked as two substrings rather
 # than one so a rewrap does not make this test outrun the actual source.
-check "the prompt gives the git log half of the command" \
-  "$(grep -Fc 'git log --oneline <recorded_at>..HEAD' "$SCRIPT" || true)" 1
 check "the prompt gives the path-scoping half of the command" \
   "$(grep -Fc -- '-- <file>' "$SCRIPT" || true)" 1
 
@@ -91,7 +100,7 @@ git -C "$REPO" commit -qm "a later round touches changed.txt only"
 run_template() {
   local file="$1"
   # Same shape as the prompt, with <recorded_at> and <file> substituted.
-  git -C "$REPO" log --oneline "$RECORDED_AT..HEAD" -- "$file"
+  git -C "$REPO" log -p "$RECORDED_AT..HEAD" -- "$file"
 }
 
 check "a file with a commit in the range reports non-empty" \
@@ -198,8 +207,11 @@ function makeAgent(scenario, captured) {
         const decision = scenario.verify(id, round)
         if (decision === undefined) continue
         // A different title every time: the whole point is that this is
-        // never read for matching.
-        verdicts.push({ id, fixed: decision === true, title: `reworded-${id}-r${round}`,
+        // never read for matching. verifyBracketed copies the id exactly as
+        // the prompt renders it, brackets included -- the near-miss a plain
+        // trim was not enough to strip.
+        const returnedId = scenario.verifyBracketed ? `[${id}]` : id
+        verdicts.push({ id: returnedId, fixed: decision === true, title: `reworded-${id}-r${round}`,
           note: `stub verdict for ${id}` })
       }
       if (scenario.injectBogusVerdict) {
@@ -215,10 +227,16 @@ function makeAgent(scenario, captured) {
       return (scenario.mutationResult ?? (() => ({ green: true, head_sha: REVIEWED_THROUGH, detail: 'stub' })))(attempt)
     }
     if (label === 'staleness') {
+      if (scenario.staleness === 'reject') throw new Error('staleness subagent failed')
       if (scenario.staleness === null) return null
       if (scenario.staleness === 'malformed') return { results: 'not-an-array' }
       const ids = idsIn(prompt)
-      return { results: scenario.staleness ? scenario.staleness(ids) : [] }
+      const results = scenario.staleness ? scenario.staleness(ids) : []
+      return {
+        results: scenario.stalenessBracketed
+          ? results.map(r => ({ ...r, id: `[${r.id}]` }))
+          : results,
+      }
     }
     if (label === 'pr') {
       return { opened: false, url: '', note: 'stub' }
@@ -239,7 +257,7 @@ async function run(scenario) {
     workflow: async () => { throw new Error('workflow() not stubbed for this test') },
     phase: () => {},
     log: (m) => captured.logs.push(m),
-    budget: { total: null, spent: () => 0, remaining: () => Infinity },
+    budget: scenario.budget ?? { total: null, spent: () => 0, remaining: () => Infinity },
   }
   const ctx = vm.createContext(sandbox)
   const fn = vm.compileFunction(body, [], { parsingContext: ctx })
@@ -398,7 +416,129 @@ async function scenarioH() {
     (captured.haltNoticePrompt ?? '').includes('code changed since recorded'), false)
 }
 
-for (const scenario of [scenarioA, scenarioB, scenarioG, scenarioC, scenarioD, scenarioE, scenarioH]) {
+// Scenario I -- a verifier that copies the id exactly as the prompt renders
+// it, brackets included, must still clear the finding. This is the same
+// permanent-halt failure the ticket fixes, just triggered by a bracket
+// instead of a reworded title.
+async function scenarioI() {
+  console.log('\n== scenario I: a bracketed verdict id ([f1]) still clears the finding')
+  const { result } = await run({
+    initialReview: {
+      correctness: [{ title: 'Off-by-one in parser', file: 'src/parser.js',
+        claim: 'boundary is wrong', evidence: 'parser.js:12' }],
+      advocate: [],
+    },
+    verify: (id) => id === 'f1' ? true : undefined,
+    verifyBracketed: true,
+  })
+  check('halted_at is absent (the run finished)', result.halted_at, undefined)
+  check('unresolved_findings is empty', result.unresolved_findings, [])
+}
+
+// Scenario J -- same bracket near-miss, on the staleness probe's join.
+async function scenarioJ() {
+  console.log('\n== scenario J: a bracketed staleness id ([f2]) still marks the finding')
+  const { result } = await run({
+    args: { maxReviewRounds: 1 },
+    initialReview: {
+      correctness: [{ title: 'Dup Finding', file: 'fileA.js', claim: 'c1', evidence: 'e1' }],
+      advocate: [{ title: 'Dup Finding', file: 'fileB.js', claim: 'c2', evidence: 'e2' }],
+    },
+    verify: (id) => id === 'f1' ? true : (id === 'f2' ? false : undefined),
+    staleness: (ids) => ids.map(id => ({ id, changed: true })),
+    stalenessBracketed: true,
+  })
+  check('the surviving finding is marked as changed despite the bracketed id',
+    result.unresolved_findings[0].code_changed_since_recorded, true)
+}
+
+// Scenario K -- a tail-review finding that happens to share a title with a
+// finding the same round just settled must not be dropped for it: the two
+// are unrelated, and only their model-generated title collides.
+async function scenarioK() {
+  console.log('\n== scenario K: a tail-review finding is not dropped for sharing a title with a settled one')
+  const { result } = await run({
+    args: { maxReviewRounds: 1 },
+    initialReview: {
+      correctness: [{ title: 'Same Title', file: 'orig.js', claim: 'c1', evidence: 'e1' }],
+      advocate: [],
+    },
+    verify: (id) => id === 'f1' ? true : undefined,
+    fixHead: () => 'fix00000000000000000000000000000000000001',
+    tailReview: [{ title: 'Same Title', file: 'new.js', claim: 'c2', evidence: 'e2' }],
+    staleness: () => [],
+  })
+  check('halted at Fix', result.halted_at, 'Fix')
+  check('exactly the fresh finding survives', result.unresolved_findings.length, 1)
+  check('it is the fresh finding, not the one already settled',
+    result.unresolved_findings[0]?.file, 'new.js')
+}
+
+// Scenario L -- same collision, one stage later: a post-mutation finding
+// sharing a title with a finding the fix loop already settled must still
+// reach the halt.
+async function scenarioL() {
+  console.log('\n== scenario L: a post-mutation finding is not dropped for sharing a title with a settled one')
+  const { result } = await run({
+    initialReview: {
+      correctness: [{ title: 'Repeated Title', file: 'orig.js', claim: 'c-orig', evidence: 'e-orig' }],
+      advocate: [],
+    },
+    verify: (id) => id === 'f1' ? true : undefined,
+    staleness: () => [],
+    mutationGated: true,
+    mutationResult: () => ({ green: true, head_sha: 'mut0000000000000000000000000000000000001', detail: 'stub green' }),
+    postMutationReview: [{ title: 'Repeated Title', file: 'mutfile.js',
+      claim: 'a different bug', evidence: 'e2' }],
+  })
+  check('halted at Review', result.halted_at, 'Review')
+  check('exactly the post-mutation finding survives', result.unresolved_findings.length, 1)
+  check('it is the post-mutation finding, not the one already settled',
+    result.unresolved_findings[0]?.file, 'mutfile.js')
+}
+
+// Scenario M -- budget is already exhausted, so the fix loop runs zero
+// rounds. The staleness probe must not fire: nothing could have changed,
+// same guard as every other optional dispatch here.
+async function scenarioM() {
+  console.log('\n== scenario M: the staleness probe is skipped once the run is out of budget')
+  const { result, captured } = await run({
+    budget: { total: 200000, spent: () => 190000, remaining: () => 5000 },
+    initialReview: {
+      correctness: [{ title: 'Needs budget', file: 'fileA.js', claim: 'c', evidence: 'e' }],
+      advocate: [],
+    },
+    verify: () => undefined,
+  })
+  check('staleness never ran', callCount(captured, 'staleness'), 0)
+  check('halted at Fix', result.halted_at, 'Fix')
+  check('the loop ran zero rounds', result.fix_rounds, 0)
+  check('the surviving finding is reported unmarked',
+    result.unresolved_findings[0]?.code_changed_since_recorded, undefined)
+  check('the note blames the overall token budget',
+    /passed its overall token budget/.test(result.note), true)
+}
+
+// Scenario N -- the staleness probe itself rejects (a dead subagent, not
+// merely an empty answer). The halt must still return, not throw.
+async function scenarioN() {
+  console.log('\n== scenario N: a rejected staleness probe does not take the halt down with it')
+  const { result } = await run({
+    args: { maxReviewRounds: 1 },
+    initialReview: {
+      correctness: [{ title: 'Dup Finding', file: 'fileA.js', claim: 'c1', evidence: 'e1' }],
+      advocate: [{ title: 'Dup Finding', file: 'fileB.js', claim: 'c2', evidence: 'e2' }],
+    },
+    verify: (id) => id === 'f1' ? true : (id === 'f2' ? false : undefined),
+    staleness: 'reject',
+  })
+  check('halted at Fix, no exception', result.halted_at, 'Fix')
+  check('the surviving finding is reported unmarked',
+    result.unresolved_findings[0]?.code_changed_since_recorded, undefined)
+}
+
+for (const scenario of [scenarioA, scenarioB, scenarioG, scenarioC, scenarioD, scenarioE, scenarioH,
+                        scenarioI, scenarioJ, scenarioK, scenarioL, scenarioM, scenarioN]) {
   await scenario()
 }
 

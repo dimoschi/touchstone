@@ -962,6 +962,13 @@ if (!reviewerCount) {
 // model-supplied title this replaces, so the script stamps its own.
 let findingSeq = 0
 const headOf = (range) => range.includes('..') ? range.split('..')[1].trim() : range.trim()
+// A verifier told to copy an id "in brackets" sometimes copies the brackets
+// too. Strip a matching pair before joining, so [f1] lines up with f1.
+const stripBrackets = (s) => {
+  const t = s.trim()
+  const m = /^\[(.+)\]$/.exec(t)
+  return (m ? m[1] : t).trim()
+}
 
 // Review is a function of a range, not a one-shot on the implementer's commits.
 // Reviewing only impl.commit_range meant every later phase that commits -- the
@@ -1094,11 +1101,14 @@ while (open.length && round < MAX_REVIEW_ROUNDS && !outOfBudget() && !sFix.over(
   const byId = new Map(
     (verdicts?.verdicts ?? [])
       .filter(v => typeof v.id === 'string')
-      .map(v => [v.id.trim(), v.fixed === true]))
+      .map(v => [stripBrackets(v.id), v.fixed === true]))
   // Unmatched means unverified, which stays open: a finding silently dropped
   // because its id came back missing or mistyped is the one failure this must
   // not have.
-  for (const f of open) if (byId.get(f.id) === true) settled.add(f.title)
+  //
+  // settled is keyed on id, not title: a fresh finding gets its own id from
+  // reviewOf, so it never collides here even if its title does.
+  for (const f of open) if (byId.get(f.id) === true) settled.add(f.id)
   open = open.filter(f => byId.get(f.id) !== true)
 
   // Filtered after the verdicts land, not before, so a finding the fix closed
@@ -1106,7 +1116,7 @@ while (open.length && round < MAX_REVIEW_ROUNDS && !outOfBudget() && !sFix.over(
   // to give for free, and it is the only thing that had to be preserved here.
   if (tailReviewable) {
     const fresh = (freshRaw ?? [])
-      .filter(f => !settled.has(f.title) && !open.some(o => o.title === f.title))
+      .filter(f => !settled.has(f.id) && !open.some(o => o.id === f.id))
     if (fresh.length) log(`round ${round}: the fix itself introduced ${fresh.length} new finding(s)`)
     open = open.concat(fresh)
     reviewedThrough = head
@@ -1118,27 +1128,36 @@ while (open.length && round < MAX_REVIEW_ROUNDS && !outOfBudget() && !sFix.over(
 sFix.close()
 
 if (open.length) {
-  // Advisory only, and only here: a finding's file may have moved on since it
-  // was recorded (a later round fixed a neighbour in the same file), so what
-  // survived to the halt may no longer describe the code at HEAD. One cheap
-  // agent reports on every finding, rather than one agent each, since the
-  // check itself is a single git log per file, not a diff worth a whole agent.
-  // It never removes a finding from open, never turns the halt into a pass,
-  // and a null or malformed result degrades to "nothing marked" rather than
-  // an exception -- the halt must still fire either way.
-  const staleness = await treeAgent(
-    `For each finding below, report whether its file has any commit in the ` +
-    `given range. For each one, run: git log --oneline <recorded_at>..HEAD ` +
-    `-- <file>, substituting that finding's own recorded_at and file. Return ` +
-    `changed=true if that prints any commit, changed=false if it is empty. ` +
-    `This does not judge whether the finding is still valid, only whether the ` +
-    `code moved; do not read or reason about the diff itself.\n` +
-    open.map(f => `[${f.id}] ${f.file} recorded at ${f.recorded_at}`).join('\n'),
-    { label: 'staleness', schema: STALENESS, model: 'haiku', effort: 'low' })
+  // Advisory only: a finding's evidence may have moved since it was
+  // recorded. One cheap agent checks each against its evidence, not just its
+  // file. Skipped when out of budget; any rejection degrades to nothing
+  // marked, never to losing the halt.
+  let staleness = null
+  if (!outOfBudget()) {
+    try {
+      staleness = await treeAgent(
+        `For each finding below, report whether the code its evidence ` +
+        `describes has changed since it was recorded, not merely whether its ` +
+        `file has any commit at all. For each one, run: git log -p ` +
+        `<recorded_at>..HEAD -- <file>, substituting that finding's own ` +
+        `recorded_at and file, and read the diff. Return changed=true only if ` +
+        `a commit in that range touches the location or behaviour the ` +
+        `evidence describes; changed=false if the file has no commits in ` +
+        `range, or its commits do not touch what the evidence describes. This ` +
+        `does not judge whether the finding is still valid, only whether the ` +
+        `code it points at moved.\n` +
+        open.map(f =>
+          `[${f.id}] ${f.file} recorded at ${f.recorded_at}. Evidence: ${f.evidence}`
+        ).join('\n'),
+        { label: 'staleness', schema: STALENESS, model: 'haiku', effort: 'low' })
+    } catch (e) {
+      log(`staleness probe failed, reporting findings unmarked: ${e?.message ?? e}`)
+    }
+  }
   const staleIds = new Set(
     (Array.isArray(staleness?.results) ? staleness.results : [])
       .filter(r => r?.changed === true && typeof r?.id === 'string')
-      .map(r => r.id.trim()))
+      .map(r => stripBrackets(r.id)))
   const reported = open.map(f =>
     staleIds.has(f.id) ? { ...f, code_changed_since_recorded: true } : f)
   const staleCount = reported.filter(f => f.code_changed_since_recorded).length
@@ -1286,7 +1305,7 @@ if (reviewerCount && mutHead && mutHead !== reviewedThrough && !outOfBudget()) {
   phase('Review')
   const fresh = (await reviewOf(
     `${reviewedThrough}..${mutHead}`, 'review:mutation', [LENS.correctness]))
-    .filter(f => !settled.has(f.title))
+    .filter(f => !settled.has(f.id))
   if (fresh.length) {
     return await halted('Review', {
       plan: plan.plan, implemented: impl.summary, mutation,
