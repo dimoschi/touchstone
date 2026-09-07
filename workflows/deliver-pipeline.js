@@ -106,6 +106,14 @@ const stage = (name) => {
 // phase that opens it.
 let draftPr = null
 
+// Rendered into both the halt comment and the success-path comment. A suspect
+// only exists in the run's return value otherwise, which dies with the session.
+const renderSuspects = (suspects) => suspects
+  .map((s, i) => `${i + 1}. ${s.title} (${s.file}): ${s.claim}. Evidence: ` +
+    `${s.evidence}. Reported again in fix round ${s.round}, after an earlier ` +
+    `finding of the same issue had been fixed and verified.`)
+  .join('\n')
+
 // A halt is a result, not an absence of one. When a draft PR is open it gets
 // the halt note as a comment, so the run's ending survives the session that
 // produced it. Async for that reason alone -- every call site is `return await`.
@@ -136,6 +144,15 @@ const halted = async (at, extra) => {
                 ? ` [code changed since recorded; re-check against HEAD]`
                 : ''))
             .join('\n')
+        : '') +
+      (extra?.regression_suspects?.length
+        ? `\nAlso report these, as a separate list headed so a reader sees they ` +
+          `are a different kind of item from the open findings above: a fix ` +
+          `landed for each and was verified, then a later review reported the ` +
+          `same issue again. They were deliberately not reopened, so nobody has ` +
+          `judged whether the fix held. Say that plainly and say it needs ` +
+          `checking:\n` +
+          renderSuspects(extra.regression_suspects)
         : ''),
       { label: `halt-notice:${at}`, model: 'haiku', effort: 'low' })
     payload.halt_reported_to = posted ? draftPr.url : null
@@ -987,15 +1004,16 @@ const dupOf = (f) => (typeof f.duplicate_of === 'string' && f.duplicate_of.trim(
 // Reports how the duplicate matched, not just that it did: referencing a
 // settled finding and restating one byte for byte mean different things, and
 // only the caller knows which it can afford to discard.
+// Order matters: all four fields matching byte for byte means the text was
+// copied from the known list the lens was handed, so it is a restatement even
+// if duplicate_of is set too.
 const duplicateTargetOf = (f, known) => {
-  const dup = dupOf(f)
-  if (dup) {
-    const referenced = known.find(k => k.id === dup)
-    if (referenced) return { hit: referenced, byReference: true }
-  }
   const key = contentKeyOf(f)
   const restated = known.find(k => contentKeyOf(k) === key)
-  return restated ? { hit: restated, byReference: false } : null
+  if (restated) return { hit: restated, byReference: false }
+  const dup = dupOf(f)
+  const referenced = dup ? known.find(k => k.id === dup) : undefined
+  return referenced ? { hit: referenced, byReference: true } : null
 }
 
 // Review is a function of a range, not a one-shot on the implementer's commits.
@@ -1004,7 +1022,7 @@ const duplicateTargetOf = (f, known) => {
 // insertions across 6 files, two of which no reviewer had ever opened, and it
 // silently reverted an earlier context-cancellation fix on every mutating
 // handler. The PR was green on every gate and carried a new bug.
-const reviewOf = async (range, tag, picked, known = []) => {
+const reviewOf = async (range, tag, picked, known = [], knownCharge = '') => {
   const out = await parallel(picked.map((lens) => () =>
     treeAgent(
       `${lens.charge}\n` +
@@ -1025,7 +1043,8 @@ const reviewOf = async (range, tag, picked, known = []) => {
           `underlying issue as one of these, even worded quite differently, ` +
           `set duplicate_of to that id instead of inventing a new one; report ` +
           `a finding with no duplicate_of only for a genuinely different bug.\n` +
-          known.map(k => `[${k.id}] ${k.title} (${k.file}): ${k.claim}`).join('\n')
+          known.map(k => `[${k.id}] ${k.title} (${k.file}): ${k.claim}`).join('\n') +
+          knownCharge
         : ''),
       { label: `${tag}:${lens.label}`, phase: 'Review', schema: FINDINGS,
         model: 'opus', effort: effortFor.review })))
@@ -1369,9 +1388,18 @@ if (reviewerCount && mutHead && mutHead !== reviewedThrough && !outOfBudget()) {
   // Only a byte-identical restatement is dropped here. A lens *referencing* a
   // settled finding against the mutation gate's own commits is saying that gate
   // undid a verified fix, and there is no loop left to reopen it into: the
-  // right outcome is the halt below.
+  // right outcome is the halt below. Because a reference is that expensive
+  // here, the charge below narrows what one is allowed to mean -- the general
+  // instruction above would otherwise have a lens reference any old bug it
+  // still perceives, and end the run.
   const fresh = (await reviewOf(
-    `${reviewedThrough}..${mutHead}`, 'review:mutation', [LENS.correctness], settled))
+    `${reviewedThrough}..${mutHead}`, 'review:mutation', [LENS.correctness], settled,
+    `\nEach of those was fixed and the fix was verified, all of it before the ` +
+    `commits you are reviewing. So set duplicate_of ONLY to report that these ` +
+    `commits undid one of those fixes, and say in the evidence which line here ` +
+    `does it. Doing so ends the run with no pull request, on the grounds that a ` +
+    `verified fix was reverted. A defect you still perceive in code these ` +
+    `commits do not touch is not a finding against this range: leave it out.`))
     .filter(f => {
       const dupe = duplicateTargetOf(f, settled)
       if (!dupe || dupe.byReference) return true
@@ -1443,6 +1471,31 @@ if (args?.openPr !== false && !outOfBudget()) {
     `Do not merge it.`,
     { label: 'pr', schema: PR, model: 'sonnet', effort: 'medium' })
   sPr.close()
+  // A green run can still carry a suspect, and it does not belong in the PR
+  // body: the body describes the change, and this is a note to whoever reviews
+  // it. Same reasoning as the halt comment -- unposted, it lives only in a
+  // return value nobody reads next week.
+  if (pr?.opened && regressionSuspects.length) {
+    const posted = await agent(
+      `Post a comment on PR ${draftPr?.number ?? pr.url} in the current repo, ` +
+      `then STOP. Use gh pr comment with --body-file - and the body on stdin, ` +
+      `or --body. Do not edit the PR title or body, do not close it, do not ` +
+      `push anything, and do not un-ready it.\n` +
+      `The comment flags work a reviewer should check by hand. For each item ` +
+      `below: a fix for it landed on this branch and was confirmed, then a ` +
+      `later review of the same branch reported the same problem again. Nobody ` +
+      `judged which reading is right, so ask the reviewer to confirm the fix ` +
+      `holds. Be brief and concrete, quote the file, and do not speculate ` +
+      `about the cause.\n` +
+      `Do not name this workflow, its phases, its gates, its reviewers, or the ` +
+      `fact that an agent wrote the change: none of it is actionable.\n` +
+      renderSuspects(regressionSuspects),
+      { label: 'regression-notice', model: 'haiku', effort: 'low' })
+    log(posted
+      ? `${regressionSuspects.length} regression suspect(s) reported on the PR`
+      : `could not comment the ${regressionSuspects.length} regression ` +
+        `suspect(s) on the PR; they are in this run's result only`)
+  }
 } else if (args?.openPr === false) {
   log('PR skipped: openPr=false; the branch is green and committed, PR is yours to open')
 } else {

@@ -184,6 +184,10 @@ function makeAgent(scenario, captured) {
       captured.haltNoticePrompt = prompt
       return true
     }
+    if (label === 'regression-notice') {
+      captured.regressionNoticePrompt = prompt
+      return scenario.regressionNoticePosts !== false
+    }
     if (label.startsWith('review:fix:')) {
       return { findings: scenario.tailReview ?? [] }
     }
@@ -239,14 +243,14 @@ function makeAgent(scenario, captured) {
       }
     }
     if (label === 'pr') {
-      return { opened: false, url: '', note: 'stub' }
+      return scenario.prResult ?? { opened: false, url: '', note: 'stub' }
     }
     throw new Error(`unstubbed agent label in test scenario: ${label}`)
   }
 }
 
 async function run(scenario) {
-  const captured = { calls: [], haltNoticePrompt: null, logs: [] }
+  const captured = { calls: [], haltNoticePrompt: null, regressionNoticePrompt: null, logs: [] }
   const sandbox = {
     args: baseArgs(scenario.args),
     agent: makeAgent(scenario, captured),
@@ -674,7 +678,7 @@ async function scenarioS() {
 // be filtered away like P's byte-identical restatement.
 async function scenarioT() {
   console.log('\n== scenario T: a referenced re-report at the post-mutation stage halts')
-  const { result } = await run({
+  const { result, captured } = await run({
     initialReview: {
       correctness: [{ title: 'Off-by-one in parser', file: 'src/parser.js',
         claim: 'boundary is wrong', evidence: 'parser.js:12' }],
@@ -691,11 +695,108 @@ async function scenarioT() {
   check('halted at Review', result.halted_at, 'Review')
   check('the finding reaches the halt rather than being filtered',
     result.unresolved_findings?.length, 1)
+  const lensPrompt = captured.calls.find(c => c.label.startsWith('review:mutation:'))?.prompt ?? ''
+  check('the lens is told a reference means these commits undid a fix',
+    lensPrompt.includes('undid one of those fixes'), true)
+  check('the lens is told what referencing costs',
+    lensPrompt.includes('ends the run with no pull request'), true)
+  check('the lens is told a defect outside this range is not a finding here',
+    lensPrompt.includes('commits do not touch is not a finding'), true)
+}
+
+// Scenario U -- a re-report that is byte-identical AND sets duplicate_of. It
+// is a restatement: matching all four fields means the text was copied from
+// the known list. Testing the reference before the content would promote it to
+// a fresh claim, which costs a spurious suspect here and a halt at the gate.
+async function scenarioU() {
+  console.log('\n== scenario U: an identical re-report that also sets duplicate_of stays a restatement')
+  const { result } = await run({
+    initialReview: {
+      correctness: [{ title: 'Off-by-one in parser', file: 'src/parser.js',
+        claim: 'boundary is wrong', evidence: 'parser.js:12' }],
+      advocate: [],
+    },
+    verify: (id) => id === 'f1' ? true : undefined,
+    fixHead: () => 'fix00000000000000000000000000000000000001',
+    tailReview: [{ title: 'Off-by-one in parser', file: 'src/parser.js',
+      claim: 'boundary is wrong', evidence: 'parser.js:12', duplicate_of: 'f1' }],
+    staleness: () => [],
+  })
+  check('halted_at is absent (the run finished)', result.halted_at, undefined)
+  check('unresolved_findings is empty', result.unresolved_findings, [])
+  check('it is dropped as a restatement, not recorded as a suspect',
+    result.regression_suspects?.length, 0)
+}
+
+// Scenario V -- the halt note says "see regression_suspects", so the comment
+// that outlives the session has to contain them. The payload does not survive
+// the run; the PR comment is the whole point of halted() being async.
+async function scenarioV() {
+  console.log('\n== scenario V: the halt comment is handed the regression suspects')
+  const { result, captured } = await run({
+    args: { maxReviewRounds: 1 },
+    draftPr: { opened: true, number: 23, url: 'https://example.invalid/pr/23', detail: 'stub draft' },
+    initialReview: {
+      correctness: [
+        { title: 'Off-by-one in parser', file: 'src/parser.js',
+          claim: 'boundary is wrong', evidence: 'parser.js:12' },
+        { title: 'Unrelated leak', file: 'src/pool.js',
+          claim: 'connection is never released', evidence: 'pool.js:40' },
+      ],
+      advocate: [],
+    },
+    verify: (id) => id === 'f1' ? true : undefined,
+    fixHead: () => 'fix00000000000000000000000000000000000001',
+    tailReview: [{ title: 'Boundary check excludes the last element', file: 'parser.js',
+      claim: 'off-by-one at the array end', evidence: 'see loop condition',
+      duplicate_of: 'f1' }],
+    staleness: () => [],
+  })
+  check('halted at Fix (the leak was never fixed)', result.halted_at, 'Fix')
+  check('a suspect was recorded', result.regression_suspects?.length, 1)
+  check('the halt note points the reader at them',
+    (result.note ?? '').includes('regression_suspects'), true)
+  check('the comment prompt carries the suspect claim',
+    (captured.haltNoticePrompt ?? '').includes('off-by-one at the array end'), true)
+  check('the comment prompt says the fix was verified and not reopened',
+    (captured.haltNoticePrompt ?? '').includes('not reopened'), true)
+}
+
+// Scenario W -- a green run that recorded a suspect. The findings all cleared,
+// so nothing halts and the PR goes ready; without a comment the suspect exists
+// only in a return value nobody reads.
+async function scenarioW() {
+  console.log('\n== scenario W: a green run reports its regression suspects on the PR')
+  const { result, captured } = await run({
+    args: { openPr: true },
+    draftPr: { opened: true, number: 23, url: 'https://example.invalid/pr/23', detail: 'stub draft' },
+    prResult: { opened: true, url: 'https://example.invalid/pr/23', note: 'stub ready' },
+    initialReview: {
+      correctness: [{ title: 'Off-by-one in parser', file: 'src/parser.js',
+        claim: 'boundary is wrong', evidence: 'parser.js:12' }],
+      advocate: [],
+    },
+    verify: (id) => id === 'f1' ? true : undefined,
+    fixHead: () => 'fix00000000000000000000000000000000000001',
+    tailReview: [{ title: 'Boundary check excludes the last element', file: 'parser.js',
+      claim: 'off-by-one at the array end', evidence: 'see loop condition',
+      duplicate_of: 'f1' }],
+    staleness: () => [],
+  })
+  check('halted_at is absent (every finding cleared)', result.halted_at, undefined)
+  check('the suspect is in the result', result.regression_suspects?.length, 1)
+  check('a comment was posted for it',
+    callCount(captured, 'regression-notice'), 1)
+  check('the comment prompt carries the suspect claim',
+    (captured.regressionNoticePrompt ?? '').includes('off-by-one at the array end'), true)
+  check('the comment writer is told to keep the process out of it',
+    (captured.regressionNoticePrompt ?? '').includes('Do not name this workflow'), true)
 }
 
 for (const scenario of [scenarioA, scenarioB, scenarioG, scenarioC, scenarioD, scenarioE, scenarioH,
                         scenarioI, scenarioJ, scenarioK, scenarioL, scenarioM, scenarioN,
-                        scenarioO, scenarioP, scenarioQ, scenarioR, scenarioS, scenarioT]) {
+                        scenarioO, scenarioP, scenarioQ, scenarioR, scenarioS, scenarioT,
+                        scenarioU, scenarioV, scenarioW]) {
   await scenario()
 }
 
