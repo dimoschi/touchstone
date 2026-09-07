@@ -20,9 +20,10 @@
 # main compares main against itself and is a deliberate no-op: it exists to
 # gate PRs, not to catch a bypass of the PR process.
 #
-# Exit 0 clean, 1 a gated file changed without a bump (or the bump reuses a
-# version already published on main), 2 usage (missing manifest, no version
-# key, no origin/main or main to compare against, or a shallow clone).
+# Exit 0 clean, 1 a gated file changed without the version advancing past the
+# base's, 2 usage (missing manifest, no version key, a version that is not
+# dotted integers, no origin/main or main to compare against, or a shallow
+# clone).
 
 set -euo pipefail
 
@@ -67,9 +68,10 @@ CURRENT_VERSION="$(version_at HEAD)" || {
   exit 2
 }
 
-# A shallow clone can silently truncate the "which versions has main already
-# published" scan below rather than fail it outright, so refuse it up front
-# instead of trusting a partial answer.
+# A shallow clone can put the merge base below the graft point, so `git
+# merge-base` silently returns a later commit and the diff range narrows to
+# fewer files than the PR really changed. Refuse up front rather than pass on a
+# partial answer.
 if [ "$(git rev-parse --is-shallow-repository)" = "true" ]; then
   echo "check-version-bump: shallow clone, cannot compare against origin/main reliably (run with full history: fetch-depth: 0)" >&2
   exit 2
@@ -111,32 +113,49 @@ fi
 
 BASE_VERSION="$(version_at "$BASE" 2>/dev/null || true)"
 
-if [ "$CURRENT_VERSION" = "$BASE_VERSION" ]; then
+# Forward, not merely different: an increase cannot reuse a string an install
+# already cached, so no walk over what main has published is needed, and no
+# question of which walk is the right one. Dotted integers only, because a
+# string compare would call 0.10.0 older than 0.9.0.
+version_advances() {
+  python3 - "$1" "$2" <<'PY'
+import re, sys
+
+def parse(v):
+    if not re.fullmatch(r'\d+(\.\d+)*', v):
+        sys.exit(3)
+    return [int(p) for p in v.split('.')]
+
+base, current = sys.argv[1], sys.argv[2]
+cur = parse(current)
+sys.exit(0 if not base else (0 if cur > parse(base) else 1))
+PY
+}
+
+RC=0
+version_advances "$BASE_VERSION" "$CURRENT_VERSION" || RC=$?
+
+if [ "$RC" -eq 3 ]; then
+  echo "check-version-bump: version '$CURRENT_VERSION' (or base '$BASE_VERSION') is not dotted integers, so the two cannot be ordered" >&2
+  exit 2
+fi
+
+if [ "$RC" -ne 0 ]; then
+  if [ "$CURRENT_VERSION" = "$BASE_VERSION" ]; then
+    HEADLINE="$MANIFEST is still at $CURRENT_VERSION while these files changed since $BASE_REF at $(git rev-parse --short "$BASE"):"
+    HINT="Bump the version (patch for a fix, minor for behaviour) in this PR."
+  else
+    HEADLINE="$MANIFEST goes backwards, $BASE_VERSION at $BASE_REF down to $CURRENT_VERSION here, while these files changed:"
+    HINT="Raise the version above $BASE_VERSION (patch for a fix, minor for behaviour) in this PR."
+  fi
   {
-    echo "check-version-bump: $MANIFEST is still at $CURRENT_VERSION while these files changed since $BASE_REF at $(git rev-parse --short "$BASE"):"
+    echo "check-version-bump: $HEADLINE"
     printf '  %s\n' "${CHANGED[@]}"
-    echo "\`claude plugin update\` compares that version string, not the commit, so every install keeps serving the cached $CURRENT_VERSION copy."
-    echo "Bump the version (patch for a fix, minor for behaviour) in this PR."
+    echo "\`claude plugin update\` compares that version string, not the commit, so an install that cached $CURRENT_VERSION keeps serving that copy rather than this change."
+    echo "$HINT"
   } >&2
   exit 1
 fi
 
-# The bump itself has to be new: reusing a version main has already shipped,
-# under different content, serves that old cached copy, same as not bumping.
-# --first-parent: walks only main's own tip history, so a version that lived
-# only on a merged-in side branch and was discarded by the merge resolution
-# (never actually served) is not visited, unlike --full-history.
-while IFS= read -r c; do
-  v="$(version_at "$c")" || continue
-  if [ "$v" = "$CURRENT_VERSION" ]; then
-    {
-      echo "check-version-bump: $MANIFEST bumped to $CURRENT_VERSION, but that version was already published at $(git rev-parse --short "$c") for different content:"
-      printf '  %s\n' "${CHANGED[@]}"
-      echo "installs cached under $CURRENT_VERSION keep serving that old copy, not this change. Pick a version nobody has shipped yet."
-    } >&2
-    exit 1
-  fi
-done < <(git rev-list --first-parent "$BASE_REF" -- "$MANIFEST")
-
-echo "check-version-bump: ok ($MANIFEST bumped to $CURRENT_VERSION, covers everything changed since $BASE_REF at $(git rev-parse --short "$BASE"))"
+echo "check-version-bump: ok ($MANIFEST advances ${BASE_VERSION:-none} -> $CURRENT_VERSION, covers everything changed since $BASE_REF at $(git rev-parse --short "$BASE"))"
 exit 0

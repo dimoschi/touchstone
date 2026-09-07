@@ -221,8 +221,8 @@ write_file "$REPO" "agents/two.md" "two" "agents: add two"
 bump_version "$REPO" 0.1.0 "release: revert version to 0.1.0"
 run_check "$REPO" >/tmp/out.l 2>&1
 check "exit code" "$?" 1
-check "flags it as already published, not merely unbumped" \
-  "$(grep -c 'already published' /tmp/out.l)" "1"
+check "says it goes backwards, not merely unbumped" \
+  "$(grep -c 'goes backwards' /tmp/out.l)" "1"
 
 echo "case N: PR edits .claude-plugin/marketplace.json only, plugin.json untouched -> ok (marketplace.json isn't served)"
 REPO="$WORK/n"
@@ -237,7 +237,7 @@ fork_pr "$REPO"
 run_check "$REPO" >/tmp/out.n 2>&1
 check "exit code" "$?" 0
 
-echo "case O: PR reuses a version main's own history carried behind a merge-simplified commit -> fail (needs main's own first-parent history, not the default path-simplified walk)"
+echo "case O: PR sets a version main once carried behind a merge-simplified commit, below main's tip -> fail (ordering against the base settles it, no history walk)"
 REPO="$WORK/o"
 new_fixture "$REPO" 0.1.0
 bump_version "$REPO" 0.5.0 "release: bump to 0.5.0"
@@ -252,7 +252,7 @@ fork_pr "$REPO"
 bump_version "$REPO" 0.5.0 "release: reuse 0.5.0 that main once carried"
 run_check "$REPO" >/tmp/out.o 2>&1
 check "exit code" "$?" 1
-check "flags it as already published" "$(grep -c 'already published' /tmp/out.o)" "1"
+check "says it goes backwards" "$(grep -c 'goes backwards' /tmp/out.o)" "1"
 
 echo "case M: two PRs off the same main tip each bump correctly, merged in turn -> resulting main is clean"
 REPO="$WORK/m"
@@ -283,7 +283,7 @@ write_file "$REPO" 'skills/one"two.md' "one" "skills: add a quoted path"
 run_check "$REPO" >/tmp/out.p 2>&1
 check "exit code" "$?" 1
 
-echo "case Q: PR reuses a version that only ever lived on a discarded merge side, never on main's own tip -> ok, not flagged as already published"
+echo "case Q: PR sets a version above main's tip that a discarded merge side once carried -> ok, merge topology does not matter to an ordering check"
 REPO="$WORK/q"
 new_fixture "$REPO" 0.1.0
 bump_version "$REPO" 0.5.0 "release: bump to 0.5.0"
@@ -299,9 +299,59 @@ bump_version "$REPO" 0.7.0 "release: reuse 0.7.0, which main's tip never carried
 run_check "$REPO" >/tmp/out.q 2>&1
 check "exit code" "$?" 0
 
+echo "case R: PR sets a version main's tip published before main was fast-forwarded onto a branch that had merged it in -> fail (invisible to a first-parent walk, but still below the base)"
+REPO="$WORK/r"
+new_fixture "$REPO" 0.1.0
+git -C "$REPO" checkout -q -b feature main
+write_file "$REPO" "skills/f.md" "f" "skills: add f"
+bump_version "$REPO" 0.4.0 "release: bump to 0.4.0"
+git -C "$REPO" checkout -q main
+write_file "$REPO" "skills/m.md" "m" "skills: add m"
+bump_version "$REPO" 0.3.0 "release: bump to 0.3.0"
+# main's tip sits at 0.3.0 here, so 0.3.0 is served to every install that
+# updates now. The fast-forward below moves main off this commit without
+# leaving it on the first-parent chain, which is what makes it invisible to
+# any walk narrower than --full-history.
+git -C "$REPO" checkout -q feature
+git -C "$REPO" merge --no-ff main -m "update branch: merge main into feature" >/dev/null 2>&1 || true
+printf '{\n  "name": "fixture",\n  "version": "0.4.0"\n}\n' > "$REPO/.claude-plugin/plugin.json"
+git -C "$REPO" add .claude-plugin/plugin.json
+git -C "$REPO" commit -q --no-edit
+git -C "$REPO" checkout -q main
+git -C "$REPO" merge -q --ff-only feature
+fork_pr "$REPO"
+write_file "$REPO" "skills/new.md" "new" "skills: add new"
+bump_version "$REPO" 0.3.0 "release: reuse 0.3.0, which main's tip once served"
+run_check "$REPO" >/tmp/out.r 2>&1
+check "exit code" "$?" 1
+check "says it goes backwards" "$(grep -c 'goes backwards' /tmp/out.r)" "1"
+
+echo "case S: 0.9.0 -> 0.10.0 is an advance (a string compare would call it a regression)"
+REPO="$WORK/s"
+new_fixture "$REPO" 0.9.0
+fork_pr "$REPO"
+write_file "$REPO" "hooks/s.py" "s" "hooks: add s"
+bump_version "$REPO" 0.10.0 "release: bump to 0.10.0"
+run_check "$REPO" >/tmp/out.s 2>&1
+check "exit code" "$?" 0
+
+echo "case T: a version that is not dotted integers -> usage error, not a pass"
+REPO="$WORK/t"
+new_fixture "$REPO" 0.1.0
+fork_pr "$REPO"
+write_file "$REPO" "hooks/t.py" "t" "hooks: add t"
+{
+  printf '{\n  "name": "fixture",\n  "version": "1.0.0-rc1"\n}\n' > "$REPO/.claude-plugin/plugin.json"
+  git -C "$REPO" add .claude-plugin/plugin.json
+  git -C "$REPO" commit -qm "release: bump to a prerelease string"
+}
+run_check "$REPO" >/tmp/out.t 2>&1
+check "exit code" "$?" 2
+check "names the ordering problem" "$(grep -c 'dotted integers' /tmp/out.t)" "1"
+
 echo ""
 if [ "$failures" -eq 0 ]; then
-  echo "OK (19 cases)"
+  echo "OK (22 cases)"
 else
   echo "FAILED: $failures assertion(s)"
   exit 1
