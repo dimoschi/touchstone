@@ -30,10 +30,8 @@ cd "$(git rev-parse --show-toplevel)"
 
 MANIFEST=".claude-plugin/plugin.json"
 # Trailing slash so a prefix match never catches a sibling like .github/workflows/
-# or a hypothetical hooks-extra/. .claude-plugin/ is included because the
-# manifest itself ships to every install (mcpServers, hooks, description),
-# not just the five directories it points at.
-GATED_PREFIXES=("workflows/" "hooks/" "skills/" "agents/" "commands/" ".claude-plugin/")
+# or a hypothetical hooks-extra/.
+GATED_PREFIXES=("workflows/" "hooks/" "skills/" "agents/" "commands/")
 
 version_at() {
   git show "$1:$MANIFEST" 2>/dev/null | python3 -c 'import json,sys; print(json.load(sys.stdin)["version"])' 2>/dev/null
@@ -45,6 +43,12 @@ file_exists_at() {
 
 is_gated() {
   local f="$1" prefix
+  # The manifest itself, not the whole .claude-plugin/ directory: it ships to
+  # every install (mcpServers, hooks, description) same as the five gated
+  # dirs, but .claude-plugin/marketplace.json is the marketplace index, not
+  # part of what an install fetches, so gating the directory would demand a
+  # bump for a file the plugin never serves.
+  [ "$f" = "$MANIFEST" ] && return 0
   for prefix in "${GATED_PREFIXES[@]}"; do
     case "$f" in
       "$prefix"*) return 0 ;;
@@ -116,6 +120,10 @@ fi
 
 # The bump itself has to be new: reusing a version main has already shipped,
 # under different content, serves that old cached copy, same as not bumping.
+# --full-history: default history simplification drops a merge parent's side
+# entirely once the merge is TREESAME to the other parent for $MANIFEST, so a
+# version main's own history genuinely carried (then overwritten by a merge
+# resolution favouring the other side) would otherwise never be visited.
 while IFS= read -r c; do
   v="$(version_at "$c")" || continue
   if [ "$v" = "$CURRENT_VERSION" ]; then
@@ -126,7 +134,7 @@ while IFS= read -r c; do
     } >&2
     exit 1
   fi
-done < <(git rev-list "$BASE_REF" -- "$MANIFEST")
+done < <(git rev-list --full-history "$BASE_REF" -- "$MANIFEST")
 
 echo "check-version-bump: ok ($MANIFEST bumped to $CURRENT_VERSION, covers everything changed since $BASE_REF at $(git rev-parse --short "$BASE"))"
 exit 0

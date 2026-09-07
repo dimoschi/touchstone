@@ -197,9 +197,11 @@ as a failure, not a pass: it means an assumption the suite makes did not hold.
 
 `claude plugin update` serves a marketplace plugin by the `version` string in
 `.claude-plugin/plugin.json`, from a cache keyed on that string, not by commit.
-A change under `workflows/`, `hooks/`, `skills/`, `agents/`, `commands/` or
-`.claude-plugin/` itself that lands without moving `version` is invisible to
-every existing install until someone bumps it later. `check-version-bump.sh`
+A change under `workflows/`, `hooks/`, `skills/`, `agents/`, `commands/` or to
+`.claude-plugin/plugin.json` itself that lands without moving `version` is
+invisible to every existing install until someone bumps it later
+(`.claude-plugin/marketplace.json` is the marketplace index, not part of what
+an install fetches, so it is not gated). `check-version-bump.sh`
 diffs HEAD against `origin/main` (a local `main` branch if there is no
 origin) and fails if any gated path changed without `version` moving to a
 string main has not already published, so the bump has to travel in the same

@@ -94,7 +94,7 @@ check "exit code" "$?" 1
 check "names the offending file" "$(grep -c 'workflows/deliver.js' /tmp/out.b)" "1"
 check "names the current version" "$(grep -c '0.1.0' /tmp/out.b)" "2"
 
-echo "case C: manifest-only edit (no version change) -> fail, .claude-plugin/ is gated"
+echo "case C: manifest-only edit (no version change) -> fail, plugin.json itself is gated"
 REPO="$WORK/c"
 new_fixture "$REPO" 0.1.0
 fork_pr "$REPO"
@@ -224,6 +224,36 @@ check "exit code" "$?" 1
 check "flags it as already published, not merely unbumped" \
   "$(grep -c 'already published' /tmp/out.l)" "1"
 
+echo "case N: PR edits .claude-plugin/marketplace.json only, plugin.json untouched -> ok (marketplace.json isn't served)"
+REPO="$WORK/n"
+new_fixture "$REPO" 0.1.0
+write_file "$REPO" ".claude-plugin/marketplace.json" '{"plugins": []}' "root: add marketplace.json"
+fork_pr "$REPO"
+{
+  printf '{"plugins": [], "note": "renamed"}' > "$REPO/.claude-plugin/marketplace.json"
+  git -C "$REPO" add .claude-plugin/marketplace.json
+  git -C "$REPO" commit -qm "marketplace: edit listing"
+}
+run_check "$REPO" >/tmp/out.n 2>&1
+check "exit code" "$?" 0
+
+echo "case O: PR reuses a version main's own history carried behind a merge-simplified commit -> fail (needs --full-history)"
+REPO="$WORK/o"
+new_fixture "$REPO" 0.1.0
+bump_version "$REPO" 0.5.0 "release: bump to 0.5.0"
+git -C "$REPO" checkout -q -b hotfix main~1
+bump_version "$REPO" 0.9.0 "hotfix: bump to 0.9.0"
+git -C "$REPO" checkout -q main
+git -C "$REPO" merge --no-ff hotfix -m "merge hotfix, resolve to hotfix's 0.9.0" >/dev/null 2>&1 || true
+printf '{\n  "name": "fixture",\n  "version": "0.9.0"\n}\n' > "$REPO/.claude-plugin/plugin.json"
+git -C "$REPO" add .claude-plugin/plugin.json
+git -C "$REPO" commit -q --no-edit
+fork_pr "$REPO"
+bump_version "$REPO" 0.5.0 "release: reuse 0.5.0 that main once carried"
+run_check "$REPO" >/tmp/out.o 2>&1
+check "exit code" "$?" 1
+check "flags it as already published" "$(grep -c 'already published' /tmp/out.o)" "1"
+
 echo "case M: two PRs off the same main tip each bump correctly, merged in turn -> resulting main is clean"
 REPO="$WORK/m"
 new_fixture "$REPO" 0.1.0
@@ -247,7 +277,7 @@ check "exit code" "$?" 0
 
 echo ""
 if [ "$failures" -eq 0 ]; then
-  echo "OK (16 cases)"
+  echo "OK (18 cases)"
 else
   echo "FAILED: $failures assertion(s)"
   exit 1
