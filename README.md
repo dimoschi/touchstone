@@ -179,6 +179,7 @@ to override.
 bash scripts/run-hook-tests.sh          # hook suites; needs only python3 and git
 bash scripts/run-go-tests.sh            # the skill's Go suites; needs a Go toolchain, python3, and an ssh signing key
 bash scripts/check-no-private-refs.sh   # no machine- or org-specific references
+bash scripts/check-version-bump.sh      # gated directories moved version in the same range
 ```
 
 `run-go-tests.sh` runs every suite in `skills/crap-controlled-changes/test/`
@@ -191,6 +192,27 @@ of anywhere else. Several of the selected suites shell out to `python3`, so the
 job installs it alongside Go rather than relying on the runner image to carry
 it. Prerequisites installed but a suite still prints a `SKIP:` line is treated
 as a failure, not a pass: it means an assumption the suite makes did not hold.
+
+### Versioning
+
+`claude plugin update` serves a marketplace plugin by the `version` string in
+`.claude-plugin/plugin.json`, from a cache keyed on that string, not by commit.
+A change under `workflows/`, `hooks/`, `skills/`, `agents/`, `commands/` or to
+`.claude-plugin/plugin.json` itself that lands without moving `version` is
+invisible to every existing install until someone bumps it later
+(`.claude-plugin/marketplace.json` is the marketplace index, not part of what
+an install fetches, so it is not gated). `check-version-bump.sh`
+diffs HEAD against `origin/main` (a local `main` branch if there is no
+origin) and fails if any gated path changed without `version` rising above
+the one on that base, so the bump has to travel in the same PR as the change
+it covers, in either commit order. Versions are ordered as dotted integers,
+which puts `0.10.0` above `0.9.0` where a string compare would not; a version
+that cannot be read that way is a setup error, not a pass. Requiring the
+version to rise, rather than only to differ, is what stops a bump from
+reusing a string some install has already cached, and it settles that without
+the check having to decide which versions `main` ever really served. A push
+straight to `main` compares main against itself and is a no-op: the check
+gates PRs, not a bypass of the PR process.
 
 Two rules the CI enforces, both easy to break by habit:
 

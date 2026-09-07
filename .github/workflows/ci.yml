@@ -41,6 +41,8 @@ jobs:
           bash scripts/run-hook-tests.sh
       - name: Workflow opt-in test suite
         run: bash workflows/test-mutation-optin.sh
+      - name: Version bump test suite
+        run: bash scripts/test-version-bump.sh
 
   go:
     # The skill's Go suites (crap-check.sh, deadcode-check.sh, mutation-check.sh)
@@ -92,6 +94,21 @@ jobs:
             bash -n "$f" || { echo "syntax error: $f"; status=1; }
           done < <(git ls-files '*.sh')
           exit $status
+
+  version:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+      # check-version-bump.sh shells out to python3 to read plugin.json's
+      # version key; without it the check misreports "no readable version"
+      # instead of the real cause, same as the go job's setup-python.
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+      - name: Gated directories require a version bump
+        run: bash scripts/check-version-bump.sh
 
   manifests:
     runs-on: ubuntu-latest
