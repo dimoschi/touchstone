@@ -2,8 +2,10 @@
 # Regression test for scripts/check-version-bump.sh.
 #
 # Builds a throwaway fixture repo per case rather than reusing the real
-# repo's history, so each case controls exactly which commit last changed
-# `version` and which files moved after it.
+# repo's history. Each case that means to look like a PR commits to `main`
+# once (the fork point) and then branches to `pr` for the change under test,
+# since the script compares HEAD against origin/main (or, absent an origin,
+# a local main branch) rather than walking history for the last bump.
 #
 # Exit 0 all green, 1 any assertion failed.
 
@@ -25,8 +27,7 @@ check() {
 }
 
 # Builds a fresh fixture repo at $1 with a root commit carrying
-# .claude-plugin/plugin.json at $2, and returns (via REPO) a path ready for
-# more commits.
+# .claude-plugin/plugin.json at $2, on a branch named `main`.
 new_fixture() {
   local dir="$1" version="$2"
   mkdir -p "$dir"
@@ -38,6 +39,14 @@ new_fixture() {
   printf '{\n  "name": "fixture",\n  "version": "%s"\n}\n' "$version" > "$dir/.claude-plugin/plugin.json"
   git -C "$dir" add .claude-plugin/plugin.json
   git -C "$dir" commit -qm "root: version $version"
+  git -C "$dir" branch -M main
+}
+
+# Branches `pr` off the current `main` tip, so main stays at the fork point
+# while further commits (added by the caller) land on `pr`.
+fork_pr() {
+  local dir="$1"
+  git -C "$dir" checkout -q -b pr main
 }
 
 bump_version() {
@@ -63,9 +72,10 @@ run_check() {
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
 
-echo "case A: no gated change since the last bump -> ok"
+echo "case A: PR with no gated change -> ok"
 REPO="$WORK/a"
 new_fixture "$REPO" 0.1.0
+fork_pr "$REPO"
 write_file "$REPO" "README.md" "docs" "docs: readme"
 write_file "$REPO" "scripts/thing.sh" "echo hi" "scripts: add thing"
 write_file "$REPO" ".github/workflows/ci.yml" "name: ci" "ci: add workflow"
@@ -74,71 +84,86 @@ check "exit code" "$?" 0
 check ".github/workflows/ is not matched by the workflows/ prefix" \
   "$(grep -c 'ok' /tmp/out.a)" "1"
 
-echo "case B: a gated file changed after the last bump, version unchanged -> fail"
+echo "case B: PR adds a gated file, version unchanged -> fail"
 REPO="$WORK/b"
 new_fixture "$REPO" 0.1.0
+fork_pr "$REPO"
 write_file "$REPO" "workflows/deliver.js" "export const meta = {}" "workflows: add deliver"
 run_check "$REPO" >/tmp/out.b 2>&1
 check "exit code" "$?" 1
 check "names the offending file" "$(grep -c 'workflows/deliver.js' /tmp/out.b)" "1"
 check "names the current version" "$(grep -c '0.1.0' /tmp/out.b)" "2"
 
-echo "case C: plugin.json touched without changing version does not count as a bump"
+echo "case C: manifest-only edit (no version change) -> fail, .claude-plugin/ is gated"
 REPO="$WORK/c"
 new_fixture "$REPO" 0.1.0
-# Touches plugin.json (adds a field) but keeps version identical: must not
-# reset the search for V, a plain 'git log -- plugin.json' would get this wrong.
+fork_pr "$REPO"
 {
   printf '{\n  "name": "fixture",\n  "version": "0.1.0",\n  "description": "x"\n}\n' > "$REPO/.claude-plugin/plugin.json"
   git -C "$REPO" add .claude-plugin/plugin.json
   git -C "$REPO" commit -qm "manifest: add description"
 }
-write_file "$REPO" "hooks/foo.py" "print(1)" "hooks: add foo"
 run_check "$REPO" >/tmp/out.c 2>&1
 check "exit code" "$?" 1
-check "names the offending file" "$(grep -c 'hooks/foo.py' /tmp/out.c)" "1"
+check "names the manifest itself" "$(grep -c '.claude-plugin/plugin.json' /tmp/out.c)" "2"
 
-echo "case D: gated change bundled with the version bump -> ok"
-REPO="$WORK/d"
+echo "case D1: PR bumps version, then adds the gated file -> ok (order independent)"
+REPO="$WORK/d1"
 new_fixture "$REPO" 0.1.0
-write_file "$REPO" "agents/one.md" "one" "agents: add one, pre-bump"
-{
-  printf '{\n  "name": "fixture",\n  "version": "0.2.0"\n}\n' > "$REPO/.claude-plugin/plugin.json"
-  printf 'two\n' > "$REPO/agents/two.md"
-  git -C "$REPO" add .claude-plugin/plugin.json agents/two.md
-  git -C "$REPO" commit -qm "agents: add two, bump version"
-}
-run_check "$REPO" >/tmp/out.d 2>&1
+fork_pr "$REPO"
+bump_version "$REPO" 0.2.0 "release: bump to 0.2.0"
+write_file "$REPO" "agents/one.md" "one" "agents: add one"
+run_check "$REPO" >/tmp/out.d1 2>&1
 check "exit code" "$?" 0
 
-echo "case E: gated change committed before the last bump -> ok"
+echo "case D2: PR adds the gated file, then bumps version -> ok (order independent)"
+REPO="$WORK/d2"
+new_fixture "$REPO" 0.1.0
+fork_pr "$REPO"
+write_file "$REPO" "agents/one.md" "one" "agents: add one"
+bump_version "$REPO" 0.2.0 "release: bump to 0.2.0"
+run_check "$REPO" >/tmp/out.d2 2>&1
+check "exit code" "$?" 0
+
+echo "case E: a gated file pushed straight to main -> ok (push-to-main is a deliberate no-op)"
 REPO="$WORK/e"
 new_fixture "$REPO" 0.1.0
-write_file "$REPO" "commands/one.md" "one" "commands: add one"
-bump_version "$REPO" 0.2.0 "release: bump to 0.2.0"
+write_file "$REPO" "commands/one.md" "one" "commands: add one, no PR"
 run_check "$REPO" >/tmp/out.e 2>&1
 check "exit code" "$?" 0
 
-echo "case F: a gated file deleted since the last bump -> fail"
+echo "case F: PR deletes a gated file, no bump -> fail"
 REPO="$WORK/f"
 new_fixture "$REPO" 0.1.0
 write_file "$REPO" "skills/one/SKILL.md" "one" "skills: add one"
-bump_version "$REPO" 0.2.0 "release: bump to 0.2.0"
+fork_pr "$REPO"
 git -C "$REPO" rm -q skills/one/SKILL.md
 git -C "$REPO" commit -qm "skills: drop one"
 run_check "$REPO" >/tmp/out.f 2>&1
 check "exit code" "$?" 1
 check "names the deleted path" "$(grep -c 'skills/one/SKILL.md' /tmp/out.f)" "1"
 
-echo "case G: a gated file renamed since the last bump -> fail"
+echo "case G: PR renames a gated file within a gated dir, no bump -> fail"
 REPO="$WORK/g"
 new_fixture "$REPO" 0.1.0
 write_file "$REPO" "skills/one/SKILL.md" "one" "skills: add one"
-bump_version "$REPO" 0.2.0 "release: bump to 0.2.0"
+fork_pr "$REPO"
 git -C "$REPO" mv skills/one/SKILL.md skills/one/SKILLS.md
 git -C "$REPO" commit -qm "skills: rename one"
 run_check "$REPO" >/tmp/out.g 2>&1
 check "exit code" "$?" 1
+
+echo "case G2: PR moves a gated file out of a gated dir, no bump -> fail (rename must not hide the source)"
+REPO="$WORK/g2"
+new_fixture "$REPO" 0.1.0
+write_file "$REPO" "skills/one/SKILL.md" "one" "skills: add one"
+fork_pr "$REPO"
+mkdir -p "$REPO/docs"
+git -C "$REPO" mv skills/one/SKILL.md docs/one.md
+git -C "$REPO" commit -qm "docs: move one out of skills/"
+run_check "$REPO" >/tmp/out.g2 2>&1
+check "exit code" "$?" 1
+check "names the vacated gated path" "$(grep -c 'skills/one/SKILL.md' /tmp/out.g2)" "1"
 
 echo "case H: no .claude-plugin/plugin.json at HEAD -> usage error"
 REPO="$WORK/h"
@@ -164,18 +189,19 @@ git -C "$REPO" commit -qm "root: no version key"
 run_check "$REPO" >/tmp/out.i 2>&1
 check "exit code" "$?" 2
 
-echo "case J: no version-changing commit reachable from HEAD -> usage error"
+echo "case J: no origin/main and no local main branch -> usage error"
 REPO="$WORK/j"
 mkdir -p "$REPO"
 git -C "$REPO" init -q
 git -C "$REPO" config user.email test@example.com
 git -C "$REPO" config user.name test
 git -C "$REPO" config commit.gpgsign false
-write_file "$REPO" "README.md" "docs" "docs: readme, no manifest at all"
+git -C "$REPO" checkout -q -b trunk
+write_file "$REPO" ".claude-plugin/plugin.json" '{"name": "fixture", "version": "0.1.0"}' "root: version 0.1.0, no main branch"
 run_check "$REPO" >/tmp/out.j 2>&1
 check "exit code" "$?" 2
 
-echo "case K: a shallow clone additionally says full history is required"
+echo "case K: a shallow clone -> usage error mentioning fetch-depth"
 REPO="$WORK/k"
 new_fixture "$REPO" 0.1.0
 write_file "$REPO" "README.md" "docs" "docs: readme"
@@ -185,9 +211,43 @@ run_check "$CLONE" >/tmp/out.k 2>&1
 check "exit code" "$?" 2
 check "mentions fetch-depth" "$(grep -c 'fetch-depth' /tmp/out.k)" "1"
 
+echo "case L: PR bumps version back to one main already published -> fail (reuse, not just 'unchanged')"
+REPO="$WORK/l"
+new_fixture "$REPO" 0.1.0
+write_file "$REPO" "agents/published.md" "one" "agents: add published, pre-bump"
+bump_version "$REPO" 0.2.0 "release: bump to 0.2.0"
+fork_pr "$REPO"
+write_file "$REPO" "agents/two.md" "two" "agents: add two"
+bump_version "$REPO" 0.1.0 "release: revert version to 0.1.0"
+run_check "$REPO" >/tmp/out.l 2>&1
+check "exit code" "$?" 1
+check "flags it as already published, not merely unbumped" \
+  "$(grep -c 'already published' /tmp/out.l)" "1"
+
+echo "case M: two PRs off the same main tip each bump correctly, merged in turn -> resulting main is clean"
+REPO="$WORK/m"
+new_fixture "$REPO" 0.1.0
+git -C "$REPO" checkout -q -b pr1 main
+write_file "$REPO" "hooks/one.py" "print(1)" "hooks: add one"
+bump_version "$REPO" 0.2.0 "release: bump to 0.2.0"
+git -C "$REPO" checkout -q -b pr2 main
+write_file "$REPO" "commands/two.md" "two" "commands: add two"
+bump_version "$REPO" 0.3.0 "release: bump to 0.3.0"
+git -C "$REPO" checkout -q main
+git -C "$REPO" merge -q --no-ff pr1 -m "merge pr1"
+# pr2 bumped from the same 0.1.0 fork point as pr1, so its plugin.json
+# conflicts with pr1's on merge; a human resolves it by hand, so this
+# fixture does too, keeping the higher version.
+git -C "$REPO" merge --no-ff pr2 -m "merge pr2" >/dev/null 2>&1
+printf '{\n  "name": "fixture",\n  "version": "0.3.0"\n}\n' > "$REPO/.claude-plugin/plugin.json"
+git -C "$REPO" add .claude-plugin/plugin.json
+git -C "$REPO" commit -q --no-edit
+run_check "$REPO" >/tmp/out.m 2>&1
+check "exit code" "$?" 0
+
 echo ""
 if [ "$failures" -eq 0 ]; then
-  echo "OK (11 cases)"
+  echo "OK (16 cases)"
 else
   echo "FAILED: $failures assertion(s)"
   exit 1

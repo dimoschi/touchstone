@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Refuse a change that touches a plugin-served directory without moving
-# `version` in .claude-plugin/plugin.json.
+# `version` in .claude-plugin/plugin.json, scoped to what this PR (or push)
+# actually introduces.
 #
 #   scripts/check-version-bump.sh
 #
@@ -10,9 +11,18 @@
 # not cover `claude plugin tag`, which already checks plugin.json against the
 # marketplace entry.
 #
-# Exit 0 clean, 1 a gated file changed since the last bump, 2 usage (missing
-# manifest, no version key, no version-changing commit reachable, or a
-# shallow clone that cannot see one).
+# The comparison is against origin/main (falling back to a local `main`
+# branch when there is no origin), not "the last commit anywhere in history
+# that touched version": anchoring on history let an unrelated sibling
+# branch's bump, or a later commit on the same PR, decide whether *this*
+# change needs one. Comparing against the fork point instead answers "did
+# this change bump the version", nothing upstream of it. A push straight to
+# main compares main against itself and is a deliberate no-op: it exists to
+# gate PRs, not to catch a bypass of the PR process.
+#
+# Exit 0 clean, 1 a gated file changed without a bump (or the bump reuses a
+# version already published on main), 2 usage (missing manifest, no version
+# key, no origin/main or main to compare against, or a shallow clone).
 
 set -euo pipefail
 
@@ -20,8 +30,10 @@ cd "$(git rev-parse --show-toplevel)"
 
 MANIFEST=".claude-plugin/plugin.json"
 # Trailing slash so a prefix match never catches a sibling like .github/workflows/
-# or a hypothetical hooks-extra/.
-GATED_PREFIXES=("workflows/" "hooks/" "skills/" "agents/" "commands/")
+# or a hypothetical hooks-extra/. .claude-plugin/ is included because the
+# manifest itself ships to every install (mcpServers, hooks, description),
+# not just the five directories it points at.
+GATED_PREFIXES=("workflows/" "hooks/" "skills/" "agents/" "commands/" ".claude-plugin/")
 
 version_at() {
   git show "$1:$MANIFEST" 2>/dev/null | python3 -c 'import json,sys; print(json.load(sys.stdin)["version"])' 2>/dev/null
@@ -51,65 +63,70 @@ CURRENT_VERSION="$(version_at HEAD)" || {
   exit 2
 }
 
-# A shallow graft and a real root both fail `rev-parse "$c^"`; only the
-# shallow file tells them apart, since a graft's parent existed but is unseen.
-SHALLOW_BOUNDARIES=""
+# A shallow clone can silently truncate the "which versions has main already
+# published" scan below rather than fail it outright, so refuse it up front
+# instead of trusting a partial answer.
 if [ "$(git rev-parse --is-shallow-repository)" = "true" ]; then
-  shallow_file="$(git rev-parse --git-path shallow)"
-  [ -f "$shallow_file" ] && SHALLOW_BOUNDARIES="$(cat "$shallow_file")"
-fi
-
-is_shallow_boundary() {
-  [ -n "$SHALLOW_BOUNDARIES" ] && printf '%s\n' "$SHALLOW_BOUNDARIES" | grep -qxF "$1"
-}
-
-V=""
-while IFS= read -r c; do
-  if git rev-parse -q --verify "$c^" >/dev/null 2>&1; then
-    parent="$(git rev-parse "$c^")"
-    if ! file_exists_at "$parent"; then
-      V="$c"
-      break
-    fi
-    if v_c="$(version_at "$c")" && v_p="$(version_at "$parent")" && [ "$v_c" != "$v_p" ]; then
-      V="$c"
-      break
-    fi
-  elif is_shallow_boundary "$c"; then
-    # History truncated right here: cannot tell whether an earlier commit
-    # changed the version, so this cannot count as one.
-    break
-  else
-    # Root commit: the file has no prior version to differ from, so its
-    # own version counts as the last change.
-    V="$c"
-    break
-  fi
-done < <(git rev-list HEAD -- "$MANIFEST")
-
-if [ -z "$V" ]; then
-  msg="check-version-bump: no version-changing commit for $MANIFEST reachable from HEAD"
-  if [ "$(git rev-parse --is-shallow-repository)" = "true" ]; then
-    msg="$msg (run with full history: fetch-depth: 0)"
-  fi
-  echo "$msg" >&2
+  echo "check-version-bump: shallow clone, cannot compare against origin/main reliably (run with full history: fetch-depth: 0)" >&2
   exit 2
 fi
 
+BASE_REF=""
+for ref in origin/main main; do
+  if git rev-parse -q --verify "$ref" >/dev/null 2>&1; then
+    BASE_REF="$ref"
+    break
+  fi
+done
+
+if [ -z "$BASE_REF" ]; then
+  echo "check-version-bump: no origin/main or main to compare against" >&2
+  exit 2
+fi
+
+BASE="$(git merge-base "$BASE_REF" HEAD)" || {
+  echo "check-version-bump: HEAD and $BASE_REF share no common history" >&2
+  exit 2
+}
+
+# --no-renames: a detected rename prints only the destination path, so
+# moving a gated file out of a gated directory (skills/x/SKILL.md ->
+# docs/x.md) would otherwise report no gated change at all.
 CHANGED=()
 while IFS= read -r f; do
   is_gated "$f" && CHANGED+=("$f")
-done < <(git diff --name-only "$V" HEAD)
+done < <(git diff --no-renames --name-only "$BASE" HEAD)
 
 if [ "${#CHANGED[@]}" -eq 0 ]; then
-  echo "check-version-bump: ok ($MANIFEST at $CURRENT_VERSION covers everything changed since $(git rev-parse --short "$V"))"
+  echo "check-version-bump: ok (nothing gated changed since $BASE_REF at $(git rev-parse --short "$BASE"))"
   exit 0
 fi
 
-{
-  echo "check-version-bump: $MANIFEST is still at $CURRENT_VERSION while these files changed since $(git rev-parse --short "$V"):"
-  printf '  %s\n' "${CHANGED[@]}"
-  echo "\`claude plugin update\` compares that version string, not the commit, so every install keeps serving the cached $CURRENT_VERSION copy."
-  echo "Bump the version (patch for a fix, minor for behaviour) in the same commit."
-} >&2
-exit 1
+BASE_VERSION="$(version_at "$BASE" 2>/dev/null || true)"
+
+if [ "$CURRENT_VERSION" = "$BASE_VERSION" ]; then
+  {
+    echo "check-version-bump: $MANIFEST is still at $CURRENT_VERSION while these files changed since $BASE_REF at $(git rev-parse --short "$BASE"):"
+    printf '  %s\n' "${CHANGED[@]}"
+    echo "\`claude plugin update\` compares that version string, not the commit, so every install keeps serving the cached $CURRENT_VERSION copy."
+    echo "Bump the version (patch for a fix, minor for behaviour) in this PR."
+  } >&2
+  exit 1
+fi
+
+# The bump itself has to be new: reusing a version main has already shipped,
+# under different content, serves that old cached copy, same as not bumping.
+while IFS= read -r c; do
+  v="$(version_at "$c")" || continue
+  if [ "$v" = "$CURRENT_VERSION" ]; then
+    {
+      echo "check-version-bump: $MANIFEST bumped to $CURRENT_VERSION, but that version was already published at $(git rev-parse --short "$c") for different content:"
+      printf '  %s\n' "${CHANGED[@]}"
+      echo "installs cached under $CURRENT_VERSION keep serving that old copy, not this change. Pick a version nobody has shipped yet."
+    } >&2
+    exit 1
+  fi
+done < <(git rev-list "$BASE_REF" -- "$MANIFEST")
+
+echo "check-version-bump: ok ($MANIFEST bumped to $CURRENT_VERSION, covers everything changed since $BASE_REF at $(git rev-parse --short "$BASE"))"
+exit 0

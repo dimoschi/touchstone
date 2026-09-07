@@ -197,11 +197,15 @@ as a failure, not a pass: it means an assumption the suite makes did not hold.
 
 `claude plugin update` serves a marketplace plugin by the `version` string in
 `.claude-plugin/plugin.json`, from a cache keyed on that string, not by commit.
-A change under `workflows/`, `hooks/`, `skills/`, `agents/` or `commands/` that
-lands without moving `version` is invisible to every existing install until
-someone bumps it later. `check-version-bump.sh` finds the commit that last
-changed `version` and fails if any gated path changed since, so the bump has
-to travel in the same PR as the change it covers.
+A change under `workflows/`, `hooks/`, `skills/`, `agents/`, `commands/` or
+`.claude-plugin/` itself that lands without moving `version` is invisible to
+every existing install until someone bumps it later. `check-version-bump.sh`
+diffs HEAD against `origin/main` (a local `main` branch if there is no
+origin) and fails if any gated path changed without `version` moving to a
+string main has not already published, so the bump has to travel in the same
+PR as the change it covers, in either commit order, and cannot just reuse an
+old string. A push straight to `main` compares main against itself and is a
+no-op: the check gates PRs, not a bypass of the PR process.
 
 Two rules the CI enforces, both easy to break by habit:
 
