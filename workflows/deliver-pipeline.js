@@ -248,6 +248,10 @@ const FINDINGS = {
         properties: {
           title: { type: 'string' }, file: { type: 'string' },
           claim: { type: 'string' }, evidence: { type: 'string' },
+          // Set only when this finding restates one from the known-findings
+          // list a reviewer was handed (see reviewOf's `known` parameter): the
+          // id of the one it restates, copied from that list, not invented.
+          duplicate_of: { type: 'string' },
         },
       },
     },
@@ -969,11 +973,23 @@ const stripBrackets = (s) => {
   const m = /^\[(.+)\]$/.exec(t)
   return (m ? m[1] : t).trim()
 }
-// The settled/fresh-finding dedup below cannot key on id: every reviewOf call
-// mints a brand-new one, even for a finding that is, in substance, the same
-// one reported again. Content is the only thing two independent reports of
-// the same finding actually share.
+// The settled/fresh-finding dedup below cannot key on id alone: every
+// reviewOf call mints a brand-new one, even for a finding that is, in
+// substance, the same one reported again. contentKeyOf catches a
+// byte-identical re-report without needing the model's cooperation.
+// duplicate_of is the other half: a reworded re-report can't match by
+// content either, so the reviewer is handed the known findings by id (the
+// `known` param below) and asked to reference one back instead of restating
+// it, the same way the verdict join below matches an id rather than text.
 const contentKeyOf = (f) => JSON.stringify([f.title, f.file, f.claim, f.evidence])
+const dupOf = (f) => (typeof f.duplicate_of === 'string' && f.duplicate_of.trim())
+  ? stripBrackets(f.duplicate_of) : null
+const isDuplicateOfKnown = (f, known) => {
+  const dup = dupOf(f)
+  if (dup && known.some(k => k.id === dup)) return true
+  const key = contentKeyOf(f)
+  return known.some(k => contentKeyOf(k) === key)
+}
 
 // Review is a function of a range, not a one-shot on the implementer's commits.
 // Reviewing only impl.commit_range meant every later phase that commits -- the
@@ -981,7 +997,7 @@ const contentKeyOf = (f) => JSON.stringify([f.title, f.file, f.claim, f.evidence
 // insertions across 6 files, two of which no reviewer had ever opened, and it
 // silently reverted an earlier context-cancellation fix on every mutating
 // handler. The PR was green on every gate and carried a new bug.
-const reviewOf = async (range, tag, picked) => {
+const reviewOf = async (range, tag, picked, known = []) => {
   const out = await parallel(picked.map((lens) => () =>
     treeAgent(
       `${lens.charge}\n` +
@@ -994,7 +1010,16 @@ const reviewOf = async (range, tag, picked) => {
       `somewhere the range does not show you.\n` +
       `Report only findings you can defend with file:line evidence. Do NOT ` +
       `report coverage, complexity, test quality, or style: deterministic ` +
-      `gates own those.`,
+      `gates own those.` +
+      (known.length
+        ? `\nThe findings below were already reported earlier this run, each ` +
+          `with its id in brackets, whether already fixed and verified or ` +
+          `still tracked as open. If what you would report is the same ` +
+          `underlying issue as one of these, even worded quite differently, ` +
+          `set duplicate_of to that id instead of inventing a new one; report ` +
+          `a finding with no duplicate_of only for a genuinely different bug.\n` +
+          known.map(k => `[${k.id}] ${k.title} (${k.file}): ${k.claim}`).join('\n')
+        : ''),
       { label: `${tag}:${lens.label}`, phase: 'Review', schema: FINDINGS,
         model: 'opus', effort: effortFor.review })))
   return out.filter(Boolean).flatMap(r => r.findings)
@@ -1015,8 +1040,10 @@ sReview.close()
 const sFix = stage('fix')
 // A finding a verifier confirmed fixed must not come back through the tail
 // review as a fresh one: the loop would never converge, and the fixer would be
-// sent to undo its own work.
-const settled = new Set()
+// sent to undo its own work. Holds the finding objects themselves, not an id
+// or a content hash, so a later reviewOf call can be handed their title/file/
+// claim as the known-findings list a duplicate_of reference joins against.
+const settled = []
 let round = 0
 // Which of the loop's four exits fired. Checked in the same order the loop
 // tests them, so the answer matches the condition that actually stopped it.
@@ -1096,7 +1123,8 @@ while (open.length && round < MAX_REVIEW_ROUNDS && !outOfBudget() && !sFix.over(
     // async, so the skip path still hands parallel() a promise rather than a
     // bare array.
     async () => tailReviewable
-      ? reviewOf(`${reviewedThrough}..${head}`, `review:fix:${round}`, [LENS.correctness])
+      ? reviewOf(`${reviewedThrough}..${head}`, `review:fix:${round}`, [LENS.correctness],
+          [...settled, ...open])
       : [],
   ])
 
@@ -1110,19 +1138,15 @@ while (open.length && round < MAX_REVIEW_ROUNDS && !outOfBudget() && !sFix.over(
   // Unmatched means unverified, which stays open: a finding silently dropped
   // because its id came back missing or mistyped is the one failure this must
   // not have.
-  //
-  // settled is keyed on content, not id: a fresh finding gets its own id from
-  // reviewOf every time, even when it is an identical re-report of one just
-  // settled, so id can never join the two back up.
-  for (const f of open) if (byId.get(f.id) === true) settled.add(contentKeyOf(f))
+  for (const f of open) if (byId.get(f.id) === true) settled.push(f)
   open = open.filter(f => byId.get(f.id) !== true)
 
   // Filtered after the verdicts land, not before, so a finding the fix closed
   // cannot come back as a fresh one. That ordering is what the sequencing used
   // to give for free, and it is the only thing that had to be preserved here.
   if (tailReviewable) {
-    const fresh = (freshRaw ?? [])
-      .filter(f => !settled.has(contentKeyOf(f)) && !open.some(o => contentKeyOf(o) === contentKeyOf(f)))
+    const known = [...settled, ...open]
+    const fresh = (freshRaw ?? []).filter(f => !isDuplicateOfKnown(f, known))
     if (fresh.length) log(`round ${round}: the fix itself introduced ${fresh.length} new finding(s)`)
     open = open.concat(fresh)
     reviewedThrough = head
@@ -1313,8 +1337,8 @@ const mutHead = mutation.head_sha?.trim()
 if (reviewerCount && mutHead && mutHead !== reviewedThrough && !outOfBudget()) {
   phase('Review')
   const fresh = (await reviewOf(
-    `${reviewedThrough}..${mutHead}`, 'review:mutation', [LENS.correctness]))
-    .filter(f => !settled.has(contentKeyOf(f)))
+    `${reviewedThrough}..${mutHead}`, 'review:mutation', [LENS.correctness], settled))
+    .filter(f => !isDuplicateOfKnown(f, settled))
   if (fresh.length) {
     return await halted('Review', {
       plan: plan.plan, implemented: impl.summary, mutation,

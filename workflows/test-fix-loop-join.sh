@@ -608,9 +608,64 @@ async function scenarioQ() {
     result.unresolved_findings[0]?.code_changed_since_recorded, true)
 }
 
+// Scenario R -- a reworded re-report of a settled finding. Unlike O (a
+// byte-identical re-report), every field here differs from the original: only
+// duplicate_of, copied from the known-findings list the tail-review lens was
+// handed, ties it back. A join that still relies on title/file/claim/evidence
+// matching (exactly the failure ticket 21 fixed for verdicts) cannot catch
+// this; the run must finish rather than reopen already-fixed code.
+async function scenarioR() {
+  console.log('\n== scenario R: a reworded re-report of a settled finding is not reopened')
+  const { result, captured } = await run({
+    initialReview: {
+      correctness: [{ title: 'Off-by-one in parser', file: 'src/parser.js',
+        claim: 'boundary is wrong', evidence: 'parser.js:12' }],
+      advocate: [],
+    },
+    verify: (id) => id === 'f1' ? true : undefined,
+    fixHead: () => 'fix00000000000000000000000000000000000001',
+    tailReview: [{ title: 'Boundary check excludes the last element', file: 'parser.js',
+      claim: 'off-by-one at the array end', evidence: 'see loop condition',
+      duplicate_of: 'f1' }],
+    staleness: () => [],
+  })
+  const tailPrompt = captured.calls.find(c => c.label.startsWith('review:fix:1:'))?.prompt ?? ''
+  check('the tail-review lens was handed the settled finding\'s id',
+    tailPrompt.includes('[f1]'), true)
+  check('halted_at is absent (the run finished, the reworded re-report was recognized)',
+    result.halted_at, undefined)
+  check('unresolved_findings is empty', result.unresolved_findings, [])
+}
+
+// Scenario S -- a finding that stays open gets re-reported each round with
+// drifting wording. Before this fix, full-content equality no longer matched
+// the copy already in `open`, so each round appended another entry for the
+// same bug. duplicate_of, referencing the still-open finding's id, must keep
+// it to exactly one entry across both rounds.
+async function scenarioS() {
+  console.log('\n== scenario S: a reworded re-report of a still-open finding does not inflate open into two entries')
+  const { result, captured } = await run({
+    args: { maxReviewRounds: 2 },
+    initialReview: {
+      correctness: [{ title: 'Foo bug', file: 'f.js', claim: 'c1', evidence: 'e1' }],
+      advocate: [],
+    },
+    verify: (id, round) => id === 'f1' ? (round === 2 ? true : false) : undefined,
+    fixHead: (round) => `fix0000000000000000000000000000000000000${round}`,
+    tailReview: [{ title: 'Different wording of foo bug', file: 'f.js',
+      claim: 'reworded claim', evidence: 'reworded evidence', duplicate_of: 'f1' }],
+    staleness: () => [],
+  })
+  const verify2Prompt = captured.calls.find(c => c.label === 'verify:2')?.prompt ?? ''
+  check('round 2 verifies exactly one finding, not two',
+    idsIn(verify2Prompt).length, 1)
+  check('halted_at is absent (the run finished, both rounds resolved the one bug)',
+    result.halted_at, undefined)
+}
+
 for (const scenario of [scenarioA, scenarioB, scenarioG, scenarioC, scenarioD, scenarioE, scenarioH,
                         scenarioI, scenarioJ, scenarioK, scenarioL, scenarioM, scenarioN,
-                        scenarioO, scenarioP, scenarioQ]) {
+                        scenarioO, scenarioP, scenarioQ, scenarioR, scenarioS]) {
   await scenario()
 }
 
