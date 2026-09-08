@@ -239,11 +239,10 @@ function makeAgent(scenario, captured) {
       }
       return { verdicts }
     }
-    if (label === 'crap-gate:opt-in') {
-      return { gated: scenario.crapGated ?? true, detail: 'stub' }
-    }
-    if (label === 'mutation:opt-in') {
-      return { gated: scenario.mutationGated ?? false, detail: 'stub' }
+    if (label === 'gate:opt-in') {
+      if (scenario.gateProbeFails) return null
+      return { crap_gated: scenario.crapGated ?? true,
+        mutation_gated: scenario.mutationGated ?? false, detail: 'stub' }
     }
     if (label.startsWith('mutation:')) {
       const attempt = Number(label.slice('mutation:'.length))
@@ -1059,9 +1058,10 @@ async function scenarioAI() {
   check('both findings reach the fix round', idsIn(verify1).length, 2)
 }
 
-// Scenario AJ -- a gated repo's Fix halt claims the CRAP gate was enforced.
+// Scenario AJ -- a gated repo's Fix halt reports the CRAP gate as green and
+// says a raw commit could not have bypassed it.
 async function scenarioAJ() {
-  console.log('\n== scenario AJ: a gated repo\'s Fix halt claims the CRAP gate was enforced')
+  console.log('\n== scenario AJ: a gated repo\'s Fix halt reports the CRAP gate as confirmed')
   const { result } = await run({
     args: { maxReviewRounds: 1 },
     crapGated: true,
@@ -1074,14 +1074,16 @@ async function scenarioAJ() {
     staleness: () => [],
   })
   check('halted at Fix', result.halted_at, 'Fix')
-  check('gates reports enforced',
-    result.gates?.detail, 'enforced by crap-commit-gate on every commit')
+  check('gates.green is true', result.gates?.green, true)
+  check('gates says a raw commit could not have bypassed it',
+    (result.gates?.detail ?? '').includes('could not have bypassed it'), true)
 }
 
 // Scenario AK -- the regression this ticket fixes: an ungated repo's Fix halt
-// must not claim the CRAP gate was enforced. Before this fix every halt
-// payload hardcoded "enforced by crap-commit-gate on every commit" regardless
-// of whether the repo had opted in at all.
+// must not claim the CRAP gate was enforced, and green must not be a hardcoded
+// literal. Before this fix every halt payload hardcoded
+// `{ green: true, detail: 'enforced by crap-commit-gate on every commit' }`
+// regardless of whether the repo had opted in at all.
 async function scenarioAK() {
   console.log('\n== scenario AK: an ungated repo\'s Fix halt does not claim the CRAP gate was enforced')
   const { result } = await run({
@@ -1096,8 +1098,7 @@ async function scenarioAK() {
     staleness: () => [],
   })
   check('halted at Fix', result.halted_at, 'Fix')
-  check('gates does not claim enforcement',
-    (result.gates?.detail ?? '').includes('enforced by crap-commit-gate on every commit'), false)
+  check('gates.green is false, not a hardcoded true', result.gates?.green, false)
   check('gates says CRAP gating was not opted into',
     (result.gates?.detail ?? '').includes('.crap-gated absent at the repo root'), true)
 }
@@ -1112,8 +1113,7 @@ async function scenarioAL() {
       detail: 'stub red', survivors: 1 }),
   }))
   check('halted at Mutation', result.halted_at, 'Mutation')
-  check('gates does not claim enforcement',
-    (result.gates?.detail ?? '').includes('enforced by crap-commit-gate on every commit'), false)
+  check('gates.green is false', result.gates?.green, false)
 }
 
 // Scenario AM -- and the green path's final result carries the same honesty:
@@ -1129,8 +1129,38 @@ async function scenarioAM() {
     staleness: () => [],
   })
   check('halted_at is absent', result.halted_at, undefined)
-  check('gates does not claim enforcement',
-    (result.gates?.detail ?? '').includes('enforced by crap-commit-gate on every commit'), false)
+  check('gates.green is false', result.gates?.green, false)
+}
+
+// Scenario AN -- the gate opt-in probe itself fails (returns nothing). The
+// CRAP marker must be reported as unconfirmed, not silently re-asserted as
+// enforced, and the run must log that the probe did not answer.
+async function scenarioAN() {
+  console.log('\n== scenario AN: a failed gate opt-in probe reports CRAP gating as unconfirmed')
+  const { result, captured } = await run({
+    args: { openPr: true },
+    gateProbeFails: true,
+    prResult: { opened: true, url: 'https://example.invalid/pr/23', note: 'stub ready' },
+    initialReview: { correctness: [], advocate: [] },
+    verify: () => undefined,
+    staleness: () => [],
+  })
+  check('gates.green is false when the probe returns nothing', result.gates?.green, false)
+  check('the run logs that the probe returned nothing',
+    captured.logs.some(l => l.includes('gate opt-in probe returned nothing')), true)
+}
+
+// Scenario AO -- one gate-opt-in probe answers both the CRAP and mutation
+// markers; the mutation phase must not ask the repo a second time.
+async function scenarioAO() {
+  console.log('\n== scenario AO: the gate opt-in probe is called exactly once for both markers')
+  const { result, captured } = await run(convergedWithSuspect({
+    crapGated: true,
+    mutationGated: false,
+  }))
+  check('gate:opt-in was called exactly once', callCount(captured, 'gate:opt-in'), 1)
+  check('mutation gate honoured the merged probe\'s answer',
+    (result.mutation?.detail ?? '').includes('skipped'), true)
 }
 
 for (const scenario of [scenarioA, scenarioB, scenarioG, scenarioC, scenarioD, scenarioE, scenarioH,
@@ -1139,7 +1169,8 @@ for (const scenario of [scenarioA, scenarioB, scenarioG, scenarioC, scenarioD, s
                         scenarioU, scenarioV, scenarioW, scenarioX, scenarioY,
                         scenarioZ, scenarioAA, scenarioAB, scenarioAC, scenarioAD,
                         scenarioAE, scenarioAF, scenarioAG, scenarioAH, scenarioAI,
-                        scenarioAJ, scenarioAK, scenarioAL, scenarioAM]) {
+                        scenarioAJ, scenarioAK, scenarioAL, scenarioAM, scenarioAN,
+                        scenarioAO]) {
   await scenario()
 }
 

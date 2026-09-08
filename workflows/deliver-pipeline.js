@@ -232,11 +232,15 @@ const BRANCH = {
   },
 }
 
-const GATED = {
+// Answers both the CRAP and mutation opt-in questions in one call: both
+// markers live at the same repo root, and no phase of this run writes there,
+// so timing cannot change either answer.
+const MARKERS = {
   type: 'object', additionalProperties: false,
-  required: ['gated', 'detail'],
+  required: ['crap_gated', 'mutation_gated', 'detail'],
   properties: {
-    gated: { type: 'boolean' },
+    crap_gated: { type: 'boolean' },
+    mutation_gated: { type: 'boolean' },
     detail: { type: 'string' },
   },
 }
@@ -873,38 +877,59 @@ if (sPlan.over()) {
 }
 
 // The Fix, Mutation and final-result payloads below all report a `gates`
-// field. crap-commit-gate.py's PreToolUse hook only blocks a raw `git commit`
-// when .crap-gated exists at the repo root, mirroring the mutation opt-in
-// probe further down; a repo with no marker has nothing forcing the
-// implementer to route commits through crap-commit.sh, so claiming the gate
-// was "enforced on every commit" there is not true, only requested.
+// field, and the Mutation phase further down needs the mutation opt-in
+// marker. One probe answers both here, before either marker is needed.
 //
-// Fail safe, same as the mutation probe: only a confirmed absence reports the
-// gate as unenforced. An unknown answer is reported as gated, which overstates
-// enforcement rather than dropping a claim the repo may actually be relying on.
-const crapGateProbe = await treeAgent(
-  `[touchstone: crap-gate opt-in]\n` +
-  `Report whether this repo opts into CRAP-gated commits, then STOP. Run no ` +
-  `tests, no gate tooling, and change nothing.\n` +
+// crap-commit-gate.py's PreToolUse hook only blocks a raw `git commit` when
+// .crap-gated exists at the repo root; crap-commit.sh itself runs the CRAP
+// and dead-code gates on every commit it makes regardless of that marker. So
+// the marker answers one question only -- could a raw commit have bypassed
+// the wrapper -- not whether the gates ran, and `gates` below reports both
+// separately rather than folding them into one "enforced" claim.
+//
+// The two markers take opposite fail-safe defaults on an unconfirmed answer.
+// Mutation: unknown counts as gated, which only costs an extra mutation run.
+// CRAP: unknown must NOT count as gated, because that would assert a raw
+// commit could not have bypassed the wrapper when nobody confirmed the
+// marker is there -- the false assertion this ticket exists to remove. So
+// crap_gated counts only a confirmed `true`; everything else, including a
+// probe that returned nothing, is reported as unconfirmed.
+const sGate = stage('gate')
+const gateProbe = await treeAgent(
+  `[touchstone: gate opt-in]\n` +
+  `Report whether this repo opts into CRAP-gated commits and into mutation ` +
+  `gating, then STOP. Run no tests, no gate tooling, and change nothing.\n` +
   `1. Find the repo root: dirname "$(git rev-parse --path-format=absolute ` +
   `--git-common-dir)".\n` +
-  `2. Test for a file named exactly .crap-gated at that root.\n` +
-  `3. Return gated=true if it is there, gated=false only if you confirmed it ` +
-  `is absent. If you could not determine either way, return gated=true and ` +
-  `explain why in detail: treating an unknown as ungated would overstate what ` +
-  `is actually enforced.\n` +
-  `Report the path you checked in detail.`,
-  { label: 'crap-gate:opt-in', schema: GATED, model: 'haiku', effort: 'low' })
-const crapGated = crapGateProbe?.gated !== false
-const gates = crapGated
-  ? { green: true, detail: 'enforced by crap-commit-gate on every commit' }
-  : { green: true, detail: 'not hook-enforced: repo has not opted into CRAP ' +
-      'gating (.crap-gated absent at the repo root); the implementer was only ' +
-      `asked to run crap-commit.sh, nothing blocked a plain git commit. ${crapGateProbe?.detail ?? ''}`.trim() }
-if (!crapGated) {
-  log(`CRAP gate not hook-enforced: no .crap-gated marker, so nothing blocked ` +
-      `a raw commit`)
+  `2. Test for a file named exactly .crap-gated at that root, and separately ` +
+  `for one named exactly .mutation-gated.\n` +
+  `3. Return crap_gated=true only if .crap-gated is there; crap_gated=false ` +
+  `otherwise, whether it is confirmed absent or you could not tell -- an ` +
+  `unconfirmed CRAP marker must never be reported as gated. Return ` +
+  `mutation_gated=true if .mutation-gated is there or you could not ` +
+  `determine either way, mutation_gated=false only if you confirmed it is ` +
+  `absent -- an unconfirmed mutation marker should still run the gate, which ` +
+  `only costs a run rather than dropping a real one.\n` +
+  `Report the paths you checked in detail.`,
+  { label: 'gate:opt-in', schema: MARKERS, model: 'haiku', effort: 'low' })
+sGate.close()
+
+const crapGated = gateProbe?.crap_gated === true
+const mutationGated = gateProbe?.mutation_gated !== false
+if (!gateProbe) {
+  log(`gate opt-in probe returned nothing; treating CRAP gating as ` +
+      `unconfirmed (reported as not hook-enforced) and mutation gating as ` +
+      `opted-in (safe default: costs an extra run rather than dropping a real gate)`)
 }
+
+const gates = crapGated
+  ? { green: true, detail: 'gates measured and green: crap-commit.sh runs ' +
+      'the dead-code and CRAP gates on every commit; separately, a raw git ' +
+      'commit could not have bypassed it (.crap-gated present at the repo root)' }
+  : { green: false, detail: 'gates not confirmed: the implementer was only ' +
+      'asked to run crap-commit.sh, and nothing hook-enforced stopped a raw ' +
+      'git commit from bypassing it (.crap-gated absent at the repo root, or ' +
+      `its presence could not be confirmed). ${gateProbe?.detail ?? ''}`.trim() }
 
 phase('Implement')
 const sImpl = stage('implement')
@@ -1440,27 +1465,12 @@ phase('Mutation')
 const sMut = stage('mutation')
 let mutation = { green: false, detail: 'not run' }
 
-// Mutation gating is opt-in, on the same marker mutation-pr-gate.py reads. A
-// repo with no marker has nothing enforcing the gate and may have none of the
-// tooling installed, so a red result there is unclearable by any amount of work.
-//
-// Fail safe: only a confirmed absence skips it. An unknown answer counts as
-// gated, costing a mutation run rather than dropping a gate the repo relies on.
-const gateProbe = await treeAgent(
-  `[touchstone: mutation opt-in]\n` +
-  `Report whether this repo opts into mutation gating, then STOP. Run no ` +
-  `tests, no mutation tooling, and change nothing.\n` +
-  `1. Find the repo root: dirname "$(git rev-parse --path-format=absolute ` +
-  `--git-common-dir)".\n` +
-  `2. Test for a file named exactly .mutation-gated at that root.\n` +
-  `3. Return gated=true if it is there, gated=false only if you confirmed it ` +
-  `is absent. If you could not determine either way, return gated=true and ` +
-  `explain why in detail: treating an unknown as ungated would drop a real ` +
-  `gate.\n` +
-  `Report the path you checked in detail.`,
-  { label: 'mutation:opt-in', schema: GATED, model: 'haiku', effort: 'low' })
-
-const mutationGated = gateProbe?.gated !== false
+// Mutation gating is opt-in, on the same marker mutation-pr-gate.py reads.
+// mutationGated came out of the merged gate-opt-in probe before Implement;
+// nothing between there and here writes to the repo root, so the answer is
+// still current. A repo with no marker has nothing enforcing the gate and may
+// have none of the tooling installed, so a red result there is unclearable by
+// any amount of work.
 if (!mutationGated) {
   mutation = {
     green: true,
@@ -1472,8 +1482,6 @@ if (!mutationGated) {
         ? `(the CRAP and dead-code gates still ran on every commit)`
         : `(the CRAP and dead-code gates are not hook-enforced here either, ` +
           `per the earlier probe)`))
-} else if (!gateProbe) {
-  log('mutation opt-in probe returned nothing; treating the repo as gated')
 }
 // needs_user_run breaks the loop instead of retrying: a run that cannot fit the
 // Bash ceiling returns the same answer every attempt, and each one costs the
