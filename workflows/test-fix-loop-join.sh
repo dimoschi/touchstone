@@ -1161,6 +1161,53 @@ async function scenarioAO() {
     (result.mutation?.detail ?? '').includes('skipped'), true)
 }
 
+// Scenarios AP to AR -- the branch marker. It is the run's only record of
+// which tracker the work came from, and the branch agent used to classify the
+// ticket itself: GitHub issue 278 came back as feat/jira-278-...
+async function scenarioAP() {
+  console.log('\n== scenario AP: a bare number is handed to the branch agent as gh-')
+  const { captured } = await run({
+    args: { ticket: '278' },
+    initialReview: { correctness: [], advocate: [] },
+    verify: () => undefined,
+    staleness: () => [],
+  })
+  const p = captured.calls.find(c => c.label === 'branch')?.prompt ?? ''
+  check('the branch name is given with the gh- marker resolved',
+    p.includes('feat/gh-278-<slug>'), true)
+  check('the worktree path carries the same marker',
+    p.includes('.claude/worktrees/gh-278-<slug>'), true)
+  check('the agent is told not to swap the marker',
+    p.includes('do not re-derive it'), true)
+  check('it is no longer asked to classify the ticket',
+    p.includes('when the ticket is a'), false)
+}
+
+async function scenarioAQ() {
+  console.log('\n== scenario AQ: a Jira key is handed over as jira-, uppercased')
+  const { captured } = await run({
+    args: { ticket: 'proj-4821', branchType: 'fix' },
+    initialReview: { correctness: [], advocate: [] },
+    verify: () => undefined,
+    staleness: () => [],
+  })
+  const p = captured.calls.find(c => c.label === 'branch')?.prompt ?? ''
+  check('the key is canonicalised to upper case',
+    p.includes('fix/jira-PROJ-4821-<slug>'), true)
+}
+
+async function scenarioAR() {
+  console.log('\n== scenario AR: a ticket that is neither form refuses before any agent runs')
+  let message = ''
+  try {
+    await run({ args: { ticket: 'retry-policy' } })
+  } catch (e) {
+    message = e?.message ?? String(e)
+  }
+  check('it throws rather than guessing a marker',
+    message.includes('neither a GitHub issue number'), true)
+}
+
 for (const scenario of [scenarioA, scenarioB, scenarioG, scenarioC, scenarioD, scenarioE, scenarioH,
                         scenarioI, scenarioJ, scenarioK, scenarioL, scenarioM, scenarioN,
                         scenarioO, scenarioP, scenarioQ, scenarioR, scenarioS, scenarioT,
@@ -1168,7 +1215,8 @@ for (const scenario of [scenarioA, scenarioB, scenarioG, scenarioC, scenarioD, s
                         scenarioZ, scenarioAA, scenarioAB, scenarioAC, scenarioAD,
                         scenarioAE, scenarioAF, scenarioAG, scenarioAH, scenarioAI,
                         scenarioAJ, scenarioAK, scenarioAL, scenarioAM, scenarioAN,
-                        scenarioAO]) {
+                        scenarioAO,
+                        scenarioAP, scenarioAQ, scenarioAR]) {
   await scenario()
 }
 
