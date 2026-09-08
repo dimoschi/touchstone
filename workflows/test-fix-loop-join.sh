@@ -179,7 +179,8 @@ function makeAgent(scenario, captured) {
     }
     if (label === 'implementer') {
       return { summary: 'stub implementation', files_changed: ['a.js', 'b.js'],
-        commit_range: COMMIT_RANGE, insertions: 20, scored: scenario.implScored ?? true }
+        commit_range: COMMIT_RANGE, insertions: 20, scored: scenario.implScored ?? true,
+        ...(scenario.implGateNote ? { gate_note: scenario.implGateNote } : {}) }
     }
     if (label === 'draft-pr') {
       return scenario.draftPr ?? { opened: false, detail: 'no draft in this test' }
@@ -1197,6 +1198,90 @@ async function scenarioAT() {
   check('gates.measured is nothing scorable', result.gates?.measured, 'nothing scorable')
 }
 
+// Scenario AU -- gates.detail must not claim "gates measured" when nothing
+// was scorable: the sentence has to vary with the measured field it sits
+// next to, not stay byte-identical to the scored case.
+async function scenarioAU() {
+  console.log('\n== scenario AU: gates.detail does not claim "measured" when nothing was scorable')
+  const scored = await run({
+    initialReview: { correctness: [], advocate: [] },
+    verify: () => undefined,
+    staleness: () => [],
+  })
+  const nothingScorable = await run({
+    implScored: false,
+    initialReview: { correctness: [], advocate: [] },
+    verify: () => undefined,
+    staleness: () => [],
+  })
+  check('the nothing-scorable detail does not open with "gates measured"',
+    (nothingScorable.result.gates?.detail ?? '').startsWith('gates measured'), false)
+  check('the two details are not byte-identical',
+    nothingScorable.result.gates?.detail !== scored.result.gates?.detail, true)
+}
+
+// Scenario AV -- a gate_note from a phase that scored nothing must not be
+// carried forward once a later phase reports scored=true: pairing an
+// implementer's "nothing to score" message with an overall measured='scored'
+// claims the wrong phase's evidence for the aggregate.
+async function scenarioAV() {
+  console.log('\n== scenario AV: an unscored phase\'s gate_note is dropped once a later phase scores')
+  const { result } = await run({
+    args: { maxReviewRounds: 1 },
+    implScored: false,
+    implGateNote: 'no staged source files in supported languages (go, php, python)',
+    fixScored: (round) => round === 1,
+    initialReview: {
+      correctness: [{ title: 'Unrelated leak', file: 'src/pool.js',
+        claim: 'connection is never released', evidence: 'pool.js:40' }],
+      advocate: [],
+    },
+    verify: () => true,
+    staleness: () => [],
+  })
+  check('gates.measured is scored', result.gates?.measured, 'scored')
+  check('the unscored implementer\'s gate_note does not leak into detail',
+    (result.gates?.detail ?? '').includes('no staged source files'), false)
+}
+
+// Scenario AW -- the aggregate rule extended past the fix loop: the mutation
+// phase's own commit is the only thing that scored in the whole run, and it
+// must still make the green-path result's measured claim 'scored'.
+async function scenarioAW() {
+  console.log('\n== scenario AW: a scoring mutation commit makes the green-path result measured')
+  const { result } = await run({
+    implScored: false,
+    initialReview: { correctness: [], advocate: [] },
+    verify: () => undefined,
+    staleness: () => [],
+    mutationGated: true,
+    mutationResult: () => ({ green: true, head_sha: 'mut0000000000000000000000000000000000003',
+      detail: 'stub green', scored: true }),
+  })
+  check('halted_at is absent', result.halted_at, undefined)
+  check('gates.measured reflects the mutation phase\'s own scored commit',
+    result.gates?.measured, 'scored')
+}
+
+// Scenario AX -- the same commit, but the attempt it came from still ended
+// red: a losing mutation attempt can commit a real fix before failing, and
+// the Mutation halt must not discard that just because the gate stayed red.
+async function scenarioAX() {
+  console.log('\n== scenario AX: the Mutation halt reflects a scored commit from a losing attempt')
+  const { result } = await run({
+    implScored: false,
+    initialReview: { correctness: [], advocate: [] },
+    verify: () => undefined,
+    staleness: () => [],
+    mutationGated: true,
+    mutationResult: () => ({ green: false, head_sha: 'mut0000000000000000000000000000000000004',
+      detail: 'stub red', survivors: 1, scored: true }),
+  })
+  check('halted at Mutation', result.halted_at, 'Mutation')
+  check('gates.measured reflects the losing attempt\'s own scored commit',
+    result.gates?.measured, 'scored')
+}
+
 // Scenario AO -- one gate-opt-in probe answers both the CRAP and mutation
 // markers; the mutation phase must not ask the repo a second time.
 async function scenarioAO() {
@@ -1264,7 +1349,8 @@ for (const scenario of [scenarioA, scenarioB, scenarioG, scenarioC, scenarioD, s
                         scenarioZ, scenarioAA, scenarioAB, scenarioAC, scenarioAD,
                         scenarioAE, scenarioAF, scenarioAG, scenarioAH, scenarioAI,
                         scenarioAJ, scenarioAK, scenarioAL, scenarioAM, scenarioAN,
-                        scenarioAO, scenarioAS, scenarioAT,
+                        scenarioAO, scenarioAS, scenarioAT, scenarioAU, scenarioAV,
+                        scenarioAW, scenarioAX,
                         scenarioAP, scenarioAQ, scenarioAR]) {
   await scenario()
 }

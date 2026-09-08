@@ -308,6 +308,7 @@ const GATE = {
     green: { type: 'boolean' }, head_sha: { type: 'string' },
     detail: { type: 'string' },
     needs_user_run: { type: 'boolean' },
+    scored: { type: 'boolean' }, gate_note: { type: 'string' },
   },
 }
 const FINDINGS = {
@@ -989,7 +990,10 @@ if (sImpl.over()) {
 // does. Folded with OR, never overwritten, so one scored=true anywhere makes
 // the whole run's `measured` claim 'scored'.
 let scored = impl.scored === true
-let gateNote = impl.gate_note ?? ''
+// Only ever set from a phase that itself reported scored=true: a note from a
+// phase that scored nothing (crap-check.sh's "no staged source files...") is
+// not evidence for a claim of measured='scored' made by a later phase.
+let gateNote = scored ? (impl.gate_note ?? '') : ''
 
 // A draft PR, opened as soon as there is a commit to hang it on.
 //
@@ -1340,8 +1344,10 @@ while (open.length && round < MAX_REVIEW_ROUNDS && !outOfBudget() && !sFix.over(
     `Findings:\n` +
     open.map(f => `- ${f.title} (${f.file}): ${f.claim}`).join('\n'),
     { label: `fix:${round}`, schema: FIXED, model: 'sonnet', effort: effortFor.implement })
-  if (fixed?.scored === true) scored = true
-  if (fixed?.gate_note) gateNote = fixed.gate_note
+  if (fixed?.scored === true) {
+    scored = true
+    if (fixed?.gate_note) gateNote = fixed.gate_note
+  }
   // Verification and the tail review both read the fix's finished commits and
   // answer independent questions of them -- "are the named findings closed?"
   // and "did the fix break something new?" -- so they run together. Sequenced,
@@ -1427,23 +1433,28 @@ if (open.length && !outOfBudget()) {
 }
 sFix.close()
 
-// Assembled here rather than earlier: `measured` needs the implementer's and
-// every fix round's own scored report, so it cannot be known before the loop
-// above has run. bypass_blocked is the earlier probe's crapGated answer,
-// unrelated to whether anything scored.
-const gates = {
-  measured: scored ? 'scored' : 'nothing scorable',
-  bypass_blocked: crapGated,
-  detail: (crapGated
-    ? 'gates measured: crap-commit.sh runs the dead-code and CRAP gates on ' +
-      'every commit; separately, a raw git commit could not have bypassed ' +
-      'it (.crap-gated present at the repo root)'
-    : 'gates measured: crap-commit.sh runs the dead-code and CRAP gates on ' +
-      'every commit regardless of the marker; separately, nothing ' +
-      'hook-enforced stopped a raw git commit from bypassing it ' +
-      '(.crap-gated absent at the repo root, or its presence could not be ' +
-      `confirmed). ${gateProbe?.detail ?? ''}`
-  ).trim() + (gateNote ? ` ${gateNote}` : ''),
+// A function, not a value computed once here: `scored` and `gateNote` keep
+// folding in later phases' own reports (the mutation loop below can still add
+// to them), so each halt and the final result call this after whatever has
+// scored by that point rather than freezing it at the end of the fix loop.
+// bypass_blocked is the earlier probe's crapGated answer, unrelated to
+// whether anything scored.
+function gatesPayload() {
+  const scoredClause = scored
+    ? 'and scored at least one function in this range'
+    : 'but nothing in this range was scorable source (go, php, python)'
+  const bypassClause = crapGated
+    ? 'a raw git commit could not have bypassed it (.crap-gated present at the repo root)'
+    : 'nothing hook-enforced stopped a raw git commit from bypassing it ' +
+      '(.crap-gated absent at the repo root, or its presence could not be confirmed)'
+  return {
+    measured: scored ? 'scored' : 'nothing scorable',
+    bypass_blocked: crapGated,
+    detail: (`${scored ? 'gates measured' : 'gates ran, nothing scorable'}: ` +
+      `crap-commit.sh runs the dead-code and CRAP gates on every commit ` +
+      `${scoredClause}; separately, ${bypassClause}. ${gateProbe?.detail ?? ''}`
+    ).trim() + (gateNote ? ` ${gateNote}` : ''),
+  }
 }
 
 if (open.length) {
@@ -1485,7 +1496,7 @@ if (open.length) {
   const staleCount = reported.filter(f => f.code_changed_since_recorded).length
 
   return await halted('Fix', {
-    plan: plan.plan, implemented: impl.summary, gates,
+    plan: plan.plan, implemented: impl.summary, gates: gatesPayload(),
     unresolved_findings: reported, fix_rounds: round, stopped_because: fixStopReason(),
     regression_suspects: regressionSuspects,
     // Report the round count that actually ran and why the loop ended. This
@@ -1589,14 +1600,23 @@ for (let attempt = 1; attempt <= MAX_GATE_ATTEMPTS && !mutation.green
     `HEAD after your last commit, or of the unchanged HEAD if you committed ` +
     `nothing. ` +
     `Anything you commit is reviewed before the PR opens, and that review is ` +
-    `keyed off this SHA.`,
+    `keyed off this SHA.\n` +
+    `Return scored=true if crap-commit.sh printed that it scored a commit you ` +
+    `made this attempt, scored=false if you committed nothing or it printed ` +
+    `nothing to score. Base this on what it printed, never on whether ` +
+    `.crap-gated exists and never on your own judgement of the change. If it ` +
+    `printed its own gate message, copy it verbatim into gate_note.`,
     { label: `mutation:${attempt}`, schema: GATE, model: 'sonnet', effort: 'high' }) ?? mutation
+  if (mutation?.scored === true) {
+    scored = true
+    if (mutation?.gate_note) gateNote = mutation.gate_note
+  }
 }
 sMut.close()
 
 if (!mutation.green) {
   return await halted('Mutation', {
-    plan: plan.plan, implemented: impl.summary, gates,
+    plan: plan.plan, implemented: impl.summary, gates: gatesPayload(),
     mutation, unresolved_findings: open, regression_suspects: regressionSuspects,
     note: mutation.needs_user_run
       ? `The mutation run does not fit the 600000 ms Bash ceiling, which for ` +
@@ -1738,7 +1758,7 @@ const result = {
   plan: plan.plan,
   stage_spend: stageSpend,
   implemented: impl.summary,
-  gates,
+  gates: gatesPayload(),
   mutation,
   reviewers: reviewerCount,
   regression_suspects: regressionSuspects,
