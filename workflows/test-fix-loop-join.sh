@@ -239,8 +239,10 @@ function makeAgent(scenario, captured) {
       }
       return { verdicts }
     }
-    if (label === 'mutation:opt-in') {
-      return { gated: scenario.mutationGated ?? false, detail: 'stub' }
+    if (label === 'gate:opt-in') {
+      if (scenario.gateProbeFails) return null
+      return { crap_gated: scenario.crapGated ?? true,
+        mutation_gated: scenario.mutationGated ?? false, detail: 'stub' }
     }
     if (label.startsWith('mutation:')) {
       const attempt = Number(label.slice('mutation:'.length))
@@ -1056,12 +1058,117 @@ async function scenarioAI() {
   check('both findings reach the fix round', idsIn(verify1).length, 2)
 }
 
+// Scenario AJ -- a gated repo's Fix halt reports the CRAP gate as green and
+// says a raw commit could not have bypassed it.
+async function scenarioAJ() {
+  console.log('\n== scenario AJ: a gated repo\'s Fix halt reports the CRAP gate as confirmed')
+  const { result } = await run({
+    args: { maxReviewRounds: 1 },
+    crapGated: true,
+    initialReview: {
+      correctness: [{ title: 'Unrelated leak', file: 'src/pool.js',
+        claim: 'connection is never released', evidence: 'pool.js:40' }],
+      advocate: [],
+    },
+    verify: () => false,
+    staleness: () => [],
+  })
+  check('halted at Fix', result.halted_at, 'Fix')
+  check('gates.green is true', result.gates?.green, true)
+  check('gates says a raw commit could not have bypassed it',
+    (result.gates?.detail ?? '').includes('could not have bypassed it'), true)
+}
+
+// Scenario AK -- an ungated repo's Fix halt still reports the gates as
+// measured and green; only the bypass claim in `detail` changes with the marker.
+async function scenarioAK() {
+  console.log('\n== scenario AK: an ungated repo\'s Fix halt still reports the gates as measured and green')
+  const { result } = await run({
+    args: { maxReviewRounds: 1 },
+    crapGated: false,
+    initialReview: {
+      correctness: [{ title: 'Unrelated leak', file: 'src/pool.js',
+        claim: 'connection is never released', evidence: 'pool.js:40' }],
+      advocate: [],
+    },
+    verify: () => false,
+    staleness: () => [],
+  })
+  check('halted at Fix', result.halted_at, 'Fix')
+  check('gates.green is true, the measurement is not conflated with the bypass question',
+    result.gates?.green, true)
+  check('gates says a raw commit was not hook-blocked from bypassing it',
+    (result.gates?.detail ?? '').includes('.crap-gated absent at the repo root'), true)
+}
+
+// Scenario AL -- the same distinction, one halt later: the Mutation halt must
+// also keep reporting the gates as measured and green in an ungated repo.
+async function scenarioAL() {
+  console.log('\n== scenario AL: an ungated repo\'s Mutation halt still reports the gates as measured and green')
+  const { result } = await run(convergedWithSuspect({
+    crapGated: false,
+    mutationResult: () => ({ green: false, head_sha: 'mut0000000000000000000000000000000000001',
+      detail: 'stub red', survivors: 1 }),
+  }))
+  check('halted at Mutation', result.halted_at, 'Mutation')
+  check('gates.green is true', result.gates?.green, true)
+}
+
+// Scenario AM -- and the green path's final result carries the same
+// distinction: an ungated repo's result still reports the gates as measured
+// and green.
+async function scenarioAM() {
+  console.log('\n== scenario AM: an ungated repo\'s green-path result still reports the gates as measured and green')
+  const { result } = await run({
+    args: { openPr: true },
+    crapGated: false,
+    prResult: { opened: true, url: 'https://example.invalid/pr/23', note: 'stub ready' },
+    initialReview: { correctness: [], advocate: [] },
+    verify: () => undefined,
+    staleness: () => [],
+  })
+  check('halted_at is absent', result.halted_at, undefined)
+  check('gates.green is true', result.gates?.green, true)
+}
+
+// Scenario AN -- probe returns nothing: the bypass question is unconfirmed,
+// but the gates are still measured and green, and the run logs the failure.
+async function scenarioAN() {
+  console.log('\n== scenario AN: a failed gate opt-in probe still reports the gates as measured and green')
+  const { result, captured } = await run({
+    args: { openPr: true },
+    gateProbeFails: true,
+    prResult: { opened: true, url: 'https://example.invalid/pr/23', note: 'stub ready' },
+    initialReview: { correctness: [], advocate: [] },
+    verify: () => undefined,
+    staleness: () => [],
+  })
+  check('gates.green is true even when the probe returns nothing', result.gates?.green, true)
+  check('the run logs that the probe returned nothing',
+    captured.logs.some(l => l.includes('gate opt-in probe returned nothing')), true)
+}
+
+// Scenario AO -- one gate-opt-in probe answers both the CRAP and mutation
+// markers; the mutation phase must not ask the repo a second time.
+async function scenarioAO() {
+  console.log('\n== scenario AO: the gate opt-in probe is called exactly once for both markers')
+  const { result, captured } = await run(convergedWithSuspect({
+    crapGated: true,
+    mutationGated: false,
+  }))
+  check('gate:opt-in was called exactly once', callCount(captured, 'gate:opt-in'), 1)
+  check('mutation gate honoured the merged probe\'s answer',
+    (result.mutation?.detail ?? '').includes('skipped'), true)
+}
+
 for (const scenario of [scenarioA, scenarioB, scenarioG, scenarioC, scenarioD, scenarioE, scenarioH,
                         scenarioI, scenarioJ, scenarioK, scenarioL, scenarioM, scenarioN,
                         scenarioO, scenarioP, scenarioQ, scenarioR, scenarioS, scenarioT,
                         scenarioU, scenarioV, scenarioW, scenarioX, scenarioY,
                         scenarioZ, scenarioAA, scenarioAB, scenarioAC, scenarioAD,
-                        scenarioAE, scenarioAF, scenarioAG, scenarioAH, scenarioAI]) {
+                        scenarioAE, scenarioAF, scenarioAG, scenarioAH, scenarioAI,
+                        scenarioAJ, scenarioAK, scenarioAL, scenarioAM, scenarioAN,
+                        scenarioAO]) {
   await scenario()
 }
 
