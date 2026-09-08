@@ -34,6 +34,23 @@ if (!ticket) {
     'Every task must trace to a Jira ticket or GH issue. Do not infer one from ' +
     'the task text; supply it explicitly or do the work outside this workflow.')
 }
+// Decided here, never by the branch agent. The two forms are mechanically
+// distinct -- 216 against PROJ-4821 -- but asked to classify one, a model put
+// GitHub issue 278 on a feat/jira-278-... branch. The marker is the run's only
+// ticket link, so that files it under a tracker the ticket is not in.
+const markerFor = (ref) => {
+  const t = String(ref).trim().replace(/^#/, '')
+  if (/^\d+$/.test(t)) return `gh-${t}`
+  if (/^[A-Za-z][A-Za-z0-9]*-\d+$/.test(t)) return `jira-${t.toUpperCase()}`
+  return null
+}
+const ticketMarker = markerFor(ticket)
+if (!ticketMarker) {
+  throw new Error(
+    `deliver-pipeline: ticket "${ticket}" is neither a GitHub issue number ` +
+    `(216, #216) nor a Jira key (PROJ-4821). Refusing rather than guessing: ` +
+    `the branch marker is the only record of which tracker the work came from.`)
+}
 // Phase recording goes to agent-eval, a separate optional tool. Default on so a
 // machine that has it keeps its ground truth without opting in every run; the
 // prompt tells each phase to skip a missing command rather than halt, so this
@@ -535,17 +552,15 @@ const wt = args?.existingBranch
     : `4. Find this repo's base branch: read the remote HEAD ` +
       `(git symbolic-ref --short refs/remotes/origin/HEAD), falling back to ` +
       `whichever of main or master exists. Do not assume main.\n`) +
-  `5. Name the branch exactly: <type>/jira-<KEY>-<slug> when the ticket is a ` +
-  `Jira key such as PROJ-4821, or <type>/gh-<NUMBER>-<slug> when it is a ` +
-  `GitHub issue number such as 216 or #216. The literal jira- or gh- marker ` +
-  `is required. Derive <slug> from the task: lowercase, hyphen-separated, at ` +
-  `most 6 words, no trailing hyphen. If the ticket is malformed and you cannot ` +
-  `classify it as either, return created=false and say so. Never cut an ` +
-  `unmarked branch: it would be reported untracked with no way to recover the ` +
-  `link.\n` +
-  `6. The worktree path is <repo-root>/.claude/worktrees/<slug>, where <slug> ` +
-  `is the branch name with its <type>/ prefix stripped (for example ` +
-  `feat/jira-PROJ-4821-session-reset gives jira-PROJ-4821-session-reset).\n` +
+  `5. Name the branch exactly ` +
+  `${args?.branchType ?? 'feat'}/${ticketMarker}-<slug>. The prefix is given ` +
+  `in full, already resolved against the ticket: use it character for ` +
+  `character and do not re-derive it, abbreviate it, or swap jira- for gh- or ` +
+  `back. Supply only <slug>, from the task: lowercase, hyphen-separated, at ` +
+  `most 6 words, no trailing hyphen.\n` +
+  `6. The worktree path is ` +
+  `<repo-root>/.claude/worktrees/${ticketMarker}-<slug>, the branch name with ` +
+  `its ${args?.branchType ?? 'feat'}/ prefix stripped.\n` +
   `7. Run git worktree list --porcelain and look for a record whose "branch ` +
   `refs/heads/<name>" line matches the branch name from step 5. If one ` +
   `exists, the branch is already checked out somewhere; git refuses to check ` +
