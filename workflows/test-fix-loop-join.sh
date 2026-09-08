@@ -179,7 +179,7 @@ function makeAgent(scenario, captured) {
     }
     if (label === 'implementer') {
       return { summary: 'stub implementation', files_changed: ['a.js', 'b.js'],
-        commit_range: COMMIT_RANGE, insertions: 20 }
+        commit_range: COMMIT_RANGE, insertions: 20, scored: scenario.implScored ?? true }
     }
     if (label === 'draft-pr') {
       return scenario.draftPr ?? { opened: false, detail: 'no draft in this test' }
@@ -214,7 +214,9 @@ function makeAgent(scenario, captured) {
     if (label.startsWith('fix:')) {
       const round = Number(label.slice('fix:'.length))
       const head = scenario.fixHead ? scenario.fixHead(round) : REVIEWED_THROUGH
-      return { head_sha: head, note: `stub fix round ${round}` }
+      const scored = scenario.fixScored ? scenario.fixScored(round) : false
+      return { head_sha: head, note: `stub fix round ${round}`, scored,
+        ...(scenario.gateNote ? { gate_note: scenario.gateNote } : {}) }
     }
     if (label.startsWith('verify:')) {
       // The late pass is labelled verify:final, not by round: it runs after the
@@ -1065,8 +1067,8 @@ async function scenarioAI() {
   check('both findings reach the fix round', idsIn(verify1).length, 2)
 }
 
-// Scenario AJ -- a gated repo's Fix halt reports the CRAP gate as green and
-// says a raw commit could not have bypassed it.
+// Scenario AJ -- a gated repo's Fix halt reports the CRAP gate as confirmed:
+// a raw commit could not have bypassed it.
 async function scenarioAJ() {
   console.log('\n== scenario AJ: a gated repo\'s Fix halt reports the CRAP gate as confirmed')
   const { result } = await run({
@@ -1081,15 +1083,16 @@ async function scenarioAJ() {
     staleness: () => [],
   })
   check('halted at Fix', result.halted_at, 'Fix')
-  check('gates.green is true', result.gates?.green, true)
+  check('gates.measured is scored', result.gates?.measured, 'scored')
+  check('gates.bypass_blocked is true', result.gates?.bypass_blocked, true)
   check('gates says a raw commit could not have bypassed it',
     (result.gates?.detail ?? '').includes('could not have bypassed it'), true)
 }
 
-// Scenario AK -- an ungated repo's Fix halt still reports the gates as
-// measured and green; only the bypass claim in `detail` changes with the marker.
+// Scenario AK -- an ungated repo's Fix halt still reports what was measured;
+// only the bypass claim in `detail` and `bypass_blocked` change with the marker.
 async function scenarioAK() {
-  console.log('\n== scenario AK: an ungated repo\'s Fix halt still reports the gates as measured and green')
+  console.log('\n== scenario AK: an ungated repo\'s Fix halt reports bypass_blocked=false')
   const { result } = await run({
     args: { maxReviewRounds: 1 },
     crapGated: false,
@@ -1102,30 +1105,31 @@ async function scenarioAK() {
     staleness: () => [],
   })
   check('halted at Fix', result.halted_at, 'Fix')
-  check('gates.green is true, the measurement is not conflated with the bypass question',
-    result.gates?.green, true)
+  check('gates.measured is scored, the measurement is not conflated with the bypass question',
+    result.gates?.measured, 'scored')
+  check('gates.bypass_blocked is false', result.gates?.bypass_blocked, false)
   check('gates says a raw commit was not hook-blocked from bypassing it',
     (result.gates?.detail ?? '').includes('.crap-gated absent at the repo root'), true)
 }
 
 // Scenario AL -- the same distinction, one halt later: the Mutation halt must
-// also keep reporting the gates as measured and green in an ungated repo.
+// also keep reporting bypass_blocked=false in an ungated repo.
 async function scenarioAL() {
-  console.log('\n== scenario AL: an ungated repo\'s Mutation halt still reports the gates as measured and green')
+  console.log('\n== scenario AL: an ungated repo\'s Mutation halt reports bypass_blocked=false')
   const { result } = await run(convergedWithSuspect({
     crapGated: false,
     mutationResult: () => ({ green: false, head_sha: 'mut0000000000000000000000000000000000001',
       detail: 'stub red', survivors: 1 }),
   }))
   check('halted at Mutation', result.halted_at, 'Mutation')
-  check('gates.green is true', result.gates?.green, true)
+  check('gates.bypass_blocked is false', result.gates?.bypass_blocked, false)
+  check('gates.measured is scored', result.gates?.measured, 'scored')
 }
 
 // Scenario AM -- and the green path's final result carries the same
-// distinction: an ungated repo's result still reports the gates as measured
-// and green.
+// distinction: an ungated repo's result still reports bypass_blocked=false.
 async function scenarioAM() {
-  console.log('\n== scenario AM: an ungated repo\'s green-path result still reports the gates as measured and green')
+  console.log('\n== scenario AM: an ungated repo\'s green-path result reports bypass_blocked=false')
   const { result } = await run({
     args: { openPr: true },
     crapGated: false,
@@ -1135,13 +1139,15 @@ async function scenarioAM() {
     staleness: () => [],
   })
   check('halted_at is absent', result.halted_at, undefined)
-  check('gates.green is true', result.gates?.green, true)
+  check('gates.measured is scored', result.gates?.measured, 'scored')
+  check('gates.bypass_blocked is false', result.gates?.bypass_blocked, false)
 }
 
-// Scenario AN -- probe returns nothing: the bypass question is unconfirmed,
-// but the gates are still measured and green, and the run logs the failure.
+// Scenario AN -- probe returns nothing: the bypass question is unconfirmed, so
+// bypass_blocked stays false (never asserted true when nobody confirmed the
+// marker), and the run logs the failure.
 async function scenarioAN() {
-  console.log('\n== scenario AN: a failed gate opt-in probe still reports the gates as measured and green')
+  console.log('\n== scenario AN: a failed gate opt-in probe reports bypass_blocked=false')
   const { result, captured } = await run({
     args: { openPr: true },
     gateProbeFails: true,
@@ -1150,9 +1156,45 @@ async function scenarioAN() {
     verify: () => undefined,
     staleness: () => [],
   })
-  check('gates.green is true even when the probe returns nothing', result.gates?.green, true)
+  check('gates.bypass_blocked is false when the probe returns nothing',
+    result.gates?.bypass_blocked, false)
+  check('gates.measured is scored', result.gates?.measured, 'scored')
   check('the run logs that the probe returned nothing',
     captured.logs.some(l => l.includes('gate opt-in probe returned nothing')), true)
+}
+
+// Scenario AS -- the aggregate rule this ticket exists for: the implementer
+// scored nothing, but a fix round did, so the run's overall `measured` claim
+// is still 'scored'.
+async function scenarioAS() {
+  console.log('\n== scenario AS: a fix round that scores makes the run measured, even if the implementer did not')
+  const { result } = await run({
+    args: { maxReviewRounds: 1 },
+    implScored: false,
+    fixScored: (round) => round === 1,
+    initialReview: {
+      correctness: [{ title: 'Unrelated leak', file: 'src/pool.js',
+        claim: 'connection is never released', evidence: 'pool.js:40' }],
+      advocate: [],
+    },
+    verify: () => true,
+    staleness: () => [],
+  })
+  check('gates.measured is scored', result.gates?.measured, 'scored')
+}
+
+// Scenario AT -- nothing scorable: the implementer reported scored=false and
+// no fix round ran, so no committing phase ever scored anything.
+async function scenarioAT() {
+  console.log('\n== scenario AT: nothing scorable when no committing phase scored anything')
+  const { result } = await run({
+    implScored: false,
+    initialReview: { correctness: [], advocate: [] },
+    verify: () => undefined,
+    staleness: () => [],
+  })
+  check('halted_at is absent', result.halted_at, undefined)
+  check('gates.measured is nothing scorable', result.gates?.measured, 'nothing scorable')
 }
 
 // Scenario AO -- one gate-opt-in probe answers both the CRAP and mutation
@@ -1222,7 +1264,7 @@ for (const scenario of [scenarioA, scenarioB, scenarioG, scenarioC, scenarioD, s
                         scenarioZ, scenarioAA, scenarioAB, scenarioAC, scenarioAD,
                         scenarioAE, scenarioAF, scenarioAG, scenarioAH, scenarioAI,
                         scenarioAJ, scenarioAK, scenarioAL, scenarioAM, scenarioAN,
-                        scenarioAO,
+                        scenarioAO, scenarioAS, scenarioAT,
                         scenarioAP, scenarioAQ, scenarioAR]) {
   await scenario()
 }

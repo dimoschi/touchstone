@@ -288,12 +288,14 @@ const TRIAGE = {
 // is a fact rather than the implementer's account of itself.
 const IMPL = {
   type: 'object', additionalProperties: false,
-  required: ['summary', 'files_changed', 'commit_range', 'insertions'],
+  required: ['summary', 'files_changed', 'commit_range', 'insertions', 'scored'],
   properties: {
     summary: { type: 'string' },
     files_changed: { type: 'array', items: { type: 'string' } },
     commit_range: { type: 'string' },
     insertions: { type: 'integer' },
+    scored: { type: 'boolean' },
+    gate_note: { type: 'string' },
   },
 }
 // head_sha is required, not optional: it is how the script learns what this
@@ -368,8 +370,11 @@ const VERDICTS = {
 // A fix round is a code change like any other, so the script has to know where
 // it landed to hand the next reviewer a range.
 const FIXED = {
-  type: 'object', additionalProperties: false, required: ['head_sha', 'note'],
-  properties: { head_sha: { type: 'string' }, note: { type: 'string' } },
+  type: 'object', additionalProperties: false, required: ['head_sha', 'note', 'scored'],
+  properties: {
+    head_sha: { type: 'string' }, note: { type: 'string' },
+    scored: { type: 'boolean' }, gate_note: { type: 'string' },
+  },
 }
 const STALENESS = {
   type: 'object', additionalProperties: false, required: ['results'],
@@ -937,16 +942,6 @@ if (!gateProbe) {
       `opted-in (safe default: costs an extra run rather than dropping a real gate)`)
 }
 
-const gates = crapGated
-  ? { green: true, detail: 'gates measured and green: crap-commit.sh runs ' +
-      'the dead-code and CRAP gates on every commit; separately, a raw git ' +
-      'commit could not have bypassed it (.crap-gated present at the repo root)' }
-  : { green: true, detail: 'gates measured and green: crap-commit.sh runs ' +
-      'the dead-code and CRAP gates on every commit regardless of the ' +
-      'marker; separately, nothing hook-enforced stopped a raw git commit ' +
-      'from bypassing it (.crap-gated absent at the repo root, or ' +
-      `its presence could not be confirmed). ${gateProbe?.detail ?? ''}`.trim() }
-
 phase('Implement')
 const sImpl = stage('implement')
 const impl = await treeAgent(
@@ -965,6 +960,12 @@ const impl = await treeAgent(
   `green. Commit signed, in as many commits as the work naturally takes. Never run ` +
   `--accept or --mark-scored yourself; both need explicit user approval. ` +
   `Do not push and do not open a PR: those are the user's to authorise.\n` +
+  `Return scored=true if crap-commit.sh printed that it scored the change ` +
+  `(ran the CRAP and dead-code checks on your commits), scored=false if you ` +
+  `made no commits or it printed nothing to score. Base this on what it ` +
+  `printed, never on whether .crap-gated exists and never on your own ` +
+  `judgement of the change. If it printed its own gate message, copy it ` +
+  `verbatim into gate_note.\n` +
   `Return commit_range as '<base-sha>..<head-sha>' using the merge base with ` +
   `${wt.base} and your final HEAD, both as full 40-character SHAs: later ` +
   `phases compare their own HEAD against the head of this range to work out ` +
@@ -981,6 +982,14 @@ if (sImpl.over()) {
     note: 'implementer exceeded its token ceiling; any work is on the branch, gates and review did not run',
   })
 }
+
+// Whether anything actually went through the gate, across every committing
+// phase from here through the fix loop -- an implementer that scored nothing
+// (nothing changed the gate checks) can still be followed by a fix round that
+// does. Folded with OR, never overwritten, so one scored=true anywhere makes
+// the whole run's `measured` claim 'scored'.
+let scored = impl.scored === true
+let gateNote = impl.gate_note ?? ''
 
 // A draft PR, opened as soon as there is a commit to hang it on.
 //
@@ -1323,9 +1332,16 @@ while (open.length && round < MAX_REVIEW_ROUNDS && !outOfBudget() && !sFix.over(
     `or of the unchanged HEAD if you committed nothing. Your commits are ` +
     `reviewed as <previous head>..<your head_sha>, so a wrong or abbreviated ` +
     `SHA there is how unreviewed code reaches the PR.\n` +
+    `Return scored=true if crap-commit.sh printed that it scored this round's ` +
+    `commits, scored=false if you committed nothing or it printed nothing to ` +
+    `score. Base this on what it printed, never on whether .crap-gated exists ` +
+    `and never on your own judgement of the change. If it printed its own ` +
+    `gate message, copy it verbatim into gate_note.\n` +
     `Findings:\n` +
     open.map(f => `- ${f.title} (${f.file}): ${f.claim}`).join('\n'),
     { label: `fix:${round}`, schema: FIXED, model: 'sonnet', effort: effortFor.implement })
+  if (fixed?.scored === true) scored = true
+  if (fixed?.gate_note) gateNote = fixed.gate_note
   // Verification and the tail review both read the fix's finished commits and
   // answer independent questions of them -- "are the named findings closed?"
   // and "did the fix break something new?" -- so they run together. Sequenced,
@@ -1410,6 +1426,25 @@ if (open.length && !outOfBudget()) {
   }
 }
 sFix.close()
+
+// Assembled here rather than earlier: `measured` needs the implementer's and
+// every fix round's own scored report, so it cannot be known before the loop
+// above has run. bypass_blocked is the earlier probe's crapGated answer,
+// unrelated to whether anything scored.
+const gates = {
+  measured: scored ? 'scored' : 'nothing scorable',
+  bypass_blocked: crapGated,
+  detail: (crapGated
+    ? 'gates measured: crap-commit.sh runs the dead-code and CRAP gates on ' +
+      'every commit; separately, a raw git commit could not have bypassed ' +
+      'it (.crap-gated present at the repo root)'
+    : 'gates measured: crap-commit.sh runs the dead-code and CRAP gates on ' +
+      'every commit regardless of the marker; separately, nothing ' +
+      'hook-enforced stopped a raw git commit from bypassing it ' +
+      '(.crap-gated absent at the repo root, or its presence could not be ' +
+      `confirmed). ${gateProbe?.detail ?? ''}`
+  ).trim() + (gateNote ? ` ${gateNote}` : ''),
+}
 
 if (open.length) {
   // Advisory only: a finding's evidence may have moved since it was
