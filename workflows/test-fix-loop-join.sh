@@ -239,6 +239,9 @@ function makeAgent(scenario, captured) {
       }
       return { verdicts }
     }
+    if (label === 'crap-gate:opt-in') {
+      return { gated: scenario.crapGated ?? true, detail: 'stub' }
+    }
     if (label === 'mutation:opt-in') {
       return { gated: scenario.mutationGated ?? false, detail: 'stub' }
     }
@@ -1056,12 +1059,87 @@ async function scenarioAI() {
   check('both findings reach the fix round', idsIn(verify1).length, 2)
 }
 
+// Scenario AJ -- a gated repo's Fix halt claims the CRAP gate was enforced.
+async function scenarioAJ() {
+  console.log('\n== scenario AJ: a gated repo\'s Fix halt claims the CRAP gate was enforced')
+  const { result } = await run({
+    args: { maxReviewRounds: 1 },
+    crapGated: true,
+    initialReview: {
+      correctness: [{ title: 'Unrelated leak', file: 'src/pool.js',
+        claim: 'connection is never released', evidence: 'pool.js:40' }],
+      advocate: [],
+    },
+    verify: () => false,
+    staleness: () => [],
+  })
+  check('halted at Fix', result.halted_at, 'Fix')
+  check('gates reports enforced',
+    result.gates?.detail, 'enforced by crap-commit-gate on every commit')
+}
+
+// Scenario AK -- the regression this ticket fixes: an ungated repo's Fix halt
+// must not claim the CRAP gate was enforced. Before this fix every halt
+// payload hardcoded "enforced by crap-commit-gate on every commit" regardless
+// of whether the repo had opted in at all.
+async function scenarioAK() {
+  console.log('\n== scenario AK: an ungated repo\'s Fix halt does not claim the CRAP gate was enforced')
+  const { result } = await run({
+    args: { maxReviewRounds: 1 },
+    crapGated: false,
+    initialReview: {
+      correctness: [{ title: 'Unrelated leak', file: 'src/pool.js',
+        claim: 'connection is never released', evidence: 'pool.js:40' }],
+      advocate: [],
+    },
+    verify: () => false,
+    staleness: () => [],
+  })
+  check('halted at Fix', result.halted_at, 'Fix')
+  check('gates does not claim enforcement',
+    (result.gates?.detail ?? '').includes('enforced by crap-commit-gate on every commit'), false)
+  check('gates says CRAP gating was not opted into',
+    (result.gates?.detail ?? '').includes('.crap-gated absent at the repo root'), true)
+}
+
+// Scenario AL -- the same regression, one halt later: the Mutation halt must
+// also stop claiming enforcement in an ungated repo.
+async function scenarioAL() {
+  console.log('\n== scenario AL: an ungated repo\'s Mutation halt does not claim the CRAP gate was enforced')
+  const { result } = await run(convergedWithSuspect({
+    crapGated: false,
+    mutationResult: () => ({ green: false, head_sha: 'mut0000000000000000000000000000000000001',
+      detail: 'stub red', survivors: 1 }),
+  }))
+  check('halted at Mutation', result.halted_at, 'Mutation')
+  check('gates does not claim enforcement',
+    (result.gates?.detail ?? '').includes('enforced by crap-commit-gate on every commit'), false)
+}
+
+// Scenario AM -- and the green path's final result carries the same honesty:
+// an ungated repo's result must not claim the CRAP gate was enforced either.
+async function scenarioAM() {
+  console.log('\n== scenario AM: an ungated repo\'s green-path result does not claim the CRAP gate was enforced')
+  const { result } = await run({
+    args: { openPr: true },
+    crapGated: false,
+    prResult: { opened: true, url: 'https://example.invalid/pr/23', note: 'stub ready' },
+    initialReview: { correctness: [], advocate: [] },
+    verify: () => undefined,
+    staleness: () => [],
+  })
+  check('halted_at is absent', result.halted_at, undefined)
+  check('gates does not claim enforcement',
+    (result.gates?.detail ?? '').includes('enforced by crap-commit-gate on every commit'), false)
+}
+
 for (const scenario of [scenarioA, scenarioB, scenarioG, scenarioC, scenarioD, scenarioE, scenarioH,
                         scenarioI, scenarioJ, scenarioK, scenarioL, scenarioM, scenarioN,
                         scenarioO, scenarioP, scenarioQ, scenarioR, scenarioS, scenarioT,
                         scenarioU, scenarioV, scenarioW, scenarioX, scenarioY,
                         scenarioZ, scenarioAA, scenarioAB, scenarioAC, scenarioAD,
-                        scenarioAE, scenarioAF, scenarioAG, scenarioAH, scenarioAI]) {
+                        scenarioAE, scenarioAF, scenarioAG, scenarioAH, scenarioAI,
+                        scenarioAJ, scenarioAK, scenarioAL, scenarioAM]) {
   await scenario()
 }
 

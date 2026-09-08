@@ -872,6 +872,40 @@ if (sPlan.over()) {
 }
 }
 
+// The Fix, Mutation and final-result payloads below all report a `gates`
+// field. crap-commit-gate.py's PreToolUse hook only blocks a raw `git commit`
+// when .crap-gated exists at the repo root, mirroring the mutation opt-in
+// probe further down; a repo with no marker has nothing forcing the
+// implementer to route commits through crap-commit.sh, so claiming the gate
+// was "enforced on every commit" there is not true, only requested.
+//
+// Fail safe, same as the mutation probe: only a confirmed absence reports the
+// gate as unenforced. An unknown answer is reported as gated, which overstates
+// enforcement rather than dropping a claim the repo may actually be relying on.
+const crapGateProbe = await treeAgent(
+  `[touchstone: crap-gate opt-in]\n` +
+  `Report whether this repo opts into CRAP-gated commits, then STOP. Run no ` +
+  `tests, no gate tooling, and change nothing.\n` +
+  `1. Find the repo root: dirname "$(git rev-parse --path-format=absolute ` +
+  `--git-common-dir)".\n` +
+  `2. Test for a file named exactly .crap-gated at that root.\n` +
+  `3. Return gated=true if it is there, gated=false only if you confirmed it ` +
+  `is absent. If you could not determine either way, return gated=true and ` +
+  `explain why in detail: treating an unknown as ungated would overstate what ` +
+  `is actually enforced.\n` +
+  `Report the path you checked in detail.`,
+  { label: 'crap-gate:opt-in', schema: GATED, model: 'haiku', effort: 'low' })
+const crapGated = crapGateProbe?.gated !== false
+const gates = crapGated
+  ? { green: true, detail: 'enforced by crap-commit-gate on every commit' }
+  : { green: true, detail: 'not hook-enforced: repo has not opted into CRAP ' +
+      'gating (.crap-gated absent at the repo root); the implementer was only ' +
+      `asked to run crap-commit.sh, nothing blocked a plain git commit. ${crapGateProbe?.detail ?? ''}`.trim() }
+if (!crapGated) {
+  log(`CRAP gate not hook-enforced: no .crap-gated marker, so nothing blocked ` +
+      `a raw commit`)
+}
+
 phase('Implement')
 const sImpl = stage('implement')
 const impl = await treeAgent(
@@ -1373,7 +1407,7 @@ if (open.length) {
   const staleCount = reported.filter(f => f.code_changed_since_recorded).length
 
   return await halted('Fix', {
-    plan: plan.plan, implemented: impl.summary, gates: { green: true, detail: 'enforced by crap-commit-gate on every commit' },
+    plan: plan.plan, implemented: impl.summary, gates,
     unresolved_findings: reported, fix_rounds: round, stopped_because: fixStopReason(),
     regression_suspects: regressionSuspects,
     // Report the round count that actually ran and why the loop ended. This
@@ -1434,7 +1468,10 @@ if (!mutationGated) {
       `(.mutation-gated absent at the repo root). ${gateProbe?.detail ?? ''}`.trim(),
   }
   log(`mutation gate skipped: no .mutation-gated marker, so nothing enforces it ` +
-      `(the CRAP and dead-code gates still ran on every commit)`)
+      (crapGated
+        ? `(the CRAP and dead-code gates still ran on every commit)`
+        : `(the CRAP and dead-code gates are not hook-enforced here either, ` +
+          `per the earlier probe)`))
 } else if (!gateProbe) {
   log('mutation opt-in probe returned nothing; treating the repo as gated')
 }
@@ -1498,7 +1535,7 @@ sMut.close()
 
 if (!mutation.green) {
   return await halted('Mutation', {
-    plan: plan.plan, implemented: impl.summary, gates: { green: true, detail: 'enforced by crap-commit-gate on every commit' },
+    plan: plan.plan, implemented: impl.summary, gates,
     mutation, unresolved_findings: open, regression_suspects: regressionSuspects,
     note: mutation.needs_user_run
       ? `The mutation run does not fit the 600000 ms Bash ceiling, which for ` +
@@ -1640,7 +1677,7 @@ const result = {
   plan: plan.plan,
   stage_spend: stageSpend,
   implemented: impl.summary,
-  gates: { green: true, detail: 'enforced by crap-commit-gate on every commit' },
+  gates,
   mutation,
   reviewers: reviewerCount,
   regression_suspects: regressionSuspects,
