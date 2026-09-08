@@ -1260,12 +1260,12 @@ let round = 0
 const everVerified = new Set()
 // One verifier for every finding, not one each. Six findings meant six agents
 // that each re-read the same diff to answer six questions about it; the reading
-// is the expensive part and it is identical across them. Returns id -> fixed,
-// keyed on the id the script assigned in reviewOf, never the title: a model
-// asked to echo a title verbatim reworded it anyway, which stalled every
+// is the expensive part and it is identical across them. Returns [id, fixed]
+// pairs, keyed on the id the script assigned in reviewOf, never the title: a
+// model asked to echo a title verbatim reworded it anyway, which stalled every
 // finding until the round limit and halted the run for good.
 const verifyOpen = async (findings, label) => {
-  if (!findings.length) return new Map()
+  if (!findings.length) return []
   for (const f of findings) everVerified.add(f.id)
   const out = await treeAgent(
     `Verify, finding by finding, whether each is now actually fixed in the ` +
@@ -1283,10 +1283,12 @@ const verifyOpen = async (findings, label) => {
     // with the Review group the tail lens opens beside it.
     { label, phase: 'Fix', schema: VERDICTS, model: 'opus',
       effort: effortFor.verify })
-  return new Map(
-    (out?.verdicts ?? [])
-      .filter(v => typeof v.id === 'string')
-      .map(v => [stripBrackets(v.id), v.fixed === true]))
+  // Pairs, not a Map: this crosses parallel() at the loop-join call site,
+  // which serializes each thunk's result and strips a Map down to a plain
+  // object with no .get. The Map is rebuilt at each call site instead.
+  return (out?.verdicts ?? [])
+    .filter(v => typeof v.id === 'string')
+    .map(v => [stripBrackets(v.id), v.fixed === true])
 }
 
 const fixStopReason = () =>
@@ -1353,7 +1355,7 @@ while (open.length && round < MAX_REVIEW_ROUNDS && !outOfBudget() && !sFix.over(
       : [],
   ])
 
-  const byId = verdicts ?? new Map()
+  const byId = new Map(verdicts ?? [])
   // Unmatched means unverified, which stays open: a finding silently dropped
   // because its id came back missing or mistyped is the one failure this must
   // not have.
@@ -1397,7 +1399,7 @@ if (open.length && !outOfBudget()) {
   if (unchecked.length) {
     log(`${unchecked.length} finding(s) were reported too late to be checked ` +
         `by a round; verifying them before deciding to halt`)
-    const late = await verifyOpen(unchecked, 'verify:final')
+    const late = new Map(await verifyOpen(unchecked, 'verify:final'))
     const closed = unchecked.filter(f => late.get(f.id) === true)
     settled.push(...closed)
     const closedIds = new Set(closed.map(f => f.id))
