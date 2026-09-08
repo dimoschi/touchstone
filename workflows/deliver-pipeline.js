@@ -106,6 +106,30 @@ const stage = (name) => {
 // phase that opens it.
 let draftPr = null
 
+// Keyed by ticket, not run id: a script is never told its own run id, and the
+// ticket is what a human looks the run up by.
+const recordRun = async (record) => {
+  const key = String(ticket).replace(/[^A-Za-z0-9_-]/g, '-')
+  const written = await agent(
+    `Write one file, then STOP. Do not stage it, commit it or push, and do ` +
+    `not touch anything else.\n` +
+    `1. Resolve the main checkout: git rev-parse --path-format=absolute ` +
+    `--git-common-dir, then take that directory's parent. Write there, not in ` +
+    `this worktree, which is removed once the work lands.\n` +
+    `2. mkdir -p <main>/.claude/touchstone-runs\n` +
+    `3. Write the JSON below to <main>/.claude/touchstone-runs/${key}.json ` +
+    `byte for byte, with a quoted heredoc (cat > path <<'TOUCHSTONE_EOF'). Do ` +
+    `not reformat it, re-indent it, summarise it or add fields. It is a record, ` +
+    `not a draft.\n` +
+    `Return the absolute path you wrote.\n\n` +
+    JSON.stringify(record, null, 2),
+    { label: 'run-record', model: 'haiku', effort: 'low' })
+  log(written
+    ? `run record written to .claude/touchstone-runs/${key}.json`
+    : `run record could not be written; this run survives only in the transcript`)
+  return typeof written === 'string' ? written : null
+}
+
 const renderSuspects = (suspects) => suspects
   .map((s, i) => `${i + 1}. ${s.title} (${s.file}): ${s.claim}. Evidence: ` +
     `${s.evidence}. Reported again in fix round ${s.round}, after an earlier ` +
@@ -158,6 +182,7 @@ const halted = async (at, extra) => {
       ? `halt at ${at} reported on ${draftPr.url}`
       : `halt at ${at}: could not comment on the draft PR; it is in this session only`)
   }
+  payload.record_path = await recordRun(payload)
   return payload
 }
 
@@ -594,8 +619,13 @@ const ticketSpec = () => ticketDetail.found
 const treeAgent = (prompt, opts) =>
   agent(
     `[touchstone: ${opts.label}]\n` +
-    `Work in the git worktree at ${wt.path}. Run every command there, ` +
-    `including all git commands. Do not operate in the main checkout.\n\n` +
+    `Work in the git worktree at ${wt.path}. Every command, git included, acts ` +
+    `on that tree and not on the main checkout: pass it explicitly, with ` +
+    `git -C ${wt.path} and absolute paths. Never cd there, not even as ` +
+    `cd ${wt.path} && <cmd>. The Bash working directory persists between ` +
+    `calls, so one such command moves the whole session, and the run state ` +
+    `written afterwards is filed under the worktree's path instead of the ` +
+    `repo's.\n\n` +
     envelope() + `\n` + prompt + RECORD(opts.label),
     opts)
 
@@ -1493,7 +1523,7 @@ if (args?.openPr !== false && !outOfBudget()) {
   log('PR skipped: out of token budget with every gate green; open the PR manually')
 }
 
-return {
+const result = {
   task,
   branch: wt.branch,
   base: wt.base,
@@ -1512,3 +1542,5 @@ return {
   pr,
   needs_user: args?.openPr !== false && !pr?.opened,
 }
+result.record_path = await recordRun(result)
+return result

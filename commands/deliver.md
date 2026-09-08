@@ -124,6 +124,26 @@ Report the branch it cut, the base it came from, the gate results, and the PR UR
 one was opened. If it halted, report the phase and the halt note verbatim: the halts
 are diagnostic, and paraphrasing them loses the reason.
 
+### Add the run id to the run record
+
+The workflow writes its own record to `.claude/touchstone-runs/<ticket>.json` in the
+main checkout, and returns the path as `record_path`. It cannot include the run id:
+the id reaches you only after the run has started, so nothing inside can be told it.
+
+Add it yourself, along with the date, by editing that file's JSON:
+
+```
+{ "run_id": "<the wf_ id the Workflow tool returned>", "recorded_on": "<today>" }
+```
+
+Without the id the record cannot be resumed from, which is most of its value: resume
+needs `resumeFromRunId` and the `scriptPath`, and both live under the launching
+session's own directory, invisible to any later session and to a second
+`CLAUDE_CONFIG_DIR`. The record is the only copy that stays with the repo.
+
+Do not commit it. `.claude/` is ignored, and the record is local state, not
+something the repo's team asked for.
+
 ### Record what happened, before you report it
 
 **Only if [agent-eval](https://github.com/dimoschi/agent-eval) is installed.** It is
