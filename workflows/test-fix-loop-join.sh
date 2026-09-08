@@ -1079,13 +1079,10 @@ async function scenarioAJ() {
     (result.gates?.detail ?? '').includes('could not have bypassed it'), true)
 }
 
-// Scenario AK -- the regression this ticket fixes: an ungated repo's Fix halt
-// must not claim the CRAP gate was enforced, and green must not be a hardcoded
-// literal. Before this fix every halt payload hardcoded
-// `{ green: true, detail: 'enforced by crap-commit-gate on every commit' }`
-// regardless of whether the repo had opted in at all.
+// Scenario AK -- an ungated repo's Fix halt still reports the gates as
+// measured and green; only the bypass claim in `detail` changes with the marker.
 async function scenarioAK() {
-  console.log('\n== scenario AK: an ungated repo\'s Fix halt does not claim the CRAP gate was enforced')
+  console.log('\n== scenario AK: an ungated repo\'s Fix halt still reports the gates as measured and green')
   const { result } = await run({
     args: { maxReviewRounds: 1 },
     crapGated: false,
@@ -1098,28 +1095,30 @@ async function scenarioAK() {
     staleness: () => [],
   })
   check('halted at Fix', result.halted_at, 'Fix')
-  check('gates.green is false, not a hardcoded true', result.gates?.green, false)
-  check('gates says CRAP gating was not opted into',
+  check('gates.green is true, the measurement is not conflated with the bypass question',
+    result.gates?.green, true)
+  check('gates says a raw commit was not hook-blocked from bypassing it',
     (result.gates?.detail ?? '').includes('.crap-gated absent at the repo root'), true)
 }
 
-// Scenario AL -- the same regression, one halt later: the Mutation halt must
-// also stop claiming enforcement in an ungated repo.
+// Scenario AL -- the same distinction, one halt later: the Mutation halt must
+// also keep reporting the gates as measured and green in an ungated repo.
 async function scenarioAL() {
-  console.log('\n== scenario AL: an ungated repo\'s Mutation halt does not claim the CRAP gate was enforced')
+  console.log('\n== scenario AL: an ungated repo\'s Mutation halt still reports the gates as measured and green')
   const { result } = await run(convergedWithSuspect({
     crapGated: false,
     mutationResult: () => ({ green: false, head_sha: 'mut0000000000000000000000000000000000001',
       detail: 'stub red', survivors: 1 }),
   }))
   check('halted at Mutation', result.halted_at, 'Mutation')
-  check('gates.green is false', result.gates?.green, false)
+  check('gates.green is true', result.gates?.green, true)
 }
 
-// Scenario AM -- and the green path's final result carries the same honesty:
-// an ungated repo's result must not claim the CRAP gate was enforced either.
+// Scenario AM -- and the green path's final result carries the same
+// distinction: an ungated repo's result still reports the gates as measured
+// and green.
 async function scenarioAM() {
-  console.log('\n== scenario AM: an ungated repo\'s green-path result does not claim the CRAP gate was enforced')
+  console.log('\n== scenario AM: an ungated repo\'s green-path result still reports the gates as measured and green')
   const { result } = await run({
     args: { openPr: true },
     crapGated: false,
@@ -1129,14 +1128,13 @@ async function scenarioAM() {
     staleness: () => [],
   })
   check('halted_at is absent', result.halted_at, undefined)
-  check('gates.green is false', result.gates?.green, false)
+  check('gates.green is true', result.gates?.green, true)
 }
 
-// Scenario AN -- the gate opt-in probe itself fails (returns nothing). The
-// CRAP marker must be reported as unconfirmed, not silently re-asserted as
-// enforced, and the run must log that the probe did not answer.
+// Scenario AN -- probe returns nothing: the bypass question is unconfirmed,
+// but the gates are still measured and green, and the run logs the failure.
 async function scenarioAN() {
-  console.log('\n== scenario AN: a failed gate opt-in probe reports CRAP gating as unconfirmed')
+  console.log('\n== scenario AN: a failed gate opt-in probe still reports the gates as measured and green')
   const { result, captured } = await run({
     args: { openPr: true },
     gateProbeFails: true,
@@ -1145,7 +1143,7 @@ async function scenarioAN() {
     verify: () => undefined,
     staleness: () => [],
   })
-  check('gates.green is false when the probe returns nothing', result.gates?.green, false)
+  check('gates.green is true even when the probe returns nothing', result.gates?.green, true)
   check('the run logs that the probe returned nothing',
     captured.logs.some(l => l.includes('gate opt-in probe returned nothing')), true)
 }

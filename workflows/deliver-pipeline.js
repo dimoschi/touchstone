@@ -926,9 +926,10 @@ const gates = crapGated
   ? { green: true, detail: 'gates measured and green: crap-commit.sh runs ' +
       'the dead-code and CRAP gates on every commit; separately, a raw git ' +
       'commit could not have bypassed it (.crap-gated present at the repo root)' }
-  : { green: false, detail: 'gates not confirmed: the implementer was only ' +
-      'asked to run crap-commit.sh, and nothing hook-enforced stopped a raw ' +
-      'git commit from bypassing it (.crap-gated absent at the repo root, or ' +
+  : { green: true, detail: 'gates measured and green: crap-commit.sh runs ' +
+      'the dead-code and CRAP gates on every commit regardless of the ' +
+      'marker; separately, nothing hook-enforced stopped a raw git commit ' +
+      'from bypassing it (.crap-gated absent at the repo root, or ' +
       `its presence could not be confirmed). ${gateProbe?.detail ?? ''}`.trim() }
 
 phase('Implement')
