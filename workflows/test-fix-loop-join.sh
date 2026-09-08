@@ -80,6 +80,13 @@ echo "== staleness probe: the git command against a real scratch repo"
 check "the prompt gives the path-scoping half of the command" \
   "$(grep -Fc -- '-- <file>' "$SCRIPT" || true)" 1
 
+echo ""
+echo "== static: the scored/gateNote comments agree on which phases feed measured"
+check "the aggregate comment does not stop the scope at the fix loop" \
+  "$(grep -Fc 'from here through the fix loop' "$SCRIPT" || true)" 0
+check "the aggregate comment names the mutation loop, matching gatesPayload's own comment" \
+  "$(grep -Fc 'from here through the mutation loop' "$SCRIPT" || true)" 1
+
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
 
@@ -1282,6 +1289,24 @@ async function scenarioAX() {
     result.gates?.measured, 'scored')
 }
 
+// Scenario AY -- scored=false is not one cause: it covers "no commits", "the
+// gate printed nothing to score" and more. When nothing ever scores, the
+// implementer's own gate_note is the only observation of which one it was,
+// so it must survive into detail rather than being replaced by a guess.
+async function scenarioAY() {
+  console.log('\n== scenario AY: the nothing-scorable detail carries the implementer\'s own gate_note')
+  const { result } = await run({
+    implScored: false,
+    implGateNote: 'crap-commit.sh: no staged source files (go, php, python)',
+    initialReview: { correctness: [], advocate: [] },
+    verify: () => undefined,
+    staleness: () => [],
+  })
+  check('gates.measured is nothing scorable', result.gates?.measured, 'nothing scorable')
+  check('the implementer\'s own gate_note reaches detail',
+    (result.gates?.detail ?? '').includes('no staged source files'), true)
+}
+
 // Scenario AO -- one gate-opt-in probe answers both the CRAP and mutation
 // markers; the mutation phase must not ask the repo a second time.
 async function scenarioAO() {
@@ -1350,7 +1375,7 @@ for (const scenario of [scenarioA, scenarioB, scenarioG, scenarioC, scenarioD, s
                         scenarioAE, scenarioAF, scenarioAG, scenarioAH, scenarioAI,
                         scenarioAJ, scenarioAK, scenarioAL, scenarioAM, scenarioAN,
                         scenarioAO, scenarioAS, scenarioAT, scenarioAU, scenarioAV,
-                        scenarioAW, scenarioAX,
+                        scenarioAW, scenarioAX, scenarioAY,
                         scenarioAP, scenarioAQ, scenarioAR]) {
   await scenario()
 }

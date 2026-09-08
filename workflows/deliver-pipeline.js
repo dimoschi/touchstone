@@ -985,15 +985,19 @@ if (sImpl.over()) {
 }
 
 // Whether anything actually went through the gate, across every committing
-// phase from here through the fix loop -- an implementer that scored nothing
-// (nothing changed the gate checks) can still be followed by a fix round that
-// does. Folded with OR, never overwritten, so one scored=true anywhere makes
-// the whole run's `measured` claim 'scored'.
+// phase from here through the mutation loop -- an implementer that scored
+// nothing (nothing changed the gate checks) can still be followed by a fix
+// round or the mutation loop that does. Folded with OR, never overwritten, so
+// one scored=true anywhere makes the whole run's `measured` claim 'scored'.
 let scored = impl.scored === true
-// Only ever set from a phase that itself reported scored=true: a note from a
-// phase that scored nothing (crap-check.sh's "no staged source files...") is
-// not evidence for a claim of measured='scored' made by a later phase.
-let gateNote = scored ? (impl.gate_note ?? '') : ''
+// Kept apart by whether the reporting phase itself scored: pairing a final
+// measured='scored' with an unscored phase's "nothing to score" note would
+// misattribute evidence, and the reverse throws away the only observation
+// there is for a run that never scores at all -- scored=false covers "no
+// commits", "it printed nothing to score" and more, and the note is what
+// says which.
+let scoredNote = scored ? (impl.gate_note ?? '') : ''
+let unscoredNote = scored ? '' : (impl.gate_note ?? '')
 
 // A draft PR, opened as soon as there is a commit to hang it on.
 //
@@ -1346,7 +1350,9 @@ while (open.length && round < MAX_REVIEW_ROUNDS && !outOfBudget() && !sFix.over(
     { label: `fix:${round}`, schema: FIXED, model: 'sonnet', effort: effortFor.implement })
   if (fixed?.scored === true) {
     scored = true
-    if (fixed?.gate_note) gateNote = fixed.gate_note
+    if (fixed?.gate_note) scoredNote = fixed.gate_note
+  } else if (fixed?.gate_note) {
+    unscoredNote = fixed.gate_note
   }
   // Verification and the tail review both read the fix's finished commits and
   // answer independent questions of them -- "are the named findings closed?"
@@ -1433,20 +1439,25 @@ if (open.length && !outOfBudget()) {
 }
 sFix.close()
 
-// A function, not a value computed once here: `scored` and `gateNote` keep
+// A function, not a value computed once here: `scored` and the two notes keep
 // folding in later phases' own reports (the mutation loop below can still add
 // to them), so each halt and the final result call this after whatever has
 // scored by that point rather than freezing it at the end of the fix loop.
 // bypass_blocked is the earlier probe's crapGated answer, unrelated to
 // whether anything scored.
 function gatesPayload() {
+  // scored=false does not mean any one thing -- no commits, a gate that
+  // printed nothing to score, or (unconfirmed) that it never ran -- so the
+  // clause here stays generic and leaves the actual cause to gateNote below,
+  // rather than asserting one.
   const scoredClause = scored
     ? 'and scored at least one function in this range'
-    : 'but nothing in this range was scorable source (go, php, python)'
+    : 'but nothing in this range scored'
   const bypassClause = crapGated
     ? 'a raw git commit could not have bypassed it (.crap-gated present at the repo root)'
     : 'nothing hook-enforced stopped a raw git commit from bypassing it ' +
       '(.crap-gated absent at the repo root, or its presence could not be confirmed)'
+  const gateNote = scored ? scoredNote : unscoredNote
   return {
     measured: scored ? 'scored' : 'nothing scorable',
     bypass_blocked: crapGated,
@@ -1609,7 +1620,9 @@ for (let attempt = 1; attempt <= MAX_GATE_ATTEMPTS && !mutation.green
     { label: `mutation:${attempt}`, schema: GATE, model: 'sonnet', effort: 'high' }) ?? mutation
   if (mutation?.scored === true) {
     scored = true
-    if (mutation?.gate_note) gateNote = mutation.gate_note
+    if (mutation?.gate_note) scoredNote = mutation.gate_note
+  } else if (mutation?.gate_note) {
+    unscoredNote = mutation.gate_note
   }
 }
 sMut.close()
