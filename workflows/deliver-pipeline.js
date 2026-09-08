@@ -89,9 +89,19 @@ const CEILINGS = {
   ...(args?.stageBudgets ?? {}),
 }
 const stageSpend = {}
+// Names the caller set by hand. Those keep their literal value: an explicit
+// budget is a decision, and scaling it would silently overrule it.
+const EXPLICIT_BUDGETS = new Set(Object.keys(args?.stageBudgets ?? {}))
+// Applied to every ceiling of a stage created after Triage, so the sizing that
+// already picks effort and lens count also picks how much the stage may spend.
+// 1 until Triage has judged; the stages before it are cheap and fixed.
+let ceilingScale = 1
 const stage = (name) => {
   const start = budget.spent()
-  const cap = CEILINGS[name]
+  const raw = CEILINGS[name]
+  const cap = raw == null || EXPLICIT_BUDGETS.has(name)
+    ? raw
+    : Math.round(raw * ceilingScale)
   return {
     over: () => cap != null && budget.spent() - start > cap,
     close: () => {
@@ -291,6 +301,24 @@ const FINDINGS = {
           // An id copied from reviewOf's `known` list, never invented. Each
           // call site states what a reference there means.
           duplicate_of: { type: 'string' },
+        },
+      },
+    },
+  },
+}
+// One group per real defect, each listing the ids that describe it. Ids only:
+// the grouping is a model judgement, but the join back is the script's.
+const DUPES = {
+  type: 'object', additionalProperties: false, required: ['groups'],
+  properties: {
+    groups: {
+      type: 'array',
+      items: {
+        type: 'object', additionalProperties: false,
+        required: ['ids', 'why'],
+        properties: {
+          ids: { type: 'array', items: { type: 'string' } },
+          why: { type: 'string' },
         },
       },
     },
@@ -752,8 +780,13 @@ const EFFORT = {
   routine:  { plan: 'medium', implement: 'high',   review: 'high',   verify: 'low' },
   involved: { plan: 'high',   implement: 'xhigh',  review: 'xhigh',  verify: 'medium' },
 }
+// Ceilings scale with the same judgement as effort. A trivial change used to
+// get a trivial effort setting and the full 80k review ceiling, which is not a
+// budget so much as permission to keep going.
+const CEILING_SCALE = { trivial: 0.4, routine: 1, involved: 1.5 }
 const complexity = EFFORT[triage.complexity] ? triage.complexity : 'involved'
 const effortFor = EFFORT[complexity]
+ceilingScale = CEILING_SCALE[complexity]
 if (triage.complexity && complexity !== triage.complexity) {
   log(`triage returned an unrecognised complexity (${triage.complexity}); ` +
       `treating it as involved, which spends the most rather than the least`)
@@ -761,7 +794,11 @@ if (triage.complexity && complexity !== triage.complexity) {
 log(`triage judged this ${complexity}` +
     (triage.complexity_note ? `: ${triage.complexity_note}` : '') +
     ` -- plan/implement/review/verify effort ` +
-    `${effortFor.plan}/${effortFor.implement}/${effortFor.review}/${effortFor.verify}`)
+    `${effortFor.plan}/${effortFor.implement}/${effortFor.review}/${effortFor.verify}` +
+    `, ceilings x${ceilingScale}` +
+    (EXPLICIT_BUDGETS.size
+      ? ` (${[...EXPLICIT_BUDGETS].join(', ')} left at the value you passed)`
+      : ''))
 sTriage.close()
 
 // A plan an earlier run already produced arrives as args.plan and starts this
@@ -1060,6 +1097,11 @@ const reviewOf = async (range, tag, picked, known = [], knownCharge = '') => {
       `surrounding code as well: a change is wrong in its context, not in ` +
       `isolation, and a line this range only deletes may be load-bearing ` +
       `somewhere the range does not show you.\n` +
+      `Read wide, report narrow. A finding must be a defect these commits ` +
+      `introduce, or one they were meant to fix and did not. A defect that was ` +
+      `already there in code this range does not touch is out of scope however ` +
+      `real it is: someone else's bug, filed here, costs a fix round and can ` +
+      `stop the run. Do not report it.\n` +
       `Report only findings you can defend with file:line evidence. Do NOT ` +
       `report coverage, complexity, test quality, or style: deterministic ` +
       `gates own those.` +
@@ -1085,8 +1127,41 @@ const reviewOf = async (range, tag, picked, known = [], knownCharge = '') => {
 // guard below refuses.
 let reviewedThrough = headOf(impl.commit_range)
 
+// Lenses cannot see each other, and contentKeyOf cannot merge them: two
+// reviewers describe one bug in different words. A failure keeps everything,
+// which costs a duplicate rather than losing a defect.
+const collapseDuplicates = async (findings) => {
+  if (findings.length < 2 || reviewerCount < 2) return findings
+  const grouped = await agent(
+    `Several reviewers looked at the same diff without seeing each other's ` +
+    `work, so the list below may describe the same defect more than once.\n` +
+    `Group the ids that are the same defect. Same underlying bug at the same ` +
+    `place counts as one even when the wording, the severity or the suggested ` +
+    `fix differ. Two defects that merely sit in one function are NOT one ` +
+    `group. Return only groups of two or more ids; if nothing duplicates, ` +
+    `return an empty list. Do not judge whether any finding is correct.\n` +
+    findings.map(f => `[${f.id}] ${f.title} (${f.file}): ${f.claim}`).join('\n'),
+    { label: 'review:dedup', phase: 'Review', schema: DUPES,
+      model: 'haiku', effort: 'low' })
+  const dropped = new Set()
+  for (const g of grouped?.groups ?? []) {
+    const ids = (Array.isArray(g?.ids) ? g.ids : [])
+      .map(stripBrackets)
+      .filter(id => findings.some(f => f.id === id))
+    for (const id of ids.slice(1)) dropped.add(id)
+    if (ids.length > 1) {
+      log(`review: ${ids.slice(1).join(', ')} fold into ${ids[0]}` +
+          (g.why ? ` (${g.why})` : ''))
+    }
+  }
+  if (!dropped.size) return findings
+  log(`review: ${findings.length} finding(s) from ${reviewerCount} reviewers ` +
+      `collapse to ${findings.length - dropped.size}`)
+  return findings.filter(f => !dropped.has(f.id))
+}
+
 let open = reviewerCount
-  ? await reviewOf(impl.commit_range, 'review', lenses)
+  ? await collapseDuplicates(await reviewOf(impl.commit_range, 'review', lenses))
   : []
 sReview.close()
 
@@ -1104,10 +1179,46 @@ const regressionSuspects = []
 let round = 0
 // Which of the loop's four exits fired. Checked in the same order the loop
 // tests them, so the answer matches the condition that actually stopped it.
+// Every id a verifier has been asked about. A finding first reported by the
+// last round's tail review would otherwise reach the halt having never been
+// checked, listed as one that survived every round.
+const everVerified = new Set()
+// One verifier for every finding, not one each. Six findings meant six agents
+// that each re-read the same diff to answer six questions about it; the reading
+// is the expensive part and it is identical across them. Returns id -> fixed,
+// keyed on the id the script assigned in reviewOf, never the title: a model
+// asked to echo a title verbatim reworded it anyway, which stalled every
+// finding until the round limit and halted the run for good.
+const verifyOpen = async (findings, label) => {
+  if (!findings.length) return new Map()
+  for (const f of findings) everVerified.add(f.id)
+  const out = await treeAgent(
+    `Verify, finding by finding, whether each is now actually fixed in the ` +
+    `repo. Read the code for each one; do not trust any claim that it was ` +
+    `fixed, including your own reasoning about a neighbouring finding.\n` +
+    `Each finding below is listed with its id in brackets. Return one ` +
+    `verdict per finding with that id copied exactly into id; order does ` +
+    `not matter. A verdict whose id is not in this list is discarded, and a ` +
+    `finding with no verdict stays open. Nothing is matched on the title, ` +
+    `so rewording it costs nothing.\n` +
+    findings.map(f =>
+      `[${f.id}] ${f.title} (${f.file}): ${f.claim}. Evidence was: ${f.evidence}`
+    ).join('\n'),
+    // phase is explicit: inside parallel() the global phase() cursor races
+    // with the Review group the tail lens opens beside it.
+    { label, phase: 'Fix', schema: VERDICTS, model: 'opus',
+      effort: effortFor.verify })
+  return new Map(
+    (out?.verdicts ?? [])
+      .filter(v => typeof v.id === 'string')
+      .map(v => [stripBrackets(v.id), v.fixed === true]))
+}
+
 const fixStopReason = () =>
   !open.length ? 'every finding was resolved'
   : round >= MAX_REVIEW_ROUNDS
-    ? `the ${MAX_REVIEW_ROUNDS}-round limit was reached, so these survived every round`
+    ? `the ${MAX_REVIEW_ROUNDS}-round limit was reached; each of these was ` +
+      `checked against the code and is still open`
   : sFix.over()
     ? `the fix stage passed its ${Math.round(CEILINGS.fix / 1000)}k output-token ` +
       `ceiling, so the loop stopped early -- these have not had every round`
@@ -1155,25 +1266,7 @@ while (open.length && round < MAX_REVIEW_ROUNDS && !outOfBudget() && !sFix.over(
     reviewerCount && head && head !== reviewedThrough && !outOfBudget()
 
   const [verdicts, freshRaw] = await parallel([
-    // One verifier for every finding, not one each. Six findings meant six
-    // agents that each re-read the same diff to answer six questions about it;
-    // the reading is the expensive part and it is identical across them.
-    () => treeAgent(
-      `Verify, finding by finding, whether each is now actually fixed in the ` +
-      `repo. Read the code for each one; do not trust any claim that it was ` +
-      `fixed, including your own reasoning about a neighbouring finding.\n` +
-      `Each finding below is listed with its id in brackets. Return one ` +
-      `verdict per finding with that id copied exactly into id; order does ` +
-      `not matter. A verdict whose id is not in this list is discarded, and a ` +
-      `finding with no verdict stays open. Nothing is matched on the title, ` +
-      `so rewording it costs nothing.\n` +
-      open.map(f =>
-        `[${f.id}] ${f.title} (${f.file}): ${f.claim}. Evidence was: ${f.evidence}`
-      ).join('\n'),
-      // phase is explicit: inside parallel() the global phase() cursor races
-      // with the Review group the tail lens opens beside it.
-      { label: `verify:${round}`, phase: 'Fix', schema: VERDICTS, model: 'opus',
-        effort: effortFor.verify }),
+    () => verifyOpen(open, `verify:${round}`),
     // The point of the loop: a fix is a change, so it faces the same adversary.
     // One lens, not all of them -- correctness is where a fix round goes wrong,
     // and the range is small.
@@ -1185,13 +1278,7 @@ while (open.length && round < MAX_REVIEW_ROUNDS && !outOfBudget() && !sFix.over(
       : [],
   ])
 
-  // Keyed on the id the script assigned in reviewOf, never the title: a model
-  // asked to echo a title verbatim reworded it anyway, which stalled every
-  // finding until the round limit and halted the run for good.
-  const byId = new Map(
-    (verdicts?.verdicts ?? [])
-      .filter(v => typeof v.id === 'string')
-      .map(v => [stripBrackets(v.id), v.fixed === true]))
+  const byId = verdicts ?? new Map()
   // Unmatched means unverified, which stays open: a finding silently dropped
   // because its id came back missing or mistyped is the one failure this must
   // not have.
@@ -1223,6 +1310,27 @@ while (open.length && round < MAX_REVIEW_ROUNDS && !outOfBudget() && !sFix.over(
     reviewedThrough = head
   }
   log(`round ${round}: ${open.length} finding(s) still open`)
+}
+
+// The last round's tail review appends findings and the loop then exits, so
+// without this they reach the halt unchecked while the fix that closed their
+// twins sits in settled. One run halted on 11 findings of which 8 were already
+// confirmed fixed. Not gated on the fix ceiling: a false halt costs the whole
+// run, and this is one agent.
+if (open.length && !outOfBudget()) {
+  const unchecked = open.filter(f => !everVerified.has(f.id))
+  if (unchecked.length) {
+    log(`${unchecked.length} finding(s) were reported too late to be checked ` +
+        `by a round; verifying them before deciding to halt`)
+    const late = await verifyOpen(unchecked, 'verify:final')
+    const closed = unchecked.filter(f => late.get(f.id) === true)
+    settled.push(...closed)
+    const closedIds = new Set(closed.map(f => f.id))
+    open = open.filter(f => !closedIds.has(f.id))
+    log(closed.length
+      ? `${closed.length} of them were already fixed; ${open.length} still open`
+      : `none of them were fixed; ${open.length} still open`)
+  }
 }
 sFix.close()
 

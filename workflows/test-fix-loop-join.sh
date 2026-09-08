@@ -56,8 +56,11 @@ check "the old 'title verbatim' instruction is gone" \
   "$(grep -Fc 'with the same title verbatim' "$SCRIPT" || true)" 0
 check "the old 'one verdict per finding ... in the same order' instruction is gone" \
   "$(grep -Fc 'in the same order, with the same' "$SCRIPT" || true)" 0
-check "the verifier's brief lists each finding's id in brackets" \
-  "$(grep -c '\[\${f\.id}\]' "$SCRIPT" || true)" 2
+# The verify brief, the staleness probe and the cross-lens dedup brief. Every
+# brief that lists findings renders the id, because every one of them is joined
+# back on it.
+check "each brief that lists findings renders its id in brackets" \
+  "$(grep -c '\[\${f\.id}\]' "$SCRIPT" || true)" 3
 
 echo ""
 echo "== static: the staleness probe checks evidence, not merely the file"
@@ -171,7 +174,8 @@ function makeAgent(scenario, captured) {
       // scope: 'inline' skips the Plan phase, which this test has no reason
       // to exercise: it is not part of the join this ticket fixes.
       return { scope: 'inline', complexity: 'trivial', complexity_note: 'stub',
-        premise_ok: true, estimated_loc: 5, evidence: [], premise_note: 'stub' }
+        premise_ok: true, estimated_loc: 5, evidence: [], premise_note: 'stub',
+        ...(scenario.triage ?? {}) }
     }
     if (label === 'implementer') {
       return { summary: 'stub implementation', files_changed: ['a.js', 'b.js'],
@@ -193,6 +197,10 @@ function makeAgent(scenario, captured) {
       captured.regressionNoticePrompt = prompt
       return scenario.regressionNoticePosts !== false
     }
+    if (label === 'review:dedup') {
+      captured.dedupPrompt = prompt
+      return { groups: scenario.dedupGroups ?? [] }
+    }
     if (label.startsWith('review:fix:')) {
       return { findings: scenario.tailReview ?? [] }
     }
@@ -209,7 +217,10 @@ function makeAgent(scenario, captured) {
       return { head_sha: head, note: `stub fix round ${round}` }
     }
     if (label.startsWith('verify:')) {
-      const round = Number(label.slice('verify:'.length))
+      // The late pass is labelled verify:final, not by round: it runs after the
+      // loop, on findings no round ever checked.
+      const suffix = label.slice('verify:'.length)
+      const round = suffix === 'final' ? 'final' : Number(suffix)
       const ids = idsIn(prompt)
       const verdicts = []
       for (const id of ids) {
@@ -256,7 +267,7 @@ function makeAgent(scenario, captured) {
 
 async function run(scenario) {
   const captured = { calls: [], haltNoticePrompt: null, regressionNoticePrompt: null,
-    runRecordPrompt: null, logs: [] }
+    runRecordPrompt: null, dedupPrompt: null, logs: [] }
   const sandbox = {
     args: baseArgs(scenario.args),
     agent: makeAgent(scenario, captured),
@@ -911,11 +922,146 @@ async function scenarioAB() {
   check('record_path is null rather than missing', result.record_path, null)
 }
 
+// Scenario AC -- ceilings follow the same judgement as effort. A trivial change
+// used to get trivial effort and the full 80k review ceiling.
+async function scenarioAC() {
+  console.log('\n== scenario AC: a trivial triage scales the ceilings down')
+  const { captured } = await run({
+    triage: { complexity: 'trivial' },
+    initialReview: { correctness: [], advocate: [] },
+    verify: () => undefined,
+    staleness: () => [],
+  })
+  const logs = captured.logs.join('\n')
+  check('the scale is reported with the effort', logs.includes('ceilings x0.4'), true)
+  check('the review ceiling scales 80k -> 32k', logs.includes('(ceiling 32k)'), true)
+  check('the fix ceiling scales 170k -> 68k', logs.includes('(ceiling 68k)'), true)
+}
+
+// Scenario AD -- an explicit budget is a decision, so scaling must not overrule
+// it. The unlisted stages still scale.
+async function scenarioAD() {
+  console.log('\n== scenario AD: an explicit stage budget is not scaled')
+  const { captured } = await run({
+    triage: { complexity: 'trivial' },
+    args: { stageBudgets: { fix: 170000 } },
+    initialReview: { correctness: [], advocate: [] },
+    verify: () => undefined,
+    staleness: () => [],
+  })
+  const logs = captured.logs.join('\n')
+  check('the fix ceiling keeps the value passed in', logs.includes('(ceiling 170k)'), true)
+  check('it is named as exempt', logs.includes('fix left at the value you passed'), true)
+  check('review still scales', logs.includes('(ceiling 32k)'), true)
+}
+
+// Scenario AE -- read wide, report narrow. The charge authorises reading past
+// the range, and one run then reported a defect in a file the branch never
+// touched, which cost a fix round.
+async function scenarioAE() {
+  console.log('\n== scenario AE: the lens is told to report only what these commits caused')
+  const { captured } = await run({
+    initialReview: { correctness: [], advocate: [] },
+    verify: () => undefined,
+    staleness: () => [],
+  })
+  const p = captured.calls.find(c => c.label === 'review:correctness')?.prompt ?? ''
+  check('it may still read the surrounding code', p.includes('surrounding code as well'), true)
+  check('it is told to report narrow', p.includes('Read wide, report narrow'), true)
+  check('a pre-existing defect in untouched code is out of scope',
+    p.includes('already there in code this range does not touch'), true)
+}
+
+// Scenarios AF and AG -- a finding the last round's tail review appended, which
+// no round could have verified. AF: it was in fact fixed, so the run must not
+// halt on it. AG: it was not, so the halt stands and says it was checked.
+function lateFinding(fixedAtFinal) {
+  return {
+    args: { maxReviewRounds: 1 },
+    initialReview: {
+      correctness: [{ title: 'Off-by-one', file: 'src/p.js', claim: 'c1', evidence: 'e1' }],
+      advocate: [],
+    },
+    verify: (id, round) => {
+      if (round === 'final') return fixedAtFinal
+      return id === 'f1' ? true : undefined
+    },
+    fixHead: () => 'fix00000000000000000000000000000000000001',
+    tailReview: [{ title: 'Unrelated nil deref', file: 'src/q.js',
+      claim: 'deref before guard', evidence: 'q.js:9' }],
+    staleness: () => [],
+  }
+}
+
+async function scenarioAF() {
+  console.log('\n== scenario AF: a late finding that was already fixed does not halt the run')
+  const { result, captured } = await run(lateFinding(true))
+  check('the late pass ran once', callCount(captured, 'verify:final'), 1)
+  check('halted_at is absent', result.halted_at, undefined)
+  check('nothing is left open', result.unresolved_findings, [])
+}
+
+async function scenarioAG() {
+  console.log('\n== scenario AG: a late finding that is real still halts, and says it was checked')
+  const { result, captured } = await run(lateFinding(false))
+  check('the late pass ran once', callCount(captured, 'verify:final'), 1)
+  check('halted at Fix', result.halted_at, 'Fix')
+  check('the finding is reported', result.unresolved_findings?.length, 1)
+  check('the stop reason no longer claims it survived every round',
+    (result.stopped_because ?? '').includes('survived every round'), false)
+  check('the stop reason says it was checked',
+    (result.stopped_because ?? '').includes('checked against the code'), true)
+}
+
+// Scenario AH -- two lenses, one defect. Both were counted, so every fix round
+// paid for it twice.
+async function scenarioAH() {
+  console.log('\n== scenario AH: one defect found by two lenses becomes one finding')
+  const { captured } = await run({
+    args: { maxReviewRounds: 1 },
+    initialReview: {
+      correctness: [{ title: 'Nil deref in Load', file: 'src/p.js',
+        claim: 'derefs before the guard', evidence: 'p.js:12' }],
+      advocate: [{ title: 'Load can panic on a missing key', file: 'src/p.js',
+        claim: 'no guard before the dereference', evidence: 'p.js:12-14' }],
+    },
+    dedupGroups: [{ ids: ['f1', 'f2'], why: 'same dereference' }],
+    verify: () => undefined,
+    fixHead: () => 'fix00000000000000000000000000000000000001',
+    staleness: () => [],
+  })
+  check('the dedup brief was handed both ids',
+    idsIn(captured.dedupPrompt ?? '').length, 2)
+  const verify1 = captured.calls.find(c => c.label === 'verify:1')?.prompt ?? ''
+  check('the fix round is asked about one finding, not two', idsIn(verify1).length, 1)
+  check('the survivor is the first of the group', idsIn(verify1)[0], 'f1')
+}
+
+// Scenario AI -- the dedup agent returning nothing must keep both findings.
+// Losing a real defect is the failure that matters here; a duplicate is not.
+async function scenarioAI() {
+  console.log('\n== scenario AI: a dedup that finds nothing keeps every finding')
+  const { captured } = await run({
+    args: { maxReviewRounds: 1 },
+    initialReview: {
+      correctness: [{ title: 'Bug one', file: 'a.js', claim: 'c1', evidence: 'e1' }],
+      advocate: [{ title: 'Bug two', file: 'b.js', claim: 'c2', evidence: 'e2' }],
+    },
+    dedupGroups: [],
+    verify: () => undefined,
+    fixHead: () => 'fix00000000000000000000000000000000000001',
+    staleness: () => [],
+  })
+  const verify1 = captured.calls.find(c => c.label === 'verify:1')?.prompt ?? ''
+  check('both findings reach the fix round', idsIn(verify1).length, 2)
+}
+
 for (const scenario of [scenarioA, scenarioB, scenarioG, scenarioC, scenarioD, scenarioE, scenarioH,
                         scenarioI, scenarioJ, scenarioK, scenarioL, scenarioM, scenarioN,
                         scenarioO, scenarioP, scenarioQ, scenarioR, scenarioS, scenarioT,
                         scenarioU, scenarioV, scenarioW, scenarioX, scenarioY,
-                        scenarioZ, scenarioAA, scenarioAB]) {
+                        scenarioZ, scenarioAA, scenarioAB, scenarioAC, scenarioAD,
+                        scenarioAE, scenarioAF, scenarioAG, scenarioAH, scenarioAI]) {
   await scenario()
 }
 
