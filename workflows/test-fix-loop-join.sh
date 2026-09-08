@@ -273,8 +273,15 @@ async function run(scenario) {
   const sandbox = {
     args: baseArgs(scenario.args),
     agent: makeAgent(scenario, captured),
+    // JSON round-tripped, not returned as-is: the real parallel() serializes
+    // each thunk's result to hand it back across the boundary, and a class
+    // instance (a Map, for instance) does not survive that. Promise.all alone
+    // preserves object identity and masked the bug this test guards against.
     parallel: (thunks) => Promise.all(thunks.map(async (t) => {
-      try { return await t() } catch { return null }
+      try {
+        const r = await t()
+        return r === undefined ? undefined : JSON.parse(JSON.stringify(r))
+      } catch { return null }
     })),
     pipeline: async () => { throw new Error('pipeline() not stubbed for this test') },
     workflow: async () => { throw new Error('workflow() not stubbed for this test') },
