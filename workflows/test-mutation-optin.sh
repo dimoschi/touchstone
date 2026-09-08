@@ -7,9 +7,9 @@
 #      `git rev-parse --show-toplevel` names the worktree and not the repo the
 #      marker lives in. The prompt specifies --git-common-dir for that reason,
 #      so the difference is asserted here rather than trusted.
-#   2. The skip decision. `gateProbe?.gated !== false` must treat every answer
-#      except a confirmed false as gated, so a probe that fails or omits the
-#      field costs a mutation run instead of dropping the gate.
+#   2. The skip decision. `gateProbe?.mutation_gated !== false` must treat every
+#      answer except a confirmed false as gated, so a probe that fails or omits
+#      the field costs a mutation run instead of dropping the gate.
 #
 # Needs git and node. Exit 0 all green, 1 any assertion failed.
 
@@ -77,16 +77,16 @@ check "worktree-only marker reports ungated" "$(probe "$WT")" false
 rm -f "$WT/.mutation-gated"
 
 echo "case E: the skip decision over every probe outcome"
-# Mirrors the script's `gateProbe?.gated !== false`. Exits 1 on any mismatch, so
-# the assertion is the status rather than parsed output.
+# Mirrors the script's `gateProbe?.mutation_gated !== false`. Exits 1 on any
+# mismatch, so the assertion is the status rather than parsed output.
 node --input-type=module -e '
-const decide = p => (p?.gated !== false)
+const decide = p => (p?.mutation_gated !== false)
 const cases = [
-  [{gated: true,  detail: "x"}, true],
-  [{gated: false, detail: "x"}, false],
-  [{},                          true],
-  [null,                        true],
-  [undefined,                   true],
+  [{mutation_gated: true,  detail: "x"}, true],
+  [{mutation_gated: false, detail: "x"}, false],
+  [{},                                   true],
+  [null,                                 true],
+  [undefined,                            true],
 ]
 process.exit(cases.every(([probe, want]) => decide(probe) === want) ? 0 : 1)
 '
