@@ -1449,9 +1449,12 @@ function gatesPayload() {
   // scored=false does not mean any one thing -- no commits, a gate that
   // printed nothing to score, or (unconfirmed) that it never ran -- so the
   // clause here stays generic and leaves the actual cause to gateNote below,
-  // rather than asserting one.
+  // rather than asserting one. scored=true only means a phase reported that
+  // crap-commit.sh printed a scored pass on its own commits -- an adoption or
+  // a declaration-only pass counts too, and neither measured a function -- so
+  // the true arm claims a pass on a commit, never a count of what it scored.
   const scoredClause = scored
-    ? 'and scored at least one function in this range'
+    ? 'and passed on a commit in this range'
     : 'but nothing in this range scored'
   const bypassClause = crapGated
     ? 'a raw git commit could not have bypassed it (.crap-gated present at the repo root)'
