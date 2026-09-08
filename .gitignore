@@ -17,3 +17,9 @@ __pycache__/
 # Local term list for scripts/check-no-private-refs.sh. Never tracked: the
 # point of keeping it out of the repo is that the terms stay unpublished.
 .private-terms
+
+# Run state this plugin writes into whatever repo it runs in: per-ticket run
+# records under .claude/touchstone-runs/ and the worktrees the branch phase
+# cuts. Records carry absolute paths and full review findings, so they are
+# local state, not something a repo's team asked for.
+.claude/
