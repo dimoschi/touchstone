@@ -110,7 +110,9 @@ function makeAgent(scenario, captured) {
     }
     if (label === 'draft-pr') {
       captured.draftPrCalled = true
-      return { opened: false, detail: 'should not be reached' }
+      // Default has no number, so draftPr stays null and prNote() reports that
+      // nothing was opened. A scenario that wants a draft must say so.
+      return scenario.draftPr ?? { opened: false, detail: 'should not be reached' }
     }
     if (label.startsWith('halt-notice:')) {
       captured.haltAt = label.slice('halt-notice:'.length)
@@ -165,6 +167,7 @@ async function scenarioUnsupportedLanguage() {
         'decision rather than editing the marker.',
       files_changed: [], commit_range: 'base00000000000000000000000000000000000000..base00000000000000000000000000000000000000',
       insertions: 0, scored: false, unsupported_language: true,
+      gate_note: 'crap-check: FAILED TO MEASURE - 2 staged file(s)',
     },
   })
   check('halted at Implement', result.halted_at, 'Implement')
@@ -172,6 +175,10 @@ async function scenarioUnsupportedLanguage() {
   // and commands/deliver.md tells the caller to report the gate result, so a
   // halt that omits it leaves the caller with nothing to report.
   check('the gate result reaches the halt payload', result.gates?.measured ?? null, 'nothing scorable')
+  // Presence is not the claim: the refusing implementer's own gate message has
+  // to survive into detail, which is the only place it is ever reported.
+  check('the refusing implementer\'s gate note reaches detail',
+    /FAILED TO MEASURE - 2 staged file/.test(result.gates?.detail ?? ''), true)
   check('Draft PR never ran', captured.draftPrCalled, false)
   check('Fix never ran', captured.fixCalled, false)
   check('Mutation never ran', captured.mutationCalled, false)
@@ -259,10 +266,13 @@ async function scenarioImplementCeiling() {
     /review did not run/.test(result.note ?? ''), true)
 }
 
+const DRAFT_OPEN = { opened: true, url: 'https://example.test/pr/5', number: 5, detail: 'stub' }
+
 async function scenarioMutationHalts() {
   console.log('\n== scenario: a mutation agent reporting unsupported_language halts at Mutation')
   const { result } = await run({
     args: { maxGateAttempts: 3 },
+    draftPr: DRAFT_OPEN,
     implementer: {
       summary: 'implemented the feature', files_changed: ['a.go'],
       commit_range: 'base00000000000000000000000000000000000000..impl0000000000000000000000000000000000000',
@@ -297,6 +307,7 @@ async function scenarioMutationNeedsUserRun() {
   console.log('\n== scenario: the Bash-ceiling halt does not claim no PR was opened either')
   const { result } = await run({
     args: { maxGateAttempts: 3 },
+    draftPr: DRAFT_OPEN,
     implementer: {
       summary: 'implemented the feature', files_changed: ['a.go'],
       commit_range: 'base00000000000000000000000000000000000000..impl0000000000000000000000000000000000000',
@@ -317,12 +328,40 @@ async function scenarioMutationNeedsUserRun() {
     /left as a draft/.test(result.note ?? ''), true)
 }
 
+// Opening the draft may fail without ending the run, so "left as a draft"
+// stated unconditionally is the same class of wrong as the claim it replaced.
+async function scenarioMutationHaltWithNoDraft() {
+  console.log('\n== scenario: with no draft opened, the Mutation halt says so')
+  const { result } = await run({
+    args: { maxGateAttempts: 3 },
+    draftPr: { opened: false, detail: 'gh pr create failed' },
+    implementer: {
+      summary: 'implemented the feature', files_changed: ['a.go'],
+      commit_range: 'base00000000000000000000000000000000000000..impl0000000000000000000000000000000000000',
+      insertions: 5, scored: true,
+    },
+    responses: {
+      'mutation:1': {
+        green: false, head_sha: 'impl0000000000000000000000000000000000000',
+        detail: 'NEXT_ACTION is UNSUPPORTED_LANGUAGE: three options.',
+        unsupported_language: true,
+      },
+    },
+  })
+  check('halted at Mutation', result.halted_at, 'Mutation')
+  check('the note says no PR was opened', /[Nn]o PR was opened/.test(result.note ?? ''), true)
+  check('the note does not claim a draft was left',
+    /left as a draft/.test(result.note ?? ''), false)
+  check('there was no PR to report the halt on', result.halt_reported_to ?? null, null)
+}
+
 async function main() {
   await scenarioUnsupportedLanguage()
   await scenarioImplementCeiling()
   await scenarioFixHalts()
   await scenarioMutationHalts()
   await scenarioMutationNeedsUserRun()
+  await scenarioMutationHaltWithNoDraft()
   if (failures) { console.log(`\nFAILED: ${failures} assertion(s)`); process.exit(1) }
   console.log('\nOK (unsupported-language halt harness)')
 }

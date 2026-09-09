@@ -457,7 +457,7 @@ async function scenarioH() {
   // This halt is strictly downstream of the Mutation halt, so the draft PR
   // always exists by here, and halted() posts this note as a comment on it.
   check('the note does not claim no PR was opened',
-    /no PR was opened/.test(result.note ?? ''), false)
+    /[Nn]o PR was opened/.test(result.note ?? ''), false)
   check('the note says the PR was left as a draft',
     /left as a draft/.test(result.note ?? ''), true)
   // The last halt that reported no gate result, and the one where it is most

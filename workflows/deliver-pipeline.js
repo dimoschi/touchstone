@@ -133,6 +133,13 @@ const stage = (name) => {
 // phase that opens it.
 let draftPr = null
 
+// Opening the draft is allowed to fail without ending the run, so a note that
+// states either outcome flatly is wrong half the time. Every halt note that
+// mentions the PR reads this instead of asserting one.
+const prNote = () => draftPr
+  ? `The PR was left as a draft`
+  : `No PR was opened, because the draft could not be opened earlier in this run`
+
 // Keyed by ticket, not run id: a script is never told its own run id, and the
 // ticket is what a human looks the run up by.
 const recordRun = async (record) => {
@@ -1614,8 +1621,9 @@ if (open.length) {
 // Mutation is a pre-PR gate, not a per-commit one: it costs a full test-suite
 // run per mutant, so it runs once here, on a clean tree, rather than inside the
 // implement/fix loops. In an opted-in repo mutation-pr-gate.py blocks
-// `gh pr create` while it is red, so a red gate here means the PR phase below
-// cannot succeed anyway.
+// `gh pr ready` while it is red, so a red gate here means the PR phase below
+// cannot get past a draft anyway. It deliberately does not block
+// `gh pr create --draft`, which is how this pipeline opens the draft above.
 phase('Mutation')
 const sMut = stage('mutation')
 let mutation = { green: false, detail: 'not run' }
@@ -1723,23 +1731,22 @@ if (!mutation.green) {
     // describes it (the tree is not necessarily uncommittable, and it is not
     // a Bash-ceiling timeout), and blaming surviving mutants for a gate that
     // never ran sends a human chasing the wrong fix.
-    // No arm claims nothing was opened: the draft opens before Review, and
-    // this note is posted as a comment on it.
+    // No arm states the PR's fate itself: this note is posted as a comment on
+    // the draft when there is one, and prNote() is what knows whether there is.
     note: mutation.unsupported_language
       ? `The mutation agent hit a NEXT_ACTION of UNSUPPORTED_LANGUAGE and ` +
         `halted rather than editing .crap-gated or .mutation-gated itself. ` +
-        `${mutation.detail} The PR was left as a draft; a human has to pick ` +
+        `${mutation.detail} ${prNote()}; a human has to pick ` +
         `one of the reported options before this can proceed.`
       : mutation.needs_user_run
       ? `The mutation run does not fit the 600000 ms Bash ceiling, which for ` +
         `this repo is expected rather than a fault. Run the command in detail ` +
         `in your own terminal, then re-run this workflow: --verify will find ` +
-        `the ledger green and the gate will cost milliseconds. The PR was ` +
-        `left as a draft, and mutation-pr-gate.py would block marking it ` +
-        `ready anyway.`
+        `the ledger green and the gate will cost milliseconds. ${prNote()}, ` +
+        `and mutation-pr-gate.py would block marking it ready anyway.`
       : `Mutation gate still red after ${MAX_GATE_ATTEMPTS} attempt(s). Surviving ` +
-        `mutants are behaviour the tests cannot detect. The PR was left as a ` +
-        `draft, and mutation-pr-gate.py would block marking it ready. Kill them ` +
+        `mutants are behaviour the tests cannot detect. ${prNote()}, and ` +
+        `mutation-pr-gate.py would block marking it ready. Kill them ` +
         `with tests, or approve a provably equivalent mutant with ` +
         `mutation-check.sh --accept.`,
   })
@@ -1773,11 +1780,9 @@ if (reviewerCount && mutHead && mutHead !== reviewedThrough && !outOfBudget()) {
       gates: gatesPayload(),
       unresolved_findings: fresh, fix_rounds: round,
       regression_suspects: regressionSuspects,
-      // Says draft, not "no PR was opened": this halt is downstream of every
-      // other one, so the draft always exists, and the note is posted on it.
       note: `The mutation gate's own commits (${reviewedThrough}..${mutHead}) ` +
-            `introduced ${fresh.length} finding(s). The fix rounds are spent, so ` +
-            `the PR was left as a draft. Judge each: fix it, or reject it as wrong.`,
+            `introduced ${fresh.length} finding(s). The fix rounds are spent. ` +
+            `${prNote()}. Judge each: fix it, or reject it as wrong.`,
     })
   }
   reviewedThrough = mutHead
