@@ -1,0 +1,63 @@
+name: Feature
+description: Something the plugin should do and does not
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        A run's triage phase reads the ticket as the specification, and its planner
+        works from the outcome rather than from the proposed change. A ticket that
+        describes only a change leaves the run to infer why, and it will infer wrong
+        often enough to matter.
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: The problem
+      description: >
+        What goes wrong today, with evidence where there is any: a measurement, a run
+        that behaved badly, a `file:line` showing the current behaviour.
+    validations:
+      required: true
+
+  - type: textarea
+    id: change
+    attributes:
+      label: Proposed change
+      description: >
+        The shape of it. If you already know the decision, state it here so the run
+        implements it instead of relitigating it.
+    validations:
+      required: true
+
+  - type: textarea
+    id: outcome
+    attributes:
+      label: Expected outcome
+      description: What is true once this ships, in a sentence or two.
+    validations:
+      required: true
+
+  - type: textarea
+    id: criteria
+    attributes:
+      label: Acceptance criteria
+      description: >
+        How anyone can tell it is done, including the boundaries: what must keep
+        working, and what this must not turn into.
+      placeholder: |
+        - The check list comes from the repo, not from names hardcoded here.
+        - No run marks a PR ready while a discovered check is red.
+        - Discovery finding nothing is logged, not a halt.
+    validations:
+      required: true
+
+  - type: textarea
+    id: constraints
+    attributes:
+      label: Constraints or alternatives
+      description: >
+        Anything that bounds the design: a dependency that does not exist yet, an
+        approach already ruled out and why.
+    validations:
+      required: false
