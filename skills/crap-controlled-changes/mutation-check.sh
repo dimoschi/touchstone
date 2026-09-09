@@ -222,7 +222,15 @@ TOOLS="$(mutation_fingerprint "$MUTATION_PATHS")"
 # *test/*.go reaches only one level, so a harness any deeper was measured as
 # production, and it usually builds only under a tag whose own lane excludes the
 # unit tests that would kill its mutants.
-GO_FILES="$( (git diff --name-only "$BASE" -- '*.go' ':(exclude)*_test.go' ':(exclude)*mock_*.go' ':(exclude)*_mock.go' ':(exclude)**/*test/*.go' ':(exclude)test/**' ':(exclude)**/test/**' ':(exclude)*.sql.go' ':(exclude)*.pb.go' || true) | filter_only)"
+#
+# cmd/*/main.go: parse_mutago.py already exempts `func main()` itself, on the
+# theory that it wires up live dependencies and is reachable only by re-execing
+# the binary. The rest of the file is the same wiring under the same theory, so
+# a package-level var, an init, or a helper main calls once was still measured
+# as production and kept reappearing as an untestable survivor. Deliberately
+# just the entry file, not cmd/**: a sibling in the same directory (flag
+# parsing, config merging, subcommand wiring) is real logic and stays measured.
+GO_FILES="$( (git diff --name-only "$BASE" -- '*.go' ':(exclude)*_test.go' ':(exclude)*mock_*.go' ':(exclude)*_mock.go' ':(exclude)**/*test/*.go' ':(exclude)test/**' ':(exclude)**/test/**' ':(exclude)*.sql.go' ':(exclude)*.pb.go' ':(exclude)cmd/*/main.go' || true) | filter_only)"
 PHP_FILES="$( (git diff --name-only "$BASE" -- '*.php' \
   ':(exclude)tests/**' ':(exclude)**/Tests/**' ':(exclude)**/*Test.php' || true) | filter_only)"
 PY_FILES="$( (git diff --name-only "$BASE" -- '*.py' \
