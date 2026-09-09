@@ -42,6 +42,19 @@ check "the Mutation prompt says never create/edit/delete the markers" \
 check "IMPL, FIXED and GATE each declare unsupported_language as a property" \
   "$(grep -Fc "unsupported_language: { type: 'boolean' }" "$SCRIPT" || true)" 3
 
+# Three passes fixed one instance each of the same defect: a note stating the
+# PR's fate from an assumption rather than from draftPr. Only the helper that
+# checks may name either outcome. Bump the last count with a new call site.
+echo "== static: only prNote() states what happened to the PR"
+check "the 'no PR was opened' wording appears only in prNote" \
+  "$(grep -Fc 'PR was opened' "$SCRIPT" || true)" 1
+check "the 'left as a draft' wording appears only in prNote" \
+  "$(grep -Fc 'left as a draft' "$SCRIPT" || true)" 1
+check "no text claims the work cannot open a PR, which the draft already did" \
+  "$(grep -Fc 'cannot open a PR' "$SCRIPT" || true)" 0
+check "every note that reports the PR's fate reads the helper" \
+  "$(grep -Fc '${prNote()}' "$SCRIPT" || true)" 4
+
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
 

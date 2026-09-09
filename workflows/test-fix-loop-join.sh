@@ -744,7 +744,7 @@ async function scenarioT() {
   check('the lens is told a reference means these commits undid a fix',
     lensPrompt.includes('undid one of those fixes'), true)
   check('the lens is told what referencing costs',
-    lensPrompt.includes('ends the run with no pull request'), true)
+    lensPrompt.includes('without the PR being marked ready'), true)
   check('the lens is told a defect outside this range is not a finding here',
     lensPrompt.includes('commits do not touch is not a finding'), true)
 }

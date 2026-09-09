@@ -1604,8 +1604,8 @@ if (open.length) {
     // ceiling, or judge the findings -- and the note pointed at the wrong one.
     note: `${open.length} review finding(s) still open after ${round} fix ` +
           `round(s); ${fixStopReason()}. Stopping before the mutation stage ` +
-          `rather than spending it on work that cannot open a PR. Judge each ` +
-          `finding: fix it, or reject it as wrong.` +
+          `rather than spending it on work that cannot be marked ready. Judge ` +
+          `each finding: fix it, or reject it as wrong.` +
           (regressionSuspects.length
             ? ` Separately, ${regressionSuspects.length} finding(s) were ` +
               `reported again after being verified fixed, and were not ` +
@@ -1765,7 +1765,7 @@ if (reviewerCount && mutHead && mutHead !== reviewedThrough && !outOfBudget()) {
     `\nEach of those was fixed and the fix was verified, all of it before the ` +
     `commits you are reviewing. So set duplicate_of ONLY to report that these ` +
     `commits undid one of those fixes, and say in the evidence which line here ` +
-    `does it. Doing so ends the run with no pull request, on the grounds that a ` +
+    `does it. Doing so ends the run without the PR being marked ready, on the grounds that a ` +
     `verified fix was reverted. A defect you still perceive in code these ` +
     `commits do not touch is not a finding against this range: leave it out.`))
     .filter(f => {
