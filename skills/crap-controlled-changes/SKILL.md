@@ -1,6 +1,6 @@
 ---
 name: crap-controlled-changes
-description: MUST be invoked BEFORE writing or editing any Go, PHP, or Python file in a repo that has opted into gating with a .crap-gated file at its root. This skill mandates TDD via superpowers:test-driven-development as its first step, targets CRAP (Change Risk Anti-Patterns) ≤6 soft / ≤8 hard on changed functions/methods, and runs a pre-commit per-function check via crap-check.sh. If you are about to write Go, PHP, or Python code in a repo with a .crap-gated marker and have not yet invoked this skill, STOP and invoke it now.
+description: MUST be invoked BEFORE writing or editing any Go, PHP, or Python file. This skill mandates TDD via superpowers:test-driven-development as its first step, targets CRAP (Change Risk Anti-Patterns) ≤6 soft / ≤8 hard on changed functions/methods, and runs a pre-commit per-function check via crap-check.sh. crap-check.sh and crap-commit.sh score every invocation regardless of a .crap-gated marker; the marker only arms the hooks that block a raw commit or PR, and creating it is the repo owner's decision, never this skill's. If you are about to write Go, PHP, or Python code and have not yet invoked this skill, STOP and invoke it now.
 ---
 
 # CRAP-Controlled Changes
