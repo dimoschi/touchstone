@@ -5,10 +5,14 @@ body:
   - type: markdown
     attributes:
       value: |
-        A run's triage phase reads the ticket as the specification, and its planner
-        works from the outcome rather than from the proposed change. A ticket that
-        describes only a change leaves the run to infer why, and it will infer wrong
-        often enough to matter.
+        Describe the outcome, not the implementation. A run's triage phase reads the
+        ticket as its specification and its plan phase decides how, against the code
+        as it is today. A ticket that arrives with a design attached gets that design
+        built whether or not it survives contact with the repo, and the planner stops
+        being a planner.
+
+        State a decision here only when it has actually been settled, and put it under
+        constraints with the reason.
 
   - type: textarea
     id: problem
@@ -21,20 +25,12 @@ body:
       required: true
 
   - type: textarea
-    id: change
-    attributes:
-      label: Proposed change
-      description: >
-        The shape of it. If you already know the decision, state it here so the run
-        implements it instead of relitigating it.
-    validations:
-      required: true
-
-  - type: textarea
     id: outcome
     attributes:
       label: Expected outcome
-      description: What is true once this ships, in a sentence or two.
+      description: >
+        What is true once this ships, in a sentence or two. Written so someone can
+        tell whether it happened without reading the diff.
     validations:
       required: true
 
@@ -55,9 +51,10 @@ body:
   - type: textarea
     id: constraints
     attributes:
-      label: Constraints or alternatives
+      label: Constraints, or decisions already taken
       description: >
         Anything that bounds the design: a dependency that does not exist yet, an
-        approach already ruled out and why.
+        approach already ruled out and why, a decision already argued out elsewhere.
+        Not a proposed implementation.
     validations:
       required: false
