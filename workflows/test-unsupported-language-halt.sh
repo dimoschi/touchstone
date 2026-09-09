@@ -141,7 +141,13 @@ async function run(scenario) {
     workflow: async () => { throw new Error('workflow() not stubbed for this test') },
     phase: () => {},
     log: () => {},
-    budget: scenario.budget ?? { total: null, spent: () => 0, remaining: () => Infinity },
+    // A function form as well as an object, because a stage's over() compares
+    // spend against the reading taken when the stage opened: a constant spend
+    // can never exceed a ceiling, so forcing an overrun needs a spend keyed off
+    // which agents have run by then.
+    budget: typeof scenario.budget === 'function'
+      ? scenario.budget(captured)
+      : scenario.budget ?? { total: null, spent: () => 0, remaining: () => Infinity },
   }
   const ctx = vm.createContext(sandbox)
   const fn = vm.compileFunction(body, [], { parsingContext: ctx })
@@ -194,6 +200,7 @@ async function scenarioFixHalts() {
           'than editing the marker.',
         scored: false, unsupported_language: true,
       },
+      staleness: { results: [{ id: 'f1', changed: true }] },
     },
   })
   check('halted at Fix', result.halted_at, 'Fix')
@@ -216,6 +223,40 @@ async function scenarioFixHalts() {
   // it reports a Fix halt whose fix phase apparently cost nothing.
   check('the fix stage spend is recorded',
     Object.prototype.hasOwnProperty.call(result.stage_spend ?? {}, 'fix'), true)
+  // The sibling halt marks findings whose evidence has moved, and halted()
+  // renders that marker into the PR comment. Unmarked, a human re-checks
+  // nothing and acts on a finding that has already been overtaken.
+  check('the finding carries the stale marker the sibling halt applies',
+    result.unresolved_findings?.[0]?.code_changed_since_recorded, true)
+}
+
+// The other Implement halt. It reported no gate result at all, and asserted in
+// prose that the gates had not run -- which is wrong for an implementer that
+// committed and scored before overrunning.
+async function scenarioImplementCeiling() {
+  console.log('\n== scenario: the Implement ceiling halt reports the gate result')
+  const { result } = await run({
+    args: { stageBudgets: { implement: 1000 } },
+    budget: (captured) => ({
+      total: null,
+      spent: () => captured.calls.some(c => c.label === 'implementer') ? 999999 : 0,
+      remaining: () => Infinity,
+    }),
+    implementer: {
+      summary: 'committed two of four steps, then ran out of ceiling',
+      files_changed: ['a.go'],
+      commit_range: 'base00000000000000000000000000000000000000..impl0000000000000000000000000000000000000',
+      insertions: 40, scored: true, gate_note: 'crap-check: PASS on 1 function',
+    },
+  })
+  check('halted at Implement', result.halted_at, 'Implement')
+  check('the gate result reaches the halt payload', result.gates?.measured ?? null, 'scored')
+  check('the scoring implementer\'s own gate note reaches detail',
+    /PASS on 1 function/.test(result.gates?.detail ?? ''), true)
+  check('the note no longer claims the gates did not run',
+    /gates and review did not run/.test(result.note ?? ''), false)
+  check('the note still says review did not run',
+    /review did not run/.test(result.note ?? ''), true)
 }
 
 async function scenarioMutationHalts() {
@@ -278,6 +319,7 @@ async function scenarioMutationNeedsUserRun() {
 
 async function main() {
   await scenarioUnsupportedLanguage()
+  await scenarioImplementCeiling()
   await scenarioFixHalts()
   await scenarioMutationHalts()
   await scenarioMutationNeedsUserRun()

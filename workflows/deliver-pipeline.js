@@ -1034,8 +1034,11 @@ if (impl.unsupported_language) {
 }
 if (sImpl.over()) {
   return await halted('Implement', {
-    plan: plan.plan, implemented: impl.summary,
-    note: 'implementer exceeded its token ceiling; any work is on the branch, gates and review did not run',
+    plan: plan.plan, implemented: impl.summary, gates: gatesPayload(),
+    // The note says nothing about the gates: an implementer that committed
+    // before overrunning did gate those commits, and what was measured is in
+    // the gates field now.
+    note: 'implementer exceeded its token ceiling; any work is on the branch and review did not run',
   })
 }
 
@@ -1348,6 +1351,45 @@ const verifyOpen = async (findings, label) => {
     .map(v => [stripBrackets(v.id), v.fixed === true])
 }
 
+// Advisory only: a finding's evidence may have moved since it was recorded. One
+// cheap agent checks each against its evidence, not just its file. Skipped only
+// when the loop ran zero rounds, since nothing could have changed then; a loop
+// that stopped on budget after a round already committed is exactly the case
+// this exists for, so it runs regardless of budget. Any rejection degrades to
+// nothing marked, never to losing the halt.
+// Declared before the loop because the refusal halt inside it calls this too,
+// and a const declared below the loop is in its temporal dead zone.
+const markStale = async (findings) => {
+  let staleness = null
+  if (round > 0) {
+    try {
+      staleness = await treeAgent(
+        `For each finding below, report whether the code its evidence ` +
+        `describes has changed since it was recorded, not merely whether its ` +
+        `file has any commit at all. For each one, run: git log -p ` +
+        `<recorded_at>..HEAD -- <file>, substituting that finding's own ` +
+        `recorded_at and file, and read the diff. Return changed=true only if ` +
+        `a commit in that range touches the location or behaviour the ` +
+        `evidence describes; changed=false if the file has no commits in ` +
+        `range, or its commits do not touch what the evidence describes. This ` +
+        `does not judge whether the finding is still valid, only whether the ` +
+        `code it points at moved.\n` +
+        findings.map(f =>
+          `[${f.id}] ${f.file} recorded at ${f.recorded_at}. Evidence: ${f.evidence}`
+        ).join('\n'),
+        { label: 'staleness', schema: STALENESS, model: 'haiku', effort: 'low' })
+    } catch (e) {
+      log(`staleness probe failed, reporting findings unmarked: ${e?.message ?? e}`)
+    }
+  }
+  const staleIds = new Set(
+    (Array.isArray(staleness?.results) ? staleness.results : [])
+      .filter(r => r?.changed === true && typeof r?.id === 'string')
+      .map(r => stripBrackets(r.id)))
+  return findings.map(f =>
+    staleIds.has(f.id) ? { ...f, code_changed_since_recorded: true } : f)
+}
+
 const fixStopReason = () =>
   !open.length ? 'every finding was resolved'
   : round >= MAX_REVIEW_ROUNDS
@@ -1415,7 +1457,7 @@ while (open.length && round < MAX_REVIEW_ROUNDS && !outOfBudget() && !sFix.over(
     sFix.close()
     return await halted('Fix', {
       plan: plan.plan, implemented: impl.summary, gates: gatesPayload(),
-      unresolved_findings: open, fix_rounds: round,
+      unresolved_findings: await markStale(open), fix_rounds: round,
       stopped_because:
         `the fixer hit a NEXT_ACTION of UNSUPPORTED_LANGUAGE and halted rather ` +
         `than editing a gate marker, so these findings have not had every round`,
@@ -1541,41 +1583,7 @@ function gatesPayload() {
 }
 
 if (open.length) {
-  // Advisory only: a finding's evidence may have moved since it was
-  // recorded. One cheap agent checks each against its evidence, not just its
-  // file. Skipped only when the loop ran zero rounds, since nothing could
-  // have changed then; a loop that stopped on budget after a round already
-  // committed is exactly the case this exists for, so it runs regardless of
-  // budget. Any rejection degrades to nothing marked, never to losing the
-  // halt.
-  let staleness = null
-  if (round > 0) {
-    try {
-      staleness = await treeAgent(
-        `For each finding below, report whether the code its evidence ` +
-        `describes has changed since it was recorded, not merely whether its ` +
-        `file has any commit at all. For each one, run: git log -p ` +
-        `<recorded_at>..HEAD -- <file>, substituting that finding's own ` +
-        `recorded_at and file, and read the diff. Return changed=true only if ` +
-        `a commit in that range touches the location or behaviour the ` +
-        `evidence describes; changed=false if the file has no commits in ` +
-        `range, or its commits do not touch what the evidence describes. This ` +
-        `does not judge whether the finding is still valid, only whether the ` +
-        `code it points at moved.\n` +
-        open.map(f =>
-          `[${f.id}] ${f.file} recorded at ${f.recorded_at}. Evidence: ${f.evidence}`
-        ).join('\n'),
-        { label: 'staleness', schema: STALENESS, model: 'haiku', effort: 'low' })
-    } catch (e) {
-      log(`staleness probe failed, reporting findings unmarked: ${e?.message ?? e}`)
-    }
-  }
-  const staleIds = new Set(
-    (Array.isArray(staleness?.results) ? staleness.results : [])
-      .filter(r => r?.changed === true && typeof r?.id === 'string')
-      .map(r => stripBrackets(r.id)))
-  const reported = open.map(f =>
-    staleIds.has(f.id) ? { ...f, code_changed_since_recorded: true } : f)
+  const reported = await markStale(open)
   const staleCount = reported.filter(f => f.code_changed_since_recorded).length
 
   return await halted('Fix', {
