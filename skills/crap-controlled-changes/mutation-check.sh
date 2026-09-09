@@ -231,13 +231,16 @@ TOOLS="$(mutation_fingerprint "$MUTATION_PATHS")"
 # just the entry file, not cmd/**: a sibling in the same directory (flag
 # parsing, config merging, subcommand wiring) is real logic and stays measured.
 #
-# Both the root and **/-prefixed spellings are needed, same as test/** above,
-# for a cmd/ that sits under a subdirectory or a nested module. Both use
-# :(glob) magic so the `*` stops at a slash: without it git's default pathspec
-# matching lets `*` cross directory boundaries, which would also exclude a
-# main.go nested deeper than the entry file itself (cmd/x/internal/main.go),
-# not just the entry file the comment above says this is limited to.
-GO_FILES="$( (git diff --name-only "$BASE" -- '*.go' ':(exclude)*_test.go' ':(exclude)*mock_*.go' ':(exclude)*_mock.go' ':(exclude)**/*test/*.go' ':(exclude)test/**' ':(exclude)**/test/**' ':(exclude)*.sql.go' ':(exclude)*.pb.go' ':(exclude,glob)cmd/*/main.go' ':(exclude,glob)**/cmd/*/main.go' || true) | filter_only)"
+# A single **/-prefixed spelling covers both a root-level cmd/ and one nested
+# under a subdirectory or module, unlike test/** above: git's own pathspec
+# rule for **/ is "match in all directories", including zero, so **/cmd/*/main.go
+# alone already reaches cmd/x/main.go too and a separate root-anchored spelling
+# would be redundant. It uses :(glob) magic so the `*` stops at a slash:
+# without it git's default pathspec matching lets `*` cross directory
+# boundaries, which would also exclude a main.go nested deeper than the entry
+# file itself (cmd/x/internal/main.go), not just the entry file this is
+# limited to.
+GO_FILES="$( (git diff --name-only "$BASE" -- '*.go' ':(exclude)*_test.go' ':(exclude)*mock_*.go' ':(exclude)*_mock.go' ':(exclude)**/*test/*.go' ':(exclude)test/**' ':(exclude)**/test/**' ':(exclude)*.sql.go' ':(exclude)*.pb.go' ':(exclude,glob)**/cmd/*/main.go' || true) | filter_only)"
 PHP_FILES="$( (git diff --name-only "$BASE" -- '*.php' \
   ':(exclude)tests/**' ':(exclude)**/Tests/**' ':(exclude)**/*Test.php' || true) | filter_only)"
 PY_FILES="$( (git diff --name-only "$BASE" -- '*.py' \
