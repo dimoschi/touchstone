@@ -162,6 +162,10 @@ async function scenarioUnsupportedLanguage() {
     },
   })
   check('halted at Implement', result.halted_at, 'Implement')
+  // The implementer may have committed and scored before hitting the refusal,
+  // and commands/deliver.md tells the caller to report the gate result, so a
+  // halt that omits it leaves the caller with nothing to report.
+  check('the gate result reaches the halt payload', result.gates?.measured ?? null, 'nothing scorable')
   check('Draft PR never ran', captured.draftPrCalled, false)
   check('Fix never ran', captured.fixCalled, false)
   check('Mutation never ran', captured.mutationCalled, false)
@@ -237,12 +241,46 @@ async function scenarioMutationHalts() {
     names_unsupported: /UNSUPPORTED_LANGUAGE/.test(result.note ?? ''),
     blames_mutants: /[Ss]urviving/.test(result.note ?? ''),
   }, { names_unsupported: true, blames_mutants: false })
+  // The draft PR is opened before Review, so one exists by the time Mutation
+  // runs, and halted() posts this note as a comment on it. A note claiming
+  // nothing was opened contradicts the PR it is written on.
+  check('the note does not claim no PR was opened',
+    /[Nn]o PR was opened/.test(result.note ?? ''), false)
+  check('the note says the PR was left as a draft',
+    /left as a draft/.test(result.note ?? ''), true)
+}
+
+// The sibling arm of the same ternary, which made the same claim. Covered
+// separately because only one arm renders per halt.
+async function scenarioMutationNeedsUserRun() {
+  console.log('\n== scenario: the Bash-ceiling halt does not claim no PR was opened either')
+  const { result } = await run({
+    args: { maxGateAttempts: 3 },
+    implementer: {
+      summary: 'implemented the feature', files_changed: ['a.go'],
+      commit_range: 'base00000000000000000000000000000000000000..impl0000000000000000000000000000000000000',
+      insertions: 5, scored: true,
+    },
+    responses: {
+      'mutation:1': {
+        green: false, head_sha: 'impl0000000000000000000000000000000000000',
+        detail: 'the run does not fit the Bash ceiling', needs_user_run: true,
+      },
+    },
+  })
+  check('halted at Mutation', result.halted_at, 'Mutation')
+  check('the note blames the Bash ceiling', /Bash ceiling/.test(result.note ?? ''), true)
+  check('the note does not claim no PR was opened',
+    /[Nn]o PR was opened/.test(result.note ?? ''), false)
+  check('the note says the PR was left as a draft',
+    /left as a draft/.test(result.note ?? ''), true)
 }
 
 async function main() {
   await scenarioUnsupportedLanguage()
   await scenarioFixHalts()
   await scenarioMutationHalts()
+  await scenarioMutationNeedsUserRun()
   if (failures) { console.log(`\nFAILED: ${failures} assertion(s)`); process.exit(1) }
   console.log('\nOK (unsupported-language halt harness)')
 }

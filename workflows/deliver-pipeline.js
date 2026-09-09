@@ -1001,28 +1001,17 @@ const impl = await treeAgent(
   { label: 'implementer', schema: IMPL, model: 'sonnet', effort: effortFor.implement })
 if (!impl) throw new Error('implementer failed')
 sImpl.close()
-// The only other outcome this phase can report, and the only one that must
-// not fall through to Draft PR: the schema has no other way to say "I
-// stopped", so an unhandled unsupported_language would read as a normal,
-// reviewable result and the refused work would never reach a commit.
-if (impl.unsupported_language) {
-  return await halted('Implement', {
-    plan: plan.plan, implemented: impl.summary,
-    note: impl.summary,
-  })
-}
-if (sImpl.over()) {
-  return await halted('Implement', {
-    plan: plan.plan, implemented: impl.summary,
-    note: 'implementer exceeded its token ceiling; any work is on the branch, gates and review did not run',
-  })
-}
 
 // Whether anything actually went through the gate, across every committing
 // phase from here through the mutation loop -- an implementer that scored
 // nothing (nothing changed the gate checks) can still be followed by a fix
 // round or the mutation loop that does. Folded with OR, never overwritten, so
 // one scored=true anywhere makes the whole run's `measured` claim 'scored'.
+//
+// Declared above the halts below, not after them: these are `let` bindings,
+// and the gate payload helper reads all three, so a halt that called it from
+// above this point died with "Cannot access 'scored' before initialization"
+// rather than reporting the gate.
 let scored = impl.scored === true
 // Kept apart by whether the reporting phase itself scored: pairing a final
 // measured='scored' with an unscored phase's "nothing to score" note would
@@ -1032,6 +1021,23 @@ let scored = impl.scored === true
 // says which.
 let scoredNote = scored ? (impl.gate_note ?? '') : ''
 let unscoredNote = scored ? '' : (impl.gate_note ?? '')
+
+// The only other outcome this phase can report, and the only one that must
+// not fall through to Draft PR: the schema has no other way to say "I
+// stopped", so an unhandled unsupported_language would read as a normal,
+// reviewable result and the refused work would never reach a commit.
+if (impl.unsupported_language) {
+  return await halted('Implement', {
+    plan: plan.plan, implemented: impl.summary, gates: gatesPayload(),
+    note: impl.summary,
+  })
+}
+if (sImpl.over()) {
+  return await halted('Implement', {
+    plan: plan.plan, implemented: impl.summary,
+    note: 'implementer exceeded its token ceiling; any work is on the branch, gates and review did not run',
+  })
+}
 
 // A draft PR, opened as soon as there is a commit to hang it on.
 //
@@ -1709,17 +1715,20 @@ if (!mutation.green) {
     // describes it (the tree is not necessarily uncommittable, and it is not
     // a Bash-ceiling timeout), and blaming surviving mutants for a gate that
     // never ran sends a human chasing the wrong fix.
+    // No arm claims nothing was opened: the draft opens before Review, and
+    // this note is posted as a comment on it.
     note: mutation.unsupported_language
       ? `The mutation agent hit a NEXT_ACTION of UNSUPPORTED_LANGUAGE and ` +
         `halted rather than editing .crap-gated or .mutation-gated itself. ` +
-        `${mutation.detail} No PR was opened; a human has to pick one of the ` +
-        `reported options before this can proceed.`
+        `${mutation.detail} The PR was left as a draft; a human has to pick ` +
+        `one of the reported options before this can proceed.`
       : mutation.needs_user_run
       ? `The mutation run does not fit the 600000 ms Bash ceiling, which for ` +
         `this repo is expected rather than a fault. Run the command in detail ` +
         `in your own terminal, then re-run this workflow: --verify will find ` +
-        `the ledger green and the gate will cost milliseconds. No PR was ` +
-        `opened, and mutation-pr-gate.py would block one anyway.`
+        `the ledger green and the gate will cost milliseconds. The PR was ` +
+        `left as a draft, and mutation-pr-gate.py would block marking it ` +
+        `ready anyway.`
       : `Mutation gate still red after ${MAX_GATE_ATTEMPTS} attempt(s). Surviving ` +
         `mutants are behaviour the tests cannot detect. The PR was left as a ` +
         `draft, and mutation-pr-gate.py would block marking it ready. Kill them ` +
