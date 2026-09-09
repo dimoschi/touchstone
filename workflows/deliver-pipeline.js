@@ -296,6 +296,12 @@ const IMPL = {
     insertions: { type: 'integer' },
     scored: { type: 'boolean' },
     gate_note: { type: 'string' },
+    // Set when the one halt this phase can hit -- a NEXT_ACTION of
+    // UNSUPPORTED_LANGUAGE -- fires. Without a schema field for it, the phase
+    // has no way to represent a halt at all: it would return a normal result
+    // and the run would sail on through Draft PR, Review, Fix and Mutation
+    // with the refused work never committed.
+    unsupported_language: { type: 'boolean' },
   },
 }
 // head_sha is required, not optional: it is how the script learns what this
@@ -965,7 +971,9 @@ const impl = await treeAgent(
   `yours, and a repo without either marker is simply not gated -- say so and ` +
   `continue. The one exception is a NEXT_ACTION of UNSUPPORTED_LANGUAGE: halt ` +
   `and report its three options to the user rather than picking one and ` +
-  `editing the marker yourself. ` +
+  `editing the marker yourself. Set unsupported_language=true when you do, ` +
+  `and put the three options in summary; leave commit_range as the unchanged ` +
+  `base if you made no commits before hitting it. ` +
   `Do not push and do not open a PR: those are the user's to authorise.\n` +
   `Return scored=true if crap-commit.sh printed that it scored the change ` +
   `(ran the CRAP and dead-code checks on your commits), scored=false if you ` +
@@ -983,6 +991,16 @@ const impl = await treeAgent(
   { label: 'implementer', schema: IMPL, model: 'sonnet', effort: effortFor.implement })
 if (!impl) throw new Error('implementer failed')
 sImpl.close()
+// The only other outcome this phase can report, and the only one that must
+// not fall through to Draft PR: the schema has no other way to say "I
+// stopped", so an unhandled unsupported_language would read as a normal,
+// reviewable result and the refused work would never reach a commit.
+if (impl.unsupported_language) {
+  return await halted('Implement', {
+    plan: plan.plan, implemented: impl.summary,
+    note: impl.summary,
+  })
+}
 if (sImpl.over()) {
   return await halted('Implement', {
     plan: plan.plan, implemented: impl.summary,
@@ -1581,7 +1599,10 @@ for (let attempt = 1; attempt <= MAX_GATE_ATTEMPTS && !mutation.green
   mutation = await treeAgent(
     `Run mutation-check.sh from the crap-controlled-changes skill in this repo. ` +
     `It mutates files in place and needs a clean working tree, so commit anything ` +
-    `outstanding first.\n` +
+    `outstanding first. Never create, edit or delete .crap-gated or ` +
+    `.mutation-gated on your own initiative: that is the repo owner's ` +
+    `decision, not yours, and a repo without either marker is simply not ` +
+    `gated -- say so and continue.\n` +
     `HOW TO RUN IT, in this order. The skill's Signal C settles all of this ` +
     `from measurements; do not re-derive a policy of your own, which is why ` +
     `this phase has been inconsistent run to run.\n` +
