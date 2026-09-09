@@ -1770,11 +1770,14 @@ if (reviewerCount && mutHead && mutHead !== reviewedThrough && !outOfBudget()) {
   if (fresh.length) {
     return await halted('Review', {
       plan: plan.plan, implemented: impl.summary, mutation,
+      gates: gatesPayload(),
       unresolved_findings: fresh, fix_rounds: round,
       regression_suspects: regressionSuspects,
+      // Says draft, not "no PR was opened": this halt is downstream of every
+      // other one, so the draft always exists, and the note is posted on it.
       note: `The mutation gate's own commits (${reviewedThrough}..${mutHead}) ` +
             `introduced ${fresh.length} finding(s). The fix rounds are spent, so ` +
-            `no PR was opened. Judge each: fix it, or reject it as wrong.`,
+            `the PR was left as a draft. Judge each: fix it, or reject it as wrong.`,
     })
   }
   reviewedThrough = mutHead

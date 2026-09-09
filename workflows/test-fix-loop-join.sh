@@ -454,6 +454,15 @@ async function scenarioH() {
     (captured.haltNoticePrompt ?? '').includes(expectedLine), true)
   check('no re-check marker text leaked into the comment',
     (captured.haltNoticePrompt ?? '').includes('code changed since recorded'), false)
+  // This halt is strictly downstream of the Mutation halt, so the draft PR
+  // always exists by here, and halted() posts this note as a comment on it.
+  check('the note does not claim no PR was opened',
+    /no PR was opened/.test(result.note ?? ''), false)
+  check('the note says the PR was left as a draft',
+    /left as a draft/.test(result.note ?? ''), true)
+  // The last halt that reported no gate result, and the one where it is most
+  // complete: mutation green, everything through the fix loop scored.
+  check('the gate result reaches the halt payload', result.gates?.measured ?? null, 'scored')
 }
 
 // Scenario I -- a verifier that copies the id exactly as the prompt renders
