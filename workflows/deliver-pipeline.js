@@ -1389,20 +1389,33 @@ while (open.length && round < MAX_REVIEW_ROUNDS && !outOfBudget() && !sFix.over(
     `Findings:\n` +
     open.map(f => `- ${f.title} (${f.file}): ${f.claim}`).join('\n'),
     { label: `fix:${round}`, schema: FIXED, model: 'sonnet', effort: effortFor.implement })
-  // Same reasoning as Implement's check above: without this, a fixer that
-  // reports the halt reads as a normal round and the loop keeps going with
-  // the refused work still uncommitted.
-  if (fixed?.unsupported_language) {
-    return await halted('Fix', {
-      plan: plan.plan, implemented: impl.summary,
-      note: fixed.note,
-    })
-  }
+  // Folded before the halt check below, not after: a fixer that committed part
+  // of the work and only then hit the refusal still has a gate result, and the
+  // halt is the only place left to report it.
   if (fixed?.scored === true) {
     scored = true
     if (fixed?.gate_note) scoredNote = fixed.gate_note
   } else if (fixed?.gate_note) {
     unscoredNote = fixed.gate_note
+  }
+  // Same reasoning as Implement's check above: without this, a fixer that
+  // reports the halt reads as a normal round and the loop keeps going with
+  // the refused work still uncommitted.
+  if (fixed?.unsupported_language) {
+    // The stage is closed before the return because closing is what records
+    // its spend. stopped_because is written here rather than taken from the
+    // shared reason helper, whose arms all describe a limit being reached and
+    // so would call this refusal "should not happen".
+    sFix.close()
+    return await halted('Fix', {
+      plan: plan.plan, implemented: impl.summary, gates: gatesPayload(),
+      unresolved_findings: open, fix_rounds: round,
+      stopped_because:
+        `the fixer hit a NEXT_ACTION of UNSUPPORTED_LANGUAGE and halted rather ` +
+        `than editing a gate marker, so these findings have not had every round`,
+      regression_suspects: regressionSuspects,
+      note: fixed.note,
+    })
   }
   // Verification and the tail review both read the fix's finished commits and
   // answer independent questions of them -- "are the named findings closed?"

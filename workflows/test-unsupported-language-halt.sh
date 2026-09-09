@@ -195,6 +195,23 @@ async function scenarioFixHalts() {
   check('halted at Fix', result.halted_at, 'Fix')
   check('Mutation never ran', captured.mutationCalled, false)
   check('the halt note reports the three options', /three options/.test(result.note ?? ''), true)
+  // The findings cost an opus review round and halted() builds the draft-PR
+  // comment out of them, so a halt that drops them leaves a reviewer with a
+  // stop and no list of what to judge.
+  check('the open finding reaches the halt payload', {
+    count: result.unresolved_findings?.length ?? 0,
+    title: result.unresolved_findings?.[0]?.title ?? null,
+  }, { count: 1, title: 'off-by-one' })
+  check('the gate result reaches the halt payload', result.gates?.measured ?? null, 'scored')
+  check('the fix round count reaches the halt payload', result.fix_rounds, 1)
+  check('the halt says why the loop stopped',
+    /UNSUPPORTED_LANGUAGE/.test(result.stopped_because ?? ''), true)
+  check('regression suspects reach the halt payload',
+    Array.isArray(result.regression_suspects), true)
+  // Closing the stage is what records its spend, so an early return that skips
+  // it reports a Fix halt whose fix phase apparently cost nothing.
+  check('the fix stage spend is recorded',
+    Object.prototype.hasOwnProperty.call(result.stage_spend ?? {}, 'fix'), true)
 }
 
 async function scenarioMutationHalts() {
