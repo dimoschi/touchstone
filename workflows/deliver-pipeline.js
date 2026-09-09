@@ -288,12 +288,14 @@ const TRIAGE = {
 // is a fact rather than the implementer's account of itself.
 const IMPL = {
   type: 'object', additionalProperties: false,
-  required: ['summary', 'files_changed', 'commit_range', 'insertions'],
+  required: ['summary', 'files_changed', 'commit_range', 'insertions', 'scored'],
   properties: {
     summary: { type: 'string' },
     files_changed: { type: 'array', items: { type: 'string' } },
     commit_range: { type: 'string' },
     insertions: { type: 'integer' },
+    scored: { type: 'boolean' },
+    gate_note: { type: 'string' },
   },
 }
 // head_sha is required, not optional: it is how the script learns what this
@@ -306,6 +308,7 @@ const GATE = {
     green: { type: 'boolean' }, head_sha: { type: 'string' },
     detail: { type: 'string' },
     needs_user_run: { type: 'boolean' },
+    scored: { type: 'boolean' }, gate_note: { type: 'string' },
   },
 }
 const FINDINGS = {
@@ -368,8 +371,11 @@ const VERDICTS = {
 // A fix round is a code change like any other, so the script has to know where
 // it landed to hand the next reviewer a range.
 const FIXED = {
-  type: 'object', additionalProperties: false, required: ['head_sha', 'note'],
-  properties: { head_sha: { type: 'string' }, note: { type: 'string' } },
+  type: 'object', additionalProperties: false, required: ['head_sha', 'note', 'scored'],
+  properties: {
+    head_sha: { type: 'string' }, note: { type: 'string' },
+    scored: { type: 'boolean' }, gate_note: { type: 'string' },
+  },
 }
 const STALENESS = {
   type: 'object', additionalProperties: false, required: ['results'],
@@ -937,16 +943,6 @@ if (!gateProbe) {
       `opted-in (safe default: costs an extra run rather than dropping a real gate)`)
 }
 
-const gates = crapGated
-  ? { green: true, detail: 'gates measured and green: crap-commit.sh runs ' +
-      'the dead-code and CRAP gates on every commit; separately, a raw git ' +
-      'commit could not have bypassed it (.crap-gated present at the repo root)' }
-  : { green: true, detail: 'gates measured and green: crap-commit.sh runs ' +
-      'the dead-code and CRAP gates on every commit regardless of the ' +
-      'marker; separately, nothing hook-enforced stopped a raw git commit ' +
-      'from bypassing it (.crap-gated absent at the repo root, or ' +
-      `its presence could not be confirmed). ${gateProbe?.detail ?? ''}`.trim() }
-
 phase('Implement')
 const sImpl = stage('implement')
 const impl = await treeAgent(
@@ -965,6 +961,12 @@ const impl = await treeAgent(
   `green. Commit signed, in as many commits as the work naturally takes. Never run ` +
   `--accept or --mark-scored yourself; both need explicit user approval. ` +
   `Do not push and do not open a PR: those are the user's to authorise.\n` +
+  `Return scored=true if crap-commit.sh printed that it scored the change ` +
+  `(ran the CRAP and dead-code checks on your commits), scored=false if you ` +
+  `made no commits or it printed nothing to score. Base this on what it ` +
+  `printed, never on whether .crap-gated exists and never on your own ` +
+  `judgement of the change. If it printed its own gate message, copy it ` +
+  `verbatim into gate_note.\n` +
   `Return commit_range as '<base-sha>..<head-sha>' using the merge base with ` +
   `${wt.base} and your final HEAD, both as full 40-character SHAs: later ` +
   `phases compare their own HEAD against the head of this range to work out ` +
@@ -981,6 +983,21 @@ if (sImpl.over()) {
     note: 'implementer exceeded its token ceiling; any work is on the branch, gates and review did not run',
   })
 }
+
+// Whether anything actually went through the gate, across every committing
+// phase from here through the mutation loop -- an implementer that scored
+// nothing (nothing changed the gate checks) can still be followed by a fix
+// round or the mutation loop that does. Folded with OR, never overwritten, so
+// one scored=true anywhere makes the whole run's `measured` claim 'scored'.
+let scored = impl.scored === true
+// Kept apart by whether the reporting phase itself scored: pairing a final
+// measured='scored' with an unscored phase's "nothing to score" note would
+// misattribute evidence, and the reverse throws away the only observation
+// there is for a run that never scores at all -- scored=false covers "no
+// commits", "it printed nothing to score" and more, and the note is what
+// says which.
+let scoredNote = scored ? (impl.gate_note ?? '') : ''
+let unscoredNote = scored ? '' : (impl.gate_note ?? '')
 
 // A draft PR, opened as soon as there is a commit to hang it on.
 //
@@ -1323,9 +1340,20 @@ while (open.length && round < MAX_REVIEW_ROUNDS && !outOfBudget() && !sFix.over(
     `or of the unchanged HEAD if you committed nothing. Your commits are ` +
     `reviewed as <previous head>..<your head_sha>, so a wrong or abbreviated ` +
     `SHA there is how unreviewed code reaches the PR.\n` +
+    `Return scored=true if crap-commit.sh printed that it scored this round's ` +
+    `commits, scored=false if you committed nothing or it printed nothing to ` +
+    `score. Base this on what it printed, never on whether .crap-gated exists ` +
+    `and never on your own judgement of the change. If it printed its own ` +
+    `gate message, copy it verbatim into gate_note.\n` +
     `Findings:\n` +
     open.map(f => `- ${f.title} (${f.file}): ${f.claim}`).join('\n'),
     { label: `fix:${round}`, schema: FIXED, model: 'sonnet', effort: effortFor.implement })
+  if (fixed?.scored === true) {
+    scored = true
+    if (fixed?.gate_note) scoredNote = fixed.gate_note
+  } else if (fixed?.gate_note) {
+    unscoredNote = fixed.gate_note
+  }
   // Verification and the tail review both read the fix's finished commits and
   // answer independent questions of them -- "are the named findings closed?"
   // and "did the fix break something new?" -- so they run together. Sequenced,
@@ -1411,6 +1439,38 @@ if (open.length && !outOfBudget()) {
 }
 sFix.close()
 
+// A function, not a value computed once here: `scored` and the two notes keep
+// folding in later phases' own reports (the mutation loop below can still add
+// to them), so each halt and the final result call this after whatever has
+// scored by that point rather than freezing it at the end of the fix loop.
+// bypass_blocked is the earlier probe's crapGated answer, unrelated to
+// whether anything scored.
+function gatesPayload() {
+  // scored=false does not mean any one thing -- no commits, a gate that
+  // printed nothing to score, or (unconfirmed) that it never ran -- so the
+  // clause here stays generic and leaves the actual cause to gateNote below,
+  // rather than asserting one. scored=true only means a phase reported that
+  // crap-commit.sh printed a scored pass on its own commits -- an adoption or
+  // a declaration-only pass counts too, and neither measured a function -- so
+  // the true arm claims a pass on a commit, never a count of what it scored.
+  const scoredClause = scored
+    ? 'and passed on a commit in this range'
+    : 'but nothing in this range scored'
+  const bypassClause = crapGated
+    ? 'a raw git commit could not have bypassed it (.crap-gated present at the repo root)'
+    : 'nothing hook-enforced stopped a raw git commit from bypassing it ' +
+      '(.crap-gated absent at the repo root, or its presence could not be confirmed)'
+  const gateNote = scored ? scoredNote : unscoredNote
+  return {
+    measured: scored ? 'scored' : 'nothing scorable',
+    bypass_blocked: crapGated,
+    detail: (`${scored ? 'gates measured' : 'gates ran, nothing scorable'}: ` +
+      `crap-commit.sh runs the dead-code and CRAP gates on every commit ` +
+      `${scoredClause}; separately, ${bypassClause}. ${gateProbe?.detail ?? ''}`
+    ).trim() + (gateNote ? ` ${gateNote}` : ''),
+  }
+}
+
 if (open.length) {
   // Advisory only: a finding's evidence may have moved since it was
   // recorded. One cheap agent checks each against its evidence, not just its
@@ -1450,7 +1510,7 @@ if (open.length) {
   const staleCount = reported.filter(f => f.code_changed_since_recorded).length
 
   return await halted('Fix', {
-    plan: plan.plan, implemented: impl.summary, gates,
+    plan: plan.plan, implemented: impl.summary, gates: gatesPayload(),
     unresolved_findings: reported, fix_rounds: round, stopped_because: fixStopReason(),
     regression_suspects: regressionSuspects,
     // Report the round count that actually ran and why the loop ended. This
@@ -1554,14 +1614,25 @@ for (let attempt = 1; attempt <= MAX_GATE_ATTEMPTS && !mutation.green
     `HEAD after your last commit, or of the unchanged HEAD if you committed ` +
     `nothing. ` +
     `Anything you commit is reviewed before the PR opens, and that review is ` +
-    `keyed off this SHA.`,
+    `keyed off this SHA.\n` +
+    `Return scored=true if crap-commit.sh printed that it scored a commit you ` +
+    `made this attempt, scored=false if you committed nothing or it printed ` +
+    `nothing to score. Base this on what it printed, never on whether ` +
+    `.crap-gated exists and never on your own judgement of the change. If it ` +
+    `printed its own gate message, copy it verbatim into gate_note.`,
     { label: `mutation:${attempt}`, schema: GATE, model: 'sonnet', effort: 'high' }) ?? mutation
+  if (mutation?.scored === true) {
+    scored = true
+    if (mutation?.gate_note) scoredNote = mutation.gate_note
+  } else if (mutation?.gate_note) {
+    unscoredNote = mutation.gate_note
+  }
 }
 sMut.close()
 
 if (!mutation.green) {
   return await halted('Mutation', {
-    plan: plan.plan, implemented: impl.summary, gates,
+    plan: plan.plan, implemented: impl.summary, gates: gatesPayload(),
     mutation, unresolved_findings: open, regression_suspects: regressionSuspects,
     note: mutation.needs_user_run
       ? `The mutation run does not fit the 600000 ms Bash ceiling, which for ` +
@@ -1703,7 +1774,7 @@ const result = {
   plan: plan.plan,
   stage_spend: stageSpend,
   implemented: impl.summary,
-  gates,
+  gates: gatesPayload(),
   mutation,
   reviewers: reviewerCount,
   regression_suspects: regressionSuspects,
