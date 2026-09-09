@@ -18,9 +18,12 @@ re-execing the binary, so a survivor there measures the absence of an
 integration harness, not a gap in the unit suite. This mirrors the
 complexity-only rule crap-check-go.sh applies to package main.
 
-Two deliberate boundaries:
-  - Only `func main()` itself. Helpers in a main package are ordinary testable
-    code and keep blocking, whether they sit above or below main.
+Two deliberate boundaries, both scoped to whatever this module is handed:
+mutation-check.sh excludes a command's entry file (cmd/<x>/main.go) from
+GO_FILES upstream, so nothing in it reaches here to be exempted or listed.
+  - Only `func main()` itself, in a file that does reach this module. Helpers
+    in a main package are ordinary testable code and keep blocking, whether
+    they sit above or below main.
   - Closures inside main's body (`defer func(){...}()` and friends) are inside
     the span, so they are exempt too. They are entry-point wiring by the same
     argument, but this is the one place the gate stops looking, and a defer in

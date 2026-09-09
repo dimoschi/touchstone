@@ -13,7 +13,9 @@
 #
 # Mutants inside the body of `func main()` are exempted and listed on stderr
 # instead of blocking; see parse_mutago.py. Only that function, not the rest of
-# package main.
+# package main, though a command's whole entry file (cmd/<x>/main.go) never
+# reaches this script at all: ../mutation-check.sh excludes it from
+# MUTATION_FILES upstream, so nothing in it is listed on stderr either.
 #
 # Invoked by ../mutation-check.sh. Env:
 #   MUTATION_BASE           diff base ref (required)
