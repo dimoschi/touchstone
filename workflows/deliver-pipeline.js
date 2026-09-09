@@ -315,6 +315,11 @@ const GATE = {
     detail: { type: 'string' },
     needs_user_run: { type: 'boolean' },
     scored: { type: 'boolean' }, gate_note: { type: 'string' },
+    // Same halt escape IMPL carries: set when a NEXT_ACTION of
+    // UNSUPPORTED_LANGUAGE fires mid-mutation, so the phase has a field to
+    // report it on rather than burning every remaining attempt on a gate that
+    // cannot run.
+    unsupported_language: { type: 'boolean' },
   },
 }
 const FINDINGS = {
@@ -381,6 +386,11 @@ const FIXED = {
   properties: {
     head_sha: { type: 'string' }, note: { type: 'string' },
     scored: { type: 'boolean' }, gate_note: { type: 'string' },
+    // Same halt escape IMPL carries: without it a fixer that hits
+    // UNSUPPORTED_LANGUAGE has no field to report the halt on, so the run
+    // reads a normal result and sails on into Mutation with the refused work
+    // uncommitted.
+    unsupported_language: { type: 'boolean' },
   },
 }
 const STALENESS = {
@@ -1357,7 +1367,8 @@ while (open.length && round < MAX_REVIEW_ROUNDS && !outOfBudget() && !sFix.over(
     `decision, not yours, and a repo without either marker is simply not ` +
     `gated -- say so and continue. The one exception is a NEXT_ACTION of ` +
     `UNSUPPORTED_LANGUAGE: halt and report its three options to the user ` +
-    `rather than picking one and editing the marker yourself. ` +
+    `rather than picking one and editing the marker yourself. Set ` +
+    `unsupported_language=true when you do, and put the three options in note. ` +
     `Do not push or open a PR.\n` +
     `Task: ${brief(task)}\n` +
     `The work under review is ${impl.commit_range}; read that diff for context ` +
@@ -1378,6 +1389,15 @@ while (open.length && round < MAX_REVIEW_ROUNDS && !outOfBudget() && !sFix.over(
     `Findings:\n` +
     open.map(f => `- ${f.title} (${f.file}): ${f.claim}`).join('\n'),
     { label: `fix:${round}`, schema: FIXED, model: 'sonnet', effort: effortFor.implement })
+  // Same reasoning as Implement's check above: without this, a fixer that
+  // reports the halt reads as a normal round and the loop keeps going with
+  // the refused work still uncommitted.
+  if (fixed?.unsupported_language) {
+    return await halted('Fix', {
+      plan: plan.plan, implemented: impl.summary,
+      note: fixed.note,
+    })
+  }
   if (fixed?.scored === true) {
     scored = true
     if (fixed?.gate_note) scoredNote = fixed.gate_note
@@ -1595,14 +1615,19 @@ if (!mutationGated) {
 // Bash ceiling returns the same answer every attempt, and each one costs the
 // ceiling in wall clock before saying so.
 for (let attempt = 1; attempt <= MAX_GATE_ATTEMPTS && !mutation.green
-     && !mutation.needs_user_run && !outOfBudget() && !sMut.over(); attempt++) {
+     && !mutation.needs_user_run && !mutation.unsupported_language
+     && !outOfBudget() && !sMut.over(); attempt++) {
   mutation = await treeAgent(
     `Run mutation-check.sh from the crap-controlled-changes skill in this repo. ` +
     `It mutates files in place and needs a clean working tree, so commit anything ` +
     `outstanding first. Never create, edit or delete .crap-gated or ` +
     `.mutation-gated on your own initiative: that is the repo owner's ` +
     `decision, not yours, and a repo without either marker is simply not ` +
-    `gated -- say so and continue.\n` +
+    `gated -- say so and continue. The one exception is a NEXT_ACTION of ` +
+    `UNSUPPORTED_LANGUAGE: halt and report its three options to the user ` +
+    `rather than picking one and editing the marker yourself. Set ` +
+    `unsupported_language=true when you do, and put the three options in ` +
+    `detail.\n` +
     `HOW TO RUN IT, in this order. The skill's Signal C settles all of this ` +
     `from measurements; do not re-derive a policy of your own, which is why ` +
     `this phase has been inconsistent run to run.\n` +
@@ -1667,7 +1692,16 @@ if (!mutation.green) {
   return await halted('Mutation', {
     plan: plan.plan, implemented: impl.summary, gates: gatesPayload(),
     mutation, unresolved_findings: open, regression_suspects: regressionSuspects,
-    note: mutation.needs_user_run
+    // unsupported_language checked first: neither of the other two notes
+    // describes it (the tree is not necessarily uncommittable, and it is not
+    // a Bash-ceiling timeout), and blaming surviving mutants for a gate that
+    // never ran sends a human chasing the wrong fix.
+    note: mutation.unsupported_language
+      ? `The mutation agent hit a NEXT_ACTION of UNSUPPORTED_LANGUAGE and ` +
+        `halted rather than editing .crap-gated or .mutation-gated itself. ` +
+        `${mutation.detail} No PR was opened; a human has to pick one of the ` +
+        `reported options before this can proceed.`
+      : mutation.needs_user_run
       ? `The mutation run does not fit the 600000 ms Bash ceiling, which for ` +
         `this repo is expected rather than a fault. Run the command in detail ` +
         `in your own terminal, then re-run this workflow: --verify will find ` +

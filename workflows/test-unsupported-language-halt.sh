@@ -1,16 +1,21 @@
 #!/usr/bin/env bash
 # Regression test for ticket 9: a NEXT_ACTION of UNSUPPORTED_LANGUAGE must not
-# leave the pipeline silently continuing past the Implement phase, and the
-# Mutation phase -- the last committing agent that still runs after such a
-# halt would leave refused work uncommitted -- must carry the same
-# .crap-gated / .mutation-gated prohibition Implement and Fix already do.
+# leave the pipeline silently continuing past whichever phase hits it. Three
+# phases can commit -- Implement, Fix, Mutation -- and each needs both a
+# schema field to report the halt on and code that actually stops the run on
+# it, rather than reading the halt as a normal result and sailing on with the
+# refused work uncommitted.
 #
-# Two things are checked:
+# Checked:
 #   1. Static: the Mutation prompt states the marker prohibition, matching the
 #      Implement and Fix prompts.
 #   2. Dynamic, against the real script under stubbed globals: an implementer
 #      that reports unsupported_language=true halts the run at Implement,
 #      before Draft PR, Fix or Mutation ever run.
+#   3. Dynamic: a fixer that reports unsupported_language=true halts the run
+#      at Fix, before Mutation ever runs.
+#   4. Dynamic: a mutation agent that reports unsupported_language=true halts
+#      the run at Mutation without blaming surviving mutants or a timeout.
 #
 # Needs node. Exit 0 all green, 1 any assertion failed.
 
@@ -34,8 +39,8 @@ check() {
 echo "== static: the Mutation prompt carries the marker prohibition"
 check "the Mutation prompt says never create/edit/delete the markers" \
   "$(grep -Fc 'Never create, edit or delete .crap-gated or' "$SCRIPT" || true)" 3
-check "IMPL declares unsupported_language as a property" \
-  "$(grep -Fc "unsupported_language: { type: 'boolean' }" "$SCRIPT" || true)" 1
+check "IMPL, FIXED and GATE each declare unsupported_language as a property" \
+  "$(grep -Fc "unsupported_language: { type: 'boolean' }" "$SCRIPT" || true)" 3
 
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
@@ -69,15 +74,23 @@ function baseArgs(overrides) {
     openPr: false,
     maxReviewRounds: 3,
     maxGateAttempts: 1,
+    reviewers: 0,
     ...overrides,
   }
 }
 
+// `responses` lets a scenario answer one exact label without re-implementing
+// every default below it; a label not listed falls through to the defaults,
+// which is what makes each scenario only state the one call it cares about.
 function makeAgent(scenario, captured) {
+  const responses = scenario.responses ?? {}
   return async (prompt, opts) => {
     const label = opts.label
     captured.calls.push({ label, prompt })
 
+    if (Object.prototype.hasOwnProperty.call(responses, label)) {
+      return responses[label]
+    }
     if (label === 'ticket') {
       return { found: true, summary: 'stub ticket', description: 'd', comments: '' }
     }
@@ -156,8 +169,63 @@ async function scenarioUnsupportedLanguage() {
   check('the halt note reports the three options', /Three options/.test(result.note ?? ''), true)
 }
 
+async function scenarioFixHalts() {
+  console.log('\n== scenario: a fixer reporting unsupported_language halts at Fix')
+  const { result, captured } = await run({
+    args: { reviewers: 1 },
+    implementer: {
+      summary: 'implemented the feature', files_changed: ['a.go', 'b.go'],
+      commit_range: 'base00000000000000000000000000000000000000..impl0000000000000000000000000000000000000',
+      insertions: 50, scored: true,
+    },
+    responses: {
+      'review:correctness': { findings: [
+        { title: 'off-by-one', file: 'a.go', claim: 'loop skips the last element',
+          evidence: 'a.go:12' },
+      ] },
+      'fix:1': {
+        head_sha: 'impl0000000000000000000000000000000000000',
+        note: 'NEXT_ACTION is UNSUPPORTED_LANGUAGE: three options are (1) add ' +
+          'support, (2) drop .crap-gated, (3) proceed ungated. Halting rather ' +
+          'than editing the marker.',
+        scored: false, unsupported_language: true,
+      },
+    },
+  })
+  check('halted at Fix', result.halted_at, 'Fix')
+  check('Mutation never ran', captured.mutationCalled, false)
+  check('the halt note reports the three options', /three options/.test(result.note ?? ''), true)
+}
+
+async function scenarioMutationHalts() {
+  console.log('\n== scenario: a mutation agent reporting unsupported_language halts at Mutation')
+  const { result } = await run({
+    args: { maxGateAttempts: 3 },
+    implementer: {
+      summary: 'implemented the feature', files_changed: ['a.go'],
+      commit_range: 'base00000000000000000000000000000000000000..impl0000000000000000000000000000000000000',
+      insertions: 5, scored: true,
+    },
+    responses: {
+      'mutation:1': {
+        green: false, head_sha: 'impl0000000000000000000000000000000000000',
+        detail: 'NEXT_ACTION is UNSUPPORTED_LANGUAGE: three options are (1) add ' +
+          'support, (2) drop .mutation-gated, (3) proceed ungated.',
+        unsupported_language: true,
+      },
+    },
+  })
+  check('halted at Mutation', result.halted_at, 'Mutation')
+  check('the halt note names UNSUPPORTED_LANGUAGE, not surviving mutants', {
+    names_unsupported: /UNSUPPORTED_LANGUAGE/.test(result.note ?? ''),
+    blames_mutants: /[Ss]urviving/.test(result.note ?? ''),
+  }, { names_unsupported: true, blames_mutants: false })
+}
+
 async function main() {
   await scenarioUnsupportedLanguage()
+  await scenarioFixHalts()
+  await scenarioMutationHalts()
   if (failures) { console.log(`\nFAILED: ${failures} assertion(s)`); process.exit(1) }
   console.log('\nOK (unsupported-language halt harness)')
 }
