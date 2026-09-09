@@ -113,6 +113,106 @@ echo "$OUT"
 [ "$RC" -eq 0 ] || { echo "FAIL: expected exit 0, got $RC"; exit 1; }
 echo "$OUT" | grep -q 'MUTATION_OK' || { echo "FAIL: no MUTATION_OK"; exit 1; }
 
+echo "--- phase 2b: a command's entry file is not measured, its sibling still is ---"
+mkdir -p cmd/mutfix
+cat > cmd/mutfix/main.go <<'EOF'
+package main
+
+import "fmt"
+
+var greeting = "hi"
+
+func helper(x int) int {
+	if x < 0 {
+		return -x
+	}
+	return x
+}
+
+func main() {
+	fmt.Println(helper(3), greeting)
+}
+EOF
+cat > cmd/mutfix/wire.go <<'EOF'
+package main
+
+func Wire(x int) int {
+	if x < 0 {
+		return -1
+	}
+	return 1
+}
+EOF
+GIT_AUTHOR_NAME=t GIT_AUTHOR_EMAIL=t@t GIT_COMMITTER_NAME=t GIT_COMMITTER_EMAIL=t@t \
+  GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=commit.gpgsign GIT_CONFIG_VALUE_0=false \
+  bash -c 'git add cmd/mutfix && git commit -qm "add untested main.go and sibling wire.go"'
+
+RC=0
+OUT="$("$SCRIPT" 2>&1)" || RC=$?
+echo "$OUT"
+[ "$RC" -eq 1 ] || { echo "FAIL: expected exit 1, got $RC"; exit 1; }
+echo "$OUT" | grep -q 'cmd/mutfix/wire.go:' || { echo "FAIL: sibling file was not measured"; exit 1; }
+echo "$OUT" | grep -q 'cmd/mutfix/main.go' && { echo "FAIL: command entry file was measured as production code"; exit 1; }
+
+echo "--- phase 2c: the entry-file exclusion isn't anchored to the repo root ---"
+mkdir -p svc/cmd/mutfix3
+cat > svc/cmd/mutfix3/main.go <<'EOF'
+package main
+
+func helper(x int) int {
+	if x < 0 {
+		return -x
+	}
+	return x
+}
+
+var used = helper(3)
+
+func main() {}
+EOF
+cat > svc/cmd/mutfix3/wire3.go <<'EOF'
+package main
+
+func Wire3(x int) int {
+	if x > 5 {
+		return -7
+	}
+	return 3
+}
+EOF
+GIT_AUTHOR_NAME=t GIT_AUTHOR_EMAIL=t@t GIT_COMMITTER_NAME=t GIT_COMMITTER_EMAIL=t@t \
+  GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=commit.gpgsign GIT_CONFIG_VALUE_0=false \
+  bash -c 'git add svc/cmd/mutfix3 && git commit -qm "add untested main.go under a non-root cmd/"'
+
+RC=0
+OUT="$("$SCRIPT" 2>&1)" || RC=$?
+echo "$OUT"
+[ "$RC" -eq 1 ] || { echo "FAIL: expected exit 1, got $RC"; exit 1; }
+echo "$OUT" | grep -q 'svc/cmd/mutfix3/wire3.go:' || { echo "FAIL: sibling file was not measured"; exit 1; }
+echo "$OUT" | grep -q 'svc/cmd/mutfix3/main.go' && { echo "FAIL: entry file under a non-root cmd/ was measured as production code"; exit 1; }
+
+echo "--- phase 2d: the exclusion glob must not cross slashes past the entry file ---"
+mkdir -p cmd/mutfix/deeper
+cat > cmd/mutfix/deeper/main.go <<'EOF'
+package main
+
+func helper4(x int) int {
+	if x > 9 {
+		return -11
+	}
+	return 13
+}
+EOF
+GIT_AUTHOR_NAME=t GIT_AUTHOR_EMAIL=t@t GIT_COMMITTER_NAME=t GIT_COMMITTER_EMAIL=t@t \
+  GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=commit.gpgsign GIT_CONFIG_VALUE_0=false \
+  bash -c 'git add cmd/mutfix/deeper && git commit -qm "add a non-entry main.go nested under a root cmd/"'
+
+RC=0
+OUT="$("$SCRIPT" 2>&1)" || RC=$?
+echo "$OUT"
+[ "$RC" -eq 1 ] || { echo "FAIL: expected exit 1, got $RC"; exit 1; }
+echo "$OUT" | grep -q 'cmd/mutfix/deeper/main.go:' || { echo "FAIL: a main.go nested deeper than the entry file was excluded from measurement"; exit 1; }
+
 echo "--- phase 3: dirty worktree is rejected ---"
 echo "// dirty" >> calc.go
 RC=0

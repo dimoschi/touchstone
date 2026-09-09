@@ -109,7 +109,10 @@ write the assertion now than to come back for it.
 | `concurrency/goroutine-remove`, `select/*` | `go f()` runs inline, drops select arms | asserting the concurrent effect, not just absence of error |
 
 Mutants inside `func main()` are exempted and listed on stderr, so entry-point
-wiring does not block. Everything else in `package main` blocks normally.
+wiring does not block, wherever that function lives. A command's whole entry
+file, `cmd/<x>/main.go`, is excluded from scoring outright, so nothing in it
+is listed on stderr either; a sibling in the same directory (flag parsing,
+config merging, subcommand wiring) is not the entry file and blocks normally.
 
 **The two obligations that account for most survivors in this codebase:**
 
