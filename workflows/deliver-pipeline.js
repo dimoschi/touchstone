@@ -960,9 +960,12 @@ const impl = await treeAgent(
   `never background it and wait with sleep. Follow its NEXT_ACTION until ` +
   `green. Commit signed, in as many commits as the work naturally takes. Never run ` +
   `--accept or --mark-scored yourself; both need explicit user approval. ` +
-  `Never create, edit or delete .crap-gated or .mutation-gated: whether a repo ` +
-  `is gated is the repo owner's decision, not yours, and a repo without either ` +
-  `marker is simply not gated -- say so and continue. ` +
+  `Never create, edit or delete .crap-gated or .mutation-gated on your own ` +
+  `initiative: whether a repo is gated is the repo owner's decision, not ` +
+  `yours, and a repo without either marker is simply not gated -- say so and ` +
+  `continue. The one exception is a NEXT_ACTION of UNSUPPORTED_LANGUAGE: halt ` +
+  `and report its three options to the user rather than picking one and ` +
+  `editing the marker yourself. ` +
   `Do not push and do not open a PR: those are the user's to authorise.\n` +
   `Return scored=true if crap-commit.sh printed that it scored the change ` +
   `(ran the CRAP and dead-code checks on your commits), scored=false if you ` +
@@ -1332,8 +1335,11 @@ while (open.length && round < MAX_REVIEW_ROUNDS && !outOfBudget() && !sFix.over(
     `which gates and commits in one call: run it in the foreground with a Bash ` +
     `timeout of 600000, never background it and wait with sleep, and do not ` +
     `pre-run crap-check.sh. Never create, edit or delete .crap-gated or ` +
-    `.mutation-gated: that is the repo owner's decision, not yours, and a repo ` +
-    `without either marker is simply not gated -- say so and continue. ` +
+    `.mutation-gated on your own initiative: that is the repo owner's ` +
+    `decision, not yours, and a repo without either marker is simply not ` +
+    `gated -- say so and continue. The one exception is a NEXT_ACTION of ` +
+    `UNSUPPORTED_LANGUAGE: halt and report its three options to the user ` +
+    `rather than picking one and editing the marker yourself. ` +
     `Do not push or open a PR.\n` +
     `Task: ${brief(task)}\n` +
     `The work under review is ${impl.commit_range}; read that diff for context ` +
