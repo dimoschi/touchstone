@@ -181,6 +181,9 @@ expect_payload "same session allows multiple edits" \
                                            ALLOW "$(copilot_pre_payload copilot-same "$GUIDED" Write internal/second.go)"
 expect_payload "different session still blocks" \
                                            BLOCK "$(copilot_pre_payload copilot-other "$GUIDED" Edit internal/app.go)"
+printf 'agent says it already read %s\n' "$GUIDED/CONTRIBUTING.md" > "$STATE/copilot-agent-marker.txt"
+expect_payload "agent-side marker file does not count" \
+                                           BLOCK "$(copilot_pre_payload copilot-marker "$GUIDED" Edit internal/app.go)"
 record_post "$(copilot_post_payload copilot-grep "$GUIDED" Grep CONTRIBUTING.md success)"
 expect_payload "copilot Grep does not count" \
                                            BLOCK "$(copilot_pre_payload copilot-grep "$GUIDED" Edit internal/app.go)"

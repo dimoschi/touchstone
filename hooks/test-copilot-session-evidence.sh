@@ -45,6 +45,18 @@ record() {
   printf '%s' "$payload_json" | python3 "$RECORDER"
 }
 
+record_path() {
+  python3 - "$STATE" "$1" <<'PY'
+import hashlib
+import sys
+from pathlib import Path
+
+state_dir, session_id = sys.argv[1:3]
+digest = hashlib.sha256(session_id.encode("utf-8")).hexdigest()
+print(Path(state_dir) / f"{digest}.json")
+PY
+}
+
 assert_paths() {
   local session_id="$1"
   shift
@@ -60,6 +72,27 @@ expected = {str(Path(path).resolve(strict=False)) for path in sys.argv[3:]}
 actual = read_session_paths(session_id)
 assert actual == expected, (actual, expected)
 print(f"  ok: {session_id}")
+PY
+}
+
+assert_read_rejected() {
+  local state_dir="$1" session_id="$2" needle="$3"
+  TOUCHSTONE_HOOK_STATE_DIR="$state_dir" python3 - "$HOOKS" "$session_id" "$needle" <<'PY'
+import sys
+
+sys.path.insert(0, sys.argv[1])
+from copilot_session_evidence import SessionEvidenceError, read_session_paths
+
+session_id = sys.argv[2]
+needle = sys.argv[3]
+try:
+    read_session_paths(session_id)
+except SessionEvidenceError as exc:
+    message = str(exc)
+    assert needle in message, message
+    print(f"  ok: rejected {session_id}")
+else:
+    raise AssertionError("expected read_session_paths to reject")
 PY
 }
 
@@ -81,6 +114,10 @@ assert_paths "session-grep"
 assert_paths "session-failed"
 assert_paths "session-pre"
 assert_paths "session-wrong" "$REAL/README.md"
+
+echo "ordinary agent-side marker files are ignored"
+printf 'agent says it read %s\n' "$REAL/CONTRIBUTING.md" > "$STATE/session-marker.ack"
+assert_paths "session-marker"
 
 echo "missing env, malformed payloads and unusable state fail observably"
 if printf '%s' "$(payload PostToolUse session-missing-env "$REAL" Read CONTRIBUTING.md success)" \
@@ -111,5 +148,45 @@ if printf '%s' "$(payload PostToolUse session-broken "$REAL" Read CONTRIBUTING.m
   exit 1
 fi
 grep -Fq 'not a directory' "$OUT"
+
+echo "symlinked state and record paths are rejected without exposing evidence"
+SYMLINK_STATE_REAL="$TMP/symlink-state-real"
+SYMLINK_STATE="$TMP/symlink-state"
+mkdir -p "$SYMLINK_STATE_REAL"
+ln -s "$SYMLINK_STATE_REAL" "$SYMLINK_STATE"
+if printf '%s' "$(payload PostToolUse session-symlink-dir "$REAL" Read CONTRIBUTING.md success)" \
+  | TOUCHSTONE_HOOK_STATE_DIR="$SYMLINK_STATE" python3 "$RECORDER" >"$OUT" 2>&1; then
+  echo "expected symlinked state dir to fail"
+  exit 1
+fi
+grep -Fq 'must not be a symlink' "$OUT"
+assert_read_rejected "$SYMLINK_STATE" "session-symlink-dir" 'must not be a symlink'
+
+SYMLINK_SESSION="session-symlink-record"
+SYMLINK_RECORD="$(record_path "$SYMLINK_SESSION")"
+OUTSIDE_RECORD="$TMP/outside-record.json"
+printf '{"session_id":"%s","paths":["%s"]}\n' \
+  "$SYMLINK_SESSION" "$REAL/README.md" > "$OUTSIDE_RECORD"
+ln -s "$OUTSIDE_RECORD" "$SYMLINK_RECORD"
+before_symlink_attack="$(cat "$OUTSIDE_RECORD")"
+if printf '%s' "$(payload PostToolUse "$SYMLINK_SESSION" "$REAL" Read CONTRIBUTING.md success)" \
+  | python3 "$RECORDER" >"$OUT" 2>&1; then
+  echo "expected symlinked session record to fail"
+  exit 1
+fi
+grep -Fq 'record must not be a symlink' "$OUT"
+test "$before_symlink_attack" = "$(cat "$OUTSIDE_RECORD")"
+assert_read_rejected "$STATE" "$SYMLINK_SESSION" 'record must not be a symlink'
+
+echo "records with unsafe permissions are rejected before reuse"
+record "$(payload PostToolUse session-open-record "$REAL" Read CONTRIBUTING.md success)"
+chmod 0644 "$(record_path session-open-record)"
+if printf '%s' "$(payload PostToolUse session-open-record "$REAL" Read docs/DEVELOPMENT.md success)" \
+  | python3 "$RECORDER" >"$OUT" 2>&1; then
+  echo "expected permissive record to fail"
+  exit 1
+fi
+grep -Fq 'owner-only permissions' "$OUT"
+assert_read_rejected "$STATE" "session-open-record" 'owner-only permissions'
 
 echo "COPILOT SESSION EVIDENCE OK"
