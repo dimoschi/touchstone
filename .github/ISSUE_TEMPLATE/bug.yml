@@ -1,0 +1,59 @@
+name: Bug
+description: Something behaves differently from what the code claims
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        A run's triage phase reads the ticket as the specification and checks its
+        premise before any code is written. A claim it cannot verify stalls the run,
+        so cite what you saw rather than what you concluded.
+
+  - type: textarea
+    id: observed
+    attributes:
+      label: What happens
+      description: >
+        The behaviour, with the evidence for it: command output, an exit code, a
+        `file:line`. Not the suspected cause.
+      placeholder: |
+        `scripts/check-version-bump.sh` exits 1 on a branch that only touches
+        `.gitignore`:
+
+            check-version-bump: .claude-plugin/plugin.json is still at 0.6.4 ...
+
+        `.gitignore` is not in GATED_PREFIXES (scripts/check-version-bump.sh:35).
+    validations:
+      required: true
+
+  - type: textarea
+    id: cause
+    attributes:
+      label: Cause, if you know it
+      description: >
+        Leave empty rather than guessing. An inferred cause that turns out wrong is
+        more expensive than none, because the fix gets aimed at it.
+    validations:
+      required: false
+
+  - type: textarea
+    id: outcome
+    attributes:
+      label: Expected outcome
+      description: What is true once this is fixed, in a sentence or two.
+    validations:
+      required: true
+
+  - type: textarea
+    id: criteria
+    attributes:
+      label: Acceptance criteria
+      description: >
+        How anyone can tell it is done. Include what must NOT change, if the fix has
+        an obvious way to overreach.
+      placeholder: |
+        - A branch touching only ungated paths passes the version gate.
+        - A branch touching `skills/` still fails without a bump.
+        - No change to the gated prefix list itself.
+    validations:
+      required: true

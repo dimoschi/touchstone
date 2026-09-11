@@ -1,0 +1,4 @@
+# Blank issues stay on: a two-line note about something noticed mid-run should not
+# have to fight a form. The forms are for work that a delivery run will read as its
+# specification.
+blank_issues_enabled: true
