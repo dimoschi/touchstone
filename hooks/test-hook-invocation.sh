@@ -106,6 +106,10 @@ assert non_string_session is None
 
 assert normalize_invocation({"hook_event_name": "PreToolUse", "tool_input": []}) is None
 assert normalize_invocation({"tool_input": []}) is None
+assert normalize_invocation(None) is None
+assert normalize_invocation([]) is None
+assert normalize_invocation("not-json-object") is None
+assert normalize_invocation(0) is None
 assert normalize_invocation({
     "hook_event_name": "NotAHook",
     "cwd": "/tmp/repo",

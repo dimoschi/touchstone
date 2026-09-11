@@ -19,8 +19,11 @@ class HookInvocation:
     raw: Mapping[str, object]
 
 
-def normalize_invocation(raw: Mapping[str, object]) -> HookInvocation | None:
+def normalize_invocation(raw: object) -> HookInvocation | None:
     """Return the common input shape, or None for a malformed hook event."""
+    if not isinstance(raw, Mapping):
+        return None
+
     tool_input = raw.get("tool_input")
     if not isinstance(tool_input, dict):
         return None
