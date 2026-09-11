@@ -1,0 +1,66 @@
+{
+  "version": 1,
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "bash": "python3 ./copilot-hook-runner.py crap-commit",
+            "cwd": "hooks",
+            "timeoutSec": 600
+          },
+          {
+            "type": "command",
+            "bash": "python3 ./copilot-hook-runner.py mutation-pr",
+            "cwd": "hooks",
+            "timeoutSec": 600
+          },
+          {
+            "type": "command",
+            "bash": "python3 ./copilot-hook-runner.py base-branch",
+            "cwd": "hooks",
+            "timeoutSec": 30
+          },
+          {
+            "type": "command",
+            "bash": "python3 ./copilot-hook-runner.py gate-pipe",
+            "cwd": "hooks",
+            "timeoutSec": 30
+          }
+        ]
+      },
+      {
+        "matcher": "Edit|Write|MultiEdit",
+        "hooks": [
+          {
+            "type": "command",
+            "bash": "python3 ./copilot-hook-runner.py contributing",
+            "cwd": "hooks",
+            "timeoutSec": 30
+          },
+          {
+            "type": "command",
+            "bash": "python3 ./copilot-hook-runner.py generated-file",
+            "cwd": "hooks",
+            "timeoutSec": 30
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "Read",
+        "hooks": [
+          {
+            "type": "command",
+            "bash": "python3 ./copilot-hook-runner.py guide-read",
+            "cwd": "hooks",
+            "timeoutSec": 30
+          }
+        ]
+      }
+    ]
+  }
+}
