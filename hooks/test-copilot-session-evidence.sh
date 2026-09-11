@@ -8,6 +8,12 @@ RECORDER="$HOOKS/copilot_session_evidence.py"
 TMP=$(mktemp -d)
 trap 'rm -rf "$TMP"' EXIT
 STATE="$TMP/state"
+DEFAULT_HOME="$TMP/default-home"
+DEFAULT_XDG="$TMP/default-xdg"
+HOME_FALLBACK="$TMP/home-fallback"
+OVERRIDE_HOME="$TMP/override-home"
+OVERRIDE_XDG="$TMP/override-xdg"
+mkdir -p "$DEFAULT_HOME" "$DEFAULT_XDG" "$HOME_FALLBACK" "$OVERRIDE_HOME" "$OVERRIDE_XDG"
 export TOUCHSTONE_HOOK_STATE_DIR="$STATE"
 OUT="$TMP/recorder.out"
 
@@ -46,7 +52,8 @@ record() {
 }
 
 record_path() {
-  python3 - "$STATE" "$1" <<'PY'
+  local state_dir="$1" session_id="$2"
+  python3 - "$state_dir" "$session_id" <<'PY'
 import hashlib
 import sys
 from pathlib import Path
@@ -96,6 +103,44 @@ else:
 PY
 }
 
+assert_paths_default() {
+  local home_dir="$1" xdg_dir="$2" session_id="$3"
+  shift 3
+  env -u TOUCHSTONE_HOOK_STATE_DIR HOME="$home_dir" XDG_STATE_HOME="$xdg_dir" \
+    python3 - "$HOOKS" "$session_id" "$@" <<'PY'
+import sys
+from pathlib import Path
+
+sys.path.insert(0, sys.argv[1])
+from copilot_session_evidence import read_session_paths
+
+session_id = sys.argv[2]
+expected = {str(Path(path).resolve(strict=False)) for path in sys.argv[3:]}
+actual = read_session_paths(session_id)
+assert actual == expected, (actual, expected)
+print(f"  ok: {session_id}")
+PY
+}
+
+assert_paths_home_fallback() {
+  local home_dir="$1" session_id="$2"
+  shift 2
+  env -u TOUCHSTONE_HOOK_STATE_DIR -u XDG_STATE_HOME HOME="$home_dir" \
+    python3 - "$HOOKS" "$session_id" "$@" <<'PY'
+import sys
+from pathlib import Path
+
+sys.path.insert(0, sys.argv[1])
+from copilot_session_evidence import read_session_paths
+
+session_id = sys.argv[2]
+expected = {str(Path(path).resolve(strict=False)) for path in sys.argv[3:]}
+actual = read_session_paths(session_id)
+assert actual == expected, (actual, expected)
+print(f"  ok: {session_id}")
+PY
+}
+
 echo "successful reads record canonical paths for the same session"
 record "$(payload PostToolUse session-one "$REAL" Read CONTRIBUTING.md success)"
 assert_paths "session-one" "$REAL/CONTRIBUTING.md"
@@ -119,13 +164,69 @@ echo "ordinary agent-side marker files are ignored"
 printf 'agent says it read %s\n' "$REAL/CONTRIBUTING.md" > "$STATE/session-marker.ack"
 assert_paths "session-marker"
 
+echo "explicit state overrides the default HOME/XDG resolver"
+if printf '%s' "$(payload PostToolUse session-override "$REAL" Read CONTRIBUTING.md success)" \
+  | HOME="$OVERRIDE_HOME" XDG_STATE_HOME="$OVERRIDE_XDG" \
+    TOUCHSTONE_HOOK_STATE_DIR="$STATE" python3 "$RECORDER" >"$OUT" 2>&1; then
+  :
+else
+  cat "$OUT"
+  echo "expected explicit state override to succeed"
+  exit 1
+fi
+test -f "$(record_path "$STATE" session-override)"
+test ! -e "$(record_path "$OVERRIDE_XDG/touchstone/copilot-hook-state" session-override)"
+test ! -e "$(record_path "$OVERRIDE_HOME/.local/state/touchstone/copilot-hook-state" session-override)"
+
+echo "default state dir resolves from XDG_STATE_HOME, then HOME"
+if printf '%s' "$(payload PostToolUse session-default-xdg "$REAL" Read CONTRIBUTING.md success)" \
+  | env -u TOUCHSTONE_HOOK_STATE_DIR HOME="$DEFAULT_HOME" XDG_STATE_HOME="$DEFAULT_XDG" \
+    python3 "$RECORDER" >"$OUT" 2>&1; then
+  :
+else
+  cat "$OUT"
+  echo "expected XDG default state dir to succeed"
+  exit 1
+fi
+assert_paths_default "$DEFAULT_HOME" "$DEFAULT_XDG" "session-default-xdg" "$REAL/CONTRIBUTING.md"
+test -f "$(record_path "$DEFAULT_XDG/touchstone/copilot-hook-state" session-default-xdg)"
+test ! -e "$(record_path "$DEFAULT_HOME/.local/state/touchstone/copilot-hook-state" session-default-xdg)"
+
+if printf '%s' "$(payload PostToolUse session-default-home "$REAL" Read docs/DEVELOPMENT.md success)" \
+  | env -u TOUCHSTONE_HOOK_STATE_DIR -u XDG_STATE_HOME HOME="$HOME_FALLBACK" \
+    python3 "$RECORDER" >"$OUT" 2>&1; then
+  :
+else
+  cat "$OUT"
+  echo "expected HOME fallback state dir to succeed"
+  exit 1
+fi
+assert_paths_home_fallback "$HOME_FALLBACK" "session-default-home" "$REAL/docs/DEVELOPMENT.md"
+test -f "$(record_path "$HOME_FALLBACK/.local/state/touchstone/copilot-hook-state" session-default-home)"
+
 echo "missing env, malformed payloads and unusable state fail observably"
 if printf '%s' "$(payload PostToolUse session-missing-env "$REAL" Read CONTRIBUTING.md success)" \
-  | env -u TOUCHSTONE_HOOK_STATE_DIR python3 "$RECORDER" >"$OUT" 2>&1; then
+  | env -u TOUCHSTONE_HOOK_STATE_DIR -u HOME -u XDG_STATE_HOME python3 "$RECORDER" >"$OUT" 2>&1; then
   echo "expected missing env to fail"
   exit 1
 fi
-grep -Fq 'TOUCHSTONE_HOOK_STATE_DIR' "$OUT"
+grep -Fq 'could not determine state dir' "$OUT"
+
+if printf '%s' "$(payload PostToolUse session-bad-xdg "$REAL" Read CONTRIBUTING.md success)" \
+  | env -u TOUCHSTONE_HOOK_STATE_DIR HOME="$DEFAULT_HOME" XDG_STATE_HOME="relative/state" \
+    python3 "$RECORDER" >"$OUT" 2>&1; then
+  echo "expected relative XDG_STATE_HOME to fail"
+  exit 1
+fi
+grep -Fq 'XDG_STATE_HOME must be an absolute path' "$OUT"
+
+if printf '%s' "$(payload PostToolUse session-bad-home "$REAL" Read CONTRIBUTING.md success)" \
+  | env -u TOUCHSTONE_HOOK_STATE_DIR -u XDG_STATE_HOME HOME="relative/home" \
+    python3 "$RECORDER" >"$OUT" 2>&1; then
+  echo "expected relative HOME to fail"
+  exit 1
+fi
+grep -Fq 'HOME must be an absolute path' "$OUT"
 
 if printf '{' | python3 "$RECORDER" >"$OUT" 2>&1; then
   echo "expected malformed json to fail"
@@ -163,7 +264,7 @@ grep -Fq 'must not be a symlink' "$OUT"
 assert_read_rejected "$SYMLINK_STATE" "session-symlink-dir" 'must not be a symlink'
 
 SYMLINK_SESSION="session-symlink-record"
-SYMLINK_RECORD="$(record_path "$SYMLINK_SESSION")"
+SYMLINK_RECORD="$(record_path "$STATE" "$SYMLINK_SESSION")"
 OUTSIDE_RECORD="$TMP/outside-record.json"
 printf '{"session_id":"%s","paths":["%s"]}\n' \
   "$SYMLINK_SESSION" "$REAL/README.md" > "$OUTSIDE_RECORD"
@@ -180,7 +281,7 @@ assert_read_rejected "$STATE" "$SYMLINK_SESSION" 'record must not be a symlink'
 
 echo "records with unsafe permissions are rejected before reuse"
 record "$(payload PostToolUse session-open-record "$REAL" Read CONTRIBUTING.md success)"
-chmod 0644 "$(record_path session-open-record)"
+chmod 0644 "$(record_path "$STATE" session-open-record)"
 if printf '%s' "$(payload PostToolUse session-open-record "$REAL" Read docs/DEVELOPMENT.md success)" \
   | python3 "$RECORDER" >"$OUT" 2>&1; then
   echo "expected permissive record to fail"

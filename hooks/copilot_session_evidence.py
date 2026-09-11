@@ -29,6 +29,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from hook_invocation import normalize_invocation
 
 STATE_ENV = "TOUCHSTONE_HOOK_STATE_DIR"
+XDG_STATE_ENV = "XDG_STATE_HOME"
+HOME_ENV = "HOME"
+STATE_SUBDIR = Path("touchstone") / "copilot-hook-state"
 OWNER_ONLY_MASK = 0o077
 TRUST_BOUNDARY_NOTE = (
     "local CLI hooks run as the invoking user; same-UID shell code can modify "
@@ -130,10 +133,10 @@ def _payload_file_path(tool_input: Mapping[str, object], cwd: Path | None) -> st
 
 def _state_dir(*, create: bool) -> Path:
     value = os.environ.get(STATE_ENV)
-    if not value:
-        raise SessionEvidenceError(f"{STATE_ENV} is required")
-
-    state_dir = Path(value)
+    if value:
+        state_dir = Path(value)
+    else:
+        state_dir = _default_state_dir()
     status = _lstat(state_dir, label=STATE_ENV, missing_ok=True)
     if status is not None:
         _require_private_directory(status, label=STATE_ENV, path=state_dir)
@@ -151,6 +154,31 @@ def _state_dir(*, create: bool) -> Path:
         assert secured is not None
         _require_private_directory(secured, label=STATE_ENV, path=state_dir)
     return state_dir
+
+
+def _default_state_dir() -> Path:
+    xdg_state_home = _validated_base_dir(XDG_STATE_ENV)
+    if xdg_state_home is not None:
+        return xdg_state_home / STATE_SUBDIR
+
+    home = _validated_base_dir(HOME_ENV)
+    if home is not None:
+        return home / ".local" / "state" / STATE_SUBDIR
+
+    raise SessionEvidenceError(
+        f"could not determine state dir: set {STATE_ENV} or {XDG_STATE_ENV} / {HOME_ENV}",
+    )
+
+
+def _validated_base_dir(name: str) -> Path | None:
+    value = os.environ.get(name)
+    if not value:
+        return None
+
+    path = Path(value)
+    if not path.is_absolute():
+        raise SessionEvidenceError(f"{name} must be an absolute path")
+    return path
 
 
 def _session_path(state_dir: Path, session_id: str) -> Path:

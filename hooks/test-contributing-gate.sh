@@ -14,6 +14,9 @@ RECORDER="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/copilot_session_evidence
 TMP=$(mktemp -d)
 trap 'rm -rf "$TMP"' EXIT
 STATE="$TMP/state"
+DEFAULT_HOME="$TMP/default-home"
+DEFAULT_XDG="$TMP/default-xdg"
+mkdir -p "$DEFAULT_HOME" "$DEFAULT_XDG"
 export TOUCHSTONE_HOOK_STATE_DIR="$STATE"
 
 GUIDED="$TMP/guided"    # gated, ships a CONTRIBUTING.md
@@ -76,7 +79,7 @@ expect_detail() {
 
 expect_detail_without_state_dir() {
   local label="$1" needle="$2" payload="$3" rc=0 out
-  out="$(printf '%s' "$payload" | env -u TOUCHSTONE_HOOK_STATE_DIR python3 "$GATE" 2>&1)" || rc=$?
+  out="$(printf '%s' "$payload" | env -u TOUCHSTONE_HOOK_STATE_DIR -u HOME -u XDG_STATE_HOME python3 "$GATE" 2>&1)" || rc=$?
   if [ "$rc" -ne 2 ] || ! printf '%s' "$out" | grep -Fq "$needle"; then
     printf '  FAIL: %-48s missing %s\n' "$label" "$needle"
     printf '        rc=%s %s\n' "$rc" "$out"
@@ -196,6 +199,45 @@ expect_payload "copilot wrong path does not count" \
 expect_detail "copilot missing path denies" "tool_input.file_path" \
                                            "$(copilot_pre_payload copilot-missing "$GUIDED" Edit __MISSING__)"
 
+echo "copilot evidence works without TOUCHSTONE_HOOK_STATE_DIR"
+expect_payload_default() {
+  local label="$1" want="$2" payload="$3" rc=0 out got
+  out="$(printf '%s' "$payload" | env -u TOUCHSTONE_HOOK_STATE_DIR HOME="$DEFAULT_HOME" XDG_STATE_HOME="$DEFAULT_XDG" python3 "$GATE" 2>&1)" || rc=$?
+  if [ "$rc" -eq 0 ]; then
+    got=ALLOW
+  elif printf '%s' "$out" | grep -q 'contributing-gate:'; then
+    got=BLOCK
+  else
+    got="OTHER($rc)"
+  fi
+  if [ "$got" = "$want" ]; then
+    printf '  ok:   %-48s %s\n' "$label" "$got"
+  else
+    printf '  FAIL: %-48s got %s want %s\n' "$label" "$got" "$want"
+    printf '        %s\n' "$out"
+    failures=$((failures + 1))
+  fi
+}
+
+if printf '%s' "$(copilot_post_payload copilot-default "$GUIDED" Read CONTRIBUTING.md success)" \
+  | env -u TOUCHSTONE_HOOK_STATE_DIR HOME="$DEFAULT_HOME" XDG_STATE_HOME="$DEFAULT_XDG" \
+    python3 "$RECORDER" >/dev/null 2>&1; then
+  :
+else
+  echo "expected default recorder state to succeed"
+  exit 1
+fi
+expect_payload_default "default state after post Read allows" \
+                                           ALLOW "$(copilot_pre_payload copilot-default "$GUIDED" Edit internal/app.go)"
+if [ "$(find "$DEFAULT_XDG/touchstone/copilot-hook-state" -maxdepth 1 -name '*.json' -type f | wc -l | tr -d ' ')" != "1" ]; then
+  echo "expected exactly one record in XDG_STATE_HOME"
+  exit 1
+fi
+if find "$DEFAULT_HOME/.local/state/touchstone/copilot-hook-state" -maxdepth 1 -name '*.json' -type f 2>/dev/null | grep -q .; then
+  echo "expected no record in HOME fallback when XDG_STATE_HOME is set"
+  exit 1
+fi
+
 echo "copilot resolves relative paths and preserves symlink equivalence"
 record_post "$(copilot_post_payload copilot-relative "$GUIDED" Read CONTRIBUTING.md success)"
 expect_payload "copilot relative cwd read allows relative edit" \
@@ -213,7 +255,7 @@ expect_payload "copilot blocks until every guide is read" \
 record_post "$(copilot_post_payload copilot-multi "$MULTI" Read docs/DEVELOPMENT.md success)"
 expect_payload "copilot allows once every guide is read" \
                                            ALLOW "$(copilot_pre_payload copilot-multi "$MULTI" Edit internal/app.go)"
-expect_detail_without_state_dir "copilot missing state dir denies" "TOUCHSTONE_HOOK_STATE_DIR" \
+expect_detail_without_state_dir "copilot missing state dir denies" "could not determine state dir" \
                                            "$(copilot_pre_payload copilot-same "$GUIDED" Edit internal/app.go)"
 CORRUPT_STATE="$TMP/corrupt-state"
 export TOUCHSTONE_HOOK_STATE_DIR="$CORRUPT_STATE"

@@ -187,11 +187,15 @@ assert_json "post success" "$out" 'data == {}'
 assert_recorded "copilot-session" "$WORK/CONTRIBUTING.md"
 
 echo "post-tool failure adds bounded context"
-out="$(run_runner "$HOOKS" guide-read "$(post_payload)")"
+out="$(
+  cd "$HOOKS"
+  printf '%s' "$(post_payload)" | env -u TOUCHSTONE_HOOK_STATE_DIR -u HOME -u XDG_STATE_HOME \
+    python3 "$RUNNER" guide-read
+)"
 assert_json "post failure" "$out" '
     (
     set(data) == {"additionalContext"}
-    and "TOUCHSTONE_HOOK_STATE_DIR" in data["additionalContext"]
+    and "could not determine state dir" in data["additionalContext"]
     )
 '
 
