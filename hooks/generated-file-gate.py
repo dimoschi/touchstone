@@ -31,10 +31,16 @@ import json
 import os
 import re
 import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from copilot_session_evidence import canonical_path
+from hook_invocation import normalize_invocation
 
 HEADER_LINES = 10
 
 GENERATED_NAMES = frozenset({'swagger.json', 'swagger.yaml'})
+EDIT_TOOLS = frozenset({'Edit', 'Write', 'MultiEdit'})
 
 MARKER = re.compile(r'@generated|(?=.*\bgenerated\b)(?=.*\bDO NOT EDIT\b)', re.I)
 
@@ -60,8 +66,14 @@ def is_generated(text):
 
 def main():
     data = json.load(sys.stdin)
+    invocation = normalize_invocation(data)
     tool_input = data.get('tool_input') or {}
     path = tool_input.get('file_path')
+    if invocation is not None and invocation.host == 'copilot' \
+            and invocation.event == 'pre_tool_use' \
+            and invocation.tool_name in EDIT_TOOLS \
+            and isinstance(path, str) and path:
+        path = canonical_path(path, invocation.cwd)
     if not path:
         return 0
 

@@ -50,6 +50,40 @@ expect() {
   fi
 }
 
+copilot_expect() {
+  local label="$1" want="$2" cwd="$3" cmd="$4" rc=0 out got
+  out="$(python3 - "$cwd" "$cmd" <<'PY' | python3 "$GATE" 2>&1
+import json
+import sys
+
+cwd, command = sys.argv[1:3]
+json.dump(
+    {
+        "hook_event_name": "PreToolUse",
+        "session_id": "copilot-crap-commit",
+        "cwd": cwd,
+        "tool_name": "Bash",
+        "tool_input": {"command": command},
+    },
+    sys.stdout,
+)
+PY
+)" || rc=$?
+  if [ "$rc" -eq 0 ]; then
+    got=ALLOW
+  elif printf '%s' "$out" | grep -q 'crap-commit.sh <absolute-repo-path>'; then
+    got=BLOCK
+  else
+    got="OTHER($rc)"
+  fi
+  if [ "$got" = "$want" ]; then
+    printf '  ok:   %-46s %s\n' "$label" "$got"
+  else
+    printf '  FAIL: %-46s got %s want %s\n' "$label" "$got" "$want"
+    failures=$((failures + 1))
+  fi
+}
+
 echo "raw commits aimed at a gated repo are refused"
 expect "plain commit, session in the repo"   BLOCK "$GATED"  "git $K -m wip"
 expect "cd into the repo from outside"       BLOCK "$TMP"    "cd $GATED && git $K -m wip"
@@ -71,6 +105,11 @@ expect "repo without the marker"             ALLOW "$PLAIN"  "git $K -m wip"
 expect "cd into a repo without the marker"   ALLOW "$TMP"    "cd $PLAIN && git $K -m wip"
 expect "directory that is not a repo"        ALLOW "$NOREPO" "git $K -m wip"
 expect "not a commit at all"                 ALLOW "$GATED"  "git status"
+
+echo "copilot bash payloads hit the same raw-commit guard"
+copilot_expect "copilot plain commit in gated repo" BLOCK "$GATED" "git $K -m wip"
+copilot_expect "copilot wrapper invocation"         ALLOW "$TMP"   "$WRAP $GATED -m wip"
+copilot_expect "copilot ungated repo"               ALLOW "$PLAIN" "git $K -m wip"
 
 echo ""
 if [ "$failures" -eq 0 ]; then
