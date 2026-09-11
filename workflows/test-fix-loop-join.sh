@@ -454,6 +454,15 @@ async function scenarioH() {
     (captured.haltNoticePrompt ?? '').includes(expectedLine), true)
   check('no re-check marker text leaked into the comment',
     (captured.haltNoticePrompt ?? '').includes('code changed since recorded'), false)
+  // This halt is strictly downstream of the Mutation halt, so the draft PR
+  // always exists by here, and halted() posts this note as a comment on it.
+  check('the note does not claim no PR was opened',
+    /[Nn]o PR was opened/.test(result.note ?? ''), false)
+  check('the note says the PR was left as a draft',
+    /left as a draft/.test(result.note ?? ''), true)
+  // The last halt that reported no gate result, and the one where it is most
+  // complete: mutation green, everything through the fix loop scored.
+  check('the gate result reaches the halt payload', result.gates?.measured ?? null, 'scored')
 }
 
 // Scenario I -- a verifier that copies the id exactly as the prompt renders
@@ -735,7 +744,7 @@ async function scenarioT() {
   check('the lens is told a reference means these commits undid a fix',
     lensPrompt.includes('undid one of those fixes'), true)
   check('the lens is told what referencing costs',
-    lensPrompt.includes('ends the run with no pull request'), true)
+    lensPrompt.includes('without the PR being marked ready'), true)
   check('the lens is told a defect outside this range is not a finding here',
     lensPrompt.includes('commits do not touch is not a finding'), true)
 }

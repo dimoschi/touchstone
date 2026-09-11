@@ -133,6 +133,13 @@ const stage = (name) => {
 // phase that opens it.
 let draftPr = null
 
+// Opening the draft is allowed to fail without ending the run, so a note that
+// states either outcome flatly is wrong half the time. Every halt note that
+// mentions the PR reads this instead of asserting one.
+const prNote = () => draftPr
+  ? `The PR was left as a draft`
+  : `No PR was opened, because the draft could not be opened earlier in this run`
+
 // Keyed by ticket, not run id: a script is never told its own run id, and the
 // ticket is what a human looks the run up by.
 const recordRun = async (record) => {
@@ -296,6 +303,12 @@ const IMPL = {
     insertions: { type: 'integer' },
     scored: { type: 'boolean' },
     gate_note: { type: 'string' },
+    // Set when the one halt this phase can hit -- a NEXT_ACTION of
+    // UNSUPPORTED_LANGUAGE -- fires. Without a schema field for it, the phase
+    // has no way to represent a halt at all: it would return a normal result
+    // and the run would sail on through Draft PR, Review, Fix and Mutation
+    // with the refused work never committed.
+    unsupported_language: { type: 'boolean' },
   },
 }
 // head_sha is required, not optional: it is how the script learns what this
@@ -309,6 +322,11 @@ const GATE = {
     detail: { type: 'string' },
     needs_user_run: { type: 'boolean' },
     scored: { type: 'boolean' }, gate_note: { type: 'string' },
+    // Same halt escape IMPL carries: set when a NEXT_ACTION of
+    // UNSUPPORTED_LANGUAGE fires mid-mutation, so the phase has a field to
+    // report it on rather than burning every remaining attempt on a gate that
+    // cannot run.
+    unsupported_language: { type: 'boolean' },
   },
 }
 const FINDINGS = {
@@ -375,6 +393,11 @@ const FIXED = {
   properties: {
     head_sha: { type: 'string' }, note: { type: 'string' },
     scored: { type: 'boolean' }, gate_note: { type: 'string' },
+    // Same halt escape IMPL carries: without it a fixer that hits
+    // UNSUPPORTED_LANGUAGE has no field to report the halt on, so the run
+    // reads a normal result and sails on into Mutation with the refused work
+    // uncommitted.
+    unsupported_language: { type: 'boolean' },
   },
 }
 const STALENESS = {
@@ -960,6 +983,14 @@ const impl = await treeAgent(
   `never background it and wait with sleep. Follow its NEXT_ACTION until ` +
   `green. Commit signed, in as many commits as the work naturally takes. Never run ` +
   `--accept or --mark-scored yourself; both need explicit user approval. ` +
+  `Never create, edit or delete .crap-gated or .mutation-gated on your own ` +
+  `initiative: whether a repo is gated is the repo owner's decision, not ` +
+  `yours, and a repo without either marker is simply not gated -- say so and ` +
+  `continue. The one exception is a NEXT_ACTION of UNSUPPORTED_LANGUAGE: halt ` +
+  `and report its three options to the user rather than picking one and ` +
+  `editing the marker yourself. Set unsupported_language=true when you do, ` +
+  `and put the three options in summary; leave commit_range as the unchanged ` +
+  `base if you made no commits before hitting it. ` +
   `Do not push and do not open a PR: those are the user's to authorise.\n` +
   `Return scored=true if crap-commit.sh printed that it scored the change ` +
   `(ran the CRAP and dead-code checks on your commits), scored=false if you ` +
@@ -977,18 +1008,17 @@ const impl = await treeAgent(
   { label: 'implementer', schema: IMPL, model: 'sonnet', effort: effortFor.implement })
 if (!impl) throw new Error('implementer failed')
 sImpl.close()
-if (sImpl.over()) {
-  return await halted('Implement', {
-    plan: plan.plan, implemented: impl.summary,
-    note: 'implementer exceeded its token ceiling; any work is on the branch, gates and review did not run',
-  })
-}
 
 // Whether anything actually went through the gate, across every committing
 // phase from here through the mutation loop -- an implementer that scored
 // nothing (nothing changed the gate checks) can still be followed by a fix
 // round or the mutation loop that does. Folded with OR, never overwritten, so
 // one scored=true anywhere makes the whole run's `measured` claim 'scored'.
+//
+// Declared above the halts below, not after them: these are `let` bindings,
+// and the gate payload helper reads all three, so a halt that called it from
+// above this point died with "Cannot access 'scored' before initialization"
+// rather than reporting the gate.
 let scored = impl.scored === true
 // Kept apart by whether the reporting phase itself scored: pairing a final
 // measured='scored' with an unscored phase's "nothing to score" note would
@@ -998,6 +1028,26 @@ let scored = impl.scored === true
 // says which.
 let scoredNote = scored ? (impl.gate_note ?? '') : ''
 let unscoredNote = scored ? '' : (impl.gate_note ?? '')
+
+// The only other outcome this phase can report, and the only one that must
+// not fall through to Draft PR: the schema has no other way to say "I
+// stopped", so an unhandled unsupported_language would read as a normal,
+// reviewable result and the refused work would never reach a commit.
+if (impl.unsupported_language) {
+  return await halted('Implement', {
+    plan: plan.plan, implemented: impl.summary, gates: gatesPayload(),
+    note: impl.summary,
+  })
+}
+if (sImpl.over()) {
+  return await halted('Implement', {
+    plan: plan.plan, implemented: impl.summary, gates: gatesPayload(),
+    // The note says nothing about the gates: an implementer that committed
+    // before overrunning did gate those commits, and what was measured is in
+    // the gates field now.
+    note: 'implementer exceeded its token ceiling; any work is on the branch and review did not run',
+  })
+}
 
 // A draft PR, opened as soon as there is a commit to hang it on.
 //
@@ -1308,6 +1358,45 @@ const verifyOpen = async (findings, label) => {
     .map(v => [stripBrackets(v.id), v.fixed === true])
 }
 
+// Advisory only: a finding's evidence may have moved since it was recorded. One
+// cheap agent checks each against its evidence, not just its file. Skipped only
+// when the loop ran zero rounds, since nothing could have changed then; a loop
+// that stopped on budget after a round already committed is exactly the case
+// this exists for, so it runs regardless of budget. Any rejection degrades to
+// nothing marked, never to losing the halt.
+// Declared before the loop because the refusal halt inside it calls this too,
+// and a const declared below the loop is in its temporal dead zone.
+const markStale = async (findings) => {
+  let staleness = null
+  if (round > 0) {
+    try {
+      staleness = await treeAgent(
+        `For each finding below, report whether the code its evidence ` +
+        `describes has changed since it was recorded, not merely whether its ` +
+        `file has any commit at all. For each one, run: git log -p ` +
+        `<recorded_at>..HEAD -- <file>, substituting that finding's own ` +
+        `recorded_at and file, and read the diff. Return changed=true only if ` +
+        `a commit in that range touches the location or behaviour the ` +
+        `evidence describes; changed=false if the file has no commits in ` +
+        `range, or its commits do not touch what the evidence describes. This ` +
+        `does not judge whether the finding is still valid, only whether the ` +
+        `code it points at moved.\n` +
+        findings.map(f =>
+          `[${f.id}] ${f.file} recorded at ${f.recorded_at}. Evidence: ${f.evidence}`
+        ).join('\n'),
+        { label: 'staleness', schema: STALENESS, model: 'haiku', effort: 'low' })
+    } catch (e) {
+      log(`staleness probe failed, reporting findings unmarked: ${e?.message ?? e}`)
+    }
+  }
+  const staleIds = new Set(
+    (Array.isArray(staleness?.results) ? staleness.results : [])
+      .filter(r => r?.changed === true && typeof r?.id === 'string')
+      .map(r => stripBrackets(r.id)))
+  return findings.map(f =>
+    staleIds.has(f.id) ? { ...f, code_changed_since_recorded: true } : f)
+}
+
 const fixStopReason = () =>
   !open.length ? 'every finding was resolved'
   : round >= MAX_REVIEW_ROUNDS
@@ -1328,7 +1417,14 @@ while (open.length && round < MAX_REVIEW_ROUNDS && !outOfBudget() && !sFix.over(
     `iterating with the repo's own test command. Commit with crap-commit.sh, ` +
     `which gates and commits in one call: run it in the foreground with a Bash ` +
     `timeout of 600000, never background it and wait with sleep, and do not ` +
-    `pre-run crap-check.sh. Do not push or open a PR.\n` +
+    `pre-run crap-check.sh. Never create, edit or delete .crap-gated or ` +
+    `.mutation-gated on your own initiative: that is the repo owner's ` +
+    `decision, not yours, and a repo without either marker is simply not ` +
+    `gated -- say so and continue. The one exception is a NEXT_ACTION of ` +
+    `UNSUPPORTED_LANGUAGE: halt and report its three options to the user ` +
+    `rather than picking one and editing the marker yourself. Set ` +
+    `unsupported_language=true when you do, and put the three options in note. ` +
+    `Do not push or open a PR.\n` +
     `Task: ${brief(task)}\n` +
     `The work under review is ${impl.commit_range}; read that diff for context ` +
     `rather than guessing what the change was meant to do.\n` +
@@ -1348,11 +1444,33 @@ while (open.length && round < MAX_REVIEW_ROUNDS && !outOfBudget() && !sFix.over(
     `Findings:\n` +
     open.map(f => `- ${f.title} (${f.file}): ${f.claim}`).join('\n'),
     { label: `fix:${round}`, schema: FIXED, model: 'sonnet', effort: effortFor.implement })
+  // Folded before the halt check below, not after: a fixer that committed part
+  // of the work and only then hit the refusal still has a gate result, and the
+  // halt is the only place left to report it.
   if (fixed?.scored === true) {
     scored = true
     if (fixed?.gate_note) scoredNote = fixed.gate_note
   } else if (fixed?.gate_note) {
     unscoredNote = fixed.gate_note
+  }
+  // Same reasoning as Implement's check above: without this, a fixer that
+  // reports the halt reads as a normal round and the loop keeps going with
+  // the refused work still uncommitted.
+  if (fixed?.unsupported_language) {
+    // The stage is closed before the return because closing is what records
+    // its spend. stopped_because is written here rather than taken from the
+    // shared reason helper, whose arms all describe a limit being reached and
+    // so would call this refusal "should not happen".
+    sFix.close()
+    return await halted('Fix', {
+      plan: plan.plan, implemented: impl.summary, gates: gatesPayload(),
+      unresolved_findings: await markStale(open), fix_rounds: round,
+      stopped_because:
+        `the fixer hit a NEXT_ACTION of UNSUPPORTED_LANGUAGE and halted rather ` +
+        `than editing a gate marker, so these findings have not had every round`,
+      regression_suspects: regressionSuspects,
+      note: fixed.note,
+    })
   }
   // Verification and the tail review both read the fix's finished commits and
   // answer independent questions of them -- "are the named findings closed?"
@@ -1472,41 +1590,7 @@ function gatesPayload() {
 }
 
 if (open.length) {
-  // Advisory only: a finding's evidence may have moved since it was
-  // recorded. One cheap agent checks each against its evidence, not just its
-  // file. Skipped only when the loop ran zero rounds, since nothing could
-  // have changed then; a loop that stopped on budget after a round already
-  // committed is exactly the case this exists for, so it runs regardless of
-  // budget. Any rejection degrades to nothing marked, never to losing the
-  // halt.
-  let staleness = null
-  if (round > 0) {
-    try {
-      staleness = await treeAgent(
-        `For each finding below, report whether the code its evidence ` +
-        `describes has changed since it was recorded, not merely whether its ` +
-        `file has any commit at all. For each one, run: git log -p ` +
-        `<recorded_at>..HEAD -- <file>, substituting that finding's own ` +
-        `recorded_at and file, and read the diff. Return changed=true only if ` +
-        `a commit in that range touches the location or behaviour the ` +
-        `evidence describes; changed=false if the file has no commits in ` +
-        `range, or its commits do not touch what the evidence describes. This ` +
-        `does not judge whether the finding is still valid, only whether the ` +
-        `code it points at moved.\n` +
-        open.map(f =>
-          `[${f.id}] ${f.file} recorded at ${f.recorded_at}. Evidence: ${f.evidence}`
-        ).join('\n'),
-        { label: 'staleness', schema: STALENESS, model: 'haiku', effort: 'low' })
-    } catch (e) {
-      log(`staleness probe failed, reporting findings unmarked: ${e?.message ?? e}`)
-    }
-  }
-  const staleIds = new Set(
-    (Array.isArray(staleness?.results) ? staleness.results : [])
-      .filter(r => r?.changed === true && typeof r?.id === 'string')
-      .map(r => stripBrackets(r.id)))
-  const reported = open.map(f =>
-    staleIds.has(f.id) ? { ...f, code_changed_since_recorded: true } : f)
+  const reported = await markStale(open)
   const staleCount = reported.filter(f => f.code_changed_since_recorded).length
 
   return await halted('Fix', {
@@ -1520,8 +1604,8 @@ if (open.length) {
     // ceiling, or judge the findings -- and the note pointed at the wrong one.
     note: `${open.length} review finding(s) still open after ${round} fix ` +
           `round(s); ${fixStopReason()}. Stopping before the mutation stage ` +
-          `rather than spending it on work that cannot open a PR. Judge each ` +
-          `finding: fix it, or reject it as wrong.` +
+          `rather than spending it on work that cannot be marked ready. Judge ` +
+          `each finding: fix it, or reject it as wrong.` +
           (regressionSuspects.length
             ? ` Separately, ${regressionSuspects.length} finding(s) were ` +
               `reported again after being verified fixed, and were not ` +
@@ -1537,8 +1621,9 @@ if (open.length) {
 // Mutation is a pre-PR gate, not a per-commit one: it costs a full test-suite
 // run per mutant, so it runs once here, on a clean tree, rather than inside the
 // implement/fix loops. In an opted-in repo mutation-pr-gate.py blocks
-// `gh pr create` while it is red, so a red gate here means the PR phase below
-// cannot succeed anyway.
+// `gh pr ready` while it is red, so a red gate here means the PR phase below
+// cannot get past a draft anyway. It deliberately does not block
+// `gh pr create --draft`, which is how this pipeline opens the draft above.
 phase('Mutation')
 const sMut = stage('mutation')
 let mutation = { green: false, detail: 'not run' }
@@ -1565,11 +1650,19 @@ if (!mutationGated) {
 // Bash ceiling returns the same answer every attempt, and each one costs the
 // ceiling in wall clock before saying so.
 for (let attempt = 1; attempt <= MAX_GATE_ATTEMPTS && !mutation.green
-     && !mutation.needs_user_run && !outOfBudget() && !sMut.over(); attempt++) {
+     && !mutation.needs_user_run && !mutation.unsupported_language
+     && !outOfBudget() && !sMut.over(); attempt++) {
   mutation = await treeAgent(
     `Run mutation-check.sh from the crap-controlled-changes skill in this repo. ` +
     `It mutates files in place and needs a clean working tree, so commit anything ` +
-    `outstanding first.\n` +
+    `outstanding first. Never create, edit or delete .crap-gated or ` +
+    `.mutation-gated on your own initiative: that is the repo owner's ` +
+    `decision, not yours, and a repo without either marker is simply not ` +
+    `gated -- say so and continue. The one exception is a NEXT_ACTION of ` +
+    `UNSUPPORTED_LANGUAGE: halt and report its three options to the user ` +
+    `rather than picking one and editing the marker yourself. Set ` +
+    `unsupported_language=true when you do, and put the three options in ` +
+    `detail.\n` +
     `HOW TO RUN IT, in this order. The skill's Signal C settles all of this ` +
     `from measurements; do not re-derive a policy of your own, which is why ` +
     `this phase has been inconsistent run to run.\n` +
@@ -1634,15 +1727,26 @@ if (!mutation.green) {
   return await halted('Mutation', {
     plan: plan.plan, implemented: impl.summary, gates: gatesPayload(),
     mutation, unresolved_findings: open, regression_suspects: regressionSuspects,
-    note: mutation.needs_user_run
+    // unsupported_language checked first: neither of the other two notes
+    // describes it (the tree is not necessarily uncommittable, and it is not
+    // a Bash-ceiling timeout), and blaming surviving mutants for a gate that
+    // never ran sends a human chasing the wrong fix.
+    // No arm states the PR's fate itself: this note is posted as a comment on
+    // the draft when there is one, and prNote() is what knows whether there is.
+    note: mutation.unsupported_language
+      ? `The mutation agent hit a NEXT_ACTION of UNSUPPORTED_LANGUAGE and ` +
+        `halted rather than editing .crap-gated or .mutation-gated itself. ` +
+        `${mutation.detail} ${prNote()}; a human has to pick ` +
+        `one of the reported options before this can proceed.`
+      : mutation.needs_user_run
       ? `The mutation run does not fit the 600000 ms Bash ceiling, which for ` +
         `this repo is expected rather than a fault. Run the command in detail ` +
         `in your own terminal, then re-run this workflow: --verify will find ` +
-        `the ledger green and the gate will cost milliseconds. No PR was ` +
-        `opened, and mutation-pr-gate.py would block one anyway.`
+        `the ledger green and the gate will cost milliseconds. ${prNote()}, ` +
+        `and mutation-pr-gate.py would block marking it ready anyway.`
       : `Mutation gate still red after ${MAX_GATE_ATTEMPTS} attempt(s). Surviving ` +
-        `mutants are behaviour the tests cannot detect. The PR was left as a ` +
-        `draft, and mutation-pr-gate.py would block marking it ready. Kill them ` +
+        `mutants are behaviour the tests cannot detect. ${prNote()}, and ` +
+        `mutation-pr-gate.py would block marking it ready. Kill them ` +
         `with tests, or approve a provably equivalent mutant with ` +
         `mutation-check.sh --accept.`,
   })
@@ -1661,7 +1765,7 @@ if (reviewerCount && mutHead && mutHead !== reviewedThrough && !outOfBudget()) {
     `\nEach of those was fixed and the fix was verified, all of it before the ` +
     `commits you are reviewing. So set duplicate_of ONLY to report that these ` +
     `commits undid one of those fixes, and say in the evidence which line here ` +
-    `does it. Doing so ends the run with no pull request, on the grounds that a ` +
+    `does it. Doing so ends the run without the PR being marked ready, on the grounds that a ` +
     `verified fix was reverted. A defect you still perceive in code these ` +
     `commits do not touch is not a finding against this range: leave it out.`))
     .filter(f => {
@@ -1673,11 +1777,12 @@ if (reviewerCount && mutHead && mutHead !== reviewedThrough && !outOfBudget()) {
   if (fresh.length) {
     return await halted('Review', {
       plan: plan.plan, implemented: impl.summary, mutation,
+      gates: gatesPayload(),
       unresolved_findings: fresh, fix_rounds: round,
       regression_suspects: regressionSuspects,
       note: `The mutation gate's own commits (${reviewedThrough}..${mutHead}) ` +
-            `introduced ${fresh.length} finding(s). The fix rounds are spent, so ` +
-            `no PR was opened. Judge each: fix it, or reject it as wrong.`,
+            `introduced ${fresh.length} finding(s). The fix rounds are spent. ` +
+            `${prNote()}. Judge each: fix it, or reject it as wrong.`,
     })
   }
   reviewedThrough = mutHead
