@@ -1,0 +1,73 @@
+"""Normalize the hook payloads supported by Touchstone's policy gates."""
+
+from __future__ import annotations
+
+import dataclasses
+from collections.abc import Mapping
+from pathlib import Path
+from typing import Literal
+
+
+@dataclasses.dataclass(frozen=True)
+class HookInvocation:
+    host: Literal["claude", "codex", "copilot"]
+    event: Literal["pre_tool_use", "post_tool_use"]
+    session_id: str | None
+    cwd: Path
+    tool_name: str
+    tool_input: Mapping[str, object]
+    raw: Mapping[str, object]
+
+
+def normalize_invocation(raw: Mapping[str, object]) -> HookInvocation | None:
+    """Return the common input shape, or None for a malformed hook event."""
+    tool_input = raw.get("tool_input")
+    if not isinstance(tool_input, dict):
+        return None
+
+    cwd = raw.get("cwd")
+    tool_name = raw.get("tool_name")
+    if not isinstance(cwd, str) or not cwd or not isinstance(tool_name, str) or not tool_name:
+        return None
+
+    event_name = raw.get("hook_event_name")
+    if event_name is None:
+        event = "pre_tool_use"
+        host = _host_from_legacy_payload(raw)
+    elif event_name == "PreToolUse":
+        event = "pre_tool_use"
+        host = _host_from_event_payload(raw, default="copilot")
+    elif event_name == "PostToolUse":
+        event = "post_tool_use"
+        host = _host_from_event_payload(raw, default="copilot")
+    else:
+        return None
+
+    session_id = raw.get("session_id")
+    return HookInvocation(
+        host=host,
+        event=event,
+        session_id=session_id if isinstance(session_id, str) else None,
+        cwd=Path(cwd).resolve(),
+        tool_name=tool_name,
+        tool_input=tool_input,
+        raw=raw,
+    )
+
+
+def _host_from_event_payload(raw: Mapping[str, object], *, default: str) -> str:
+    explicit_host = _explicit_host(raw)
+    return explicit_host or default
+
+
+def _host_from_legacy_payload(raw: Mapping[str, object]) -> str:
+    explicit_host = _explicit_host(raw)
+    return explicit_host or "claude"
+
+
+def _explicit_host(raw: Mapping[str, object]) -> str | None:
+    for key in ("host", "source"):
+        value = raw.get(key)
+        if value in {"claude", "codex", "copilot"}:
+            return value
+    return None
