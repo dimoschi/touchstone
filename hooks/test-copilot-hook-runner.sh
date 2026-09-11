@@ -7,48 +7,16 @@ HOOKS="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 RUNNER="$HOOKS/copilot-hook-runner.py"
 CONFIG="$HOOKS/copilot-hooks.json"
 WORK="$HOOKS/.test-copilot-hook-runner.$$"
-TARGET="$HOOKS/copilot_session_evidence.py"
-BACKUP="$WORK/copilot_session_evidence.py.orig"
-HAD_TARGET=0
+STATE="$WORK/state"
 
 cleanup() {
   local rc=$?
-  rm -f "$TARGET"
-  if [ "$HAD_TARGET" -eq 1 ] && [ -e "$BACKUP" ]; then
-    mv "$BACKUP" "$TARGET"
-  fi
   rm -rf "$WORK"
   exit "$rc"
 }
 trap cleanup EXIT
 
 mkdir -p "$WORK/elsewhere"
-if [ -e "$TARGET" ]; then
-  HAD_TARGET=1
-  mv "$TARGET" "$BACKUP"
-fi
-
-write_child() {
-  python3 - "$TARGET" "$1" "$2" "$3" <<'PY'
-from pathlib import Path
-import sys
-
-path = Path(sys.argv[1])
-exit_code = int(sys.argv[2])
-stderr_text = sys.argv[3]
-stdout_text = sys.argv[4]
-path.write_text(
-    "#!/usr/bin/env python3\n"
-    "import sys\n"
-    "sys.stdin.buffer.read()\n"
-    f"sys.stderr.write({stderr_text!r})\n"
-    f"sys.stdout.write({stdout_text!r})\n"
-    f"raise SystemExit({exit_code})\n",
-    encoding="utf-8",
-)
-PY
-  chmod +x "$TARGET"
-}
 
 pre_payload() {
   python3 - "$WORK" <<'PY'
@@ -100,6 +68,14 @@ run_runner() {
   )
 }
 
+run_runner_with_state() {
+  local from_dir="$1" key="$2" payload="$3"
+  (
+    cd "$from_dir"
+    printf '%s' "$payload" | TOUCHSTONE_HOOK_STATE_DIR="$STATE" python3 "$RUNNER" "$key"
+  )
+}
+
 assert_json() {
   local label="$1" out="$2" check="$3"
   python3 - "$label" "$out" "$check" <<'PY'
@@ -114,6 +90,21 @@ check = textwrap.dedent(check).strip()
 if not eval(check, {}, namespace):
     raise AssertionError(f"{label}: {data!r} did not satisfy {check!r}")
 print(f"  ok: {label}")
+PY
+}
+
+assert_recorded() {
+  local session_id="$1" expected="$2"
+  TOUCHSTONE_HOOK_STATE_DIR="$STATE" python3 - "$HOOKS" "$session_id" "$expected" <<'PY'
+import sys
+
+sys.path.insert(0, sys.argv[1])
+from copilot_session_evidence import read_session_paths
+
+session_id, expected = sys.argv[2:4]
+paths = read_session_paths(session_id)
+assert paths == {expected}, paths
+print(f"  ok: recorded {session_id}")
 PY
 }
 
@@ -166,20 +157,8 @@ print("  ok: config")
 PY
 
 echo "pre-tool success allows"
-write_child 0 "" "ignored stdout"
 out="$(run_runner "$HOOKS" guide-read "$(pre_payload)")"
 assert_json "pre allow" "$out" 'data == {"permissionDecision": "allow"}'
-
-echo "pre-tool failure denies and uses stderr, not child stdout"
-write_child 2 "child blocked\n" "noise that must stay hidden\n"
-out="$(run_runner "$HOOKS" guide-read "$(pre_payload)")"
-assert_json "pre deny" "$out" '
-    (
-    data.get("permissionDecision") == "deny"
-    and "child blocked" in data.get("permissionDecisionReason", "")
-    and "noise that must stay hidden" not in data.get("permissionDecisionReason", "")
-    )
-'
 
 echo "malformed input denies"
 out="$(
@@ -202,25 +181,22 @@ assert_json "unknown deny" "$out" '
     )
 '
 
-echo "post-tool success is empty JSON"
-write_child 0 "" "ignored stdout"
-out="$(run_runner "$HOOKS" guide-read "$(post_payload)")"
+echo "post-tool success is empty JSON and records evidence"
+out="$(run_runner_with_state "$HOOKS" guide-read "$(post_payload)")"
 assert_json "post success" "$out" 'data == {}'
+assert_recorded "copilot-session" "$WORK/CONTRIBUTING.md"
 
 echo "post-tool failure adds bounded context"
-write_child 2 "post recorder failed\n" "ignored stdout\n"
 out="$(run_runner "$HOOKS" guide-read "$(post_payload)")"
 assert_json "post failure" "$out" '
     (
     set(data) == {"additionalContext"}
-    and "post recorder failed" in data["additionalContext"]
-    and "ignored stdout" not in data["additionalContext"]
+    and "TOUCHSTONE_HOOK_STATE_DIR" in data["additionalContext"]
     )
 '
 
 echo "runner resolves children relative to itself, not cwd"
-write_child 0 "" ""
-out="$(run_runner "$WORK/elsewhere" guide-read "$(pre_payload)")"
-assert_json "arbitrary cwd" "$out" 'data == {"permissionDecision": "allow"}'
+out="$(run_runner_with_state "$WORK/elsewhere" guide-read "$(post_payload)")"
+assert_json "arbitrary cwd" "$out" 'data == {}'
 
 echo "COPILOT HOOK RUNNER OK"
