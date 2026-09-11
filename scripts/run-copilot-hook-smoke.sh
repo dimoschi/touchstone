@@ -18,6 +18,8 @@ SOURCE_CONFIG="$ROOT/hooks/copilot-hooks.json"
 SOURCE_HOOKS="$ROOT/hooks"
 SOURCE_SKILLS="$ROOT/skills"
 PLUGIN_MANIFEST="$ROOT/.claude-plugin/plugin.json"
+REAL_HOME="${HOME:-}"
+REAL_XDG_CONFIG_HOME="${XDG_CONFIG_HOME:-}"
 
 SCRATCH_ROOT=""
 KEEP_SCRATCH="${TOUCHSTONE_KEEP_SMOKE_ROOT:-0}"
@@ -39,6 +41,103 @@ trap cleanup EXIT INT TERM
 skip_unavailable() {
   echo 'SKIP: copilot CLI unavailable or unauthenticated'
   exit 0
+}
+
+print_artifact() {
+  local label="$1" path="$2"
+  printf -- '--- %s (%s) ---%s' "$label" "$path" $'\n' >&2
+  if [ -f "$path" ]; then
+    sed 's/^/  /' "$path" >&2
+  else
+    echo '  <missing>' >&2
+  fi
+}
+
+fail_with_logs() {
+  local message="$1"
+  shift
+  echo "$message" >&2
+  while [ "$#" -gt 0 ]; do
+    print_artifact "$1" "$2"
+    shift 2
+  done
+  exit 1
+}
+
+probe_is_auth_skip() {
+  local stdout_path="$1" stderr_path="$2"
+  python3 - "$stdout_path" "$stderr_path" <<'PY'
+import re
+import sys
+from pathlib import Path
+
+stdout_path, stderr_path = sys.argv[1:3]
+text = ""
+for path in (stdout_path, stderr_path):
+    file = Path(path)
+    if file.exists():
+        text += file.read_text(encoding="utf-8", errors="replace") + "\n"
+text = text.lower()
+patterns = [
+    r"\bno authentication information found\b",
+    r"\bnot authenticated\b",
+    r"\bunauthenticated\b",
+    r"\bauthentication required\b",
+    r"\blogin required\b",
+    r"\bplease (?:sign in|log in)\b",
+    r"\byou must (?:sign in|log in)\b",
+    r"\brun\s+copilot\s+auth\s+login\b",
+]
+raise SystemExit(0 if any(re.search(pattern, text) for pattern in patterns) else 1)
+PY
+}
+
+with_copilot_env() {
+  if [ -n "${SMOKE_GH_TOKEN:-}" ]; then
+    HOME="$SMOKE_HOME" \
+    XDG_CONFIG_HOME="$SMOKE_XDG_CONFIG_HOME" \
+    XDG_CACHE_HOME="$SMOKE_XDG_CACHE_HOME" \
+    XDG_STATE_HOME="$SMOKE_XDG_STATE_HOME" \
+    GH_CONFIG_DIR="$SMOKE_XDG_CONFIG_HOME/gh" \
+    GH_TOKEN="$SMOKE_GH_TOKEN" \
+    COPILOT_HOME="$SMOKE_COPILOT_HOME" \
+      "$@"
+  else
+    HOME="$SMOKE_HOME" \
+    XDG_CONFIG_HOME="$SMOKE_XDG_CONFIG_HOME" \
+    XDG_CACHE_HOME="$SMOKE_XDG_CACHE_HOME" \
+    XDG_STATE_HOME="$SMOKE_XDG_STATE_HOME" \
+    GH_CONFIG_DIR="$SMOKE_XDG_CONFIG_HOME/gh" \
+    COPILOT_HOME="$SMOKE_COPILOT_HOME" \
+      "$@"
+  fi
+}
+
+seed_gh_auth() {
+  local source_dir=""
+  if [ -n "$REAL_XDG_CONFIG_HOME" ] && [ -d "$REAL_XDG_CONFIG_HOME/gh" ]; then
+    source_dir="$REAL_XDG_CONFIG_HOME/gh"
+  elif [ -n "$REAL_HOME" ] && [ -d "$REAL_HOME/.config/gh" ]; then
+    source_dir="$REAL_HOME/.config/gh"
+  fi
+  if [ -z "$source_dir" ]; then
+    return 0
+  fi
+  cp -R "$source_dir" "$SMOKE_XDG_CONFIG_HOME/gh"
+}
+
+seed_smoke_auth_token() {
+  SMOKE_GH_TOKEN="${COPILOT_GITHUB_TOKEN:-${GH_TOKEN:-${GITHUB_TOKEN:-}}}"
+  if [ -n "$SMOKE_GH_TOKEN" ]; then
+    return 0
+  fi
+  if ! command -v gh >/dev/null 2>&1; then
+    return 0
+  fi
+  if SMOKE_GH_TOKEN="$(gh auth token 2>/dev/null)"; then
+    return 0
+  fi
+  SMOKE_GH_TOKEN=""
 }
 
 write_text() {
@@ -77,7 +176,12 @@ run_copilot() {
   if [ -n "$available_tools" ]; then
     cmd+=(--available-tools="$available_tools")
   fi
-  COPILOT_HOME="$SMOKE_COPILOT_HOME" "${cmd[@]}" >"$jsonl" 2>"$stderr_file"
+  if ! with_copilot_env "${cmd[@]}" >"$jsonl" 2>"$stderr_file"; then
+    fail_with_logs \
+      "run-copilot-hook-smoke: copilot failed unexpectedly during $CURRENT_STEP" \
+      "copilot stderr" "$stderr_file" \
+      "copilot jsonl" "$jsonl"
+  fi
 }
 
 assert_probe() {
@@ -125,29 +229,45 @@ Path(detail_path).write_text(
 PY
 }
 
-assert_source_manifest() {
-  local manifest="$1"
-  python3 - "$manifest" <<'PY'
+assert_manifest_version() {
+  local manifest="$1" expected_version="$2" detail_path="$3"
+  python3 - "$manifest" "$expected_version" "$detail_path" <<'PY'
 import json
 import sys
 from pathlib import Path
 
-manifest = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
-assert manifest["version"] == "0.6.5", manifest["version"]
+manifest_path, expected_version, detail_path = sys.argv[1:4]
+manifest = json.loads(Path(manifest_path).read_text(encoding="utf-8"))
+actual_version = manifest.get("version")
+if actual_version != expected_version:
+    raise SystemExit(f"expected manifest version {expected_version!r}, got {actual_version!r}")
+
+Path(detail_path).write_text(
+    json.dumps(
+        {
+            "manifest_path": str(Path(manifest_path).resolve(strict=False)),
+            "name": manifest.get("name"),
+            "version": actual_version,
+        },
+        indent=2,
+    )
+    + "\n",
+    encoding="utf-8",
+)
 PY
 }
 
 compile_hook_config() {
-  local source_config="$1" target_config="$2" hook_dir="$3" state_dir="$4" detail_path="$5"
-  python3 - "$source_config" "$target_config" "$hook_dir" "$state_dir" "$detail_path" <<'PY'
+  local source_config="$1" target_config="$2" hook_dir="$3" state_dir="$4" hook_input_dir="$5" detail_path="$6"
+  python3 - "$source_config" "$target_config" "$hook_dir" "$state_dir" "$hook_input_dir" "$detail_path" <<'PY'
 import json
 import re
 import shlex
 import sys
 from pathlib import Path
 
-source_config, target_config, hook_dir, state_dir, detail_path = [
-    Path(value) for value in sys.argv[1:6]
+source_config, target_config, hook_dir, state_dir, hook_input_dir, detail_path = [
+    Path(value) for value in sys.argv[1:7]
 ]
 source = json.loads(source_config.read_text(encoding="utf-8"))
 assert source["version"] == 1
@@ -155,12 +275,15 @@ assert set(source) == {"version", "hooks"}
 assert isinstance(source["hooks"], dict) and source["hooks"]
 
 runner = hook_dir / "copilot-hook-runner.py"
+logger = hook_dir / "copilot-hook-smoke-logger.py"
 assert runner.is_file(), runner
+assert logger.is_file(), logger
 
 source_events = list(source["hooks"].keys())
 compiled = {"version": 1, "hooks": {}}
 compiled_hooks = []
 command_re = re.compile(r"python3\s+\./copilot-hook-runner\.py\s+([a-z0-9-]+)$")
+wrapped_keys = {"contributing", "generated-file", "guide-read"}
 
 for event_name, groups in source["hooks"].items():
     assert isinstance(groups, list) and groups, event_name
@@ -179,12 +302,22 @@ for event_name, groups in source["hooks"].items():
             match = command_re.fullmatch(hook["bash"].strip())
             assert match is not None, hook["bash"]
             key = match.group(1)
-            compiled_hook = {
-                "type": "command",
-                "bash": (
+            wrapped = key in wrapped_keys
+            if wrapped:
+                command = (
+                    f"TOUCHSTONE_HOOK_INPUT_EVIDENCE_DIR={shlex.quote(str(hook_input_dir))} "
+                    f"TOUCHSTONE_HOOK_STATE_DIR={shlex.quote(str(state_dir))} "
+                    f"python3 {shlex.quote(str(logger))} "
+                    f"{shlex.quote(str(runner))} {shlex.quote(key)}"
+                )
+            else:
+                command = (
                     f"TOUCHSTONE_HOOK_STATE_DIR={shlex.quote(str(state_dir))} "
                     f"python3 {shlex.quote(str(runner))} {shlex.quote(key)}"
-                ),
+                )
+            compiled_hook = {
+                "type": "command",
+                "bash": command,
                 "cwd": str(hook_dir),
                 "timeoutSec": hook["timeoutSec"],
             }
@@ -196,6 +329,7 @@ for event_name, groups in source["hooks"].items():
                     "bash": compiled_hook["bash"],
                     "cwd": compiled_hook["cwd"],
                     "timeoutSec": compiled_hook["timeoutSec"],
+                    "wrapped_for_hook_input_capture": wrapped,
                 }
             )
             new_group["hooks"].append(compiled_hook)
@@ -209,6 +343,8 @@ detail_path.write_text(
             "source_event_keys": source_events,
             "compiled_event_keys": list(compiled["hooks"].keys()),
             "compiled_hooks": compiled_hooks,
+            "hook_input_logger": str(logger),
+            "hook_input_evidence_dir": str(hook_input_dir),
         },
         indent=2,
     )
@@ -458,25 +594,53 @@ Path(detail_path).write_text(json.dumps(match, indent=2) + "\n", encoding="utf-8
 PY
 }
 
-CURRENT_STEP="detect-version"
-VERSION_OUTPUT="$(copilot --version 2>/dev/null)" || skip_unavailable
-VERSION_LINE="${VERSION_OUTPUT%%$'\n'*}"
-
 SCRATCH_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/touchstone-copilot-hook-smoke.XXXXXX")"
 SCRATCH_ROOT="$(cd "$SCRATCH_ROOT" && pwd -P)"
-mkdir -p "$SCRATCH_ROOT/artifacts" "$SCRATCH_ROOT/probe-cwd"
+mkdir -p "$SCRATCH_ROOT/artifacts"
 
+SMOKE_HOME="$SCRATCH_ROOT/home"
+SMOKE_XDG_CONFIG_HOME="$SCRATCH_ROOT/xdg-config"
+SMOKE_XDG_CACHE_HOME="$SCRATCH_ROOT/xdg-cache"
+SMOKE_XDG_STATE_HOME="$SCRATCH_ROOT/xdg-state"
 SMOKE_COPILOT_HOME="$SCRATCH_ROOT/copilot-home"
 SMOKE_REPO="$SCRATCH_ROOT/repo"
 SMOKE_INSTALLED_ROOT="$SCRATCH_ROOT/installed/touchstone"
 SMOKE_STATE_DIR="$SCRATCH_ROOT/hook-state"
+SMOKE_HOOK_INPUT_DIR="$SCRATCH_ROOT/artifacts/hook-stdin"
+
+mkdir -p \
+  "$SCRATCH_ROOT/probe-cwd" \
+  "$SMOKE_HOME" \
+  "$SMOKE_XDG_CONFIG_HOME" \
+  "$SMOKE_XDG_CACHE_HOME" \
+  "$SMOKE_XDG_STATE_HOME" \
+  "$SMOKE_COPILOT_HOME/hooks" \
+  "$SMOKE_HOOK_INPUT_DIR"
+seed_gh_auth
+seed_smoke_auth_token
+
+if ! command -v copilot >/dev/null 2>&1; then
+  skip_unavailable
+fi
+
+CURRENT_STEP="detect-version"
+VERSION_STDOUT="$SCRATCH_ROOT/artifacts/00-version.stdout"
+VERSION_STDERR="$SCRATCH_ROOT/artifacts/00-version.stderr"
+if ! with_copilot_env copilot --version >"$VERSION_STDOUT" 2>"$VERSION_STDERR"; then
+  fail_with_logs \
+    'run-copilot-hook-smoke: copilot --version failed unexpectedly' \
+    "copilot --version stdout" "$VERSION_STDOUT" \
+    "copilot --version stderr" "$VERSION_STDERR"
+fi
+VERSION_OUTPUT="$(<"$VERSION_STDOUT")"
+VERSION_LINE="${VERSION_OUTPUT%%$'\n'*}"
 
 CURRENT_STEP="probe-auth"
 PROBE_JSONL="$SCRATCH_ROOT/artifacts/00-probe.jsonl"
 PROBE_STDERR="$SCRATCH_ROOT/artifacts/00-probe.stderr"
 PROBE_DETAIL="$SCRATCH_ROOT/artifacts/00-probe-summary.json"
 PROBE_SESSION_ID="$(uuid4)"
-if ! COPILOT_HOME="$SMOKE_COPILOT_HOME" copilot -C "$SCRATCH_ROOT/probe-cwd" \
+if ! with_copilot_env copilot -C "$SCRATCH_ROOT/probe-cwd" \
   -p 'Reply with PROBE_READY only.' \
   --session-id "$PROBE_SESSION_ID" \
   --allow-all-tools \
@@ -486,10 +650,19 @@ if ! COPILOT_HOME="$SMOKE_COPILOT_HOME" copilot -C "$SCRATCH_ROOT/probe-cwd" \
   --no-color \
   --output-format json \
   --stream off >"$PROBE_JSONL" 2>"$PROBE_STDERR"; then
-  skip_unavailable
+  if probe_is_auth_skip "$PROBE_JSONL" "$PROBE_STDERR"; then
+    skip_unavailable
+  fi
+  fail_with_logs \
+    'run-copilot-hook-smoke: probe failed unexpectedly' \
+    "probe stderr" "$PROBE_STDERR" \
+    "probe jsonl" "$PROBE_JSONL"
 fi
 if ! assert_probe "$PROBE_JSONL" "$VERSION_LINE" "$PROBE_DETAIL"; then
-  skip_unavailable
+  fail_with_logs \
+    'run-copilot-hook-smoke: probe output drifted or failed assertions' \
+    "probe stderr" "$PROBE_STDERR" \
+    "probe jsonl" "$PROBE_JSONL"
 fi
 
 CURRENT_STEP="build-smoke-repo"
@@ -515,11 +688,19 @@ git -C "$SMOKE_REPO" add src/commit-target.txt
 CURRENT_STEP="install-hooks"
 cp -R "$SOURCE_HOOKS" "$SMOKE_INSTALLED_ROOT/hooks"
 cp -R "$SOURCE_SKILLS" "$SMOKE_INSTALLED_ROOT/skills"
-mkdir -p "$SMOKE_COPILOT_HOME/hooks" "$SMOKE_STATE_DIR"
+mkdir -p "$SMOKE_INSTALLED_ROOT/.claude-plugin" "$SMOKE_STATE_DIR"
+cp "$PLUGIN_MANIFEST" "$SMOKE_INSTALLED_ROOT/.claude-plugin/plugin.json"
 COMPILED_CONFIG="$SMOKE_COPILOT_HOME/hooks/touchstone.json"
 CONFIG_DETAIL="$SCRATCH_ROOT/artifacts/01-compiled-config.json"
-compile_hook_config "$SOURCE_CONFIG" "$COMPILED_CONFIG" "$SMOKE_INSTALLED_ROOT/hooks" "$SMOKE_STATE_DIR" "$CONFIG_DETAIL"
-assert_source_manifest "$PLUGIN_MANIFEST"
+MANIFEST_DETAIL="$SCRATCH_ROOT/artifacts/02-installed-manifest.json"
+compile_hook_config \
+  "$SOURCE_CONFIG" \
+  "$COMPILED_CONFIG" \
+  "$SMOKE_INSTALLED_ROOT/hooks" \
+  "$SMOKE_STATE_DIR" \
+  "$SMOKE_HOOK_INPUT_DIR" \
+  "$CONFIG_DETAIL"
+assert_manifest_version "$SMOKE_INSTALLED_ROOT/.claude-plugin/plugin.json" "0.6.5" "$MANIFEST_DETAIL"
 
 COMMIT_SESSION_ID="$(uuid4)"
 GUIDE_SESSION_ID="$(uuid4)"
@@ -527,6 +708,8 @@ GUIDE_PATH="$SMOKE_REPO/CONTRIBUTING.md"
 GENERATED_PATH="$SMOKE_REPO/src/generated_fixture.go"
 ORDINARY_PATH="$SMOKE_REPO/src/ordinary.txt"
 GENERATED_BASELINE="$SCRATCH_ROOT/artifacts/generated-baseline.go"
+READ_HOOK_INPUT_DETAIL="$SCRATCH_ROOT/artifacts/22-guide-read-hook-input.json"
+EDIT_HOOK_INPUT_DETAIL="$SCRATCH_ROOT/artifacts/41-ordinary-edit-hook-input.json"
 cp "$GENERATED_PATH" "$GENERATED_BASELINE"
 
 CURRENT_STEP="commit-denial"
@@ -559,6 +742,45 @@ run_copilot \
   "$READ_STDERR"
 assert_successful_view "$READ_JSONL" "$GUIDE_PATH" 'Read this guide before editing.' "$READ_DETAIL"
 assert_recorded_state "$SMOKE_INSTALLED_ROOT/hooks" "$SMOKE_STATE_DIR" "$GUIDE_SESSION_ID" "$GUIDE_PATH" "$STATE_DETAIL"
+python3 - "$SMOKE_HOOK_INPUT_DIR" "$READ_HOOK_INPUT_DETAIL" "$GUIDE_PATH" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+evidence_dir, detail_path, expected_path = sys.argv[1:4]
+matches = []
+for candidate in sorted(Path(evidence_dir).glob("guide-read-*.json")):
+    payload = json.loads(candidate.read_text(encoding="utf-8"))
+    tool_input = payload.get("tool_input")
+    if not isinstance(tool_input, dict):
+        continue
+    if payload.get("hook_event_name") != "PostToolUse":
+        continue
+    if payload.get("tool_name") != "Read":
+        continue
+    if tool_input.get("path") != expected_path:
+        continue
+    tool_result = payload.get("tool_result")
+    if not isinstance(tool_result, dict) or tool_result.get("result_type") != "success":
+        continue
+    matches.append(
+        {
+            "evidence_file": str(candidate),
+            "hook_event_name": payload["hook_event_name"],
+            "tool_name": payload["tool_name"],
+            "tool_input": tool_input,
+            "tool_result": tool_result,
+            "session_id": payload.get("session_id"),
+        }
+    )
+
+if not matches:
+    raise SystemExit(
+        f"did not observe direct guide-read hook payload with PostToolUse and tool_input.path={expected_path!r}"
+    )
+
+Path(detail_path).write_text(json.dumps(matches[0], indent=2) + "\n", encoding="utf-8")
+PY
 
 CURRENT_STEP="generated-edit-denial"
 GENERATED_JSONL="$SCRATCH_ROOT/artifacts/30-generated-edit.jsonl"
@@ -587,6 +809,41 @@ run_copilot \
   "$ORDINARY_JSONL" \
   "$ORDINARY_STDERR"
 assert_successful_edit "$ORDINARY_JSONL" "$ORDINARY_PATH" "$ORDINARY_DETAIL"
+python3 - "$SMOKE_HOOK_INPUT_DIR" "$EDIT_HOOK_INPUT_DETAIL" "$ORDINARY_PATH" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+evidence_dir, detail_path, expected_path = sys.argv[1:4]
+matches = []
+for candidate in sorted(Path(evidence_dir).glob("contributing-*.json")):
+    payload = json.loads(candidate.read_text(encoding="utf-8"))
+    tool_input = payload.get("tool_input")
+    if not isinstance(tool_input, dict):
+        continue
+    if payload.get("hook_event_name") != "PreToolUse":
+        continue
+    if payload.get("tool_name") != "Edit":
+        continue
+    if tool_input.get("path") != expected_path:
+        continue
+    matches.append(
+        {
+            "evidence_file": str(candidate),
+            "hook_event_name": payload["hook_event_name"],
+            "tool_name": payload["tool_name"],
+            "tool_input": tool_input,
+            "session_id": payload.get("session_id"),
+        }
+    )
+
+if not matches:
+    raise SystemExit(
+        f"did not observe direct contributing hook payload with PreToolUse and tool_input.path={expected_path!r}"
+    )
+
+Path(detail_path).write_text(json.dumps(matches[0], indent=2) + "\n", encoding="utf-8")
+PY
 python3 - "$ORDINARY_PATH" <<'PY'
 from pathlib import Path
 import sys
@@ -603,11 +860,14 @@ python3 - "$SUMMARY_PATH" \
   "$BASE_HEAD" \
   "$PROBE_DETAIL" \
   "$CONFIG_DETAIL" \
+  "$MANIFEST_DETAIL" \
   "$COMMIT_DETAIL" \
   "$READ_DETAIL" \
   "$STATE_DETAIL" \
+  "$READ_HOOK_INPUT_DETAIL" \
   "$GENERATED_DETAIL" \
-  "$ORDINARY_DETAIL" <<'PY'
+  "$ORDINARY_DETAIL" \
+  "$EDIT_HOOK_INPUT_DETAIL" <<'PY'
 import json
 import sys
 from pathlib import Path
@@ -618,12 +878,15 @@ from pathlib import Path
     base_head,
     probe_detail,
     config_detail,
+    manifest_detail,
     commit_detail,
     read_detail,
     state_detail,
+    read_hook_input_detail,
     generated_detail,
     ordinary_detail,
-) = sys.argv[1:11]
+    edit_hook_input_detail,
+) = sys.argv[1:14]
 
 def load(path):
     return json.loads(Path(path).read_text(encoding="utf-8"))
@@ -633,14 +896,17 @@ summary = {
     "base_head_before_smoke": base_head,
     "probe": load(probe_detail),
     "compiled_hook_config": load(config_detail),
+    "installed_manifest": load(manifest_detail),
     "raw_commit_denial": load(commit_detail),
     "guide_read": load(read_detail),
     "guide_state": load(state_detail),
+    "guide_read_hook_input": load(read_hook_input_detail),
     "generated_edit_denial": load(generated_detail),
     "ordinary_edit_allow": load(ordinary_detail),
+    "ordinary_edit_hook_input": load(edit_hook_input_detail),
 }
 
 Path(summary_path).write_text(json.dumps(summary, indent=2) + "\n", encoding="utf-8")
 PY
 
-echo "copilot-hook-smoke: PASS ($VERSION_LINE; source events preserved from hooks/copilot-hooks.json; raw git commit denied; guide Read recorded state; generated edit denied; ordinary edit allowed)"
+echo "copilot-hook-smoke: PASS ($VERSION_LINE; installed manifest 0.6.5 validated; source events preserved from hooks/copilot-hooks.json; raw git commit denied; direct Read hook payload observed; generated edit denied; ordinary edit allowed with direct Edit hook payload observed)"
