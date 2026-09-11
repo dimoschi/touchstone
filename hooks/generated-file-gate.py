@@ -35,7 +35,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from copilot_session_evidence import canonical_path
-from hook_invocation import normalize_invocation
+from hook_invocation import normalize_invocation, tool_input_path
 
 HEADER_LINES = 10
 
@@ -68,11 +68,13 @@ def main():
     data = json.load(sys.stdin)
     invocation = normalize_invocation(data)
     tool_input = data.get('tool_input') or {}
-    path = tool_input.get('file_path')
+    if not isinstance(tool_input, dict):
+        tool_input = {}
+    path = tool_input_path(tool_input)
     if invocation is not None and invocation.host == 'copilot' \
             and invocation.event == 'pre_tool_use' \
             and invocation.tool_name in EDIT_TOOLS \
-            and isinstance(path, str) and path:
+            and path is not None:
         path = canonical_path(path, invocation.cwd)
     if not path:
         return 0

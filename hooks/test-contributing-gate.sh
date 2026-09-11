@@ -117,7 +117,7 @@ payload = {
     "tool_input": {},
 }
 if file_path != "__MISSING__":
-    payload["tool_input"]["file_path"] = file_path
+    payload["tool_input"]["path"] = file_path
 json.dump(payload, sys.stdout)
 PY
 }
@@ -137,7 +137,7 @@ payload = {
     "tool_result": {"result_type": result_type},
 }
 if file_path != "__MISSING__":
-    payload["tool_input"]["file_path"] = file_path
+    payload["tool_input"]["path"] = file_path
 json.dump(payload, sys.stdout)
 PY
 }
@@ -196,7 +196,7 @@ expect_payload "copilot failed Read does not count" \
 record_post "$(copilot_post_payload copilot-wrong "$GUIDED" Read README.md success)"
 expect_payload "copilot wrong path does not count" \
                                            BLOCK "$(copilot_pre_payload copilot-wrong "$GUIDED" Edit internal/app.go)"
-expect_detail "copilot missing path denies" "tool_input.file_path" \
+expect_detail "copilot missing path denies" "tool_input.path" \
                                            "$(copilot_pre_payload copilot-missing "$GUIDED" Edit __MISSING__)"
 
 echo "copilot evidence works without TOUCHSTONE_HOOK_STATE_DIR"

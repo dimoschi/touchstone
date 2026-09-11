@@ -30,7 +30,7 @@ payload() {
 import json
 import sys
 
-event, session_id, cwd, tool_name, file_path, result_type = sys.argv[1:7]
+event, session_id, cwd, tool_name, target_path, result_type = sys.argv[1:7]
 payload = {
     "hook_event_name": event,
     "session_id": session_id,
@@ -38,8 +38,8 @@ payload = {
     "tool_name": tool_name,
     "tool_input": {},
 }
-if file_path != "__MISSING__":
-    payload["tool_input"]["file_path"] = file_path
+if target_path != "__MISSING__":
+    payload["tool_input"]["path"] = target_path
 if event == "PostToolUse":
     payload["tool_result"] = {"result_type": result_type}
 json.dump(payload, sys.stdout)
@@ -239,7 +239,7 @@ if printf '%s' "$(payload PostToolUse session-missing-path "$REAL" Read __MISSIN
   echo "expected missing path to fail"
   exit 1
 fi
-grep -Fq 'tool_input.file_path' "$OUT"
+grep -Fq 'tool_input.path' "$OUT"
 
 BROKEN="$TMP/broken-state"
 printf 'not a directory' > "$BROKEN"

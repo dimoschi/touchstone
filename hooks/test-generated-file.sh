@@ -53,7 +53,7 @@ json.dump(
         "cwd": cwd,
         "tool_name": "Edit",
         "tool_input": {
-            "file_path": file_path,
+            "path": file_path,
             "old_string": "a",
             "new_string": "b",
         },
@@ -75,7 +75,7 @@ json.dump(
         "cwd": cwd,
         "tool_name": "Write",
         "tool_input": {
-            "file_path": file_path,
+            "path": file_path,
             "content": content,
         },
     },
@@ -141,7 +141,7 @@ expect "copilot ordinary source via relative path" \
 # This gate applies everywhere and has no repo-specific prerequisite it can
 # verify first, so a missing path stays allow-open: without a target file there
 # is no evidence to check, unlike contributing-gate.py's opted-in guide policy.
-expect "copilot missing file_path stays allow-open" \
+expect "copilot missing path stays allow-open" \
                                     ALLOW "$(copilot_missing_path "$WORK" "Edit")"
 
 echo ""

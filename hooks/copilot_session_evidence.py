@@ -26,7 +26,7 @@ from pathlib import Path
 from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from hook_invocation import normalize_invocation
+from hook_invocation import normalize_invocation, tool_input_path
 
 STATE_ENV = "TOUCHSTONE_HOOK_STATE_DIR"
 XDG_STATE_ENV = "XDG_STATE_HOME"
@@ -100,7 +100,7 @@ def main() -> int:
         if result_type != "success":
             return 0
         state_dir = _state_dir(create=True)
-        target = _payload_file_path(invocation.tool_input, invocation.cwd)
+        target = _payload_path(invocation.tool_input, invocation.cwd)
         prior = _read_record(_session_path(state_dir, invocation.session_id), invocation.session_id, missing_ok=True)
         paths = set(prior["paths"])
         paths.add(target)
@@ -122,10 +122,12 @@ def _result_type(payload: object) -> str:
     return result_type
 
 
-def _payload_file_path(tool_input: Mapping[str, object], cwd: Path | None) -> str:
-    value = tool_input.get("file_path")
-    if not isinstance(value, str) or not value:
-        raise SessionEvidenceError("PostToolUse Read payload missing usable tool_input.file_path")
+def _payload_path(tool_input: Mapping[str, object], cwd: Path | None) -> str:
+    value = tool_input_path(tool_input)
+    if value is None:
+        raise SessionEvidenceError(
+            "PostToolUse Read payload missing usable tool_input.path (or legacy tool_input.file_path)"
+        )
     if cwd is None:
         raise SessionEvidenceError("PostToolUse Read payload missing cwd")
     return canonical_path(value, cwd)

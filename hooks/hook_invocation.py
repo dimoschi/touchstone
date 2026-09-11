@@ -19,6 +19,15 @@ class HookInvocation:
     raw: Mapping[str, object]
 
 
+def tool_input_path(tool_input: Mapping[str, object]) -> str | None:
+    """Return the target path from either the legacy or native key."""
+    for key in ("file_path", "path"):
+        value = tool_input.get(key)
+        if isinstance(value, str) and value:
+            return value
+    return None
+
+
 def normalize_invocation(raw: object) -> HookInvocation | None:
     """Return the common input shape, or None for a malformed hook event."""
     if not isinstance(raw, Mapping):

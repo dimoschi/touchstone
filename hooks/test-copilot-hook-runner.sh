@@ -49,7 +49,7 @@ json.dump(
         "timestamp": "2026-09-12T00:00:00Z",
         "cwd": sys.argv[1],
         "tool_name": "Read",
-        "tool_input": {"file_path": "CONTRIBUTING.md"},
+        "tool_input": {"path": "CONTRIBUTING.md"},
         "tool_result": {
             "result_type": "success",
             "text_result_for_llm": "guide contents",

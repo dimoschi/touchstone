@@ -28,7 +28,7 @@ from copilot_session_evidence import (
     canonical_path,
     read_session_paths,
 )
-from hook_invocation import normalize_invocation
+from hook_invocation import normalize_invocation, tool_input_path
 
 # Extensionless CONTRIBUTORS is deliberately absent: it is commonly a generated
 # list of names rather than a guide, so gating on it costs a read and teaches
@@ -50,7 +50,8 @@ Then make the edit again. A Read of each file is the only thing that clears
 this, and it is asked once per file per session.'''
 
 UNSUPPORTED = '''contributing-gate: unsupported Copilot {tool} payload for a repo that ships contribution guides.
-This hook needs tool_input.file_path to decide what {tool} would change:
+This hook needs tool_input.path (or legacy tool_input.file_path) to decide what
+{tool} would change:
 
 {paths}'''
 
@@ -114,7 +115,10 @@ def read_in_session(transcript, guides):
             for block in content:
                 if not isinstance(block, dict) or block.get('name') != 'Read':
                     continue
-                target = (block.get('input') or {}).get('file_path')
+                input_block = block.get('input') or {}
+                if not isinstance(input_block, dict):
+                    continue
+                target = tool_input_path(input_block)
                 if target and resolved(target) in wanted:
                     seen.add(resolved(target))
     return seen
@@ -176,7 +180,10 @@ def gate_copilot(invocation):
 
 
 def gate_legacy(data):
-    target = (data.get('tool_input') or {}).get('file_path')
+    tool_input = data.get('tool_input') or {}
+    if not isinstance(tool_input, dict):
+        return 0
+    target = tool_input_path(tool_input)
     if not target:
         return 0
 
@@ -209,8 +216,8 @@ def repo_toplevel(path):
 
 
 def copilot_target(invocation):
-    value = invocation.tool_input.get('file_path')
-    if not isinstance(value, str) or not value:
+    value = tool_input_path(invocation.tool_input)
+    if value is None:
         return None
     return canonical_path(value, invocation.cwd)
 
