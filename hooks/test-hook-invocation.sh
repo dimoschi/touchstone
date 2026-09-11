@@ -68,14 +68,37 @@ legacy = normalize_invocation({
 assert legacy is not None
 assert legacy.host == "claude"
 
-assert normalize_invocation({"hook_event_name": "PreToolUse", "tool_input": []}) is None
-assert normalize_invocation({"tool_input": []}) is None
-assert normalize_invocation({
+missing_session = normalize_invocation({
     "hook_event_name": "PreToolUse",
     "cwd": "/tmp/repo",
     "tool_name": "Edit",
     "tool_input": {"file_path": "pkg/a.py"},
-}) is not None
+})
+assert missing_session is not None
+assert missing_session.session_id is None
+
+empty_session = normalize_invocation({
+    "hook_event_name": "PreToolUse",
+    "session_id": "",
+    "cwd": "/tmp/repo",
+    "tool_name": "Edit",
+    "tool_input": {"file_path": "pkg/a.py"},
+})
+assert empty_session is not None
+assert empty_session.session_id is None
+
+non_string_session = normalize_invocation({
+    "hook_event_name": "PostToolUse",
+    "session_id": 123,
+    "cwd": "/tmp/repo",
+    "tool_name": "Write",
+    "tool_input": {"file_path": "pkg/b.py", "content": "ok"},
+})
+assert non_string_session is not None
+assert non_string_session.session_id is None
+
+assert normalize_invocation({"hook_event_name": "PreToolUse", "tool_input": []}) is None
+assert normalize_invocation({"tool_input": []}) is None
 assert normalize_invocation({
     "hook_event_name": "NotAHook",
     "cwd": "/tmp/repo",

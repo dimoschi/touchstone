@@ -44,6 +44,8 @@ def normalize_invocation(raw: Mapping[str, object]) -> HookInvocation | None:
         return None
 
     session_id = raw.get("session_id")
+    if host == "copilot" and event_name in {"PreToolUse", "PostToolUse"}:
+        session_id = session_id if isinstance(session_id, str) and session_id else None
     return HookInvocation(
         host=host,
         event=event,
