@@ -13,7 +13,7 @@ class HookInvocation:
     host: Literal["claude", "codex", "copilot"]
     event: Literal["pre_tool_use", "post_tool_use"]
     session_id: str | None
-    cwd: Path
+    cwd: Path | None
     tool_name: str
     tool_input: Mapping[str, object]
     raw: Mapping[str, object]
@@ -25,9 +25,8 @@ def normalize_invocation(raw: Mapping[str, object]) -> HookInvocation | None:
     if not isinstance(tool_input, dict):
         return None
 
-    cwd = raw.get("cwd")
     tool_name = raw.get("tool_name")
-    if not isinstance(cwd, str) or not cwd or not isinstance(tool_name, str) or not tool_name:
+    if not isinstance(tool_name, str) or not tool_name:
         return None
 
     event_name = raw.get("hook_event_name")
@@ -45,7 +44,25 @@ def normalize_invocation(raw: Mapping[str, object]) -> HookInvocation | None:
 
     session_id = raw.get("session_id")
     if host == "copilot" and event_name in {"PreToolUse", "PostToolUse"}:
-        session_id = session_id if isinstance(session_id, str) and session_id else None
+        if not isinstance(session_id, str) or not session_id:
+            return None
+        cwd = raw.get("cwd")
+        if isinstance(cwd, str) and cwd:
+            cwd_value = Path(cwd).resolve()
+        else:
+            cwd_value = None
+        return HookInvocation(
+            host=host,
+            event=event,
+            session_id=session_id,
+            cwd=cwd_value,
+            tool_name=tool_name,
+            tool_input=tool_input,
+            raw=raw,
+        )
+    cwd = raw.get("cwd")
+    if not isinstance(cwd, str) or not cwd:
+        return None
     return HookInvocation(
         host=host,
         event=event,

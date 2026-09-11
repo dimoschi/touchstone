@@ -40,6 +40,16 @@ assert post is not None
 assert post.host == "copilot"
 assert post.event == "post_tool_use"
 
+copilot_no_cwd = normalize_invocation({
+    "hook_event_name": "PreToolUse",
+    "session_id": "copilot-session",
+    "tool_name": "Edit",
+    "tool_input": {"file_path": "pkg/a.py", "old_string": "x", "new_string": "y"},
+})
+assert copilot_no_cwd is not None
+assert copilot_no_cwd.host == "copilot"
+assert copilot_no_cwd.cwd is None
+
 claude = normalize_invocation({
     "cwd": "/tmp/repo",
     "tool_name": "Edit",
@@ -74,8 +84,7 @@ missing_session = normalize_invocation({
     "tool_name": "Edit",
     "tool_input": {"file_path": "pkg/a.py"},
 })
-assert missing_session is not None
-assert missing_session.session_id is None
+assert missing_session is None
 
 empty_session = normalize_invocation({
     "hook_event_name": "PreToolUse",
@@ -84,8 +93,7 @@ empty_session = normalize_invocation({
     "tool_name": "Edit",
     "tool_input": {"file_path": "pkg/a.py"},
 })
-assert empty_session is not None
-assert empty_session.session_id is None
+assert empty_session is None
 
 non_string_session = normalize_invocation({
     "hook_event_name": "PostToolUse",
@@ -94,8 +102,7 @@ non_string_session = normalize_invocation({
     "tool_name": "Write",
     "tool_input": {"file_path": "pkg/b.py", "content": "ok"},
 })
-assert non_string_session is not None
-assert non_string_session.session_id is None
+assert non_string_session is None
 
 assert normalize_invocation({"hook_event_name": "PreToolUse", "tool_input": []}) is None
 assert normalize_invocation({"tool_input": []}) is None
@@ -111,6 +118,13 @@ assert normalize_invocation({
     "tool_name": "Edit",
     "tool_input": {"file_path": "pkg/a.py"},
 }) is None
+assert normalize_invocation({
+    "hook_event_name": "PreToolUse",
+    "session_id": "copilot-session",
+    "cwd": "",
+    "tool_name": "Edit",
+    "tool_input": {"file_path": "pkg/a.py", "old_string": "x", "new_string": "y"},
+}) is not None
 assert normalize_invocation({
     "hook_event_name": "PreToolUse",
     "cwd": "/tmp/repo",
