@@ -7,6 +7,20 @@ delivery policy, what the runtime actually guarantees, and what the smallest
 adapter interface looks like. Everything under "Verified" below was run, not
 inferred; everything under "Not yet verified" is an explicit gap, not a claim.
 
+## Runnable evidence, not just prose
+
+`prototypes/copilot-driver/` is a small, actually-executable driver script
+(`driver.sh`) that exercises every acceptance-criterion bullet from #53
+against the real Copilot CLI in an isolated scratch repo: it invokes a worker
+phase and validates its structured result, proves a raw `git commit` is
+denied by a `preToolUse` hook before a local check has passed, proves the
+same commit is unblocked once the check passes, runs two reviewer calls
+concurrently and confirms they aren't serialized, and attempts an
+interruption + resume. It prints `PASS`/`FAIL` per criterion and exits
+non-zero if any fail — including the session-durability gap below, which is
+an expected, tracked negative result, not a script bug. See
+`prototypes/copilot-driver/RUN-LOG.md` for a captured real run.
+
 ## Two Copilot surfaces, not one
 
 - **Copilot CLI** — runs locally, in the developer's own shell. Interactive by
@@ -91,12 +105,20 @@ JSONL event stream and hook stdin/stdout.
   This is the mechanism #56 needs to port `crap-commit-gate.py`,
   `mutation-pr-gate.py`, `base-branch-commit-gate.py`, and `gate-pipe-gate.py`
   to.
-- **`--add-dir <dir>` grants scoped trust for a single session.** Per
-  `copilot --help`, it "load[s] its `.github/skills` and `.github/agents` as
-  trusted configuration" for that directory, without touching the user's
-  global `trustedFolders`. This is the mechanism a driver script (or CI) should
-  use to grant a worktree exactly the trust it needs, rather than mutating
-  `~/.copilot/config.json`.
+- **`--add-dir <dir>` does NOT grant hook trust — corrected from an earlier
+  draft of this document.** Per `copilot --help` it only loads that
+  directory's `.github/skills` and `.github/agents` as trusted configuration;
+  empirically, a `.github/hooks/*.json` file in an `--add-dir`-referenced,
+  otherwise-untrusted directory still never fired. **The mechanism that
+  actually works, verified directly:** setting the `COPILOT_HOME` environment
+  variable to a scratch directory before invoking `copilot` isolates the
+  CLI's *user-level* hooks directory to `$COPILOT_HOME/hooks/*.json`, and
+  hooks placed there fire unconditionally — regardless of the working
+  directory's `trustedFolders` status. This is the mechanism a driver script
+  (or CI, #59) should use to install a hard gate deterministically, without
+  mutating the real user's `~/.copilot/config.json` or depending on
+  trustedFolders at all. `prototypes/copilot-driver/driver.sh` uses exactly
+  this to install `hooks/preToolUse-commit-gate.sh`.
 
 ## A silent-failure mode that must be handled explicitly (blocks #56)
 
@@ -115,9 +137,10 @@ is trust, not a field, but the failure shape is the same: a real gate that
 looks green because it never ran. Any Copilot packaging or CI verification
 (#54, #59) must assert the hook actually fired (e.g. via a marker file the
 hook itself writes) rather than trusting a clean exit code as evidence a gate
-was enforced. `--add-dir` (above) is the fix for a driver script that controls
-its own invocation; it does not help an end user running `copilot` directly in
-an untrusted clone, who needs to be told to trust the folder first.
+was enforced. Setting `COPILOT_HOME` to a scratch directory (above) is the fix
+for a driver script that controls its own invocation; it does not help an end
+user running `copilot` directly in an untrusted clone, who needs to be told to
+trust the folder first.
 
 ## Not yet verified — explicit gaps, not solved here
 
@@ -137,10 +160,18 @@ an untrusted clone, who needs to be told to trust the folder first.
   only. The cloud agent's sandboxed, non-interactive, partial-hook-event
   environment is a real third target, not assumed equivalent to the CLI, and
   is scoped as follow-up work rather than claimed here.
-- **Cancellation/interruption mid-phase** was only exercised via an OS-level
-  `timeout` wrapper around each `copilot -p` call, which worked cleanly. Truly
-  interrupting a running call (e.g. SIGINT mid-tool-execution) and resuming via
-  `--session-id`/`--resume` afterward was not tested end-to-end.
+- **Session state is not crash-durable — verified, not just untested.**
+  Killing a `copilot -p --session-id X` process mid-turn (`SIGTERM`) and then
+  reusing the same `--session-id` in a fresh process does **not** error and
+  does **not** recover the killed turn: the resumed call silently starts a
+  brand-new conversation (`message_count:1` in its own transcript), so a
+  prompt like "what token did I just tell you?" is answered `UNKNOWN` rather
+  than recovered or refused. **Conclusion for #57/#58: a driver must keep its
+  own external phase-completion checkpoint (e.g. a state file per phase) and
+  must not treat `--session-id` reuse as a crash-recovery mechanism** — it is
+  a continuity convenience for a single well-behaved run, not a durability
+  guarantee across a kill. `prototypes/copilot-driver/driver.sh` reproduces
+  this and reports it as an expected, tracked negative result.
 - **Custom-agent (`*.agent.md`) role restriction** (e.g. confirming a planner
   agent genuinely lacks write access, per #58's requirement) was not exercised
   in this pass — `--agent <agent>` exists and is documented, but its
@@ -166,10 +197,15 @@ generically for both hosts:
    gate logic itself (CRAP, dead-code, mutation, base-branch, gate-pipe) does
    not change; only the thin translation layer at the hook's entrypoint does.
    Full mapping work is #56.
-4. **`--add-dir` for trust, not global config**, so a driver script (or CI) can
-   run a worktree's hooks/skills/agents without mutating the user's
-   `~/.copilot/config.json`.
-5. **Usage accounting via `--usage-output-file`**, read and recorded the same
+4. **`COPILOT_HOME` for deterministic hook trust, not global config or
+   `--add-dir`**, so a driver script (or CI) can install and guarantee a hook
+   fires for a worktree without mutating the user's `~/.copilot/config.json`
+   or depending on trustedFolders.
+5. **An external phase-completion checkpoint, not `--session-id` reuse**, as
+   the crash-recovery mechanism — the CLI's own session state does not
+   survive a killed process (see above), so "resume after interruption" is
+   the driver's responsibility, not the CLI's.
+6. **Usage accounting via `--usage-output-file`**, read and recorded the same
    way agent-eval records phase metrics today — optional, additive, never a
    hard gate on its own.
 
