@@ -104,6 +104,32 @@ assert non_string_session is None
 
 assert normalize_invocation({"hook_event_name": "PreToolUse", "tool_input": []}) is None
 assert normalize_invocation({"tool_input": []}) is None
+assert normalize_invocation({
+    "hook_event_name": "PreToolUse",
+    "session_id": "copilot-session",
+    "cwd": "/tmp/repo",
+}) is None
+assert normalize_invocation({
+    "hook_event_name": "PreToolUse",
+    "session_id": "copilot-session",
+    "cwd": "/tmp/repo",
+    "tool_name": 123,
+    "tool_input": {"file_path": "pkg/a.py"},
+}) is None
+assert normalize_invocation({
+    "hook_event_name": "PreToolUse",
+    "session_id": "copilot-session",
+    "cwd": "/tmp/repo",
+    "tool_name": "Edit",
+}) is None
+for tool_input in (None, "text", 1, ["pkg/a.py"]):
+    assert normalize_invocation({
+        "hook_event_name": "PreToolUse",
+        "session_id": "copilot-session",
+        "cwd": "/tmp/repo",
+        "tool_name": "Edit",
+        "tool_input": tool_input,
+    }) is None
 assert normalize_invocation(None) is None
 assert normalize_invocation([]) is None
 assert normalize_invocation("not-json-object") is None
