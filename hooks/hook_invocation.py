@@ -50,10 +50,9 @@ def normalize_invocation(raw: object) -> HookInvocation | None:
         if not isinstance(session_id, str) or not session_id:
             return None
         cwd = raw.get("cwd")
-        if isinstance(cwd, str) and cwd:
-            cwd_value = Path(cwd).resolve()
-        else:
-            cwd_value = None
+        if not isinstance(cwd, str) or not cwd:
+            return None
+        cwd_value = Path(cwd).resolve()
         return HookInvocation(
             host=host,
             event=event,

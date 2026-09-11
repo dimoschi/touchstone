@@ -46,9 +46,7 @@ copilot_no_cwd = normalize_invocation({
     "tool_name": "Edit",
     "tool_input": {"file_path": "pkg/a.py", "old_string": "x", "new_string": "y"},
 })
-assert copilot_no_cwd is not None
-assert copilot_no_cwd.host == "copilot"
-assert copilot_no_cwd.cwd is None
+assert copilot_no_cwd is None
 
 claude = normalize_invocation({
     "cwd": "/tmp/repo",
@@ -128,7 +126,14 @@ assert normalize_invocation({
     "cwd": "",
     "tool_name": "Edit",
     "tool_input": {"file_path": "pkg/a.py", "old_string": "x", "new_string": "y"},
-}) is not None
+}) is None
+assert normalize_invocation({
+    "hook_event_name": "PreToolUse",
+    "session_id": "copilot-session",
+    "cwd": 123,
+    "tool_name": "Edit",
+    "tool_input": {"file_path": "pkg/a.py", "old_string": "x", "new_string": "y"},
+}) is None
 assert normalize_invocation({
     "hook_event_name": "PreToolUse",
     "cwd": "/tmp/repo",
