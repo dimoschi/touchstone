@@ -12,11 +12,12 @@ trap 'rm -rf "$TMP"' EXIT
 REMOTE="$TMP/remote.git"
 MAIN="$TMP/main"
 LOCAL="$TMP/local"
+BASE_BRANCH=main
 
 git init -q --bare "$REMOTE"
 mkdir -p "$MAIN" "$LOCAL"
-git -C "$MAIN" init -q
-git -C "$LOCAL" init -q
+git -C "$MAIN" init -q -b "$BASE_BRANCH"
+git -C "$LOCAL" init -q -b "$BASE_BRANCH"
 printf 'tracked\n' > "$MAIN/readme.txt"
 git -C "$MAIN" add readme.txt
 git -C "$MAIN" -c commit.gpgsign=false -c user.email=t@t -c user.name=t commit -q -m baseline
@@ -26,7 +27,7 @@ git -C "$MAIN" checkout -q -b feature
 printf 'feature\n' >> "$MAIN/readme.txt"
 git -C "$MAIN" add readme.txt
 git -C "$MAIN" -c commit.gpgsign=false -c user.email=t@t -c user.name=t commit -q -m feature
-git -C "$MAIN" checkout -q main
+git -C "$MAIN" checkout -q "$BASE_BRANCH"
 git -C "$LOCAL" -c commit.gpgsign=false -c user.email=t@t -c user.name=t \
   commit -q --allow-empty -m baseline
 
@@ -84,7 +85,7 @@ expect_payload "local-only repo with no remote"   ALLOW "$(legacy_payload "$LOCA
 expect_payload "non-commit command"               ALLOW "$(legacy_payload "$MAIN" "git status")"
 git -C "$MAIN" checkout -q feature
 expect_payload "feature branch commit"            ALLOW "$(legacy_payload "$MAIN" "git commit -m wip")"
-git -C "$MAIN" checkout -q main
+git -C "$MAIN" checkout -q "$BASE_BRANCH"
 
 echo "copilot bash payloads block the same base-branch commit"
 expect_payload "copilot main branch commit"       BLOCK "$(copilot_payload "$MAIN" "git commit -m wip")"
