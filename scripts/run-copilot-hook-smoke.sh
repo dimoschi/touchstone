@@ -16,6 +16,7 @@ umask 077
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
 SOURCE_CONFIG="$ROOT/hooks/copilot-hooks.json"
 SOURCE_HOOKS="$ROOT/hooks"
+SOURCE_SKILLS="$ROOT/skills"
 SOURCE_MANIFEST="$ROOT/.claude-plugin/plugin.json"
 REAL_HOME="${HOME:-}"
 REAL_XDG_CONFIG_HOME="${XDG_CONFIG_HOME:-}"
@@ -168,11 +169,11 @@ print(uuid.uuid4())
 PY
 }
 
-run_copilot() {
-  local session_id="$1" prompt="$2" available_tools="$3" jsonl="$4" stderr_file="$5"
+run_copilot_in_repo() {
+  local repo="$1" session_id="$2" prompt="$3" available_tools="$4" jsonl="$5" stderr_file="$6"
   local -a cmd=(
     copilot
-    -C "$SMOKE_REPO"
+    -C "$repo"
     -p "$prompt"
     --session-id "$session_id"
     --allow-all-tools
@@ -192,6 +193,10 @@ run_copilot() {
       "copilot stderr" "$stderr_file" \
       "copilot jsonl" "$jsonl"
   fi
+}
+
+run_copilot() {
+  run_copilot_in_repo "$SMOKE_REPO" "$@"
 }
 
 assert_probe() {
@@ -588,6 +593,73 @@ Path(detail_path).write_text(
 PY
 }
 
+assert_packaged_file() {
+  local target_path="$1" relative_path="$2" detail_path="$3"
+  python3 - "$target_path" "$relative_path" "$detail_path" <<'PY'
+import json
+import os
+import stat
+import sys
+from pathlib import Path
+
+target_path, relative_path, detail_path = sys.argv[1:4]
+path = Path(target_path)
+if not path.is_file():
+    raise SystemExit(f"expected packaged file at {target_path!r}")
+
+mode = stat.S_IMODE(os.lstat(path).st_mode)
+Path(detail_path).write_text(
+    json.dumps(
+        {
+            "path": str(path.resolve(strict=False)),
+            "relative_path": relative_path,
+            "exists": True,
+            "mode_octal": format(mode, "#04o"),
+        },
+        indent=2,
+    )
+    + "\n",
+    encoding="utf-8",
+)
+PY
+}
+
+assert_commit_gate_wrapper() {
+  local detail_json="$1" expected_wrapper="$2" packaged_detail_json="$3" detail_path="$4"
+  python3 - "$detail_json" "$expected_wrapper" "$packaged_detail_json" "$detail_path" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+detail_json, expected_wrapper, packaged_detail_json, detail_path = sys.argv[1:5]
+detail = json.loads(Path(detail_json).read_text(encoding="utf-8"))
+packaged = json.loads(Path(packaged_detail_json).read_text(encoding="utf-8"))
+message = detail.get("error", "")
+if expected_wrapper not in message:
+    raise SystemExit(f"raw commit denial did not reference packaged wrapper {expected_wrapper!r}")
+if "No such file or directory" in message or "FileNotFoundError" in message:
+    raise SystemExit(f"raw commit denial mentioned a missing path: {message!r}")
+if packaged.get("path") != expected_wrapper:
+    raise SystemExit(
+        f"packaged wrapper detail recorded {packaged.get('path')!r}, expected {expected_wrapper!r}"
+    )
+
+Path(detail_path).write_text(
+    json.dumps(
+        {
+            "wrapper_path": expected_wrapper,
+            "wrapper_exists": True,
+            "error": message,
+            "tool_call_id": detail.get("tool_call_id"),
+        },
+        indent=2,
+    )
+    + "\n",
+    encoding="utf-8",
+)
+PY
+}
+
 assert_denied_edit() {
   local jsonl="$1" target_path="$2" reason_substring="$3" detail_path="$4"
   python3 - "$jsonl" "$target_path" "$reason_substring" "$detail_path" <<'PY'
@@ -691,6 +763,50 @@ Path(detail_path).write_text(json.dumps(match, indent=2) + "\n", encoding="utf-8
 PY
 }
 
+assert_mutation_gate_denial() {
+  local detail_json="$1" expected_helper="$2" packaged_detail_json="$3" detail_path="$4"
+  python3 - "$detail_json" "$expected_helper" "$packaged_detail_json" "$detail_path" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+detail_json, expected_helper, packaged_detail_json, detail_path = sys.argv[1:5]
+detail = json.loads(Path(detail_json).read_text(encoding="utf-8"))
+packaged = json.loads(Path(packaged_detail_json).read_text(encoding="utf-8"))
+message = detail.get("error", "")
+if "mutation-pr-gate:" not in message:
+    raise SystemExit(f"missing mutation-pr-gate diagnostic in {message!r}")
+if "mutation-check:" not in message:
+    raise SystemExit(f"missing mutation-check helper diagnostic in {message!r}")
+if not (
+    "mutation-check could not evaluate this change" in message
+    or "mutation ledger is not green" in message
+):
+    raise SystemExit(f"unexpected mutation gate diagnostic: {message!r}")
+for forbidden in ("FileNotFoundError", "No such file or directory", "[Errno 2]", "can't open file"):
+    if forbidden in message:
+        raise SystemExit(f"mutation gate surfaced a missing helper path ({forbidden}): {message!r}")
+if packaged.get("path") != expected_helper:
+    raise SystemExit(
+        f"packaged helper detail recorded {packaged.get('path')!r}, expected {expected_helper!r}"
+    )
+
+Path(detail_path).write_text(
+    json.dumps(
+        {
+            "helper_path": expected_helper,
+            "helper_exists": True,
+            "error": message,
+            "tool_call_id": detail.get("tool_call_id"),
+        },
+        indent=2,
+    )
+    + "\n",
+    encoding="utf-8",
+)
+PY
+}
+
 SCRATCH_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/touchstone-copilot-hook-smoke.XXXXXX")"
 SCRATCH_ROOT="$(cd "$SCRATCH_ROOT" && pwd -P)"
 mkdir -p "$SCRATCH_ROOT/artifacts"
@@ -706,9 +822,12 @@ SMOKE_PLUGIN_MANIFEST="$SMOKE_PLUGIN_ROOT/plugin.json"
 SMOKE_HOOK_CONFIG="$SMOKE_PLUGIN_ROOT/com.github.copilot/hooks/hooks.json"
 SMOKE_MARKETPLACE_NAME="touchstone-local-smoke"
 SMOKE_REPO="$SCRATCH_ROOT/repo"
+SMOKE_MUTATION_REPO="$SCRATCH_ROOT/mutation-repo"
 SMOKE_STATE_DIR="$SCRATCH_ROOT/hook-state"
 SMOKE_HOOK_INPUT_DIR="$SCRATCH_ROOT/artifacts/hook-stdin"
 SMOKE_USER_HOOK_CONFIG="$SMOKE_COPILOT_HOME/hooks/touchstone.json"
+SMOKE_PACKAGED_CRAP_COMMIT="$SMOKE_PLUGIN_ROOT/skills/crap-controlled-changes/crap-commit.sh"
+SMOKE_PACKAGED_MUTATION_CHECK="$SMOKE_PLUGIN_ROOT/skills/crap-controlled-changes/mutation-check.sh"
 
 mkdir -p \
   "$SCRATCH_ROOT/probe-cwd" \
@@ -740,9 +859,12 @@ VERSION_LINE="${VERSION_OUTPUT%%$'\n'*}"
 CURRENT_STEP="build-local-plugin"
 mkdir -p "$SMOKE_PLUGIN_ROOT"
 cp -R "$SOURCE_HOOKS" "$SMOKE_PLUGIN_ROOT/hooks"
+cp -R "$SOURCE_SKILLS" "$SMOKE_PLUGIN_ROOT/skills"
 mkdir -p "$(dirname "$SMOKE_HOOK_CONFIG")"
 MANIFEST_DETAIL="$SCRATCH_ROOT/artifacts/01-smoke-plugin-manifest.json"
 CONFIG_DETAIL="$SCRATCH_ROOT/artifacts/02-installed-config.json"
+PACKAGED_CRAP_COMMIT_DETAIL="$SCRATCH_ROOT/artifacts/02a-packaged-crap-commit.json"
+PACKAGED_MUTATION_CHECK_DETAIL="$SCRATCH_ROOT/artifacts/02b-packaged-mutation-check.json"
 MARKETPLACE_ADD_STDOUT="$SCRATCH_ROOT/artifacts/03-marketplace-add.stdout"
 MARKETPLACE_ADD_STDERR="$SCRATCH_ROOT/artifacts/03-marketplace-add.stderr"
 PLUGIN_INSTALL_STDOUT="$SCRATCH_ROOT/artifacts/04-plugin-install.stdout"
@@ -760,6 +882,22 @@ if ! copy_hook_config "$SOURCE_CONFIG" "$SMOKE_HOOK_CONFIG" "$CONFIG_DETAIL"; th
   fail_setup_with_logs \
     'run-copilot-hook-smoke: could not stage the verbatim Copilot hook config into the scratch plugin package' \
     "source hook config" "$SOURCE_CONFIG"
+fi
+if ! assert_packaged_file \
+  "$SMOKE_PACKAGED_CRAP_COMMIT" \
+  "skills/crap-controlled-changes/crap-commit.sh" \
+  "$PACKAGED_CRAP_COMMIT_DETAIL"; then
+  fail_setup_with_logs \
+    'run-copilot-hook-smoke: scratch plugin package is missing the bundled crap-commit helper the hook points at' \
+    "source skills dir" "$SOURCE_SKILLS"
+fi
+if ! assert_packaged_file \
+  "$SMOKE_PACKAGED_MUTATION_CHECK" \
+  "skills/crap-controlled-changes/mutation-check.sh" \
+  "$PACKAGED_MUTATION_CHECK_DETAIL"; then
+  fail_setup_with_logs \
+    'run-copilot-hook-smoke: scratch plugin package is missing the bundled mutation-check helper the hook executes' \
+    "source skills dir" "$SOURCE_SKILLS"
 fi
 SMOKE_PLUGIN_NAME="$(python3 - "$SMOKE_PLUGIN_MANIFEST" <<'PY'
 import json
@@ -878,6 +1016,7 @@ mkdir -p "$SMOKE_STATE_DIR"
 
 COMMIT_SESSION_ID="$(uuid4)"
 GUIDE_SESSION_ID="$(uuid4)"
+MUTATION_SESSION_ID="$(uuid4)"
 GUIDE_PATH="$SMOKE_REPO/CONTRIBUTING.md"
 GENERATED_PATH="$SMOKE_REPO/src/generated_fixture.go"
 ORDINARY_PATH="$SMOKE_REPO/src/ordinary.txt"
@@ -890,6 +1029,7 @@ CURRENT_STEP="commit-denial"
 COMMIT_JSONL="$SCRATCH_ROOT/artifacts/10-raw-commit.jsonl"
 COMMIT_STDERR="$SCRATCH_ROOT/artifacts/10-raw-commit.stderr"
 COMMIT_DETAIL="$SCRATCH_ROOT/artifacts/10-raw-commit.json"
+COMMIT_WRAPPER_DETAIL="$SCRATCH_ROOT/artifacts/11-raw-commit-wrapper.json"
 RAW_COMMIT_TOKEN="smoke-raw-commit-${COMMIT_SESSION_ID%%-*}"
 run_copilot \
   "$COMMIT_SESSION_ID" \
@@ -898,6 +1038,11 @@ run_copilot \
   "$COMMIT_JSONL" \
   "$COMMIT_STDERR"
 assert_denied_bash "$COMMIT_JSONL" "git commit -m $RAW_COMMIT_TOKEN" 'crap-commit-gate:' "$COMMIT_DETAIL"
+assert_commit_gate_wrapper \
+  "$COMMIT_DETAIL" \
+  "$SMOKE_PACKAGED_CRAP_COMMIT" \
+  "$PACKAGED_CRAP_COMMIT_DETAIL" \
+  "$COMMIT_WRAPPER_DETAIL"
 if [ "$(git -C "$SMOKE_REPO" rev-parse HEAD)" != "$BASE_HEAD" ]; then
   echo "run-copilot-hook-smoke: raw commit unexpectedly changed HEAD" >&2
   exit 1
@@ -1027,6 +1172,80 @@ if content != "after\n":
     raise SystemExit(f"unexpected ordinary file content: {content!r}")
 PY
 
+CURRENT_STEP="build-mutation-repo"
+mkdir -p "$SMOKE_MUTATION_REPO/src"
+git -C "$SMOKE_MUTATION_REPO" init -q
+git -C "$SMOKE_MUTATION_REPO" config user.name 'Touchstone Mutation Smoke'
+git -C "$SMOKE_MUTATION_REPO" config user.email 'touchstone-mutation-smoke@example.com'
+git -C "$SMOKE_MUTATION_REPO" config commit.gpgsign false
+git -C "$SMOKE_MUTATION_REPO" branch -M main
+
+write_text "$SMOKE_MUTATION_REPO/.mutation-gated" $'\n'
+write_text "$SMOKE_MUTATION_REPO/src/mutation_target.py" $'def answer():\n    return 1\n'
+git -C "$SMOKE_MUTATION_REPO" add -f .mutation-gated src/mutation_target.py
+git -C "$SMOKE_MUTATION_REPO" commit -qm 'fixture: mutation base'
+git -C "$SMOKE_MUTATION_REPO" checkout -qb smoke-mutation-helper
+write_text "$SMOKE_MUTATION_REPO/src/mutation_target.py" $'def answer():\n    return 2\n'
+git -C "$SMOKE_MUTATION_REPO" add src/mutation_target.py
+git -C "$SMOKE_MUTATION_REPO" commit -qm 'fixture: mutation helper trigger'
+
+CURRENT_STEP="mutation-pr-denial"
+MUTATION_JSONL="$SCRATCH_ROOT/artifacts/50-mutation-pr.jsonl"
+MUTATION_STDERR="$SCRATCH_ROOT/artifacts/50-mutation-pr.stderr"
+MUTATION_DETAIL="$SCRATCH_ROOT/artifacts/50-mutation-pr.json"
+MUTATION_GATE_DETAIL="$SCRATCH_ROOT/artifacts/51-mutation-pr-gate.json"
+MUTATION_HOOK_INPUT_DETAIL="$SCRATCH_ROOT/artifacts/52-mutation-hook-input.json"
+MUTATION_TOKEN="smoke-mutation-pr-${MUTATION_SESSION_ID%%-*}"
+run_copilot_in_repo \
+  "$SMOKE_MUTATION_REPO" \
+  "$MUTATION_SESSION_ID" \
+  "Use the bash tool exactly once. Run exactly this command: gh pr create --title $MUTATION_TOKEN --body $MUTATION_TOKEN. Do not change files, do not run git push, and do not retry with any other command. After the tool result, reply MUTATION_PR_ATTEMPT_DONE only." \
+  "bash" \
+  "$MUTATION_JSONL" \
+  "$MUTATION_STDERR"
+assert_denied_bash "$MUTATION_JSONL" "gh pr create --title $MUTATION_TOKEN --body $MUTATION_TOKEN" 'mutation-pr-gate:' "$MUTATION_DETAIL"
+assert_mutation_gate_denial \
+  "$MUTATION_DETAIL" \
+  "$SMOKE_PACKAGED_MUTATION_CHECK" \
+  "$PACKAGED_MUTATION_CHECK_DETAIL" \
+  "$MUTATION_GATE_DETAIL"
+python3 - "$SMOKE_HOOK_INPUT_DIR" "$MUTATION_HOOK_INPUT_DETAIL" "$MUTATION_TOKEN" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+evidence_dir, detail_path, token = sys.argv[1:4]
+matches = []
+for candidate in sorted(Path(evidence_dir).glob("mutation-pr-*.json")):
+    payload = json.loads(candidate.read_text(encoding="utf-8"))
+    tool_input = payload.get("tool_input")
+    if not isinstance(tool_input, dict):
+        continue
+    command = tool_input.get("command")
+    if not isinstance(command, str) or token not in command:
+        continue
+    if payload.get("hook_event_name") != "PreToolUse":
+        continue
+    if payload.get("tool_name") != "Bash":
+        continue
+    matches.append(
+        {
+            "evidence_file": str(candidate),
+            "hook_event_name": payload["hook_event_name"],
+            "tool_name": payload["tool_name"],
+            "tool_input": tool_input,
+            "session_id": payload.get("session_id"),
+        }
+    )
+
+if not matches:
+    raise SystemExit(
+        f"did not observe direct mutation-pr hook payload for bash command containing {token!r}"
+    )
+
+Path(detail_path).write_text(json.dumps(matches[0], indent=2) + "\n", encoding="utf-8")
+PY
+
 CURRENT_STEP="write-summary"
 SUMMARY_PATH="$SCRATCH_ROOT/artifacts/summary.json"
 python3 - "$SUMMARY_PATH" \
@@ -1036,13 +1255,19 @@ python3 - "$SUMMARY_PATH" \
   "$CONFIG_DETAIL" \
   "$MANIFEST_DETAIL" \
   "$INSTALL_DETAIL" \
+  "$PACKAGED_CRAP_COMMIT_DETAIL" \
+  "$PACKAGED_MUTATION_CHECK_DETAIL" \
   "$COMMIT_DETAIL" \
+  "$COMMIT_WRAPPER_DETAIL" \
   "$READ_DETAIL" \
   "$STATE_DETAIL" \
   "$READ_HOOK_INPUT_DETAIL" \
   "$GENERATED_DETAIL" \
   "$ORDINARY_DETAIL" \
-  "$EDIT_HOOK_INPUT_DETAIL" <<'PY'
+  "$EDIT_HOOK_INPUT_DETAIL" \
+  "$MUTATION_DETAIL" \
+  "$MUTATION_GATE_DETAIL" \
+  "$MUTATION_HOOK_INPUT_DETAIL" <<'PY'
 import json
 import sys
 from pathlib import Path
@@ -1055,14 +1280,20 @@ from pathlib import Path
     config_detail,
     manifest_detail,
     install_detail,
+    packaged_crap_commit_detail,
+    packaged_mutation_check_detail,
     commit_detail,
+    commit_wrapper_detail,
     read_detail,
     state_detail,
     read_hook_input_detail,
     generated_detail,
     ordinary_detail,
     edit_hook_input_detail,
-) = sys.argv[1:15]
+    mutation_detail,
+    mutation_gate_detail,
+    mutation_hook_input_detail,
+) = sys.argv[1:21]
 
 def load(path):
     return json.loads(Path(path).read_text(encoding="utf-8"))
@@ -1074,16 +1305,22 @@ summary = {
     "plugin_installation": load(install_detail),
     "installed_hook_config": load(config_detail),
     "smoke_plugin_manifest": load(manifest_detail),
+    "packaged_crap_commit": load(packaged_crap_commit_detail),
+    "packaged_mutation_check": load(packaged_mutation_check_detail),
     "raw_commit_denial": load(commit_detail),
+    "raw_commit_wrapper": load(commit_wrapper_detail),
     "guide_read": load(read_detail),
     "guide_state": load(state_detail),
     "guide_read_hook_input": load(read_hook_input_detail),
     "generated_edit_denial": load(generated_detail),
     "ordinary_edit_allow": load(ordinary_detail),
     "ordinary_edit_hook_input": load(edit_hook_input_detail),
+    "mutation_pr_denial": load(mutation_detail),
+    "mutation_pr_gate": load(mutation_gate_detail),
+    "mutation_pr_hook_input": load(mutation_hook_input_detail),
 }
 
 Path(summary_path).write_text(json.dumps(summary, indent=2) + "\n", encoding="utf-8")
 PY
 
-echo "copilot-hook-smoke: PASS ($VERSION_LINE; scratch local marketplace installed $SMOKE_PLUGIN_REF with no \$COPILOT_HOME/hooks/touchstone.json; plugin com.github.copilot/hooks/hooks.json preserved hooks/copilot-hooks.json verbatim; hooks executed via runtime-injected PLUGIN_ROOT with no ambient export; raw git commit denied; direct Read hook payload observed; generated edit denied; ordinary edit allowed with direct Edit hook payload observed)"
+echo "copilot-hook-smoke: PASS ($VERSION_LINE; scratch local marketplace installed $SMOKE_PLUGIN_REF with no \$COPILOT_HOME/hooks/touchstone.json; plugin com.github.copilot/hooks/hooks.json preserved hooks/copilot-hooks.json verbatim; scratch plugin packaged hooks/ plus skills/ helpers; hooks executed via runtime-injected PLUGIN_ROOT with no ambient export; raw git commit denied and pointed at the installed crap-commit.sh; direct Read hook payload observed; generated edit denied; ordinary edit allowed with direct Edit hook payload observed; mutation PR denied via the bundled mutation-check helper and never by a missing path)"
