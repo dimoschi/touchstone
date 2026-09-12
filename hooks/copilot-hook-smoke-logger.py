@@ -3,14 +3,11 @@
 
 from __future__ import annotations
 
-import os
-import stat
 import subprocess
 import sys
-import tempfile
 from pathlib import Path
 
-EVIDENCE_ENV = "TOUCHSTONE_HOOK_INPUT_EVIDENCE_DIR"
+from copilot_hook_input_evidence import record_hook_input
 
 
 def main() -> int:
@@ -26,8 +23,7 @@ def main() -> int:
     raw = sys.stdin.buffer.read()
 
     try:
-        evidence_dir = _evidence_dir()
-        _write_evidence(evidence_dir, hook_key, raw)
+        record_hook_input(hook_key, raw)
     except OSError as exc:
         print(f"copilot-hook-smoke-logger: could not record hook stdin: {exc}", file=sys.stderr)
         return 1
@@ -46,24 +42,6 @@ def main() -> int:
     sys.stdout.buffer.write(result.stdout)
     sys.stderr.buffer.write(result.stderr)
     return result.returncode
-
-
-def _evidence_dir() -> Path:
-    value = os.environ.get(EVIDENCE_ENV)
-    if not value:
-        raise OSError(f"{EVIDENCE_ENV} is required")
-
-    path = Path(value)
-    path.mkdir(parents=True, exist_ok=True, mode=0o700)
-    os.chmod(path, stat.S_IRWXU)
-    return path
-
-
-def _write_evidence(evidence_dir: Path, hook_key: str, raw: bytes) -> None:
-    fd, path = tempfile.mkstemp(prefix=f"{hook_key}-", suffix=".json", dir=evidence_dir)
-    with os.fdopen(fd, "wb") as handle:
-        handle.write(raw)
-    os.chmod(path, stat.S_IRUSR | stat.S_IWUSR)
 
 
 if __name__ == "__main__":

@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+from copilot_hook_input_evidence import record_hook_input
 from hook_invocation import normalize_invocation
 
 HOOKS = {
@@ -31,6 +32,10 @@ def main() -> int:
     key = _resolve_key()
     if key is None:
         return _emit_failure(event, _unknown_key_message())
+    try:
+        record_hook_input(key, raw)
+    except OSError as exc:
+        return _emit_failure(event, f"could not record hook stdin: {exc}")
     if payload is None:
         return _emit_failure(event, "invalid JSON hook payload")
 

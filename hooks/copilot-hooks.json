@@ -7,26 +7,22 @@
         "hooks": [
           {
             "type": "command",
-            "bash": "python3 ./copilot-hook-runner.py crap-commit",
-            "cwd": "hooks",
+            "bash": "cd \"$PLUGIN_ROOT/hooks\" && exec python3 ./copilot-hook-runner.py crap-commit",
             "timeoutSec": 600
           },
           {
             "type": "command",
-            "bash": "python3 ./copilot-hook-runner.py mutation-pr",
-            "cwd": "hooks",
+            "bash": "cd \"$PLUGIN_ROOT/hooks\" && exec python3 ./copilot-hook-runner.py mutation-pr",
             "timeoutSec": 600
           },
           {
             "type": "command",
-            "bash": "python3 ./copilot-hook-runner.py base-branch",
-            "cwd": "hooks",
+            "bash": "cd \"$PLUGIN_ROOT/hooks\" && exec python3 ./copilot-hook-runner.py base-branch",
             "timeoutSec": 30
           },
           {
             "type": "command",
-            "bash": "python3 ./copilot-hook-runner.py gate-pipe",
-            "cwd": "hooks",
+            "bash": "cd \"$PLUGIN_ROOT/hooks\" && exec python3 ./copilot-hook-runner.py gate-pipe",
             "timeoutSec": 30
           }
         ]
@@ -36,14 +32,12 @@
         "hooks": [
           {
             "type": "command",
-            "bash": "python3 ./copilot-hook-runner.py contributing",
-            "cwd": "hooks",
+            "bash": "cd \"$PLUGIN_ROOT/hooks\" && exec python3 ./copilot-hook-runner.py contributing",
             "timeoutSec": 30
           },
           {
             "type": "command",
-            "bash": "python3 ./copilot-hook-runner.py generated-file",
-            "cwd": "hooks",
+            "bash": "cd \"$PLUGIN_ROOT/hooks\" && exec python3 ./copilot-hook-runner.py generated-file",
             "timeoutSec": 30
           }
         ]
@@ -55,8 +49,7 @@
         "hooks": [
           {
             "type": "command",
-            "bash": "python3 ./copilot-hook-runner.py guide-read",
-            "cwd": "hooks",
+            "bash": "cd \"$PLUGIN_ROOT/hooks\" && exec python3 ./copilot-hook-runner.py guide-read",
             "timeoutSec": 30
           }
         ]

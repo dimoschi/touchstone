@@ -113,6 +113,13 @@ with_copilot_env() {
   fi
 }
 
+with_hook_env() {
+  PLUGIN_ROOT="$SMOKE_INSTALLED_ROOT" \
+  TOUCHSTONE_HOOK_STATE_DIR="$SMOKE_STATE_DIR" \
+  TOUCHSTONE_HOOK_INPUT_EVIDENCE_DIR="$SMOKE_HOOK_INPUT_DIR" \
+    "$@"
+}
+
 seed_gh_auth() {
   local source_dir=""
   if [ -n "$REAL_XDG_CONFIG_HOME" ] && [ -d "$REAL_XDG_CONFIG_HOME/gh" ]; then
@@ -176,7 +183,7 @@ run_copilot() {
   if [ -n "$available_tools" ]; then
     cmd+=(--available-tools="$available_tools")
   fi
-  if ! with_copilot_env "${cmd[@]}" >"$jsonl" 2>"$stderr_file"; then
+  if ! with_hook_env with_copilot_env "${cmd[@]}" >"$jsonl" 2>"$stderr_file"; then
     fail_with_logs \
       "run-copilot-hook-smoke: copilot failed unexpectedly during $CURRENT_STEP" \
       "copilot stderr" "$stderr_file" \
@@ -257,94 +264,65 @@ Path(detail_path).write_text(
 PY
 }
 
-compile_hook_config() {
-  local source_config="$1" target_config="$2" hook_dir="$3" state_dir="$4" hook_input_dir="$5" detail_path="$6"
-  python3 - "$source_config" "$target_config" "$hook_dir" "$state_dir" "$hook_input_dir" "$detail_path" <<'PY'
+copy_hook_config() {
+  local source_config="$1" target_config="$2" detail_path="$3"
+  python3 - "$source_config" "$target_config" "$detail_path" <<'PY'
 import json
 import re
-import shlex
 import sys
 from pathlib import Path
 
-source_config, target_config, hook_dir, state_dir, hook_input_dir, detail_path = [
-    Path(value) for value in sys.argv[1:7]
-]
-source = json.loads(source_config.read_text(encoding="utf-8"))
+source_config, target_config, detail_path = [Path(value) for value in sys.argv[1:4]]
+source_bytes = source_config.read_bytes()
+target_config.write_bytes(source_bytes)
+if target_config.read_bytes() != source_bytes:
+    raise SystemExit("installed config bytes drifted from source config")
+
+source = json.loads(source_bytes.decode("utf-8"))
 assert source["version"] == 1
 assert set(source) == {"version", "hooks"}
 assert isinstance(source["hooks"], dict) and source["hooks"]
 
-runner = hook_dir / "copilot-hook-runner.py"
-logger = hook_dir / "copilot-hook-smoke-logger.py"
-assert runner.is_file(), runner
-assert logger.is_file(), logger
-
-source_events = list(source["hooks"].keys())
-compiled = {"version": 1, "hooks": {}}
-compiled_hooks = []
-command_re = re.compile(r"python3\s+\./copilot-hook-runner\.py\s+([a-z0-9-]+)$")
-wrapped_keys = {"contributing", "generated-file", "guide-read"}
+command_re = re.compile(
+    r'cd "\$PLUGIN_ROOT/hooks" && exec python3 \./copilot-hook-runner\.py ([a-z0-9-]+)$'
+)
+installed_hooks = []
 
 for event_name, groups in source["hooks"].items():
     assert isinstance(groups, list) and groups, event_name
-    new_groups = []
     for group in groups:
         assert isinstance(group, dict)
         assert isinstance(group.get("matcher"), str) and group["matcher"]
         hooks = group.get("hooks")
         assert isinstance(hooks, list) and hooks
-        new_group = {"matcher": group["matcher"], "hooks": []}
         for hook in hooks:
             assert hook.get("type") == "command", hook
+            assert "cwd" not in hook, hook
             assert "command" not in hook, hook
             assert isinstance(hook.get("bash"), str) and hook["bash"], hook
             assert isinstance(hook.get("timeoutSec"), int), hook
             match = command_re.fullmatch(hook["bash"].strip())
             assert match is not None, hook["bash"]
             key = match.group(1)
-            wrapped = key in wrapped_keys
-            if wrapped:
-                command = (
-                    f"TOUCHSTONE_HOOK_INPUT_EVIDENCE_DIR={shlex.quote(str(hook_input_dir))} "
-                    f"TOUCHSTONE_HOOK_STATE_DIR={shlex.quote(str(state_dir))} "
-                    f"python3 {shlex.quote(str(logger))} "
-                    f"{shlex.quote(str(runner))} {shlex.quote(key)}"
-                )
-            else:
-                command = (
-                    f"TOUCHSTONE_HOOK_STATE_DIR={shlex.quote(str(state_dir))} "
-                    f"python3 {shlex.quote(str(runner))} {shlex.quote(key)}"
-                )
-            compiled_hook = {
-                "type": "command",
-                "bash": command,
-                "cwd": str(hook_dir),
-                "timeoutSec": hook["timeoutSec"],
-            }
-            compiled_hooks.append(
+            installed_hooks.append(
                 {
                     "event": event_name,
                     "matcher": group["matcher"],
                     "key": key,
-                    "bash": compiled_hook["bash"],
-                    "cwd": compiled_hook["cwd"],
-                    "timeoutSec": compiled_hook["timeoutSec"],
-                    "wrapped_for_hook_input_capture": wrapped,
+                    "bash": hook["bash"],
+                    "timeoutSec": hook["timeoutSec"],
                 }
             )
-            new_group["hooks"].append(compiled_hook)
-        new_groups.append(new_group)
-    compiled["hooks"][event_name] = new_groups
 
-target_config.write_text(json.dumps(compiled, indent=2) + "\n", encoding="utf-8")
 detail_path.write_text(
     json.dumps(
         {
-            "source_event_keys": source_events,
-            "compiled_event_keys": list(compiled["hooks"].keys()),
-            "compiled_hooks": compiled_hooks,
-            "hook_input_logger": str(logger),
-            "hook_input_evidence_dir": str(hook_input_dir),
+            "source_event_keys": list(source["hooks"].keys()),
+            "installed_event_keys": list(source["hooks"].keys()),
+            "installed_config_path": str(target_config),
+            "copied_verbatim": True,
+            "plugin_root_required": True,
+            "installed_hooks": installed_hooks,
         },
         indent=2,
     )
@@ -690,15 +668,12 @@ cp -R "$SOURCE_HOOKS" "$SMOKE_INSTALLED_ROOT/hooks"
 cp -R "$SOURCE_SKILLS" "$SMOKE_INSTALLED_ROOT/skills"
 mkdir -p "$SMOKE_INSTALLED_ROOT/.claude-plugin" "$SMOKE_STATE_DIR"
 cp "$PLUGIN_MANIFEST" "$SMOKE_INSTALLED_ROOT/.claude-plugin/plugin.json"
-COMPILED_CONFIG="$SMOKE_COPILOT_HOME/hooks/touchstone.json"
-CONFIG_DETAIL="$SCRATCH_ROOT/artifacts/01-compiled-config.json"
+INSTALLED_CONFIG="$SMOKE_COPILOT_HOME/hooks/touchstone.json"
+CONFIG_DETAIL="$SCRATCH_ROOT/artifacts/01-installed-config.json"
 MANIFEST_DETAIL="$SCRATCH_ROOT/artifacts/02-installed-manifest.json"
-compile_hook_config \
+copy_hook_config \
   "$SOURCE_CONFIG" \
-  "$COMPILED_CONFIG" \
-  "$SMOKE_INSTALLED_ROOT/hooks" \
-  "$SMOKE_STATE_DIR" \
-  "$SMOKE_HOOK_INPUT_DIR" \
+  "$INSTALLED_CONFIG" \
   "$CONFIG_DETAIL"
 assert_manifest_version "$SMOKE_INSTALLED_ROOT/.claude-plugin/plugin.json" "0.6.5" "$MANIFEST_DETAIL"
 
@@ -895,7 +870,7 @@ summary = {
     "copilot_version": version_output.strip(),
     "base_head_before_smoke": base_head,
     "probe": load(probe_detail),
-    "compiled_hook_config": load(config_detail),
+    "installed_hook_config": load(config_detail),
     "installed_manifest": load(manifest_detail),
     "raw_commit_denial": load(commit_detail),
     "guide_read": load(read_detail),
@@ -909,4 +884,4 @@ summary = {
 Path(summary_path).write_text(json.dumps(summary, indent=2) + "\n", encoding="utf-8")
 PY
 
-echo "copilot-hook-smoke: PASS ($VERSION_LINE; installed manifest 0.6.5 validated; source events preserved from hooks/copilot-hooks.json; raw git commit denied; direct Read hook payload observed; generated edit denied; ordinary edit allowed with direct Edit hook payload observed)"
+echo "copilot-hook-smoke: PASS ($VERSION_LINE; installed manifest 0.6.5 validated; plugin-installed hooks/copilot-hooks.json preserved verbatim with PLUGIN_ROOT-based runner commands; raw git commit denied; direct Read hook payload observed; generated edit denied; ordinary edit allowed with direct Edit hook payload observed)"

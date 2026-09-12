@@ -8,6 +8,7 @@ RUNNER="$HOOKS/copilot-hook-runner.py"
 CONFIG="$HOOKS/copilot-hooks.json"
 WORK="$HOOKS/.test-copilot-hook-runner.$$"
 STATE="$WORK/state"
+HOOK_INPUT="$WORK/hook-input"
 
 cleanup() {
   local rc=$?
@@ -76,6 +77,16 @@ run_runner_with_state() {
   )
 }
 
+run_runner_with_state_and_input_capture() {
+  local from_dir="$1" key="$2" payload="$3"
+  (
+    cd "$from_dir"
+    printf '%s' "$payload" \
+      | TOUCHSTONE_HOOK_STATE_DIR="$STATE" TOUCHSTONE_HOOK_INPUT_EVIDENCE_DIR="$HOOK_INPUT" \
+        python3 "$RUNNER" "$key"
+  )
+}
+
 assert_json() {
   local label="$1" out="$2" check="$3"
   python3 - "$label" "$out" "$check" <<'PY'
@@ -108,6 +119,22 @@ print(f"  ok: recorded {session_id}")
 PY
 }
 
+assert_hook_input_recorded() {
+  local key="$1" payload="$2"
+  python3 - "$HOOK_INPUT" "$key" "$payload" <<'PY'
+from pathlib import Path
+import sys
+
+hook_input_dir = Path(sys.argv[1])
+key = sys.argv[2]
+payload = sys.argv[3].encode("utf-8")
+evidence_files = sorted(hook_input_dir.glob(f"{key}-*.json"))
+assert len(evidence_files) == 1, evidence_files
+assert evidence_files[0].read_bytes() == payload
+print(f"  ok: exact hook stdin for {key}")
+PY
+}
+
 echo "config parses and routes the expected gates"
 python3 - "$CONFIG" <<'PY'
 import json
@@ -134,11 +161,11 @@ seen = []
 for group in pre:
     for hook in group["hooks"]:
         assert hook["type"] == "command"
-        assert hook["cwd"] == "hooks"
+        assert "cwd" not in hook
         assert "bash" in hook and "command" not in hook
         assert "timeoutSec" in hook and "timeout" not in hook
         assert "CLAUDE_PLUGIN_ROOT" not in hook["bash"]
-        assert hook["bash"].startswith("python3 ./copilot-hook-runner.py ")
+        assert hook["bash"].startswith('cd "$PLUGIN_ROOT/hooks" && exec python3 ./copilot-hook-runner.py ')
         seen.append((hook["bash"].rsplit(" ", 1)[-1], hook["timeoutSec"]))
 assert seen == expected_pre
 assert all(key != "guide-read" for key, _ in seen)
@@ -149,8 +176,7 @@ assert [len(group["hooks"]) for group in post] == [1]
 hook = post[0]["hooks"][0]
 assert hook == {
     "type": "command",
-    "bash": "python3 ./copilot-hook-runner.py guide-read",
-    "cwd": "hooks",
+    "bash": 'cd "$PLUGIN_ROOT/hooks" && exec python3 ./copilot-hook-runner.py guide-read',
     "timeoutSec": 30,
 }
 print("  ok: config")
@@ -182,9 +208,11 @@ assert_json "unknown deny" "$out" '
 '
 
 echo "post-tool success is empty JSON and records evidence"
-out="$(run_runner_with_state "$HOOKS" guide-read "$(post_payload)")"
+payload="$(post_payload)"
+out="$(run_runner_with_state_and_input_capture "$HOOKS" guide-read "$payload")"
 assert_json "post success" "$out" 'data == {}'
 assert_recorded "copilot-session" "$WORK/CONTRIBUTING.md"
+assert_hook_input_recorded "guide-read" "$payload"
 
 echo "post-tool failure adds bounded context"
 out="$(
