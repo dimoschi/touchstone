@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Run a real Copilot CLI smoke test against an isolated user-level hook install.
+# Run a real Copilot CLI smoke test against an isolated installed plugin.
 #
 # Exit 0 on pass, 0 with a SKIP line only when Copilot CLI is unavailable or
 # unauthenticated, 1 on a smoke failure, 2 on local setup misuse.
@@ -16,8 +16,7 @@ umask 077
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
 SOURCE_CONFIG="$ROOT/hooks/copilot-hooks.json"
 SOURCE_HOOKS="$ROOT/hooks"
-SOURCE_SKILLS="$ROOT/skills"
-PLUGIN_MANIFEST="$ROOT/.claude-plugin/plugin.json"
+SOURCE_MANIFEST="$ROOT/.claude-plugin/plugin.json"
 REAL_HOME="${HOME:-}"
 REAL_XDG_CONFIG_HOME="${XDG_CONFIG_HOME:-}"
 
@@ -64,6 +63,17 @@ fail_with_logs() {
   exit 1
 }
 
+fail_setup_with_logs() {
+  local message="$1"
+  shift
+  echo "$message" >&2
+  while [ "$#" -gt 0 ]; do
+    print_artifact "$1" "$2"
+    shift 2
+  done
+  exit 2
+}
+
 probe_is_auth_skip() {
   local stdout_path="$1" stderr_path="$2"
   python3 - "$stdout_path" "$stderr_path" <<'PY'
@@ -93,31 +103,24 @@ PY
 }
 
 with_copilot_env() {
+  local -a cmd=(
+    env
+    -u PLUGIN_ROOT
+    -u CLAUDE_PLUGIN_ROOT
+    HOME="$SMOKE_HOME"
+    XDG_CONFIG_HOME="$SMOKE_XDG_CONFIG_HOME"
+    XDG_CACHE_HOME="$SMOKE_XDG_CACHE_HOME"
+    XDG_STATE_HOME="$SMOKE_XDG_STATE_HOME"
+    GH_CONFIG_DIR="$SMOKE_XDG_CONFIG_HOME/gh"
+    COPILOT_HOME="$SMOKE_COPILOT_HOME"
+    TOUCHSTONE_HOOK_STATE_DIR="$SMOKE_STATE_DIR"
+    TOUCHSTONE_HOOK_INPUT_EVIDENCE_DIR="$SMOKE_HOOK_INPUT_DIR"
+  )
   if [ -n "${SMOKE_GH_TOKEN:-}" ]; then
-    HOME="$SMOKE_HOME" \
-    XDG_CONFIG_HOME="$SMOKE_XDG_CONFIG_HOME" \
-    XDG_CACHE_HOME="$SMOKE_XDG_CACHE_HOME" \
-    XDG_STATE_HOME="$SMOKE_XDG_STATE_HOME" \
-    GH_CONFIG_DIR="$SMOKE_XDG_CONFIG_HOME/gh" \
-    GH_TOKEN="$SMOKE_GH_TOKEN" \
-    COPILOT_HOME="$SMOKE_COPILOT_HOME" \
-      "$@"
-  else
-    HOME="$SMOKE_HOME" \
-    XDG_CONFIG_HOME="$SMOKE_XDG_CONFIG_HOME" \
-    XDG_CACHE_HOME="$SMOKE_XDG_CACHE_HOME" \
-    XDG_STATE_HOME="$SMOKE_XDG_STATE_HOME" \
-    GH_CONFIG_DIR="$SMOKE_XDG_CONFIG_HOME/gh" \
-    COPILOT_HOME="$SMOKE_COPILOT_HOME" \
-      "$@"
+    cmd+=(GH_TOKEN="$SMOKE_GH_TOKEN")
   fi
-}
-
-with_hook_env() {
-  PLUGIN_ROOT="$SMOKE_INSTALLED_ROOT" \
-  TOUCHSTONE_HOOK_STATE_DIR="$SMOKE_STATE_DIR" \
-  TOUCHSTONE_HOOK_INPUT_EVIDENCE_DIR="$SMOKE_HOOK_INPUT_DIR" \
-    "$@"
+  cmd+=("$@")
+  "${cmd[@]}"
 }
 
 seed_gh_auth() {
@@ -183,7 +186,7 @@ run_copilot() {
   if [ -n "$available_tools" ]; then
     cmd+=(--available-tools="$available_tools")
   fi
-  if ! with_hook_env with_copilot_env "${cmd[@]}" >"$jsonl" 2>"$stderr_file"; then
+  if ! with_copilot_env "${cmd[@]}" >"$jsonl" 2>"$stderr_file"; then
     fail_with_logs \
       "run-copilot-hook-smoke: copilot failed unexpectedly during $CURRENT_STEP" \
       "copilot stderr" "$stderr_file" \
@@ -236,25 +239,141 @@ Path(detail_path).write_text(
 PY
 }
 
-assert_manifest_version() {
-  local manifest="$1" expected_version="$2" detail_path="$3"
-  python3 - "$manifest" "$expected_version" "$detail_path" <<'PY'
+build_smoke_plugin_manifest() {
+  local source_manifest="$1" target_manifest="$2" detail_path="$3"
+  python3 - "$source_manifest" "$target_manifest" "$detail_path" <<'PY'
 import json
+import re
 import sys
 from pathlib import Path
 
-manifest_path, expected_version, detail_path = sys.argv[1:4]
-manifest = json.loads(Path(manifest_path).read_text(encoding="utf-8"))
-actual_version = manifest.get("version")
-if actual_version != expected_version:
-    raise SystemExit(f"expected manifest version {expected_version!r}, got {actual_version!r}")
+source_manifest_path, target_manifest_path, detail_path = [Path(value) for value in sys.argv[1:4]]
+source_manifest = json.loads(source_manifest_path.read_text(encoding="utf-8"))
+
+name = source_manifest.get("name")
+if not isinstance(name, str) or not name:
+    raise SystemExit("source manifest is missing a string name")
+if len(name) > 64:
+    raise SystemExit(f"source manifest name {name!r} exceeds 64 characters")
+if re.fullmatch(r"[a-z0-9](?:[a-z0-9.-]{0,62}[a-z0-9])?", name) is None:
+    raise SystemExit(f"source manifest name {name!r} is not valid for Agent Plugins 1.0")
+if "--" in name or ".." in name:
+    raise SystemExit(f"source manifest name {name!r} is not valid for Agent Plugins 1.0")
+
+manifest = {
+    "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+    "name": name,
+}
+for key in ("version", "description", "author", "homepage", "repository", "license", "keywords"):
+    if key in source_manifest:
+        manifest[key] = source_manifest[key]
+
+target_manifest_path.parent.mkdir(parents=True, exist_ok=True)
+target_manifest_path.write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
 
 Path(detail_path).write_text(
     json.dumps(
         {
-            "manifest_path": str(Path(manifest_path).resolve(strict=False)),
+            "source_manifest_path": str(source_manifest_path.resolve(strict=False)),
+            "manifest_path": str(target_manifest_path.resolve(strict=False)),
             "name": manifest.get("name"),
-            "version": actual_version,
+            "version": manifest.get("version"),
+            "schema": manifest["$schema"],
+        },
+        indent=2,
+    )
+    + "\n",
+    encoding="utf-8",
+)
+PY
+}
+
+write_local_marketplace() {
+  local marketplace_path="$1" plugin_name="$2" plugin_version="$3" plugin_source="$4"
+  python3 - "$marketplace_path" "$plugin_name" "$plugin_version" "$plugin_source" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+marketplace_path, plugin_name, plugin_version, plugin_source = sys.argv[1:5]
+manifest = {
+    "name": "touchstone-local-smoke",
+    "owner": {"name": "Touchstone Smoke"},
+    "metadata": {
+        "description": "Scratch-only local marketplace for Touchstone's Copilot hook smoke",
+        "version": plugin_version or "0.0.0",
+    },
+    "plugins": [
+        {
+            "name": plugin_name,
+            "description": "Scratch-installed Touchstone hook smoke plugin",
+            "version": plugin_version or "0.0.0",
+            "source": plugin_source,
+        }
+    ],
+}
+Path(marketplace_path).write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
+PY
+}
+
+assert_plugin_install_settings() {
+  local settings_path="$1" expected_marketplace="$2" expected_marketplace_root="$3" expected_plugin_ref="$4" user_hook_path="$5" detail_path="$6"
+  python3 - "$settings_path" "$expected_marketplace" "$expected_marketplace_root" "$expected_plugin_ref" "$user_hook_path" "$detail_path" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+(
+    settings_path,
+    expected_marketplace,
+    expected_marketplace_root,
+    expected_plugin_ref,
+    user_hook_path,
+    detail_path,
+) = sys.argv[1:7]
+
+settings = json.loads(Path(settings_path).read_text(encoding="utf-8"))
+marketplaces = settings.get("extraKnownMarketplaces")
+if not isinstance(marketplaces, dict):
+    raise SystemExit("settings.json is missing extraKnownMarketplaces")
+
+marketplace = marketplaces.get(expected_marketplace)
+if not isinstance(marketplace, dict):
+    raise SystemExit(f"settings.json is missing marketplace {expected_marketplace!r}")
+
+source = marketplace.get("source")
+if not isinstance(source, dict):
+    raise SystemExit(f"marketplace {expected_marketplace!r} is missing source details")
+if source.get("source") != "directory":
+    raise SystemExit(f"marketplace {expected_marketplace!r} is not a local directory source")
+
+actual_marketplace_root = source.get("path")
+if not isinstance(actual_marketplace_root, str):
+    raise SystemExit(f"marketplace {expected_marketplace!r} is missing its path")
+if Path(actual_marketplace_root).resolve() != Path(expected_marketplace_root).resolve():
+    raise SystemExit(
+        f"expected marketplace root {expected_marketplace_root!r}, got {actual_marketplace_root!r}"
+    )
+
+enabled = settings.get("enabledPlugins")
+if not isinstance(enabled, dict):
+    raise SystemExit("settings.json is missing enabledPlugins")
+if enabled.get(expected_plugin_ref) is not True:
+    raise SystemExit(f"expected {expected_plugin_ref!r} to be enabled in settings.json")
+
+user_hook = Path(user_hook_path)
+if user_hook.exists():
+    raise SystemExit(f"user hook config unexpectedly exists at {user_hook}")
+
+Path(detail_path).write_text(
+    json.dumps(
+        {
+            "settings_path": str(Path(settings_path).resolve(strict=False)),
+            "marketplace_name": expected_marketplace,
+            "marketplace_root": str(Path(actual_marketplace_root).resolve(strict=False)),
+            "plugin_ref": expected_plugin_ref,
+            "user_hook_config_path": str(user_hook),
+            "user_hook_config_absent": True,
         },
         indent=2,
     )
@@ -581,10 +700,15 @@ SMOKE_XDG_CONFIG_HOME="$SCRATCH_ROOT/xdg-config"
 SMOKE_XDG_CACHE_HOME="$SCRATCH_ROOT/xdg-cache"
 SMOKE_XDG_STATE_HOME="$SCRATCH_ROOT/xdg-state"
 SMOKE_COPILOT_HOME="$SCRATCH_ROOT/copilot-home"
+SMOKE_MARKETPLACE_ROOT="$SCRATCH_ROOT/local-marketplace"
+SMOKE_PLUGIN_ROOT="$SMOKE_MARKETPLACE_ROOT/plugins/touchstone"
+SMOKE_PLUGIN_MANIFEST="$SMOKE_PLUGIN_ROOT/plugin.json"
+SMOKE_HOOK_CONFIG="$SMOKE_PLUGIN_ROOT/com.github.copilot/hooks/hooks.json"
+SMOKE_MARKETPLACE_NAME="touchstone-local-smoke"
 SMOKE_REPO="$SCRATCH_ROOT/repo"
-SMOKE_INSTALLED_ROOT="$SCRATCH_ROOT/installed/touchstone"
 SMOKE_STATE_DIR="$SCRATCH_ROOT/hook-state"
 SMOKE_HOOK_INPUT_DIR="$SCRATCH_ROOT/artifacts/hook-stdin"
+SMOKE_USER_HOOK_CONFIG="$SMOKE_COPILOT_HOME/hooks/touchstone.json"
 
 mkdir -p \
   "$SCRATCH_ROOT/probe-cwd" \
@@ -592,7 +716,7 @@ mkdir -p \
   "$SMOKE_XDG_CONFIG_HOME" \
   "$SMOKE_XDG_CACHE_HOME" \
   "$SMOKE_XDG_STATE_HOME" \
-  "$SMOKE_COPILOT_HOME/hooks" \
+  "$SMOKE_COPILOT_HOME" \
   "$SMOKE_HOOK_INPUT_DIR"
 seed_gh_auth
 seed_smoke_auth_token
@@ -612,6 +736,94 @@ if ! with_copilot_env copilot --version >"$VERSION_STDOUT" 2>"$VERSION_STDERR"; 
 fi
 VERSION_OUTPUT="$(<"$VERSION_STDOUT")"
 VERSION_LINE="${VERSION_OUTPUT%%$'\n'*}"
+
+CURRENT_STEP="build-local-plugin"
+mkdir -p "$SMOKE_PLUGIN_ROOT"
+cp -R "$SOURCE_HOOKS" "$SMOKE_PLUGIN_ROOT/hooks"
+mkdir -p "$(dirname "$SMOKE_HOOK_CONFIG")"
+MANIFEST_DETAIL="$SCRATCH_ROOT/artifacts/01-smoke-plugin-manifest.json"
+CONFIG_DETAIL="$SCRATCH_ROOT/artifacts/02-installed-config.json"
+MARKETPLACE_ADD_STDOUT="$SCRATCH_ROOT/artifacts/03-marketplace-add.stdout"
+MARKETPLACE_ADD_STDERR="$SCRATCH_ROOT/artifacts/03-marketplace-add.stderr"
+PLUGIN_INSTALL_STDOUT="$SCRATCH_ROOT/artifacts/04-plugin-install.stdout"
+PLUGIN_INSTALL_STDERR="$SCRATCH_ROOT/artifacts/04-plugin-install.stderr"
+PLUGIN_LIST_STDOUT="$SCRATCH_ROOT/artifacts/05-plugin-list.stdout"
+PLUGIN_LIST_STDERR="$SCRATCH_ROOT/artifacts/05-plugin-list.stderr"
+INSTALL_DETAIL="$SCRATCH_ROOT/artifacts/06-plugin-installation.json"
+
+if ! build_smoke_plugin_manifest "$SOURCE_MANIFEST" "$SMOKE_PLUGIN_MANIFEST" "$MANIFEST_DETAIL"; then
+  fail_setup_with_logs \
+    'run-copilot-hook-smoke: could not build a scratch Copilot-compatible plugin manifest from the source manifest' \
+    "source manifest" "$SOURCE_MANIFEST"
+fi
+if ! copy_hook_config "$SOURCE_CONFIG" "$SMOKE_HOOK_CONFIG" "$CONFIG_DETAIL"; then
+  fail_setup_with_logs \
+    'run-copilot-hook-smoke: could not stage the verbatim Copilot hook config into the scratch plugin package' \
+    "source hook config" "$SOURCE_CONFIG"
+fi
+SMOKE_PLUGIN_NAME="$(python3 - "$SMOKE_PLUGIN_MANIFEST" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+manifest = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+print(manifest["name"])
+PY
+)"
+SMOKE_PLUGIN_VERSION="$(python3 - "$SMOKE_PLUGIN_MANIFEST" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+manifest = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+print(manifest.get("version", ""))
+PY
+)"
+SMOKE_PLUGIN_REF="$SMOKE_PLUGIN_NAME@$SMOKE_MARKETPLACE_NAME"
+write_local_marketplace \
+  "$SMOKE_MARKETPLACE_ROOT/marketplace.json" \
+  "$SMOKE_PLUGIN_NAME" \
+  "$SMOKE_PLUGIN_VERSION" \
+  "plugins/touchstone"
+
+CURRENT_STEP="install-local-plugin"
+if ! with_copilot_env copilot plugin marketplace add "$SMOKE_MARKETPLACE_ROOT" \
+  >"$MARKETPLACE_ADD_STDOUT" 2>"$MARKETPLACE_ADD_STDERR"; then
+  fail_setup_with_logs \
+    'run-copilot-hook-smoke: copilot could not register a scratch local marketplace; this smoke requires an actual supported local plugin install path instead of copied user hooks' \
+    "marketplace add stdout" "$MARKETPLACE_ADD_STDOUT" \
+    "marketplace add stderr" "$MARKETPLACE_ADD_STDERR"
+fi
+if ! with_copilot_env copilot plugin install "$SMOKE_PLUGIN_REF" \
+  >"$PLUGIN_INSTALL_STDOUT" 2>"$PLUGIN_INSTALL_STDERR"; then
+  fail_setup_with_logs \
+    'run-copilot-hook-smoke: copilot could not install the scratch local plugin via marketplace; this smoke cannot fall back to a copied COPILOT_HOME hook or a manually exported PLUGIN_ROOT' \
+    "plugin install stdout" "$PLUGIN_INSTALL_STDOUT" \
+    "plugin install stderr" "$PLUGIN_INSTALL_STDERR" \
+    "marketplace add stdout" "$MARKETPLACE_ADD_STDOUT" \
+    "marketplace add stderr" "$MARKETPLACE_ADD_STDERR"
+fi
+if ! with_copilot_env copilot plugin list >"$PLUGIN_LIST_STDOUT" 2>"$PLUGIN_LIST_STDERR"; then
+  fail_setup_with_logs \
+    'run-copilot-hook-smoke: copilot plugin list failed after local marketplace install' \
+    "plugin list stdout" "$PLUGIN_LIST_STDOUT" \
+    "plugin list stderr" "$PLUGIN_LIST_STDERR"
+fi
+if ! assert_plugin_install_settings \
+  "$SMOKE_COPILOT_HOME/settings.json" \
+  "$SMOKE_MARKETPLACE_NAME" \
+  "$SMOKE_MARKETPLACE_ROOT" \
+  "$SMOKE_PLUGIN_REF" \
+  "$SMOKE_USER_HOOK_CONFIG" \
+  "$INSTALL_DETAIL"; then
+  fail_setup_with_logs \
+    'run-copilot-hook-smoke: scratch plugin install did not produce the expected isolated Copilot settings state' \
+    "plugin install stdout" "$PLUGIN_INSTALL_STDOUT" \
+    "plugin install stderr" "$PLUGIN_INSTALL_STDERR" \
+    "plugin list stdout" "$PLUGIN_LIST_STDOUT" \
+    "plugin list stderr" "$PLUGIN_LIST_STDERR" \
+    "copilot settings" "$SMOKE_COPILOT_HOME/settings.json"
+fi
 
 CURRENT_STEP="probe-auth"
 PROBE_JSONL="$SCRATCH_ROOT/artifacts/00-probe.jsonl"
@@ -644,7 +856,7 @@ if ! assert_probe "$PROBE_JSONL" "$VERSION_LINE" "$PROBE_DETAIL"; then
 fi
 
 CURRENT_STEP="build-smoke-repo"
-mkdir -p "$SMOKE_REPO/src" "$SMOKE_INSTALLED_ROOT"
+mkdir -p "$SMOKE_REPO/src"
 git -C "$SMOKE_REPO" init -q
 git -C "$SMOKE_REPO" config user.name 'Touchstone Smoke'
 git -C "$SMOKE_REPO" config user.email 'touchstone-smoke@example.com'
@@ -662,20 +874,7 @@ git -C "$SMOKE_REPO" commit -qm 'fixture: root'
 BASE_HEAD="$(git -C "$SMOKE_REPO" rev-parse HEAD)"
 write_text "$SMOKE_REPO/src/commit-target.txt" $'staged change\n'
 git -C "$SMOKE_REPO" add src/commit-target.txt
-
-CURRENT_STEP="install-hooks"
-cp -R "$SOURCE_HOOKS" "$SMOKE_INSTALLED_ROOT/hooks"
-cp -R "$SOURCE_SKILLS" "$SMOKE_INSTALLED_ROOT/skills"
-mkdir -p "$SMOKE_INSTALLED_ROOT/.claude-plugin" "$SMOKE_STATE_DIR"
-cp "$PLUGIN_MANIFEST" "$SMOKE_INSTALLED_ROOT/.claude-plugin/plugin.json"
-INSTALLED_CONFIG="$SMOKE_COPILOT_HOME/hooks/touchstone.json"
-CONFIG_DETAIL="$SCRATCH_ROOT/artifacts/01-installed-config.json"
-MANIFEST_DETAIL="$SCRATCH_ROOT/artifacts/02-installed-manifest.json"
-copy_hook_config \
-  "$SOURCE_CONFIG" \
-  "$INSTALLED_CONFIG" \
-  "$CONFIG_DETAIL"
-assert_manifest_version "$SMOKE_INSTALLED_ROOT/.claude-plugin/plugin.json" "0.6.5" "$MANIFEST_DETAIL"
+mkdir -p "$SMOKE_STATE_DIR"
 
 COMMIT_SESSION_ID="$(uuid4)"
 GUIDE_SESSION_ID="$(uuid4)"
@@ -716,7 +915,7 @@ run_copilot \
   "$READ_JSONL" \
   "$READ_STDERR"
 assert_successful_view "$READ_JSONL" "$GUIDE_PATH" 'Read this guide before editing.' "$READ_DETAIL"
-assert_recorded_state "$SMOKE_INSTALLED_ROOT/hooks" "$SMOKE_STATE_DIR" "$GUIDE_SESSION_ID" "$GUIDE_PATH" "$STATE_DETAIL"
+assert_recorded_state "$SMOKE_PLUGIN_ROOT/hooks" "$SMOKE_STATE_DIR" "$GUIDE_SESSION_ID" "$GUIDE_PATH" "$STATE_DETAIL"
 python3 - "$SMOKE_HOOK_INPUT_DIR" "$READ_HOOK_INPUT_DETAIL" "$GUIDE_PATH" <<'PY'
 import json
 import sys
@@ -836,6 +1035,7 @@ python3 - "$SUMMARY_PATH" \
   "$PROBE_DETAIL" \
   "$CONFIG_DETAIL" \
   "$MANIFEST_DETAIL" \
+  "$INSTALL_DETAIL" \
   "$COMMIT_DETAIL" \
   "$READ_DETAIL" \
   "$STATE_DETAIL" \
@@ -854,6 +1054,7 @@ from pathlib import Path
     probe_detail,
     config_detail,
     manifest_detail,
+    install_detail,
     commit_detail,
     read_detail,
     state_detail,
@@ -861,7 +1062,7 @@ from pathlib import Path
     generated_detail,
     ordinary_detail,
     edit_hook_input_detail,
-) = sys.argv[1:14]
+) = sys.argv[1:15]
 
 def load(path):
     return json.loads(Path(path).read_text(encoding="utf-8"))
@@ -870,8 +1071,9 @@ summary = {
     "copilot_version": version_output.strip(),
     "base_head_before_smoke": base_head,
     "probe": load(probe_detail),
+    "plugin_installation": load(install_detail),
     "installed_hook_config": load(config_detail),
-    "installed_manifest": load(manifest_detail),
+    "smoke_plugin_manifest": load(manifest_detail),
     "raw_commit_denial": load(commit_detail),
     "guide_read": load(read_detail),
     "guide_state": load(state_detail),
@@ -884,4 +1086,4 @@ summary = {
 Path(summary_path).write_text(json.dumps(summary, indent=2) + "\n", encoding="utf-8")
 PY
 
-echo "copilot-hook-smoke: PASS ($VERSION_LINE; installed manifest 0.6.5 validated; plugin-installed hooks/copilot-hooks.json preserved verbatim with PLUGIN_ROOT-based runner commands; raw git commit denied; direct Read hook payload observed; generated edit denied; ordinary edit allowed with direct Edit hook payload observed)"
+echo "copilot-hook-smoke: PASS ($VERSION_LINE; scratch local marketplace installed $SMOKE_PLUGIN_REF with no \$COPILOT_HOME/hooks/touchstone.json; plugin com.github.copilot/hooks/hooks.json preserved hooks/copilot-hooks.json verbatim; hooks executed via runtime-injected PLUGIN_ROOT with no ambient export; raw git commit denied; direct Read hook payload observed; generated edit denied; ordinary edit allowed with direct Edit hook payload observed)"
