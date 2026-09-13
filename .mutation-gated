@@ -1,0 +1,7 @@
+# Presence-only marker: arms hooks/mutation-pr-gate.py, which runs
+# mutation-check.sh --verify on `gh pr create`, `gh pr ready`, a merge onto a
+# base branch, or a push at one, and blocks while the ledger is unverified.
+# Nothing reads this file's contents.
+#
+# Paths are exempted in .crap-gated, not here. mutation-check.sh reads that
+# marker's patterns for its own selection, so there is one list, not two.

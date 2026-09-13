@@ -31,9 +31,13 @@ coverage.json
 # commonly ignore **/.crap-gated so throwaway test fixtures elsewhere do not get
 # staged by accident).
 !.crap-gated
+!.mutation-gated
 
 # Run state this plugin writes into whatever repo it runs in: per-ticket run
 # records under .claude/touchstone-runs/ and the worktrees the branch phase
 # cuts. Records carry absolute paths and full review findings, so they are
 # local state, not something a repo's team asked for.
 .claude/
+
+# mutmut copies the source tree here and runs pytest in it.
+mutants/
