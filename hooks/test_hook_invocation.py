@@ -134,6 +134,14 @@ def test_explicit_copilot_pre_tool_use_requires_session_and_cwd():
     ) is None
 
 
+def test_copilot_post_tool_use_also_requires_a_session_id():
+    """PostToolUse must be in the session-scoped set, not just PreToolUse:
+    guide-read evidence is written from a PostToolUse hook."""
+    assert normalize_invocation(
+        _base(hook_event_name="PostToolUse", host="copilot", session_id=None, cwd="/tmp")
+    ) is None
+
+
 def test_post_tool_use_event_maps_correctly():
     inv = normalize_invocation(
         _base(hook_event_name="PostToolUse", host="copilot", session_id="s1", cwd="/tmp")

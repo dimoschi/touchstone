@@ -152,7 +152,7 @@ def test_payload_with_no_transcript_path_says_so(monkeypatch, tmp_path, capsys):
     rc = _run(monkeypatch, payload)
     err = capsys.readouterr().err
     assert rc == 2
-    assert 'no transcript_path' in err
+    assert 'the hook payload carried no transcript_path' in err
     assert 'Read it before editing' not in err
 
 
@@ -212,6 +212,45 @@ def test_refusal_names_every_unread_guide(monkeypatch, tmp_path, capsys):
     assert rc == 2
     assert f'  {repo / "CONTRIBUTING.md"}' in err
     assert f'  {repo / "docs" / "DEVELOPMENT.md"}' in err
+
+
+def test_unparseable_line_before_the_read_does_not_stop_the_scan(monkeypatch, tmp_path):
+    repo = _repo(tmp_path, "guided", guides=[("CONTRIBUTING.md", "read me")])
+    transcript = tmp_path / "broken-then-good.jsonl"
+    good = json.dumps({"message": {"content": [
+        {"type": "tool_use", "name": "Read",
+         "input": {"file_path": str(repo / "CONTRIBUTING.md")}}]}})
+    transcript.write_text("tool_use CONTRIBUTING.md but not json {\n" + good + "\n")
+    rc = _run(monkeypatch, _legacy_payload(transcript, str(repo / "internal" / "app.go")))
+    assert rc == 0
+
+
+def test_non_read_block_before_the_read_block_does_not_stop_the_scan(
+        monkeypatch, tmp_path):
+    repo = _repo(tmp_path, "guided", guides=[("CONTRIBUTING.md", "read me")])
+    transcript = tmp_path / "blocks.jsonl"
+    line = json.dumps({"message": {"content": [
+        {"type": "tool_use", "name": "Grep",
+         "input": {"file_path": str(repo / "CONTRIBUTING.md")}},
+        "not even a dict",
+        {"type": "tool_use", "name": "Read",
+         "input": {"file_path": str(repo / "CONTRIBUTING.md")}}]}})
+    transcript.write_text(line + "\n")
+    rc = _run(monkeypatch, _legacy_payload(transcript, str(repo / "internal" / "app.go")))
+    assert rc == 0
+
+
+def test_refusal_lists_the_guides_one_per_line(monkeypatch, tmp_path, capsys):
+    repo = _repo(tmp_path, "multi", guides=[
+        ("CONTRIBUTING.md", "main guide"),
+        ("docs/DEVELOPMENT.md", "dev guide"),
+    ])
+    missing = tmp_path / "missing.jsonl"
+    _write_transcript(missing, [("Read", str(repo / "nothing.md"))])
+    rc = _run(monkeypatch, _legacy_payload(missing, str(repo / "internal" / "app.go")))
+    err = capsys.readouterr().err
+    assert rc == 2
+    assert f'  {repo / "CONTRIBUTING.md"}\n  {repo / "docs" / "DEVELOPMENT.md"}' in err
 
 
 def test_multiple_guides_all_must_be_read(monkeypatch, tmp_path):

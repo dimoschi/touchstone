@@ -75,6 +75,39 @@ def test_child_payload_is_stamped_copilot_but_evidence_keeps_the_original(monkey
     assert seen["recorded"] == original
 
 
+def test_post_tool_use_failures_use_the_post_shape_not_deny(monkeypatch, capsys):
+    """Every failure path must answer in the shape of the event it was given.
+
+    A PostToolUse hook has already run its tool, so denying is meaningless;
+    Copilot expects additionalContext. Testing these only on PreToolUse left
+    the event argument unasserted on each failure path.
+    """
+    post = json.dumps(_payload(event="PostToolUse")).encode()
+
+    rc = _run(monkeypatch, "not-a-real-key", post)
+    assert rc == 0
+    assert "additionalContext" in json.loads(capsys.readouterr().out)
+
+    rc = _run(monkeypatch, "guide-read",
+              json.dumps({"hook_event_name": "PostToolUse", "nope": True}).encode())
+    assert rc == 0
+    out = json.loads(capsys.readouterr().out)
+    assert out == {"additionalContext": "malformed hook payload"}
+
+
+def test_post_tool_use_record_failure_uses_the_post_shape(monkeypatch, capsys):
+    monkeypatch.setattr("sys.argv", ["copilot-hook-runner.py", "guide-read"])
+    monkeypatch.setattr("sys.stdin", SimpleNamespace(
+        buffer=io.BytesIO(json.dumps(_payload(event="PostToolUse")).encode())))
+
+    def boom(*a, **k):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(runner, "record_hook_input", boom)
+    assert runner.main() == 0
+    assert "additionalContext" in json.loads(capsys.readouterr().out)
+
+
 def test_unknown_key_is_a_denied_pre_tool_use(monkeypatch, capsys):
     monkeypatch.setattr("sys.argv", ["copilot-hook-runner.py", "not-a-real-key"])
     monkeypatch.setattr("sys.stdin", SimpleNamespace(buffer=io.BytesIO(b"{}")))
