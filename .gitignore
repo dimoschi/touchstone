@@ -31,6 +31,7 @@ coverage.json
 # commonly ignore **/.crap-gated so throwaway test fixtures elsewhere do not get
 # staged by accident).
 !.crap-gated
+!.mutation-gated
 
 # Run state this plugin writes into whatever repo it runs in: per-ticket run
 # records under .claude/touchstone-runs/ and the worktrees the branch phase
