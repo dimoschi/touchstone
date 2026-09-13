@@ -316,7 +316,7 @@ const IMPL = {
 // nothing" -- which is exactly the case that must not silently skip review.
 const GATE = {
   type: 'object', additionalProperties: false,
-  required: ['green', 'head_sha', 'detail'],
+  required: ['green', 'head_sha', 'detail', 'scored'],
   properties: {
     green: { type: 'boolean' }, head_sha: { type: 'string' },
     detail: { type: 'string' },

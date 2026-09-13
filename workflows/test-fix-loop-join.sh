@@ -256,7 +256,7 @@ function makeAgent(scenario, captured) {
     }
     if (label.startsWith('mutation:')) {
       const attempt = Number(label.slice('mutation:'.length))
-      return (scenario.mutationResult ?? (() => ({ green: true, head_sha: REVIEWED_THROUGH, detail: 'stub' })))(attempt)
+      return (scenario.mutationResult ?? (() => ({ green: true, head_sha: REVIEWED_THROUGH, detail: 'stub', scored: true })))(attempt)
     }
     if (label === 'staleness') {
       if (scenario.staleness === 'reject') throw new Error('staleness subagent failed')
@@ -443,7 +443,7 @@ async function scenarioH() {
     initialReview: { correctness: [], advocate: [] }, // no Fix-loop findings at all
     verify: () => undefined,
     mutationGated: true,
-    mutationResult: () => ({ green: true, head_sha: mutHead, detail: 'stub green' }),
+    mutationResult: () => ({ green: true, head_sha: mutHead, detail: 'stub green', scored: true }),
     postMutationReview: [{ title: 'Mutation gate introduced X', file: 'mutfile.js',
       claim: 'c', evidence: 'e' }],
   })
@@ -536,7 +536,7 @@ async function scenarioL() {
     verify: (id) => id === 'f1' ? true : undefined,
     staleness: () => [],
     mutationGated: true,
-    mutationResult: () => ({ green: true, head_sha: 'mut0000000000000000000000000000000000001', detail: 'stub green' }),
+    mutationResult: () => ({ green: true, head_sha: 'mut0000000000000000000000000000000000001', detail: 'stub green', scored: true }),
     postMutationReview: [{ title: 'Repeated Title', file: 'mutfile.js',
       claim: 'a different bug', evidence: 'e2' }],
   })
@@ -624,7 +624,7 @@ async function scenarioP() {
     verify: (id) => id === 'f1' ? true : undefined,
     staleness: () => [],
     mutationGated: true,
-    mutationResult: () => ({ green: true, head_sha: 'mut0000000000000000000000000000000000001', detail: 'stub green' }),
+    mutationResult: () => ({ green: true, head_sha: 'mut0000000000000000000000000000000000001', detail: 'stub green', scored: true }),
     postMutationReview: [{ title: 'Off-by-one in parser', file: 'src/parser.js',
       claim: 'boundary is wrong', evidence: 'parser.js:12' }],
   })
@@ -732,7 +732,7 @@ async function scenarioT() {
     verify: (id) => id === 'f1' ? true : undefined,
     staleness: () => [],
     mutationGated: true,
-    mutationResult: () => ({ green: true, head_sha: 'mut0000000000000000000000000000000000001', detail: 'stub green' }),
+    mutationResult: () => ({ green: true, head_sha: 'mut0000000000000000000000000000000000001', detail: 'stub green', scored: true }),
     postMutationReview: [{ title: 'Boundary check excludes the last element', file: 'parser.js',
       claim: 'the mutation commits reverted the guard', evidence: 'parser.js:14',
       duplicate_of: 'f1' }],
@@ -865,7 +865,7 @@ async function scenarioX() {
   console.log('\n== scenario X: the Mutation halt carries the regression suspects')
   const { result, captured } = await run(convergedWithSuspect({
     mutationResult: () => ({ green: false, head_sha: 'mut0000000000000000000000000000000000001',
-      detail: 'stub red', survivors: 1 }),
+      detail: 'stub red', survivors: 1, scored: true }),
   }))
   check('halted at Mutation', result.halted_at, 'Mutation')
   check('the suspect is in the payload', result.regression_suspects?.length, 1)
@@ -876,7 +876,7 @@ async function scenarioX() {
 async function scenarioY() {
   console.log('\n== scenario Y: the post-mutation Review halt carries the regression suspects')
   const { result, captured } = await run(convergedWithSuspect({
-    mutationResult: () => ({ green: true, head_sha: 'mut0000000000000000000000000000000000001', detail: 'stub green' }),
+    mutationResult: () => ({ green: true, head_sha: 'mut0000000000000000000000000000000000001', detail: 'stub green', scored: true }),
     postMutationReview: [{ title: 'New nil deref in the added test helper',
       file: 'src/helper.js', claim: 'deref before the guard', evidence: 'helper.js:8' }],
   }))
@@ -1136,7 +1136,7 @@ async function scenarioAL() {
   const { result } = await run(convergedWithSuspect({
     crapGated: false,
     mutationResult: () => ({ green: false, head_sha: 'mut0000000000000000000000000000000000001',
-      detail: 'stub red', survivors: 1 }),
+      detail: 'stub red', survivors: 1, scored: true }),
   }))
   check('halted at Mutation', result.halted_at, 'Mutation')
   check('gates.bypass_blocked is false', result.gates?.bypass_blocked, false)
