@@ -133,10 +133,10 @@ Optional:
 
 ```
 commands/deliver.md              /touchstone:deliver — parses flags, refuses without a ticket
-workflows/deliver-pipeline.js    the eight-phase orchestration
+workflows/deliver-pipeline.js    the nine-phase orchestration
 agents/planner.md                plan-only subagent, has no Edit or Write tool
 skills/crap-controlled-changes/  the gates, their language modules, and their docs
-hooks/                           seven PreToolUse gates
+hooks/                           six policy gates, with a manifest per host
 ```
 
 ### The phases
@@ -145,24 +145,32 @@ hooks/                           seven PreToolUse gates
 2. **Triage** — one cheap agent checks the ticket's premise, sizes the job, and judges how hard it is to get right. A disproved premise halts. Work under ten lines skips straight to Implement. The difficulty judgement sets the reasoning effort every later phase runs at, so an easy change does not get paid for like a hard one.
 3. **Plan** — a planner with no write tools produces a plan, acceptance criteria and risk areas.
 4. **Implement** — TDD via the skill, committing through `crap-commit.sh`, which runs both commit-time gates and refuses while either is red.
-5. **Review** — adversarial reviewers on distinct lenses, chosen by diff size. Re-runs on commits any later phase adds.
-6. **Fix** — confirmed findings only, bounded rounds. A verifier and an adversary then read the fix's own commits in parallel: independent questions, one turn.
-7. **Mutation** — kill every survivor with a test. Its own commits get reviewed too.
-8. **PR** — pushes and opens against the repo's template, only once every gate is green.
+5. **Draft PR** — pushes the branch and opens a draft, so the work is visible and any later halt has somewhere durable to be reported.
+6. **Review** — adversarial reviewers on distinct lenses, chosen by diff size. Re-runs on commits any later phase adds.
+7. **Fix** — confirmed findings only, bounded rounds. A verifier and an adversary then read the fix's own commits in parallel: independent questions, one turn.
+8. **Mutation** — kill every survivor with a test. Its own commits get reviewed too.
+9. **PR** — fills in the PR against the repo's template and marks the draft ready, only once every gate is green.
 
 ### The hooks
 
-Five apply only to repos you opted in:
+Three apply only to repos you opted in:
 
 - `crap-commit-gate.py` — refuses raw `git commit`, names `crap-commit.sh` instead. It does not guess which repo a command targets; it resolves `git -C` and `cd` chains and refuses decidably.
 - `mutation-pr-gate.py` — verifies the mutation ledger before `gh pr create`, a `git merge` onto a base branch, or a `git push` at one.
 - `contributing-gate.py` — refuses the first edit until the repo's `CONTRIBUTING.md` has actually been Read this session. A repo shipping no guide is never gated.
 
-Two apply everywhere, because each fires only on its own evidence:
+Three apply everywhere, because each fires only on its own evidence:
 
 - `base-branch-commit-gate.py` — refuses a commit on `main`/`master`/etc. Exempts a repo with no remote, since that work cannot reach anyone yet.
 - `gate-pipe-gate.py` — refuses piping a gate anywhere. `$?` after a pipeline is the *last* command's status, so `mutation-check.sh | tail` reports tail's exit 0 however the gate ended, turning a red gate into a reported pass.
 - `generated-file-gate.py` — refuses hand-editing a file whose own header says `@generated` or `DO NOT EDIT`. The marker is the file's consent, so this needs no repo opt-in.
+
+The same six run on Claude Code and on Copilot. Each host gets its own manifest
+(`hooks/hooks.json`, `hooks/copilot-hooks.json`) over one set of scripts, because the
+hosts disagree about how a hook is invoked and how it reports a refusal. Copilot
+additionally carries a `PostToolUse` hook on `Read`, which is how `contributing-gate.py`
+learns the guide was read on a host with no session transcript to inspect. Details in
+[docs/architecture.md](docs/architecture.md).
 
 ## Signing
 
@@ -183,15 +191,11 @@ bash scripts/check-version-bump.sh      # gated directories moved version in the
 ```
 
 `run-go-tests.sh` runs every suite in `skills/crap-controlled-changes/test/`
-except the ones needing a live PHP toolchain or `uv`, which this job does not
-install. That includes dead-code, CRAP and mutation, the two `crap-commit.sh`
-suites (which additionally need an ssh key for `CRAP_SIGNING_KEY`, defaulting
-to `~/.ssh/id_ed25519`, and a matching entry in `gpg.ssh.allowedSignersFile`),
-and `lib/go_modules.py`'s own test, which is pure Python and runs here for lack
-of anywhere else. Several of the selected suites shell out to `python3`, so the
-job installs it alongside Go rather than relying on the runner image to carry
-it. Prerequisites installed but a suite still prints a `SKIP:` line is treated
-as a failure, not a pass: it means an assumption the suite makes did not hold.
+except the ones needing a live PHP toolchain or `uv`, which no job installs.
+Running a single suite, how that selection works, fixture handling and the
+toolchain each CI job provides are in [docs/testing.md](docs/testing.md). How
+the gates, hooks and workflow fit together is in
+[docs/architecture.md](docs/architecture.md).
 
 ### Versioning
 
@@ -213,16 +217,6 @@ reusing a string some install has already cached, and it settles that without
 the check having to decide which versions `main` ever really served. A push
 straight to `main` compares main against itself and is a no-op: the check
 gates PRs, not a bypass of the PR process.
-
-Two rules the CI enforces, both easy to break by habit:
-
-- **Module resolution lives in one place.** `lib/go_modules.py` answers "which
-  module owns this file" for all three Go gates. It used to be copy-pasted into
-  each of them, which meant the gates could disagree about what to measure while
-  all reporting green.
-
-The skill's own suites live in `skills/crap-controlled-changes/test/` and need the
-relevant language toolchain. Each builds its fixture repository on first run.
 
 `check-no-private-refs.sh` looks for classes of leak (absolute home paths,
 personal config paths, stray tracker keys) rather than a list of specific names,
