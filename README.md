@@ -227,6 +227,25 @@ since a committed list would publish exactly what it exists to exclude. Point
 `TOUCHSTONE_PRIVATE_TERMS` at a local file of extra patterns for anything that
 should not be written down in the repo.
 
+## What a run costs
+
+Touchstone is not cheap, and you should know that before you point it at a ticket
+rather than after.
+
+One measured run (ticket 7, a routine CI-configuration change) took **44 minutes
+across 17 agents** and moved **33M tokens**: 198k of output against 31.2M of cache
+reads and 1.9M of cache writes. Output is 0.6% of the tokens and roughly 15% of the
+cost. The rest is each agent re-sending its own growing conversation on every turn,
+which is why the handoff between phases is nearly free and the phases themselves are
+not.
+
+A heavier ticket costs more, and not linearly. The expensive axis is fix rounds: that
+run needed one, while earlier runs on code tickets needed three and came to 252k and
+291k of output over 57 and 75 minutes.
+
+Triage scales reasoning effort to the difficulty it judges, which bounds the output
+share. It does not bound the context re-reads, which are the larger half.
+
 ## Prior art
 
 [OpenHands](https://github.com/All-Hands-AI/OpenHands) and
