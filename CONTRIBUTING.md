@@ -11,11 +11,14 @@ sweep them into the wrong commit. A worktree gives each branch its own
 directory and its own `HEAD`, so two sessions never contend for either.
 
 ```bash
-git worktree add ../touchstone-<branch-slug> -b <branch> origin/main
+git fetch origin
+git worktree add <repo-root>/.claude/worktrees/<ticket-marker>-<slug> -b <branch> origin/main
 ```
 
-Run every command, git included, with `-C <worktree-path>` or from inside that
-directory, and never `cd` back into the main checkout mid-session.
+Run every command, git included, with `-C <worktree-path>`. Never `cd` into
+the worktree, not even for a single command: the shell's working directory
+persists between commands in an agent session, so one `cd` moves every command
+after it, including the ones that record where the work happened.
 
 ## Ticket-driven delivery
 
@@ -32,11 +35,22 @@ committed, so `crap-commit.sh` and the mutation ledger enforce on every commit
 and PR here, not only in repos this plugin is installed into. Commit through
 `crap-commit.sh` rather than a raw `git commit`; a hook refuses the raw form.
 
-Commits are signed by whatever `git config` resolves for this clone; nothing
-here overrides `commit.gpgsign` or the signing key. The one thing refused is
-signing with an `*_sk` hardware-token key, since an unattended run would hang
-waiting for the token rather than fail.
+Commits are signed by whatever `git config` resolves for this clone unless you
+set `CRAP_SIGNING_KEY` to a key file, which `crap-commit.sh` uses instead and
+turns signing on even if `commit.gpgsign` is off. The one thing refused, with
+or without that variable, is signing with an `*_sk` hardware-token key, since
+an unattended run would hang waiting for the token rather than fail; set
+`CRAP_SIGNING_KEY` to a non-hardware key to get past that.
 
-Push and open the PR the normal way; nothing here intercepts either except the
-mutation gate, which blocks a `gh pr create`, a merge onto a base branch, or a
-push at one while the mutation ledger is unverified.
+Push and open the PR the normal way. The mutation gate intercepts a non-draft
+`gh pr create`, a `gh pr ready`, a merge onto a base branch, and a push at one,
+running `mutation-check.sh --verify` first and blocking while the ledger is
+unverified. `gh pr create --draft` is exempt, so open a draft PR and mark it
+ready only once the ledger is verified.
+
+Bump `version` in `.claude-plugin/plugin.json` in the same PR as any change
+under `workflows/`, `hooks/`, `skills/`, `agents/`, `commands/` or
+`.claude-plugin/plugin.json` itself. `claude plugin update` keys its cache on
+that string, so an unbumped change is invisible to every existing install.
+Nothing at commit time catches a missed bump; `scripts/check-version-bump.sh`
+runs in CI and fails the PR.
