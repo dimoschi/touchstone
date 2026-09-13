@@ -77,14 +77,13 @@ cat > phpunit.xml <<'EOF'
   </source>
 </phpunit>
 EOF
-cat > infection.json <<'EOF'
+cat > infection.json <<EOF
 {
   "source": { "directories": ["src"] },
   "bootstrap": "tests/bootstrap.php",
-  "phpUnit": { "customPath": "PHPUNIT_PLACEHOLDER" }
+  "phpUnit": { "customPath": "$PHPUNIT_PHAR" }
 }
 EOF
-sed -i '' "s|PHPUNIT_PLACEHOLDER|$PHPUNIT_PHAR|" infection.json
 # A test that executes the method without distinguishing its branches: coverage is
 # 100%, and every mutant of the comparison and both returns still passes.
 cat > tests/CalcTest.php <<'EOF'

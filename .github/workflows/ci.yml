@@ -80,6 +80,39 @@ jobs:
       - name: Go-dependent test suites
         run: bash scripts/run-go-tests.sh
 
+  php-python:
+    # The suites the go job excludes because it installs neither toolchain:
+    # infection/phpunit (run-mutation-php-live.sh) and uv (run-mutation-python.sh,
+    # run-python-e2e.sh). One job, not two: splitting PHP from uv would need a
+    # second hand-maintained suite list where scripts/lib/skill-suites.sh has one.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+      - uses: astral-sh/setup-uv@v10.1.0
+      - name: Install PHP with a coverage driver
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.3'
+          coverage: pcov
+          tools: phpunit:11, infection
+      - name: Locate the phpunit and infection phars
+        run: |
+          {
+            echo "PHPUNIT_PHAR=$(command -v phpunit)"
+            echo "INFECTION_PHAR=$(command -v infection)"
+            echo "PHP_BIN=$(command -v php)"
+          } >> "$GITHUB_ENV"
+      - name: Configure git
+        run: |
+          git config --global user.email ci@example.com
+          git config --global user.name CI
+          git config --global init.defaultBranch main
+      - name: PHP and Python suites
+        run: bash scripts/run-php-python-tests.sh
+
   python:
     # Both, for the same reason as the hooks job: the permission and symlink
     # checks copilot_session_evidence.py and contributing-gate.py carry out
