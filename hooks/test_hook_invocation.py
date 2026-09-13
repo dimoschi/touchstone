@@ -38,6 +38,27 @@ def test_legacy_payload_defaults_to_claude_host():
     assert inv.host == "claude"
     assert inv.event == "pre_tool_use"
     assert inv.cwd == Path("/tmp").resolve()
+    assert inv.tool_name == "Edit"
+    assert inv.tool_input == {"file_path": "/tmp/x"}
+    assert inv.raw["tool_name"] == "Edit"
+
+
+def test_empty_tool_name_is_rejected_not_merely_non_string():
+    assert normalize_invocation(_base(tool_name="")) is None
+
+
+def test_empty_session_id_is_rejected_on_the_copilot_branch():
+    assert normalize_invocation(
+        _base(hook_event_name="PreToolUse", host="copilot", session_id="", cwd="/tmp")
+    ) is None
+
+
+def test_explicit_copilot_host_without_an_event_name_takes_the_general_branch():
+    """host=copilot alone must not demand a session id: the session-scoped
+    requirement belongs to the event payloads Copilot's runner sends."""
+    inv = normalize_invocation(_base(host="copilot"))
+    assert inv.host == "copilot"
+    assert inv.session_id is None
     assert inv.session_id is None
 
 
@@ -96,6 +117,11 @@ def test_explicit_copilot_pre_tool_use_requires_session_and_cwd():
     assert inv.event == "pre_tool_use"
     assert inv.session_id == "s1"
     assert inv.cwd == Path("/tmp").resolve()
+    # the gates read these off the invocation, so carrying them through is the
+    # contract, not an implementation detail
+    assert inv.tool_name == "Edit"
+    assert inv.tool_input == {"file_path": "/tmp/x"}
+    assert inv.raw["session_id"] == "s1"
 
     assert normalize_invocation(
         _base(hook_event_name="PreToolUse", host="copilot", session_id=None, cwd="/tmp")

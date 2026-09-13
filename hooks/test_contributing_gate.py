@@ -156,6 +156,64 @@ def test_payload_with_no_transcript_path_says_so(monkeypatch, tmp_path, capsys):
     assert 'Read it before editing' not in err
 
 
+def test_read_is_found_after_unrelated_and_non_read_lines(monkeypatch, tmp_path):
+    """The scan must keep going past lines it rejects.
+
+    Every earlier transcript put the Read first or alone, so nothing noticed
+    whether a rejected line stopped the scan instead of skipping it.
+    """
+    repo = _repo(tmp_path, "guided", guides=[("CONTRIBUTING.md", "read me")])
+    transcript = tmp_path / "mixed.jsonl"
+    _write_transcript(transcript, [
+        json.dumps({"message": {"content": [{"type": "text", "text": "chatter"}]}}),
+        ("Grep", str(repo / "CONTRIBUTING.md")),
+        ("Read", str(repo / "unrelated.md")),
+        ("Read", str(repo / "CONTRIBUTING.md")),
+    ])
+    rc = _run(monkeypatch, _legacy_payload(transcript, str(repo / "internal" / "app.go")))
+    assert rc == 0
+
+
+def test_read_of_an_undecodable_transcript_still_finds_the_guide(monkeypatch, tmp_path):
+    """errors='replace' keeps the scan alive on a transcript with invalid
+    UTF-8; a stricter or dropping mode loses the line or raises."""
+    repo = _repo(tmp_path, "guided", guides=[("CONTRIBUTING.md", "read me")])
+    transcript = tmp_path / "latin1.jsonl"
+    good = json.dumps({"message": {"content": [
+        {"type": "tool_use", "name": "Read",
+         "input": {"file_path": str(repo / "CONTRIBUTING.md")}}]}})
+    transcript.write_bytes(b'{"note": "caf\xe9 tool_use CONTRIBUTING.md"}\n'
+                           + good.encode() + b"\n")
+    rc = _run(monkeypatch, _legacy_payload(transcript, str(repo / "internal" / "app.go")))
+    assert rc == 0
+
+
+def test_block_without_a_usable_path_does_not_stop_the_scan(monkeypatch, tmp_path):
+    repo = _repo(tmp_path, "guided", guides=[("CONTRIBUTING.md", "read me")])
+    transcript = tmp_path / "nopath.jsonl"
+    noisy = json.dumps({"message": {"content": [
+        {"type": "tool_use", "name": "Read", "input": {}},
+        {"type": "tool_use", "name": "Read",
+         "input": {"file_path": str(repo / "CONTRIBUTING.md")}}]}})
+    transcript.write_text(noisy + "\n")
+    rc = _run(monkeypatch, _legacy_payload(transcript, str(repo / "internal" / "app.go")))
+    assert rc == 0
+
+
+def test_refusal_names_every_unread_guide(monkeypatch, tmp_path, capsys):
+    repo = _repo(tmp_path, "multi", guides=[
+        ("CONTRIBUTING.md", "main guide"),
+        ("docs/DEVELOPMENT.md", "dev guide"),
+    ])
+    missing = tmp_path / "missing.jsonl"
+    _write_transcript(missing, [("Read", str(repo / "nothing.md"))])
+    rc = _run(monkeypatch, _legacy_payload(missing, str(repo / "internal" / "app.go")))
+    err = capsys.readouterr().err
+    assert rc == 2
+    assert f'  {repo / "CONTRIBUTING.md"}' in err
+    assert f'  {repo / "docs" / "DEVELOPMENT.md"}' in err
+
+
 def test_multiple_guides_all_must_be_read(monkeypatch, tmp_path):
     repo = _repo(tmp_path, "multi", guides=[
         ("CONTRIBUTING.md", "main guide"),
