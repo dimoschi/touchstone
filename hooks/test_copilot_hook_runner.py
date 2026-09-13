@@ -28,6 +28,86 @@ def _run(monkeypatch, key, payload_bytes, record_ok=True):
     return runner.main()
 
 
+def test_record_hook_input_is_keyed_by_the_hook_name(monkeypatch):
+    seen = {}
+    monkeypatch.setattr(runner, "_run_child", lambda name, raw: (True, ""))
+    monkeypatch.setattr(runner, "record_hook_input",
+                        lambda key, raw: seen.__setitem__("key", key))
+    monkeypatch.setattr("sys.argv", ["copilot-hook-runner.py", "gate-pipe"])
+    monkeypatch.setattr("sys.stdin",
+                        SimpleNamespace(buffer=io.BytesIO(json.dumps(_payload()).encode())))
+    runner.main()
+    assert seen["key"] == "gate-pipe"
+
+
+def test_child_is_the_script_mapped_to_the_key(monkeypatch):
+    seen = {}
+    monkeypatch.setattr(runner, "_run_child",
+                        lambda name, raw: (seen.__setitem__("name", name), (True, ""))[1])
+    monkeypatch.setattr(runner, "record_hook_input", lambda *a, **k: None)
+    monkeypatch.setattr("sys.argv", ["copilot-hook-runner.py", "contributing"])
+    monkeypatch.setattr("sys.stdin",
+                        SimpleNamespace(buffer=io.BytesIO(json.dumps(_payload()).encode())))
+    runner.main()
+    assert seen["name"] == "contributing-gate.py"
+
+
+def test_child_payload_is_stamped_copilot_but_evidence_keeps_the_original(monkeypatch):
+    """The runner is the only place that knows the host, so it must say so.
+
+    Nothing in a payload's shape distinguishes Copilot from Claude, so the
+    gates default to claude. Every Copilot entry comes through here, which
+    makes this the one honest place to mark it.
+    """
+    seen = {}
+    monkeypatch.setattr(runner, "_run_child",
+                        lambda name, raw: (seen.__setitem__("child", raw), (True, ""))[1])
+    monkeypatch.setattr(runner, "record_hook_input",
+                        lambda key, raw: seen.__setitem__("recorded", raw))
+    monkeypatch.setattr("sys.argv", ["copilot-hook-runner.py", "gate-pipe"])
+    original = json.dumps(_payload()).encode()
+    monkeypatch.setattr("sys.stdin", SimpleNamespace(buffer=io.BytesIO(original)))
+
+    runner.main()
+
+    assert json.loads(seen["child"])["host"] == "copilot"
+    # evidence is what Copilot actually sent, not what we handed the gate
+    assert seen["recorded"] == original
+
+
+def test_post_tool_use_failures_use_the_post_shape_not_deny(monkeypatch, capsys):
+    """Every failure path must answer in the shape of the event it was given.
+
+    A PostToolUse hook has already run its tool, so denying is meaningless;
+    Copilot expects additionalContext. Testing these only on PreToolUse left
+    the event argument unasserted on each failure path.
+    """
+    post = json.dumps(_payload(event="PostToolUse")).encode()
+
+    rc = _run(monkeypatch, "not-a-real-key", post)
+    assert rc == 0
+    assert "additionalContext" in json.loads(capsys.readouterr().out)
+
+    rc = _run(monkeypatch, "guide-read",
+              json.dumps({"hook_event_name": "PostToolUse", "nope": True}).encode())
+    assert rc == 0
+    out = json.loads(capsys.readouterr().out)
+    assert out == {"additionalContext": "malformed hook payload"}
+
+
+def test_post_tool_use_record_failure_uses_the_post_shape(monkeypatch, capsys):
+    monkeypatch.setattr("sys.argv", ["copilot-hook-runner.py", "guide-read"])
+    monkeypatch.setattr("sys.stdin", SimpleNamespace(
+        buffer=io.BytesIO(json.dumps(_payload(event="PostToolUse")).encode())))
+
+    def boom(*a, **k):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(runner, "record_hook_input", boom)
+    assert runner.main() == 0
+    assert "additionalContext" in json.loads(capsys.readouterr().out)
+
+
 def test_unknown_key_is_a_denied_pre_tool_use(monkeypatch, capsys):
     monkeypatch.setattr("sys.argv", ["copilot-hook-runner.py", "not-a-real-key"])
     monkeypatch.setattr("sys.stdin", SimpleNamespace(buffer=io.BytesIO(b"{}")))
@@ -65,7 +145,7 @@ def test_invalid_json_payload_is_denied(monkeypatch, capsys):
     assert rc == 0
     out = json.loads(capsys.readouterr().out)
     assert out["permissionDecision"] == "deny"
-    assert "invalid JSON" in out["permissionDecisionReason"]
+    assert out["permissionDecisionReason"] == "invalid JSON hook payload"
 
 
 def test_malformed_payload_is_denied(monkeypatch, capsys):
@@ -73,7 +153,7 @@ def test_malformed_payload_is_denied(monkeypatch, capsys):
     assert rc == 0
     out = json.loads(capsys.readouterr().out)
     assert out["permissionDecision"] == "deny"
-    assert "malformed hook payload" in out["permissionDecisionReason"]
+    assert out["permissionDecisionReason"] == "malformed hook payload"
 
 
 def test_successful_pre_tool_use_child_emits_allow(monkeypatch, capsys):

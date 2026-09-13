@@ -39,11 +39,16 @@ def main() -> int:
     if payload is None:
         return _emit_failure(event, "invalid JSON hook payload")
 
+    # Shape cannot distinguish Copilot from Claude, so the gates default to
+    # claude; every Copilot entry comes through here, so this is where it is
+    # known. After record_hook_input, which must keep the bytes Copilot sent.
+    payload["host"] = "copilot"
+
     invocation = normalize_invocation(payload)
     if invocation is None:
         return _emit_failure(event, "malformed hook payload")
 
-    ok, detail = _run_child(HOOKS[key], raw)
+    ok, detail = _run_child(HOOKS[key], json.dumps(payload).encode())
     if ok:
         return _emit_success(invocation.event)
     return _emit_failure(invocation.event, detail)

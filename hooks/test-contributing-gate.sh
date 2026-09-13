@@ -111,6 +111,7 @@ import sys
 session_id, cwd, tool_name, file_path = sys.argv[1:5]
 payload = {
     "hook_event_name": "PreToolUse",
+    "host": "copilot",
     "session_id": session_id,
     "cwd": cwd,
     "tool_name": tool_name,
@@ -130,6 +131,7 @@ import sys
 session_id, cwd, tool_name, file_path, result_type = sys.argv[1:6]
 payload = {
     "hook_event_name": "PostToolUse",
+    "host": "copilot",
     "session_id": session_id,
     "cwd": cwd,
     "tool_name": tool_name,

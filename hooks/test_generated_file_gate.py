@@ -70,6 +70,7 @@ def test_copilot_pre_tool_use_edit_resolves_relative_to_cwd(monkeypatch, tmp_pat
     path.write_text("// Code generated. DO NOT EDIT.\npackage x\n")
     payload = {
         "hook_event_name": "PreToolUse",
+        "host": "copilot",
         "session_id": "s1",
         "cwd": str(tmp_path),
         "tool_name": "Edit",

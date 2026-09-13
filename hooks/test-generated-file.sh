@@ -49,6 +49,7 @@ cwd, file_path = sys.argv[1:3]
 json.dump(
     {
         "hook_event_name": "PreToolUse",
+        "host": "copilot",
         "session_id": "copilot-generated",
         "cwd": cwd,
         "tool_name": "Edit",
@@ -71,6 +72,7 @@ cwd, file_path, content = sys.argv[1:4]
 json.dump(
     {
         "hook_event_name": "PreToolUse",
+        "host": "copilot",
         "session_id": "copilot-generated",
         "cwd": cwd,
         "tool_name": "Write",
@@ -92,6 +94,7 @@ cwd, tool_name = sys.argv[1:3]
 json.dump(
     {
         "hook_event_name": "PreToolUse",
+        "host": "copilot",
         "session_id": "copilot-generated",
         "cwd": cwd,
         "tool_name": tool_name,
