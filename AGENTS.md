@@ -18,7 +18,8 @@ Read [docs/architecture.md](docs/architecture.md) before changing any of the thr
 
 ```bash
 bash scripts/run-hook-tests.sh          # needs only python3 and git
-bash scripts/run-go-tests.sh            # needs Go, python3, an ssh signing key
+bash scripts/run-go-tests.sh            # the skill's Go-toolchain suites; needs Go, python3, an ssh signing key
+bash scripts/run-php-python-tests.sh    # the skill's PHP/uv suites; needs a live PHP ^8.3 + infection + phpunit, and uv
 bash scripts/run-python-tests.sh        # needs pytest + coverage>=7.13.1 (or CRAP_PY_RUN)
 bash workflows/test-fix-loop-join.sh
 bash workflows/test-mutation-optin.sh

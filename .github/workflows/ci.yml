@@ -91,7 +91,7 @@ jobs:
       - uses: actions/setup-python@v6
         with:
           python-version: '3.12'
-      - uses: astral-sh/setup-uv@v10
+      - uses: astral-sh/setup-uv@v10.1.0
       - name: Install PHP with a coverage driver
         uses: shivammathur/setup-php@v2
         with:
