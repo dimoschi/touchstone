@@ -18,9 +18,14 @@
 # exempts web/ -- without forcing a choice between gating everything and
 # gating nothing. An empty marker, which is the common case, exempts nothing.
 #
-# crap_exempt_pathspecs is also read by crap-check.sh itself to narrow
-# GO_SPEC/PHP_SPEC/PY_SPEC, so the same patterns exempt a file this gate
-# measures, not only one it cannot measure at all.
+# crap_exempt_pathspecs is read by all three gates, not just this refusal:
+# crap-check.sh narrows GO_SPEC/PHP_SPEC/PY_SPEC with it, deadcode-check.sh its
+# own GO_SPEC, and mutation-check.sh every selection it makes including
+# --verify. So the same patterns exempt a file these gates can measure, not
+# only one no module can score at all, and the cost of adding a pattern is the
+# whole of measurement under that path: coverage, static reachability and
+# mutation alike. Widening one of these readers without the others deadlocks a
+# repo carrying both markers, which is how mutation-check.sh came to be here.
 
 UNSUPPORTED_SPEC=(
   '*.ts' '*.tsx' '*.js' '*.jsx' '*.mjs' '*.cjs'
@@ -89,8 +94,9 @@ report_unsupported_sources() {
     echo "       gate. Add gitignore-style patterns to .crap-gated, one per line:"
     echo "         echo 'web/**' >> $root/.crap-gated"
     echo "       The marker is committed, so the whole team gets the same rule."
-    echo "       This also stops the gate from measuring Go/PHP/Python under that"
-    echo "       path, not only from refusing another language there."
+    echo "       This also stops all three gates -- coverage, dead code and"
+    echo "       mutation -- from measuring Go/PHP/Python under that path, not"
+    echo "       only from refusing another language there."
     echo "    2. Add a module for the language: lib/crap-check-<lang>.sh, following"
     echo "       the contract the go, php and python modules already implement."
     echo "    3. Remove .crap-gated if this repo should not be gated at all."
