@@ -49,6 +49,12 @@ Read it before editing:
 Then make the edit again. A Read of each file is the only thing that clears
 this, and it is asked once per file per session.'''
 
+NO_EVIDENCE = '''contributing-gate: cannot tell whether this repo's contribution
+guide was read, so refusing rather than guessing: {detail}
+
+This is a setup problem, not an unread guide. Re-reading the guide will not
+clear it.'''
+
 UNSUPPORTED = '''contributing-gate: unsupported Copilot {tool} payload for a repo that ships contribution guides.
 This hook needs tool_input.path (or legacy tool_input.file_path) to decide what
 {tool} would change:
@@ -99,10 +105,10 @@ def read_in_session(transcript, guides):
     # spelling of the path, which is exactly what may not match.
     names = {Path(guide).name for guide in guides}
     seen = set()
-    try:
-        handle = open(transcript, errors='replace')
-    except OSError:
-        return seen
+    # OSError propagates: a transcript the gate cannot open is not evidence
+    # that the guide is unread, and conflating the two produced a refusal no
+    # amount of re-reading could clear.
+    handle = open(transcript, errors='replace')
     with handle:
         for line in handle:
             if 'tool_use' not in line or not any(n in line for n in names):
@@ -135,7 +141,7 @@ def main():
             and invocation.event == 'pre_tool_use':
         return gate_copilot(invocation)
 
-    return gate_legacy(data)
+    return gate_claude(data)
 
 
 def gate_copilot(invocation):
@@ -179,28 +185,56 @@ def gate_copilot(invocation):
     return 2
 
 
-def gate_legacy(data):
+def claude_target(data):
+    """The path this edit would change, or None if the payload names none."""
     tool_input = data.get('tool_input') or {}
     if not isinstance(tool_input, dict):
-        return 0
+        return None
     target = tool_input_path(tool_input)
     if not target:
-        return 0
+        return None
+    return Path(target).expanduser()
 
-    target = Path(target).expanduser()
+
+def claude_guides(data):
+    """Guides this edit must have read, or [] when the gate does not apply.
+
+    Empty covers every reason to stay out of the way: no usable target, an
+    ungated repo, no repo at all, no guide shipped, or the edit being to the
+    guide itself.
+    """
+    target = claude_target(data)
+    if target is None:
+        return []
     if not is_gated(target, '.crap-gated'):
-        return 0
-
-    start = nearest_dir(target)
-    top = git(start, 'rev-parse', '--show-toplevel') if start else None
+        return []
+    top = repo_toplevel(target)
     if not top:
-        return 0
+        return []
+    return [g for g in find_guides(top) if resolved(g) != resolved(target)]
 
-    guides = [g for g in find_guides(Path(top)) if resolved(g) != resolved(target)]
+
+def guide_evidence(data, guides):
+    """(guides read this session, None), or (empty, why we cannot tell)."""
+    transcript = data.get('transcript_path') or ''
+    if not transcript:
+        return set(), 'the hook payload carried no transcript_path'
+    try:
+        return read_in_session(transcript, guides), None
+    except OSError as exc:
+        return set(), f'could not read {transcript}: {exc}'
+
+
+def gate_claude(data):
+    guides = claude_guides(data)
     if not guides:
         return 0
 
-    read = read_in_session(data.get('transcript_path') or '', guides)
+    read, why_not = guide_evidence(data, guides)
+    if why_not:
+        print(NO_EVIDENCE.format(detail=why_not), file=sys.stderr)
+        return 2
+
     unread = [g for g in guides if resolved(g) not in read]
     if not unread:
         return 0

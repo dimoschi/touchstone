@@ -15,6 +15,7 @@ from hook_invocation import normalize_invocation
 
 copilot = normalize_invocation({
     "hook_event_name": "PreToolUse",
+    "host": "copilot",
     "session_id": "copilot-session",
     "timestamp": "2026-09-12T00:00:00Z",
     "cwd": "/tmp/repo",
@@ -31,6 +32,7 @@ assert copilot.tool_input["file_path"] == "pkg/a.py"
 
 post = normalize_invocation({
     "hook_event_name": "PostToolUse",
+    "host": "copilot",
     "session_id": "copilot-session",
     "cwd": "/tmp/repo",
     "tool_name": "Write",
@@ -42,6 +44,7 @@ assert post.event == "post_tool_use"
 
 copilot_no_cwd = normalize_invocation({
     "hook_event_name": "PreToolUse",
+    "host": "copilot",
     "session_id": "copilot-session",
     "tool_name": "Edit",
     "tool_input": {"file_path": "pkg/a.py", "old_string": "x", "new_string": "y"},
@@ -78,14 +81,26 @@ assert legacy.host == "claude"
 
 missing_session = normalize_invocation({
     "hook_event_name": "PreToolUse",
+    "host": "copilot",
     "cwd": "/tmp/repo",
     "tool_name": "Edit",
     "tool_input": {"file_path": "pkg/a.py"},
 })
 assert missing_session is None
 
+# the same payload without the host marker is Claude, which needs no session id
+claude_event = normalize_invocation({
+    "hook_event_name": "PreToolUse",
+    "cwd": "/tmp/repo",
+    "tool_name": "Edit",
+    "tool_input": {"file_path": "pkg/a.py"},
+})
+assert claude_event is not None
+assert claude_event.host == "claude"
+
 empty_session = normalize_invocation({
     "hook_event_name": "PreToolUse",
+    "host": "copilot",
     "session_id": "",
     "cwd": "/tmp/repo",
     "tool_name": "Edit",
@@ -95,6 +110,7 @@ assert empty_session is None
 
 non_string_session = normalize_invocation({
     "hook_event_name": "PostToolUse",
+    "host": "copilot",
     "session_id": 123,
     "cwd": "/tmp/repo",
     "tool_name": "Write",

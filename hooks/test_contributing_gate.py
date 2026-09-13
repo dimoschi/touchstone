@@ -32,6 +32,18 @@ def _legacy_payload(transcript, file_path):
     return json.dumps({"transcript_path": str(transcript), "tool_input": tool_input})
 
 
+def _claude_payload(transcript, file_path, cwd):
+    """The shape Claude Code actually sends: an event name and no host key."""
+    return json.dumps({
+        "hook_event_name": "PreToolUse",
+        "session_id": "s1",
+        "transcript_path": str(transcript),
+        "cwd": str(cwd),
+        "tool_name": "Edit",
+        "tool_input": {"file_path": file_path},
+    })
+
+
 def _write_transcript(path, entries):
     """entries: list of (tool_name_or_None, file_path) for tool_use blocks,
     or a raw string line for something else."""
@@ -50,6 +62,28 @@ def _write_transcript(path, entries):
 def _run(monkeypatch, payload):
     monkeypatch.setattr("sys.stdin", io.StringIO(payload))
     return gate.main()
+
+
+def test_claude_shaped_payload_honours_the_transcript(monkeypatch, tmp_path):
+    """Regression: every earlier test used the legacy shape, so nothing
+    exercised the payload Claude Code really sends. Classified as copilot, it
+    reached gate_copilot, whose evidence no Claude-side hook writes, and every
+    edit in a gated repo was refused."""
+    repo = _repo(tmp_path, "guided", guides=[("CONTRIBUTING.md", "read me")])
+    transcript = tmp_path / "read.jsonl"
+    _write_transcript(transcript, [("Read", str(repo / "CONTRIBUTING.md"))])
+    rc = _run(monkeypatch, _claude_payload(
+        transcript, str(repo / "internal" / "app.go"), repo))
+    assert rc == 0
+
+
+def test_claude_shaped_payload_still_blocks_an_unread_guide(monkeypatch, tmp_path):
+    repo = _repo(tmp_path, "guided", guides=[("CONTRIBUTING.md", "read me")])
+    transcript = tmp_path / "empty.jsonl"
+    _write_transcript(transcript, [("Read", str(repo / "somewhere-else.md"))])
+    rc = _run(monkeypatch, _claude_payload(
+        transcript, str(repo / "internal" / "app.go"), repo))
+    assert rc == 2
 
 
 def test_edit_with_unread_guide_is_blocked(monkeypatch, tmp_path):
@@ -98,10 +132,28 @@ def test_block_message_quoting_the_path_does_not_count(monkeypatch, tmp_path):
     assert rc == 2
 
 
-def test_unreadable_transcript_does_not_count(monkeypatch, tmp_path):
+def test_unreadable_transcript_says_so_instead_of_blaming_the_guide(
+        monkeypatch, tmp_path, capsys):
+    """A transcript the gate cannot open is not evidence that the guide is
+    unread. Reporting it as one is unactionable: the agent re-reads the guide,
+    is refused again, and nothing says why."""
     repo = _repo(tmp_path, "guided", guides=[("CONTRIBUTING.md", "read me")])
-    rc = _run(monkeypatch, _legacy_payload(tmp_path / "nope.jsonl", str(repo / "internal" / "app.go")))
+    missing = tmp_path / "nope.jsonl"
+    rc = _run(monkeypatch, _legacy_payload(missing, str(repo / "internal" / "app.go")))
+    err = capsys.readouterr().err
     assert rc == 2
+    assert str(missing) in err
+    assert 'Read it before editing' not in err
+
+
+def test_payload_with_no_transcript_path_says_so(monkeypatch, tmp_path, capsys):
+    repo = _repo(tmp_path, "guided", guides=[("CONTRIBUTING.md", "read me")])
+    payload = json.dumps({"tool_input": {"file_path": str(repo / "internal" / "app.go")}})
+    rc = _run(monkeypatch, payload)
+    err = capsys.readouterr().err
+    assert rc == 2
+    assert 'no transcript_path' in err
+    assert 'Read it before editing' not in err
 
 
 def test_multiple_guides_all_must_be_read(monkeypatch, tmp_path):
@@ -215,7 +267,7 @@ def test_read_in_session_skips_read_block_with_non_dict_input(tmp_path):
 def test_legacy_missing_toplevel_after_gated_check_is_allowed(monkeypatch, tmp_path):
     repo = _repo(tmp_path, "guided", guides=[("CONTRIBUTING.md", "read me")])
     target = repo / "internal" / "app.go"
-    # gate_legacy's only `git()` call after the is_gated check is this exact
+    # gate_claude's only `git()` call after the is_gated check is this exact
     # show-toplevel lookup, so a plain stub covers it without a passthrough
     # branch that would never run.
     monkeypatch.setattr(gate, "git", lambda path, *args: None)
@@ -236,6 +288,7 @@ def _copilot_pre(session_id, cwd, tool_name, file_path):
     tool_input = {} if file_path is None else {"path": file_path}
     return json.dumps({
         "hook_event_name": "PreToolUse",
+        "host": "copilot",
         "session_id": session_id,
         "cwd": str(cwd),
         "tool_name": tool_name,
@@ -246,6 +299,7 @@ def _copilot_pre(session_id, cwd, tool_name, file_path):
 def _record_copilot_read(monkeypatch, session_id, cwd, tool_name, file_path, result_type="success"):
     payload = json.dumps({
         "hook_event_name": "PostToolUse",
+        "host": "copilot",
         "session_id": session_id,
         "cwd": str(cwd),
         "tool_name": tool_name,
@@ -373,6 +427,7 @@ def test_copilot_edit_outside_any_repo_is_allowed(monkeypatch, tmp_path):
     monkeypatch.setenv(cse.STATE_ENV, str(tmp_path / "state"))
     payload = json.dumps({
         "hook_event_name": "PreToolUse",
+        "host": "copilot",
         "session_id": "s1",
         "cwd": str(tmp_path),
         "tool_name": "Edit",

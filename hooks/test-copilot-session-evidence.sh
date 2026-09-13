@@ -33,6 +33,7 @@ import sys
 event, session_id, cwd, tool_name, target_path, result_type = sys.argv[1:7]
 payload = {
     "hook_event_name": event,
+    "host": "copilot",
     "session_id": session_id,
     "cwd": cwd,
     "tool_name": tool_name,

@@ -69,9 +69,28 @@ def test_legacy_payload_session_id_kept_only_if_str():
     assert inv.session_id is None
 
 
-def test_pre_tool_use_defaults_to_copilot_and_requires_session_and_cwd():
+def test_claude_pre_tool_use_payload_is_not_classified_as_copilot():
+    """Claude Code sends hook_event_name and no host key.
+
+    Defaulting that to copilot routed every real Claude edit into
+    gate_copilot, which clears only via session-evidence state that no
+    Claude-side hook writes, so a gated repo refused every edit.
+    """
     inv = normalize_invocation(
-        _base(hook_event_name="PreToolUse", session_id="s1", cwd="/tmp")
+        _base(
+            hook_event_name="PreToolUse",
+            session_id="abc123",
+            transcript_path="/tmp/abc123.jsonl",
+            cwd="/tmp",
+        )
+    )
+    assert inv.host == "claude"
+    assert inv.event == "pre_tool_use"
+
+
+def test_explicit_copilot_pre_tool_use_requires_session_and_cwd():
+    inv = normalize_invocation(
+        _base(hook_event_name="PreToolUse", host="copilot", session_id="s1", cwd="/tmp")
     )
     assert inv.host == "copilot"
     assert inv.event == "pre_tool_use"
@@ -79,19 +98,19 @@ def test_pre_tool_use_defaults_to_copilot_and_requires_session_and_cwd():
     assert inv.cwd == Path("/tmp").resolve()
 
     assert normalize_invocation(
-        _base(hook_event_name="PreToolUse", session_id=None, cwd="/tmp")
+        _base(hook_event_name="PreToolUse", host="copilot", session_id=None, cwd="/tmp")
     ) is None
     assert normalize_invocation(
-        _base(hook_event_name="PreToolUse", session_id="s1", cwd=None)
+        _base(hook_event_name="PreToolUse", host="copilot", session_id="s1", cwd=None)
     ) is None
     assert normalize_invocation(
-        _base(hook_event_name="PreToolUse", session_id="s1", cwd="")
+        _base(hook_event_name="PreToolUse", host="copilot", session_id="s1", cwd="")
     ) is None
 
 
 def test_post_tool_use_event_maps_correctly():
     inv = normalize_invocation(
-        _base(hook_event_name="PostToolUse", session_id="s1", cwd="/tmp")
+        _base(hook_event_name="PostToolUse", host="copilot", session_id="s1", cwd="/tmp")
     )
     assert inv.event == "post_tool_use"
     assert inv.host == "copilot"

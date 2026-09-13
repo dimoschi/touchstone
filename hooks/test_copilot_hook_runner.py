@@ -28,6 +28,29 @@ def _run(monkeypatch, key, payload_bytes, record_ok=True):
     return runner.main()
 
 
+def test_child_payload_is_stamped_copilot_but_evidence_keeps_the_original(monkeypatch):
+    """The runner is the only place that knows the host, so it must say so.
+
+    Nothing in a payload's shape distinguishes Copilot from Claude, so the
+    gates default to claude. Every Copilot entry comes through here, which
+    makes this the one honest place to mark it.
+    """
+    seen = {}
+    monkeypatch.setattr(runner, "_run_child",
+                        lambda name, raw: (seen.__setitem__("child", raw), (True, ""))[1])
+    monkeypatch.setattr(runner, "record_hook_input",
+                        lambda key, raw: seen.__setitem__("recorded", raw))
+    monkeypatch.setattr("sys.argv", ["copilot-hook-runner.py", "gate-pipe"])
+    original = json.dumps(_payload()).encode()
+    monkeypatch.setattr("sys.stdin", SimpleNamespace(buffer=io.BytesIO(original)))
+
+    runner.main()
+
+    assert json.loads(seen["child"])["host"] == "copilot"
+    # evidence is what Copilot actually sent, not what we handed the gate
+    assert seen["recorded"] == original
+
+
 def test_unknown_key_is_a_denied_pre_tool_use(monkeypatch, capsys):
     monkeypatch.setattr("sys.argv", ["copilot-hook-runner.py", "not-a-real-key"])
     monkeypatch.setattr("sys.stdin", SimpleNamespace(buffer=io.BytesIO(b"{}")))

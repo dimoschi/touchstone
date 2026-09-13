@@ -44,13 +44,13 @@ def normalize_invocation(raw: object) -> HookInvocation | None:
     event_name = raw.get("hook_event_name")
     if event_name is None:
         event = "pre_tool_use"
-        host = _host_from_legacy_payload(raw)
+        host = _host_from_payload(raw)
     elif event_name == "PreToolUse":
         event = "pre_tool_use"
-        host = _host_from_event_payload(raw, default="copilot")
+        host = _host_from_payload(raw)
     elif event_name == "PostToolUse":
         event = "post_tool_use"
-        host = _host_from_event_payload(raw, default="copilot")
+        host = _host_from_payload(raw)
     else:
         return None
 
@@ -85,14 +85,20 @@ def normalize_invocation(raw: object) -> HookInvocation | None:
     )
 
 
-def _host_from_event_payload(raw: Mapping[str, object], *, default: str) -> str:
-    explicit_host = _explicit_host(raw)
-    return explicit_host or default
+def _host_from_payload(raw: Mapping[str, object]) -> str:
+    """The host that sent this payload, defaulting to claude.
 
-
-def _host_from_legacy_payload(raw: Mapping[str, object]) -> str:
-    explicit_host = _explicit_host(raw)
-    return explicit_host or "claude"
+    Shape must never decide this. Claude Code and Copilot both send
+    `hook_event_name`, `session_id`, `cwd` and `tool_input` and neither
+    marks itself, so an earlier rule that read any event-shaped payload as
+    copilot classified every real Claude edit that way. contributing-gate
+    then routed them to gate_copilot, which clears only via the
+    session-evidence state written by a PostToolUse hook that exists in
+    copilot-hooks.json and not in hooks.json, so a gated repo refused every
+    edit except the guide itself. copilot-hook-runner.py stamps the host
+    explicitly, which is sound because it is the one place that knows.
+    """
+    return _explicit_host(raw) or "claude"
 
 
 def _explicit_host(raw: Mapping[str, object]) -> str | None:

@@ -233,6 +233,7 @@ def test_main_malformed_payload_fails(monkeypatch, capsys):
 def test_main_ignores_non_copilot_or_non_post_tool_use(monkeypatch):
     payload = {
         "hook_event_name": "PreToolUse",
+        "host": "copilot",
         "session_id": "s1",
         "cwd": "/tmp",
         "tool_name": "Read",
@@ -245,6 +246,7 @@ def test_main_ignores_non_copilot_or_non_post_tool_use(monkeypatch):
 def test_main_ignores_non_read_tool(monkeypatch):
     payload = {
         "hook_event_name": "PostToolUse",
+        "host": "copilot",
         "session_id": "s1",
         "cwd": "/tmp",
         "tool_name": "Edit",
@@ -273,6 +275,7 @@ def test_result_type_requires_result_type_string():
 def test_main_non_success_result_type_is_a_no_op(monkeypatch):
     payload = {
         "hook_event_name": "PostToolUse",
+        "host": "copilot",
         "session_id": "s1",
         "cwd": "/tmp",
         "tool_name": "Read",
@@ -296,6 +299,7 @@ def test_main_records_a_successful_read(monkeypatch, tmp_path):
     target.write_text("guide")
     payload = {
         "hook_event_name": "PostToolUse",
+        "host": "copilot",
         "session_id": "s1",
         "cwd": str(tmp_path),
         "tool_name": "Read",
@@ -317,6 +321,7 @@ def test_main_appends_to_an_existing_session_record(monkeypatch, tmp_path):
     def read(target_name):
         payload = {
             "hook_event_name": "PostToolUse",
+            "host": "copilot",
             "session_id": "s1",
             "cwd": str(tmp_path),
             "tool_name": "Read",
@@ -419,6 +424,7 @@ def test_main_session_evidence_error_is_reported(monkeypatch, tmp_path, capsys):
     monkeypatch.delenv(cse.HOME_ENV, raising=False)
     payload = {
         "hook_event_name": "PostToolUse",
+        "host": "copilot",
         "session_id": "s1",
         "cwd": str(tmp_path),
         "tool_name": "Read",
