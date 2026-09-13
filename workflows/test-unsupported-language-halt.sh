@@ -296,7 +296,7 @@ async function scenarioMutationHalts() {
         green: false, head_sha: 'impl0000000000000000000000000000000000000',
         detail: 'NEXT_ACTION is UNSUPPORTED_LANGUAGE: three options are (1) add ' +
           'support, (2) drop .mutation-gated, (3) proceed ungated.',
-        unsupported_language: true,
+        unsupported_language: true, scored: false,
       },
     },
   })
@@ -329,7 +329,7 @@ async function scenarioMutationNeedsUserRun() {
     responses: {
       'mutation:1': {
         green: false, head_sha: 'impl0000000000000000000000000000000000000',
-        detail: 'the run does not fit the Bash ceiling', needs_user_run: true,
+        detail: 'the run does not fit the Bash ceiling', needs_user_run: true, scored: false,
       },
     },
   })
@@ -357,7 +357,7 @@ async function scenarioMutationHaltWithNoDraft() {
       'mutation:1': {
         green: false, head_sha: 'impl0000000000000000000000000000000000000',
         detail: 'NEXT_ACTION is UNSUPPORTED_LANGUAGE: three options.',
-        unsupported_language: true,
+        unsupported_language: true, scored: false,
       },
     },
   })
