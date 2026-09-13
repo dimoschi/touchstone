@@ -80,30 +80,44 @@ Python gates that read the tool call on stdin and refuse it. Shared git logic
 differently: `tool_input_path()` reads both `file_path` and `path`, and
 `HookInvocation.host` is one of `claude`, `codex`, `copilot`.
 
-### Six policy gates, two manifests
+### Seven policy gates, two manifests
 
 The gates are the same on every host. What differs is how a host invokes them and how it
 learns the verdict.
 
 `hooks/hooks.json` is the Claude manifest. It invokes each gate directly, and **the exit
-code is the verdict**.
+code is the verdict**. Every gate but one is `PreToolUse`, a refusal before the tool call
+runs; `comment-policy-gate.py` is `PostToolUse`, since it inspects what a completed
+Edit/Write/MultiEdit added rather than deciding whether to allow it.
 
 `hooks/copilot-hooks.json` is the Copilot manifest. Every entry goes through one
 dispatcher, `copilot-hook-runner.py <key>`, which looks the key up in a fixed allowlist,
 runs the real gate as a child process with the same stdin, and translates the result
-into Copilot's JSON contract (`permissionDecision: allow | deny`). The dispatcher
-**always exits 0** and speaks its verdict in JSON, so do not read its exit code as a
-result. Child stderr becomes the denial reason, bounded to 12 lines and 1200 characters.
+into Copilot's JSON contract (`permissionDecision: allow | deny` for `PreToolUse`,
+`additionalContext` for `PostToolUse`). The dispatcher **always exits 0** and speaks its
+verdict in JSON, so do not read its exit code as a result. Child stderr becomes the
+denial (or context) text, bounded to 12 lines and 1200 characters.
 
 Adding a gate therefore means touching both manifests and the runner's `HOOKS` map.
 
-Three gates are opt-in via a marker at the target repo root:
+Four gates are opt-in via a marker. Three resolve it at the target repo root,
+shared by every worktree even before a commit; `comment-policy-gate.py` reads
+its own from the worktree being edited instead, since the marker carries
+policy content a branch can change. That resolution (`worktree_root` plus a
+plain `.exists()`) is a filesystem check, not a git one: the marker does not
+need to be tracked or committed at all, an untracked file created directly in
+that worktree gates it just the same. What it does need is to already be on
+disk in *that* worktree; committing it on `main` does not by itself reach a
+linked worktree that was created earlier, since the worktree's checkout is
+fixed at the point it was cut and does not pick up a later commit to the
+branch it started from on its own:
 
-| Hook | Marker | Refuses |
+| Hook | Marker | Enforcement |
 |---|---|---|
-| `crap-commit-gate.py` | `.crap-gated` | a raw `git commit`, naming `crap-commit.sh` instead |
-| `contributing-gate.py` | `.crap-gated` | the first edit until the repo's contribution guide has been read this session |
-| `mutation-pr-gate.py` | `.mutation-gated` | `gh pr create`, a merge onto a base branch, or a push at one, while the ledger is unverified |
+| `crap-commit-gate.py` | `.crap-gated` | refuses a raw `git commit`, naming `crap-commit.sh` instead |
+| `contributing-gate.py` | `.crap-gated` | refuses the first edit until the repo's contribution guide has been read this session |
+| `mutation-pr-gate.py` | `.mutation-gated` | refuses `gh pr create`, a merge onto a base branch, or a push at one, while the ledger is unverified |
+| `comment-policy-gate.py` | `.comment-gated` | `PostToolUse`, so it cannot refuse; it flags (exit 2, non-blocking) a newly added comment matching one of the marker's own regex rules after the edit has already landed. The plugin ships no default rule |
 
 Three fire everywhere, because each acts on its own evidence rather than on a marker:
 

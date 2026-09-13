@@ -105,7 +105,7 @@ for _bare in _GATED:
 def load_script(path: Path) -> ModuleType:
     """Import a hyphen-named script (not a valid module name) by file path.
 
-    Kept as the suites' entry point for the eight hyphen-named hooks. The module
+    Kept as the suites' entry point for the nine hyphen-named hooks. The module
     is already loaded by the time a test calls this, so it returns that object
     rather than a second copy.
     """

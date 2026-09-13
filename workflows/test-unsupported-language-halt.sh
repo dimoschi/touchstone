@@ -38,7 +38,7 @@ check() {
 
 echo "== static: the Mutation prompt carries the marker prohibition"
 check "the Mutation prompt says never create/edit/delete the markers" \
-  "$(grep -Fc 'Never create, edit or delete .crap-gated or' "$SCRIPT" || true)" 3
+  "$(grep -Fc 'Never create, edit or delete .crap-gated,' "$SCRIPT" || true)" 3
 check "IMPL, FIXED and GATE each declare unsupported_language as a property" \
   "$(grep -Fc "unsupported_language: { type: 'boolean' }" "$SCRIPT" || true)" 3
 

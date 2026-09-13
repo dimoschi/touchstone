@@ -53,6 +53,16 @@
             "timeoutSec": 30
           }
         ]
+      },
+      {
+        "matcher": "Edit|Write|MultiEdit",
+        "hooks": [
+          {
+            "type": "command",
+            "bash": "cd \"$PLUGIN_ROOT/hooks\" && exec python3 ./copilot-hook-runner.py comment-policy",
+            "timeoutSec": 30
+          }
+        ]
       }
     ]
   }

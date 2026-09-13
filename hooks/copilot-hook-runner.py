@@ -21,6 +21,7 @@ HOOKS = {
     "contributing": "contributing-gate.py",
     "generated-file": "generated-file-gate.py",
     "guide-read": "copilot_session_evidence.py",
+    "comment-policy": "comment-policy-gate.py",
 }
 MAX_DETAIL_LINES = 12
 MAX_DETAIL_CHARS = 1200

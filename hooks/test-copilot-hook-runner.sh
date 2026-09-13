@@ -171,12 +171,16 @@ assert seen == expected_pre
 assert all(key != "guide-read" for key, _ in seen)
 
 post = hooks["PostToolUse"]
-assert [group["matcher"] for group in post] == ["Read"]
-assert [len(group["hooks"]) for group in post] == [1]
-hook = post[0]["hooks"][0]
-assert hook == {
+assert [group["matcher"] for group in post] == ["Read", "Edit|Write|MultiEdit"]
+assert [len(group["hooks"]) for group in post] == [1, 1]
+assert post[0]["hooks"][0] == {
     "type": "command",
     "bash": 'cd "$PLUGIN_ROOT/hooks" && exec python3 ./copilot-hook-runner.py guide-read',
+    "timeoutSec": 30,
+}
+assert post[1]["hooks"][0] == {
+    "type": "command",
+    "bash": 'cd "$PLUGIN_ROOT/hooks" && exec python3 ./copilot-hook-runner.py comment-policy',
     "timeoutSec": 30,
 }
 print("  ok: config")
