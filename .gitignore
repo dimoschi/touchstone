@@ -37,3 +37,6 @@ coverage.json
 # cuts. Records carry absolute paths and full review findings, so they are
 # local state, not something a repo's team asked for.
 .claude/
+
+# mutmut copies the source tree here and runs pytest in it.
+mutants/

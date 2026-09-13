@@ -92,6 +92,39 @@ CRAP_PY_PYTEST_ARGS="tests/unit -k somepattern" crap-check.sh
 The helper exists to keep the stash dance, the join, and the artifact cleanup
 (`.complexipy_cache/`, `.coverage`) out of your hands.
 
+## Mutation setup (Signal C)
+
+`mutation-check-python.sh` drives mutmut 3, which needs `source_paths` in
+`pyproject.toml` under `[tool.mutmut]` or in `setup.cfg` under `[mutmut]`. Four
+things about it are easy to get wrong, and each fails quietly rather than loudly.
+
+- **`source_paths` is not only "what to mutate".** mutmut copies every entry into
+  `mutants/` and runs the suite there with that as the working directory. A test
+  file or a `conftest.py` outside those paths does not exist in that tree, so
+  collection fails or the mutants run against nothing. List the test directories
+  too. An entry may be a single file, which is how a repo-root `conftest.py`
+  gets there.
+- **In `setup.cfg`, one path per line.** That reader splits a list value on
+  newlines only, so a comma-separated value is read as one path of that literal
+  name. It matches nothing and the run reports `0 files mutated` while exiting 0
+  from generation. `pyproject.toml` takes a normal TOML array and is not affected.
+- **`do_not_mutate` patterns are matched with `fnmatch` against the path as
+  written.** `**/conftest.py` needs a literal `/` and so misses a `conftest.py`
+  at a source-path root; list both spellings (`conftest.py` and `*/conftest.py`,
+  `test_*.py` and `*/test_*.py`). A mutated `conftest.py` takes down mutmut's
+  forced-fail self-check before it reports anything about your code.
+- **A conftest that caches modules by name must key on the file too.** pytest's
+  rootdir search reaches the original `conftest.py` as well as the copy inside
+  `mutants/`, so the unmutated modules can claim the names first. Handing those
+  back runs the suite against unmutated code, and every mutant then comes back
+  `no tests`.
+
+`mutants/` is mutmut's own cache: gitignore it.
+
+Note that `no tests` is not a pass. The module reports such a mutant as a
+survivor, exactly like `survived`, because a mutant no test exercises is a
+change your suite cannot detect.
+
 ## Caveats and known gaps (prototype)
 
 - A changed file that is **never imported by any test** won't appear in coverage
