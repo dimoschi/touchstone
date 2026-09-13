@@ -187,17 +187,18 @@ to override.
 
 ```bash
 bash scripts/run-hook-tests.sh          # hook suites; needs only python3 and git
-bash scripts/run-go-tests.sh            # the skill's Go suites; needs a Go toolchain, python3, and an ssh signing key
+bash scripts/run-go-tests.sh            # the skill's Go-toolchain suites; needs a Go toolchain, python3, and an ssh signing key
+bash scripts/run-php-python-tests.sh    # the skill's PHP/uv suites; needs a live PHP ^8.3 + infection + phpunit, and uv
 bash scripts/check-no-private-refs.sh   # no machine- or org-specific references
 bash scripts/check-version-bump.sh      # gated directories moved version in the same range
 ```
 
-`run-go-tests.sh` runs every suite in `skills/crap-controlled-changes/test/`
-except the ones needing a live PHP toolchain or `uv`, which no job installs.
-Running a single suite, how that selection works, fixture handling and the
-toolchain each CI job provides are in [docs/testing.md](docs/testing.md). How
-the gates, hooks and workflow fit together is in
-[docs/architecture.md](docs/architecture.md).
+`run-go-tests.sh` and `run-php-python-tests.sh` run complementary halves of every
+suite in `skills/crap-controlled-changes/test/`, split by the one list in
+`scripts/lib/skill-suites.sh`. Running a single suite, how that selection works,
+fixture handling and the toolchain each CI job provides are in
+[docs/testing.md](docs/testing.md). How the gates, hooks and workflow fit
+together is in [docs/architecture.md](docs/architecture.md).
 
 ### Versioning
 

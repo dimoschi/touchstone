@@ -8,7 +8,8 @@ are the exception, driven by `pytest.ini` and `conftest.py`; see `run-python-tes
 
 ```bash
 bash scripts/run-hook-tests.sh          # every hooks/test-*.sh; needs only python3 and git
-bash scripts/run-go-tests.sh            # the skill's suites; needs Go, python3, an ssh signing key
+bash scripts/run-go-tests.sh            # the skill's Go-toolchain suites; needs Go, python3, an ssh signing key
+bash scripts/run-php-python-tests.sh    # the skill's PHP/uv suites; needs a live PHP ^8.3 + infection + phpunit, and uv
 bash scripts/run-python-tests.sh        # pytest unit suites for hooks/ and lib/; needs pytest + coverage>=7.13.1
 bash workflows/test-fix-loop-join.sh    # the workflow's fix/verify/review loop
 bash workflows/test-mutation-optin.sh   # marker opt-in behaviour
@@ -45,19 +46,25 @@ bash skills/crap-controlled-changes/test/run-mutation-go.sh
 
 Neither workflow suite takes a scenario filter; both run every scenario they define.
 
-## How `run-go-tests.sh` selects suites
+## How the two runners select suites
 
-By **exclusion**, not by grepping for a `command -v go` guard. A new suite in
-`skills/crap-controlled-changes/test/` runs there by default and opts out by name in
-`NEEDS_OTHER_TOOLCHAIN`.
+`scripts/lib/skill-suites.sh` holds one list, `NEEDS_OTHER_TOOLCHAIN`, naming every
+suite in `skills/crap-controlled-changes/test/` that needs a live PHP toolchain or
+`uv`. `run-go-tests.sh` runs discovered `run*.sh` suites **minus** that list;
+`run-php-python-tests.sh` runs the **intersection** with it. The two sets are
+complements of one discovery, so a new suite runs under `run-go-tests.sh` by default
+and opts out (into `run-php-python-tests.sh`) only by being added to the list.
 
-The rejected alternative matters: a guard-based rule could never match
-`run-go-modules.sh`, which tests Go module resolution in pure Python and so never
-carried the guard.
+Selection is by exclusion, not by grepping each suite for a `command -v go`/`uv`
+guard: that rule could never match `run-go-modules.sh`, which tests Go module
+resolution in pure Python and so never carried one.
 
-**A `SKIP:` line is a failure in this runner.** Every prerequisite the selected suites
-need is installed, so a skip means an assumption the suite makes did not hold, not a
-legitimate absence. Suites still skip normally when run by hand without a toolchain.
+**A `SKIP:` line is a failure in both runners.** Every prerequisite the selected
+suites need is installed in their own job, so a skip means an assumption the suite
+makes did not hold, not a legitimate absence. Suites still skip normally when run by
+hand without a toolchain. `run-php-python-tests.sh` also fails if discovery finds
+fewer suites than `NEEDS_OTHER_TOOLCHAIN` names: a name in the list that no longer
+exists on disk is stale and would otherwise silently shrink the job.
 
 ## Fixtures
 
@@ -71,7 +78,7 @@ Discard them yourself if that is what you want; the refusal message names the co
 
 ## What CI installs
 
-`.github/workflows/ci.yml` runs seven jobs. Three details are load-bearing:
+`.github/workflows/ci.yml` runs eight jobs. Four details are load-bearing:
 
 - The `hooks` job runs on **ubuntu and macOS**, because hooks resolve paths and symlinks
   differently and macOS reaches `/tmp` through `/private`. It installs a modern bash,
@@ -80,9 +87,9 @@ Discard them yourself if that is what you want; the refusal message names the co
 - The `go` job installs python3 alongside Go. Most selected suites shell out to
   `python3`, and so do the three gates themselves, so it is a declared prerequisite
   rather than a runner-image accident.
+- The `php-python` job installs a live PHP ^8.3 toolchain (with a pcov coverage driver,
+  phpunit and infection) and `uv`, and runs `scripts/run-php-python-tests.sh`: the
+  suites the `go` job excludes because it installs neither.
 - The `python` job also runs on **ubuntu and macOS**, for the same reason as `hooks`:
   `copilot_session_evidence.py`'s permission checks and `contributing-gate.py`'s symlink
   comparison are exactly the platform-sensitive code that matrix exists to catch.
-
-No job installs a live PHP toolchain or `uv`, so the PHP-live and Python mutation suites
-are verified by hand only.
