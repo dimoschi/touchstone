@@ -41,7 +41,14 @@ crap_exempt_pathspecs() {
     line="${line#"${line%%[![:space:]]*}"}"
     line="${line%"${line##*[![:space:]]}"}"
     [ -n "$line" ] || continue
-    printf '%s\n' ":(glob,exclude)$line"
+    # A leading '/' is gitignore's own anchor-to-this-file's-directory marker,
+    # not glob text: git pathspec's own :(top) magic already anchors to the
+    # repo root (where this marker lives), so keeping the '/' in the pattern
+    # text too makes git treat it as a literal absolute path and fail with
+    # "Invalid path '/x': No such file or directory" instead of matching
+    # anything. Strip it and let :(top) carry the anchoring.
+    line="${line#/}"
+    printf '%s\n' ":(glob,exclude,top)$line"
   done < "$marker"
 }
 
@@ -82,6 +89,8 @@ report_unsupported_sources() {
     echo "       gate. Add gitignore-style patterns to .crap-gated, one per line:"
     echo "         echo 'web/**' >> $root/.crap-gated"
     echo "       The marker is committed, so the whole team gets the same rule."
+    echo "       This also stops the gate from measuring Go/PHP/Python under that"
+    echo "       path, not only from refusing another language there."
     echo "    2. Add a module for the language: lib/crap-check-<lang>.sh, following"
     echo "       the contract the go, php and python modules already implement."
     echo "    3. Remove .crap-gated if this repo should not be gated at all."

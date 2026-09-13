@@ -252,9 +252,33 @@ check "says SKIPPED" "$(printf '%s' "$OUT" | grep -c 'SKIPPED for module')" "1"
 check "denies being a pass" "$(printf '%s' "$OUT" | grep -c 'not a pass')" "1"
 check "reports the skip in NEXT_ACTION" "$(printf '%s' "$OUT" | grep -c DEADCODE_SKIPPED)" "1"
 
+echo "case I: a marker-exempted file with no enclosing go.mod is skipped, not analysed"
+cd "$WORK"
+git init -qb main noroot
+cd noroot
+mkdir -p sub
+printf 'module example.com/noroot/sub\n\ngo 1.26\n' > sub/go.mod
+cat > sub/main.go <<'EOF'
+package main
+
+func main() {}
+EOF
+git add . && commit -m baseline
+cat > orphan.go <<'EOF'
+package main
+
+func Orphan() int { return 1 }
+EOF
+printf 'orphan.go\n' > .crap-gated
+git add orphan.go .crap-gated
+run
+check "clean exit: the exempted orphan is never analysed" "$RC" "0"
+check "reports no staged Go files once the exemption applies" \
+      "$(printf '%s' "$OUT" | grep -c 'no staged Go files')" "1"
+
 echo ""
 if [ "$failures" -eq 0 ]; then
-  echo "DEADCODE OK (8 cases)"
+  echo "DEADCODE OK (9 cases)"
 else
   echo "FAILED: $failures assertion(s)"
   exit 1

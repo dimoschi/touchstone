@@ -14,6 +14,7 @@ set -uo pipefail
 
 SKILL_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 CRAP="$SKILL_DIR/crap-check.sh"
+source "$SKILL_DIR/lib/unsupported-sources.sh"
 failures=0
 
 check() {
@@ -123,6 +124,28 @@ git add -A
 printf 'tools/scratch.go\n' >> .crap-gated
 git add -A
 check "an exempted Go file is never handed to a language module" ALLOW "$(verdict)"
+
+echo "a leading-slash exempt pattern (gitignore anchoring) is a valid pathspec, not a crash"
+git rm -q --cached tools/scratch.go >/dev/null 2>&1; rm -rf tools; git add -A
+mkdir -p unrelated
+: > unrelated/x.go
+cat > measured.go <<'EOF'
+package main
+
+func Measured() int { return 1 }
+EOF
+printf '/unrelated/**\n' > .crap-gated
+git add -A
+EXEMPT_SPEC=()
+while IFS= read -r ex; do
+  [ -n "$ex" ] && EXEMPT_SPEC+=("$ex")
+done < <(crap_exempt_pathspecs "$PWD")
+GO_OUT="$(git diff --cached --name-only -- '*.go' "${EXEMPT_SPEC[@]}" 2>&1)"; GO_RC=$?
+check "the pathspec built from a leading-slash line is valid" "0" "$GO_RC"
+check "the unrelated exempted path is filtered out" \
+      "0" "$(printf '%s\n' "$GO_OUT" | grep -c '^unrelated/x.go$')"
+check "a non-exempted Go file is still selected for measurement" \
+      "1" "$(printf '%s\n' "$GO_OUT" | grep -c '^measured.go$')"
 
 echo ""
 if [ "$failures" -eq 0 ]; then

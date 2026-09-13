@@ -34,6 +34,7 @@ SKILL_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 LIB_DIR="$SKILL_DIR/lib"
 . "$LIB_DIR/require-bash.sh"
 . "$LIB_DIR/tool-versions.sh"
+source "$LIB_DIR/unsupported-sources.sh"
 DEADCODE_VERSION="${DEADCODE_GO_VERSION:-$DEADCODE_VERSION_DEFAULT}"
 DEADCODE_PKG="golang.org/x/tools/cmd/deadcode"
 # go/packages takes build tags as an explicit flag, not from GOFLAGS, so a
@@ -63,7 +64,16 @@ if [ "${1:-}" = "--revoke" ]; then
   exec python3 "$LIB_DIR/deadcode_accepted.py" remove "$STORE" "$BRANCH" "$2"
 fi
 
-GO_SPEC=('*.go' ':(exclude)*_test.go' ':(exclude)*mock_*.go' ':(exclude)*.sql.go')
+# The marker's own exempt patterns apply here too, matching crap-check.sh: a
+# repo can carry Go source structurally unfit for this analysis (no enclosing
+# go.mod), and .crap-gated is already the one place a repo lists what it
+# excludes from measurement.
+EXEMPT_SPEC=()
+while IFS= read -r ex; do
+  [ -n "$ex" ] && EXEMPT_SPEC+=("$ex")
+done < <(crap_exempt_pathspecs "$REPO_ROOT")
+
+GO_SPEC=('*.go' ':(exclude)*_test.go' ':(exclude)*mock_*.go' ':(exclude)*.sql.go' ${EXEMPT_SPEC[@]+"${EXEMPT_SPEC[@]}"})
 CHANGED=()
 while IFS= read -r f; do
   [ -n "$f" ] && CHANGED+=("$f")

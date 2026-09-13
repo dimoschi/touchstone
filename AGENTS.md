@@ -56,6 +56,11 @@ Running one suite, fixture handling, and what CI installs: [docs/testing.md](doc
 - This repo gates itself: `.crap-gated` is committed at the root. `hooks/*.py` and
   `skills/crap-controlled-changes/lib/*.py` are measured by the pytest unit suites under
   `scripts/run-python-tests.sh`, which is what makes them real coverage instead of the
-  0%/no-data the Python gate reported before those suites existed. `workflows/*.js` is
-  exempted in the marker because no gate module scores JavaScript. Do not remove the
-  marker or widen its exemptions without the repo owner's say-so.
+  0%/no-data the Python gate reported before those suites existed. The marker also
+  exempts three things it cannot measure at all: `workflows/*.js` (no gate module scores
+  JavaScript), the throwaway git fixtures under `skills/crap-controlled-changes/test/`
+  that the skill's own suites copy into disposable repos to exercise the gate itself,
+  and `lib/mainrange.go` (a `go:build ignore` helper with no enclosing `go.mod`). An
+  exempted path is dropped from measurement entirely, for every language, not only from
+  the unsupported-language refusal. Do not remove the marker or widen its exemptions
+  without the repo owner's say-so.

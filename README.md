@@ -107,8 +107,10 @@ Elixir and the like) is **refused**, not waved through: a gate that silently
 passes what it cannot measure reports a guarantee it never checked. A repo that
 genuinely mixes languages exempts paths by listing gitignore-style patterns in
 its `.crap-gated` marker, one per line, so a Go service with a TypeScript
-frontend can gate the Go and exempt `web/**`. Files that are not program source
-— docs, config, SQL, shell — never trigger it.
+frontend can gate the Go and exempt `web/**`. The same patterns also stop the
+gate from measuring Go, PHP or Python under an exempted path, not only from
+refusing another language there. Files that are not program source — docs,
+config, SQL, shell — never trigger it.
 
 | Language | Gate tooling |
 |---|---|
