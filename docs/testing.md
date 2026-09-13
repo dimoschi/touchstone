@@ -8,6 +8,7 @@ framework and no runner to configure.
 ```bash
 bash scripts/run-hook-tests.sh          # every hooks/test-*.sh; needs only python3 and git
 bash scripts/run-go-tests.sh            # the skill's suites; needs Go, python3, an ssh signing key
+bash scripts/run-python-tests.sh        # pytest unit suites for hooks/ and lib/; needs pytest + coverage>=7.13.1
 bash workflows/test-fix-loop-join.sh    # the workflow's fix/verify/review loop
 bash workflows/test-mutation-optin.sh   # marker opt-in behaviour
 bash scripts/test-version-bump.sh       # check-version-bump.sh's own suite
@@ -17,6 +18,17 @@ The two `crap-commit.sh` suites need an ssh key for `CRAP_SIGNING_KEY` (defaulti
 `~/.ssh/id_ed25519`) and a matching entry in `gpg.ssh.allowedSignersFile`.
 `lib/go_modules.py`'s own test is pure Python and runs in the Go runner for lack of
 anywhere else.
+
+`run-python-tests.sh` runs `coverage run -m pytest` over `hooks/test_*.py` and
+`skills/crap-controlled-changes/test/unit/`, then enforces a 90% combined floor. These
+suites drive every module in-process (calling `main()` directly, never `subprocess`),
+which is what lets `coverage run -m pytest` see them: the CRAP gate's own Python module
+runs the configured suite twice per commit, so a suite that only worked via a subprocess
+round-trip would need parallel coverage collection this repo does not configure. Neither
+coverage nor pytest need to be importable in the active environment; set `CRAP_PY_RUN`
+to a launcher (e.g. `uv run --no-project --with 'coverage>=7.13.1' --with pytest --`)
+when they are not. These suites do not replace `run-hook-tests.sh` or `run-go-tests.sh`,
+which still drive the CLIs end to end and assert on their output.
 
 ## Running one suite
 
@@ -55,7 +67,7 @@ Discard them yourself if that is what you want; the refusal message names the co
 
 ## What CI installs
 
-`.github/workflows/ci.yml` runs six jobs. Two details are load-bearing:
+`.github/workflows/ci.yml` runs seven jobs. Three details are load-bearing:
 
 - The `hooks` job runs on **ubuntu and macOS**, because hooks resolve paths and symlinks
   differently and macOS reaches `/tmp` through `/private`. It installs a modern bash,
@@ -64,6 +76,9 @@ Discard them yourself if that is what you want; the refusal message names the co
 - The `go` job installs python3 alongside Go. Most selected suites shell out to
   `python3`, and so do the three gates themselves, so it is a declared prerequisite
   rather than a runner-image accident.
+- The `python` job also runs on **ubuntu and macOS**, for the same reason as `hooks`:
+  `copilot_session_evidence.py`'s permission checks and `contributing-gate.py`'s symlink
+  comparison are exactly the platform-sensitive code that matrix exists to catch.
 
 No job installs a live PHP toolchain or `uv`, so the PHP-live and Python mutation suites
 are verified by hand only.

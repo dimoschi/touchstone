@@ -1,0 +1,6 @@
+# Opt-in marker for the CRAP commit gate and the contributing-guide gate.
+# See docs/architecture.md and AGENTS.md for what this commits the repo to.
+#
+# workflows/*.js is exempt: no gate module scores JavaScript, and the workflow
+# script is tested by workflows/test-fix-loop-join.sh instead.
+workflows/*.js

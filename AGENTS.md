@@ -19,6 +19,7 @@ Read [docs/architecture.md](docs/architecture.md) before changing any of the thr
 ```bash
 bash scripts/run-hook-tests.sh          # needs only python3 and git
 bash scripts/run-go-tests.sh            # needs Go, python3, an ssh signing key
+bash scripts/run-python-tests.sh        # needs pytest + coverage>=7.13.1 (or CRAP_PY_RUN)
 bash workflows/test-fix-loop-join.sh
 bash workflows/test-mutation-optin.sh
 bash scripts/check-version-bump.sh
@@ -52,6 +53,9 @@ Running one suite, fixture handling, and what CI installs: [docs/testing.md](doc
   they run from a version-keyed plugin cache rather than from this checkout.
 - Comments here carry the WHY at unusual density, and most record a specific failure
   that already happened. Read them before changing the line they sit on.
-- This repo does not gate itself. There is no `.crap-gated` marker, because the Python
-  gate cannot measure `lib/*.py` while it is tested only by shell suites. Do not create
-  the marker to "fix" this.
+- This repo gates itself: `.crap-gated` is committed at the root. `hooks/*.py` and
+  `skills/crap-controlled-changes/lib/*.py` are measured by the pytest unit suites under
+  `scripts/run-python-tests.sh`, which is what makes them real coverage instead of the
+  0%/no-data the Python gate reported before those suites existed. `workflows/*.js` is
+  exempted in the marker because no gate module scores JavaScript. Do not remove the
+  marker or widen its exemptions without the repo owner's say-so.
