@@ -18,6 +18,11 @@ __pycache__/
 # point of keeping it out of the repo is that the terms stay unpublished.
 .private-terms
 
+# Agent guidance is part of this project, so it overrides a global ignore of
+# **/AGENTS.md. CLAUDE.md stays ignored: it is a symlink to this file, created
+# per checkout rather than committed.
+!AGENTS.md
+
 # Run state this plugin writes into whatever repo it runs in: per-ticket run
 # records under .claude/touchstone-runs/ and the worktrees the branch phase
 # cuts. Records carry absolute paths and full review findings, so they are
