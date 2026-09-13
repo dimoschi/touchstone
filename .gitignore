@@ -12,6 +12,9 @@ skills/crap-controlled-changes/test/fixture*/node_modules/
 __pycache__/
 *.py[cod]
 .pytest_cache/
+.coverage
+.coverage.*
+coverage.json
 .DS_Store
 
 # Local term list for scripts/check-no-private-refs.sh. Never tracked: the
