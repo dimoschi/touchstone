@@ -37,6 +37,17 @@ def test_git_returns_none_on_os_error(monkeypatch, tmp_path):
     assert base_branch.git(tmp_path, "status") is None
 
 
+def test_git_returns_none_on_undecodable_blob(tmp_path):
+    repo = _repo(tmp_path)
+    (repo / "task.php").write_bytes(b"<?php\n// caf\xe9 latin1 comment\n")
+    _git("add", ".", cwd=repo)
+    _git(
+        "-c", "user.name=t", "-c", "user.email=t@t", "-c", "commit.gpgsign=false",
+        "commit", "-q", "-m", "non-utf8", cwd=repo,
+    )
+    assert base_branch.git(repo, "show", "HEAD:./task.php") is None
+
+
 def test_target_repo_prefers_dash_c():
     out = base_branch.target_repo('git -C "/some repo" commit', Path("/cwd"))
     assert out == Path("/some repo")
@@ -120,3 +131,18 @@ def test_is_gated_false_when_no_existing_ancestor_at_all(monkeypatch):
     # forces the walk to exhaust without ever finding a directory.
     monkeypatch.setattr(Path, "is_dir", lambda self: False)
     assert base_branch.is_gated(Path("/definitely/not/a/real/path/x.py"), ".crap-gated") is False
+
+
+def test_marker_path_returns_root_marker_when_repo_found(tmp_path):
+    repo = _repo(tmp_path)
+    (repo / "sub").mkdir()
+    assert base_branch.marker_path(repo / "sub" / "file.py", ".comment-gated") == repo / ".comment-gated"
+
+
+def test_marker_path_none_outside_a_repo(tmp_path):
+    assert base_branch.marker_path(tmp_path / "file.py", ".comment-gated") is None
+
+
+def test_marker_path_none_when_no_existing_ancestor_at_all(monkeypatch):
+    monkeypatch.setattr(Path, "is_dir", lambda self: False)
+    assert base_branch.marker_path(Path("/definitely/not/a/real/path/x.py"), ".comment-gated") is None

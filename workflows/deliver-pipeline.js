@@ -983,10 +983,11 @@ const impl = await treeAgent(
   `never background it and wait with sleep. Follow its NEXT_ACTION until ` +
   `green. Commit signed, in as many commits as the work naturally takes. Never run ` +
   `--accept or --mark-scored yourself; both need explicit user approval. ` +
-  `Never create, edit or delete .crap-gated or .mutation-gated on your own ` +
-  `initiative: whether a repo is gated is the repo owner's decision, not ` +
-  `yours, and a repo without either marker is simply not gated -- say so and ` +
-  `continue. The one exception is a NEXT_ACTION of UNSUPPORTED_LANGUAGE: halt ` +
+  `Never create, edit or delete .crap-gated, .mutation-gated or ` +
+  `.comment-gated on your own initiative: whether a repo is gated (and by ` +
+  `which policy) is the repo owner's decision, not yours, and a repo ` +
+  `without any of them is simply not gated -- say so and continue. The ` +
+  `one exception is a NEXT_ACTION of UNSUPPORTED_LANGUAGE: halt ` +
   `and report its three options to the user rather than picking one and ` +
   `editing the marker yourself. Set unsupported_language=true when you do, ` +
   `and put the three options in summary; leave commit_range as the unchanged ` +
@@ -1417,12 +1418,12 @@ while (open.length && round < MAX_REVIEW_ROUNDS && !outOfBudget() && !sFix.over(
     `iterating with the repo's own test command. Commit with crap-commit.sh, ` +
     `which gates and commits in one call: run it in the foreground with a Bash ` +
     `timeout of 600000, never background it and wait with sleep, and do not ` +
-    `pre-run crap-check.sh. Never create, edit or delete .crap-gated or ` +
-    `.mutation-gated on your own initiative: that is the repo owner's ` +
-    `decision, not yours, and a repo without either marker is simply not ` +
-    `gated -- say so and continue. The one exception is a NEXT_ACTION of ` +
-    `UNSUPPORTED_LANGUAGE: halt and report its three options to the user ` +
-    `rather than picking one and editing the marker yourself. Set ` +
+    `pre-run crap-check.sh. Never create, edit or delete .crap-gated, ` +
+    `.mutation-gated or .comment-gated on your own initiative: that is the ` +
+    `repo owner's decision, not yours, and a repo without any of them is ` +
+    `simply not gated -- say so and continue. The one exception is a ` +
+    `NEXT_ACTION of UNSUPPORTED_LANGUAGE: halt and report its three options ` +
+    `to the user rather than picking one and editing the marker yourself. Set ` +
     `unsupported_language=true when you do, and put the three options in note. ` +
     `Do not push or open a PR.\n` +
     `Task: ${brief(task)}\n` +
@@ -1655,12 +1656,12 @@ for (let attempt = 1; attempt <= MAX_GATE_ATTEMPTS && !mutation.green
   mutation = await treeAgent(
     `Run mutation-check.sh from the crap-controlled-changes skill in this repo. ` +
     `It mutates files in place and needs a clean working tree, so commit anything ` +
-    `outstanding first. Never create, edit or delete .crap-gated or ` +
-    `.mutation-gated on your own initiative: that is the repo owner's ` +
-    `decision, not yours, and a repo without either marker is simply not ` +
-    `gated -- say so and continue. The one exception is a NEXT_ACTION of ` +
-    `UNSUPPORTED_LANGUAGE: halt and report its three options to the user ` +
-    `rather than picking one and editing the marker yourself. Set ` +
+    `outstanding first. Never create, edit or delete .crap-gated, ` +
+    `.mutation-gated or .comment-gated on your own initiative: that is the ` +
+    `repo owner's decision, not yours, and a repo without any of them is ` +
+    `simply not gated -- say so and continue. The one exception is a ` +
+    `NEXT_ACTION of UNSUPPORTED_LANGUAGE: halt and report its three options ` +
+    `to the user rather than picking one and editing the marker yourself. Set ` +
     `unsupported_language=true when you do, and put the three options in ` +
     `detail.\n` +
     `HOW TO RUN IT, in this order. The skill's Signal C settles all of this ` +

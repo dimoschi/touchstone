@@ -55,13 +55,29 @@ Then opt a repository in. **Nothing is gated until you say so:**
 cd your-repo
 touch .crap-gated        # dead-code + CRAP gate on every commit, and the guide gate
 touch .mutation-gated    # mutation gate before a PR can open
-git add .crap-gated .mutation-gated
+printf '\\bTODO\\b\n' > .comment-gated   # flags a newly added comment matching any rule below, one regex per line
+git add .crap-gated .mutation-gated .comment-gated
+git commit -m "Opt in to touchstone's gates"
 ```
 
-Both markers are committable, so opting in is one decision a team shares rather
-than something each person configures. They are separate on purpose: the CRAP
-ledger can always be made green by writing tests, but some codebases carry mutants
-no test can ever kill (a string-heavy module where the mutator only flips the case
+Run this from a plain terminal, not inside a Claude Code session: the two `touch` lines
+just gated the repo, and `crap-commit-gate.py` refuses a raw `git commit` from that point
+on, naming `crap-commit.sh` instead (see [Signing](#signing)).
+
+All three markers are committable, so opting in is one decision a team shares
+rather than something each person configures. `.crap-gated` and `.mutation-gated`
+are plain booleans (present or absent); `.comment-gated` instead carries the
+policy itself, so `touch .comment-gated` alone flags nothing until you add a
+rule line. `.crap-gated`/`.mutation-gated` resolve to the same file at the repo
+root for every worktree even while only staged; `.comment-gated` instead has to
+already sit on disk in the worktree actually being edited, a plain filesystem
+check. It does not need to be tracked or committed at all, but a copy that
+only exists in the main checkout (staged, committed, or otherwise) is invisible
+to a linked worktree (where this pipeline's own runs happen) unless that
+worktree's own checkout already has it. `.crap-gated` and `.mutation-gated` are separate from each other on
+purpose: the CRAP ledger can always be made green by writing tests, but some
+codebases carry mutants no test can ever kill (a string-heavy module where the
+mutator only flips the case
 of case-insensitive keys). One shared marker made those repos unmergeable.
 
 ## Every run needs a ticket. This is deliberate
@@ -138,7 +154,7 @@ commands/deliver.md              /touchstone:deliver — parses flags, refuses w
 workflows/deliver-pipeline.js    the nine-phase orchestration
 agents/planner.md                plan-only subagent, has no Edit or Write tool
 skills/crap-controlled-changes/  the gates, their language modules, and their docs
-hooks/                           six policy gates, with a manifest per host
+hooks/                           seven policy gates, with a manifest per host
 ```
 
 ### The phases
@@ -155,11 +171,12 @@ hooks/                           six policy gates, with a manifest per host
 
 ### The hooks
 
-Three apply only to repos you opted in:
+Four apply only to repos you opted in:
 
 - `crap-commit-gate.py` — refuses raw `git commit`, names `crap-commit.sh` instead. It does not guess which repo a command targets; it resolves `git -C` and `cd` chains and refuses decidably.
 - `mutation-pr-gate.py` — verifies the mutation ledger before `gh pr create`, a `git merge` onto a base branch, or a `git push` at one.
 - `contributing-gate.py` — refuses the first edit until the repo's `CONTRIBUTING.md` has actually been Read this session. A repo shipping no guide is never gated.
+- `comment-policy-gate.py` — flags a newly added comment that matches a rule in the repo's own `.comment-gated` (one regex per line, blank and `#` lines ignored; a rule that itself must start with a literal `#`, such as `#\d+`, needs `\#\d+` instead, or the line reads as a marker comment and is dropped). The plugin ships no default rule, so an absent, empty, or comment-only marker flags nothing. Comment detection is prefix-based per file extension, not a parser: it never sees a block comment or a trailing (same-line) comment, and does not report a line number. It also flags a string literal, heredoc, or docstring line whose first non-space character happens to be the comment prefix, since it cannot tell that apart from a real comment: not a blind spot, the opposite of one.
 
 Three apply everywhere, because each fires only on its own evidence:
 
@@ -167,7 +184,7 @@ Three apply everywhere, because each fires only on its own evidence:
 - `gate-pipe-gate.py` — refuses piping a gate anywhere. `$?` after a pipeline is the *last* command's status, so `mutation-check.sh | tail` reports tail's exit 0 however the gate ended, turning a red gate into a reported pass.
 - `generated-file-gate.py` — refuses hand-editing a file whose own header says `@generated` or `DO NOT EDIT`. The marker is the file's consent, so this needs no repo opt-in.
 
-The same six run on Claude Code and on Copilot. Each host gets its own manifest
+The same seven run on Claude Code and on Copilot. Each host gets its own manifest
 (`hooks/hooks.json`, `hooks/copilot-hooks.json`) over one set of scripts, because the
 hosts disagree about how a hook is invoked and how it reports a refusal. Copilot
 additionally carries a `PostToolUse` hook on `Read`, which is how `contributing-gate.py`
