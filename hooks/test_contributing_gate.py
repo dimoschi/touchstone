@@ -152,7 +152,7 @@ def test_payload_with_no_transcript_path_says_so(monkeypatch, tmp_path, capsys):
     rc = _run(monkeypatch, payload)
     err = capsys.readouterr().err
     assert rc == 2
-    assert 'the hook payload carried no transcript_path' in err
+    assert ': the hook payload carried no transcript_path\n' in err
     assert 'Read it before editing' not in err
 
 
@@ -233,6 +233,7 @@ def test_non_read_block_before_the_read_block_does_not_stop_the_scan(
         {"type": "tool_use", "name": "Grep",
          "input": {"file_path": str(repo / "CONTRIBUTING.md")}},
         "not even a dict",
+        {"type": "tool_use", "name": "Read", "input": "CONTRIBUTING.md"},
         {"type": "tool_use", "name": "Read",
          "input": {"file_path": str(repo / "CONTRIBUTING.md")}}]}})
     transcript.write_text(line + "\n")
