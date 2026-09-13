@@ -168,7 +168,7 @@ function idsIn(prompt) {
 function makeAgent(scenario, captured) {
   return async (prompt, opts) => {
     const label = opts.label
-    captured.calls.push({ label, prompt })
+    captured.calls.push({ label, prompt, schema: opts.schema })
 
     if (label === 'ticket') {
       return { found: true, summary: 'stub ticket', description: 'd', comments: '' }
@@ -871,6 +871,12 @@ async function scenarioX() {
   check('the suspect is in the payload', result.regression_suspects?.length, 1)
   check('the comment prompt carries the suspect claim',
     (captured.haltNoticePrompt ?? '').includes('off-by-one at the array end'), true)
+  // A mutation agent that omits scored is indistinguishable from one that
+  // scored nothing, which is exactly how a scoring commit can still report
+  // "nothing scorable": the schema handed to the agent must force the field.
+  const mutationCall = captured.calls.find((c) => c.label === 'mutation:1')
+  check('the mutation schema requires scored',
+    mutationCall?.schema?.required?.includes('scored'), true)
 }
 
 async function scenarioY() {
