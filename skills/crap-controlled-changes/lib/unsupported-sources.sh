@@ -17,6 +17,10 @@
 # mixed repo -- a Go service with a TypeScript frontend gates the Go and
 # exempts web/ -- without forcing a choice between gating everything and
 # gating nothing. An empty marker, which is the common case, exempts nothing.
+#
+# crap_exempt_pathspecs is also read by crap-check.sh itself to narrow
+# GO_SPEC/PHP_SPEC/PY_SPEC, so the same patterns exempt a file this gate
+# measures, not only one it cannot measure at all.
 
 UNSUPPORTED_SPEC=(
   '*.ts' '*.tsx' '*.js' '*.jsx' '*.mjs' '*.cjs'

@@ -100,7 +100,11 @@ def test_state_dir_rejects_symlinked_directory(monkeypatch, tmp_path):
 
 def test_state_dir_rejects_group_or_world_permissions(monkeypatch, tmp_path):
     state_dir = tmp_path / "state"
-    state_dir.mkdir(mode=0o755)
+    # mkdir(mode=...) is masked by the process umask, so a strict umask (077)
+    # would silently narrow 0o755 to 0o700 and this test would never see the
+    # permissions it means to reject. chmod is not subject to umask.
+    state_dir.mkdir()
+    os.chmod(state_dir, 0o755)
     monkeypatch.setenv(cse.STATE_ENV, str(state_dir))
     with pytest.raises(cse.SessionEvidenceError, match="owner-only permissions"):
         cse._state_dir(create=False)

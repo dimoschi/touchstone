@@ -110,6 +110,20 @@ echo "a repo that never opted in is never refused"
 rm -f .crap-gated; git add -A
 check "no marker, typescript staged" ALLOW "$(verdict)"
 
+echo "an exempted path is also skipped for a language the gate measures, not only an unsupported one"
+rm -f web/app.ts src/other.ts; git add -A
+touch .crap-gated
+mkdir -p tools
+cat > tools/scratch.go <<'EOF'
+package main
+
+func Scratch() int { return 1 }
+EOF
+git add -A
+printf 'tools/scratch.go\n' >> .crap-gated
+git add -A
+check "an exempted Go file is never handed to a language module" ALLOW "$(verdict)"
+
 echo ""
 if [ "$failures" -eq 0 ]; then
   echo "UNSUPPORTED SOURCES OK"

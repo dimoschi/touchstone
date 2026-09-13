@@ -6,7 +6,11 @@
 #
 # Neither coverage nor pytest need to be importable in the active environment:
 # set CRAP_PY_RUN to a launcher prefix when they are not, e.g.
-#   CRAP_PY_RUN="uv run --no-project --with 'coverage>=7.13.1' --with pytest --"
+#   CRAP_PY_RUN="uv run --no-project --with coverage>=7.13.1 --with pytest --"
+# No inner quotes around the version spec: this value is expanded unquoted
+# below, and word splitting does not strip quote characters the way the shell
+# does while parsing a script, so a quoted spec reaches uv as a literal string
+# containing quote characters and fails to resolve.
 # (the same variable skills/crap-controlled-changes/lib/crap-check-python.sh
 # reads, so one setting covers both).
 #
@@ -18,6 +22,15 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
 CRAP_PY_RUN="${CRAP_PY_RUN:-}"
+
+# Checked before the real run so a broken launcher is reported as that, not
+# misread as "pytest reported failures" once coverage never runs at all.
+if ! $CRAP_PY_RUN coverage --version >/dev/null 2>&1; then
+  echo "!! 'coverage' not runnable via '${CRAP_PY_RUN:-<active env>}'" >&2
+  echo "   Hint: install coverage.py + pytest in this environment, or set CRAP_PY_RUN" >&2
+  echo "   to a launcher, e.g. CRAP_PY_RUN=\"uv run --no-project --with coverage>=7.13.1 --with pytest --\"." >&2
+  exit 1
+fi
 
 $CRAP_PY_RUN coverage run -m pytest
 TEST_STATUS=$?

@@ -1,7 +1,8 @@
 # Testing
 
-Every suite is a bash script that exits 0 green, non-zero red. There is no test
-framework and no runner to configure.
+Most suites are bash scripts that exit 0 green, non-zero red, with no framework to
+configure. The pytest unit suites under `hooks/` and `skills/crap-controlled-changes/test/unit/`
+are the exception, driven by `pytest.ini` and `conftest.py`; see `run-python-tests.sh` below.
 
 ## Runners
 
@@ -16,8 +17,9 @@ bash scripts/test-version-bump.sh       # check-version-bump.sh's own suite
 
 The two `crap-commit.sh` suites need an ssh key for `CRAP_SIGNING_KEY` (defaulting to
 `~/.ssh/id_ed25519`) and a matching entry in `gpg.ssh.allowedSignersFile`.
-`lib/go_modules.py`'s own test is pure Python and runs in the Go runner for lack of
-anywhere else.
+`lib/go_modules.py` now carries two independent suites: `run-go-modules.sh`, pure Python
+but still run by the Go runner for lack of moving it, and `test/unit/test_go_modules.py`,
+which runs under `run-python-tests.sh` instead.
 
 `run-python-tests.sh` runs `coverage run -m pytest` over `hooks/test_*.py` and
 `skills/crap-controlled-changes/test/unit/`, then enforces a 90% combined floor. These
@@ -26,8 +28,10 @@ which is what lets `coverage run -m pytest` see them: the CRAP gate's own Python
 runs the configured suite twice per commit, so a suite that only worked via a subprocess
 round-trip would need parallel coverage collection this repo does not configure. Neither
 coverage nor pytest need to be importable in the active environment; set `CRAP_PY_RUN`
-to a launcher (e.g. `uv run --no-project --with 'coverage>=7.13.1' --with pytest --`)
-when they are not. These suites do not replace `run-hook-tests.sh` or `run-go-tests.sh`,
+to a launcher (e.g. `uv run --no-project --with coverage>=7.13.1 --with pytest --`, no
+inner quotes: the value is expanded unquoted, so a quoted spec reaches the launcher as a
+literal string containing quote characters) when they are not. These suites do not
+replace `run-hook-tests.sh` or `run-go-tests.sh`,
 which still drive the CLIs end to end and assert on their output.
 
 ## Running one suite

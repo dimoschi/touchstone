@@ -64,11 +64,22 @@ fi
 # These excludes control *selection* (what gets scored) only. They have no
 # bearing on the baseline stash: an excluded file still sits in the working
 # tree during the baseline phase and still has to compile. See lib/ignored-files.sh.
-GO_SPEC=('*.go' ':(exclude)*_test.go' ':(exclude)*mock_*.go' ':(exclude)*.sql.go' ':(exclude)*.pb.go')
-PHP_SPEC=('*.php' ':(exclude)tests/**' ':(exclude)**/Tests/**' ':(exclude)**/*Test.php')
+#
+# The marker's own exempt patterns apply here too, not only to the unsupported-
+# language check below: a repo can carry Go/PHP/Python source it structurally
+# cannot score (a fixture copied into a throwaway git repo to test this gate
+# itself, a standalone helper script with no enclosing module) and .crap-gated
+# is already the one place a repo lists what it excludes from measurement.
+EXEMPT_SPEC=()
+while IFS= read -r ex; do
+  [ -n "$ex" ] && EXEMPT_SPEC+=("$ex")
+done < <(crap_exempt_pathspecs "$REPO_ROOT")
+
+GO_SPEC=('*.go' ':(exclude)*_test.go' ':(exclude)*mock_*.go' ':(exclude)*.sql.go' ':(exclude)*.pb.go' ${EXEMPT_SPEC[@]+"${EXEMPT_SPEC[@]}"})
+PHP_SPEC=('*.php' ':(exclude)tests/**' ':(exclude)**/Tests/**' ':(exclude)**/*Test.php' ${EXEMPT_SPEC[@]+"${EXEMPT_SPEC[@]}"})
 PY_SPEC=('*.py' ':(exclude)**/test_*.py' ':(exclude)**/*_test.py'
          ':(exclude)tests/**' ':(exclude)**/tests/**'
-         ':(exclude)conftest.py' ':(exclude)**/conftest.py')
+         ':(exclude)conftest.py' ':(exclude)**/conftest.py' ${EXEMPT_SPEC[@]+"${EXEMPT_SPEC[@]}"})
 
 resolve_base() {
   local b="${CRAP_BASE:-}" cand
