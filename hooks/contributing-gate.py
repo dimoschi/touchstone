@@ -23,6 +23,12 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from base_branch import git, is_gated
+from copilot_session_evidence import (
+    SessionEvidenceError,
+    canonical_path,
+    read_session_paths,
+)
+from hook_invocation import normalize_invocation, tool_input_path
 
 # Extensionless CONTRIBUTORS is deliberately absent: it is commonly a generated
 # list of names rather than a guide, so gating on it costs a read and teaches
@@ -33,6 +39,7 @@ GUIDES = (
     'DEVELOPMENT.md', 'DEVELOPING.md',
 )
 GUIDE_DIRS = ('', '.github', 'docs')
+EDIT_TOOLS = frozenset({'Edit', 'Write', 'MultiEdit'})
 
 HELP = '''contributing-gate: this repo documents how it wants to be changed.
 Read it before editing:
@@ -41,6 +48,12 @@ Read it before editing:
 
 Then make the edit again. A Read of each file is the only thing that clears
 this, and it is asked once per file per session.'''
+
+UNSUPPORTED = '''contributing-gate: unsupported Copilot {tool} payload for a repo that ships contribution guides.
+This hook needs tool_input.path (or legacy tool_input.file_path) to decide what
+{tool} would change:
+
+{paths}'''
 
 
 def nearest_dir(path):
@@ -102,15 +115,75 @@ def read_in_session(transcript, guides):
             for block in content:
                 if not isinstance(block, dict) or block.get('name') != 'Read':
                     continue
-                target = (block.get('input') or {}).get('file_path')
+                input_block = block.get('input') or {}
+                if not isinstance(input_block, dict):
+                    continue
+                target = tool_input_path(input_block)
                 if target and resolved(target) in wanted:
                     seen.add(resolved(target))
     return seen
 
 
 def main():
-    data = json.load(sys.stdin)
-    target = (data.get('tool_input') or {}).get('file_path')
+    try:
+        data = json.load(sys.stdin)
+    except ValueError:
+        return 0
+
+    invocation = normalize_invocation(data)
+    if invocation is not None and invocation.host == 'copilot' \
+            and invocation.event == 'pre_tool_use':
+        return gate_copilot(invocation)
+
+    return gate_legacy(data)
+
+
+def gate_copilot(invocation):
+    if invocation.tool_name not in EDIT_TOOLS:
+        return 0
+
+    target = copilot_target(invocation)
+    if target is None:
+        top = repo_toplevel(invocation.cwd)
+        if not top:
+            return 0
+        guides = find_guides(Path(top))
+        if not is_gated(Path(top), '.crap-gated') or not guides:
+            return 0
+        print(UNSUPPORTED.format(
+            tool=invocation.tool_name,
+            paths='\n'.join(f'  {guide}' for guide in guides),
+        ), file=sys.stderr)
+        return 2
+
+    target_path = Path(target)
+    top = repo_toplevel(target_path)
+    if not top or not is_gated(target_path, '.crap-gated'):
+        return 0
+
+    guides = [g for g in find_guides(Path(top)) if canonical_path(g) != target]
+    if not guides:
+        return 0
+
+    try:
+        read = read_session_paths(invocation.session_id)
+    except SessionEvidenceError as exc:
+        print(f'contributing-gate: {exc}', file=sys.stderr)
+        return 2
+
+    unread = [g for g in guides if canonical_path(g) not in read]
+    if not unread:
+        return 0
+
+    print(HELP.format(paths='\n'.join(f'  {g}' for g in unread)), file=sys.stderr)
+    return 2
+
+
+def gate_legacy(data):
+    tool_input = data.get('tool_input') or {}
+    if not isinstance(tool_input, dict):
+        return 0
+    target = tool_input_path(tool_input)
     if not target:
         return 0
 
@@ -134,6 +207,19 @@ def main():
 
     print(HELP.format(paths='\n'.join(f'  {g}' for g in unread)), file=sys.stderr)
     return 2
+
+
+def repo_toplevel(path):
+    start = path if path.is_dir() else nearest_dir(path)
+    top = git(start, 'rev-parse', '--show-toplevel') if start else None
+    return Path(top) if top else None
+
+
+def copilot_target(invocation):
+    value = tool_input_path(invocation.tool_input)
+    if value is None:
+        return None
+    return canonical_path(value, invocation.cwd)
 
 
 if __name__ == '__main__':

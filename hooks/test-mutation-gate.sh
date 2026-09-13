@@ -48,6 +48,41 @@ expect() {
   fi
 }
 
+copilot_expect() {
+  local label="$1" want="$2" cwd="$3" cmd="$4" rc=0 out got
+  out="$(python3 - "$cwd" "$cmd" <<'PY' | python3 "$GATE" 2>&1
+import json
+import sys
+
+cwd, command = sys.argv[1:3]
+json.dump(
+    {
+        "hook_event_name": "PreToolUse",
+        "session_id": "copilot-mutation",
+        "cwd": cwd,
+        "tool_name": "Bash",
+        "tool_input": {"command": command},
+    },
+    sys.stdout,
+)
+PY
+)" || rc=$?
+  if [ "$rc" -eq 0 ]; then
+    got=ALLOW
+  elif [ "$rc" -eq 2 ]; then
+    got=BLOCK
+  else
+    got="OTHER($rc)"
+  fi
+  if [ "$got" = "$want" ]; then
+    printf '  ok:   %-52s %s\n' "$label" "$got"
+  else
+    printf '  FAIL: %-52s got %s want %s\n' "$label" "$got" "$want"
+    printf '%s\n' "$out" | sed 's/^/        /'
+    failures=$((failures + 1))
+  fi
+}
+
 record_branch() {
   local branch="$1" blob
   blob="$(git rev-parse "$branch:x.go")"
@@ -138,6 +173,16 @@ expect "non-draft create, unrecorded -> blocked"   BLOCK "$WORK" "gh pr create -
 expect "draft then ready -> blocked"               BLOCK "$WORK" "gh pr create --draft --title x; gh pr ready 7"
 expect "ready then draft -> blocked"               BLOCK "$WORK" "gh pr ready 7 && gh pr create --draft"
 expect "--draft-mode is not --draft -> blocked"    BLOCK "$WORK" "gh pr create --draft-mode"
+
+echo "copilot bash payloads hit the same mutation triggers"
+copilot_expect "copilot draft create, unrecorded -> allowed"      ALLOW "$WORK" "gh pr create --draft --title x"
+copilot_expect "copilot non-draft create, unrecorded -> blocked"  BLOCK "$WORK" "gh pr create --title x"
+copilot_expect "copilot draft then ready -> blocked"              BLOCK "$WORK" "gh pr create --draft --title x; gh pr ready 7"
+git checkout -q feature
+copilot_expect "copilot gh pr ready, recorded -> allowed"         ALLOW "$WORK" "gh pr ready"
+git checkout -q main
+copilot_expect "copilot merge unrecorded branch -> blocked"       BLOCK "$WORK" "git merge other"
+copilot_expect "copilot push unrecorded source -> blocked"        BLOCK "$WORK" "git push origin other:main"
 
 echo "=== a non-trigger command passes straight through ==="
 expect "unrelated command" ALLOW "$WORK" "git status"
