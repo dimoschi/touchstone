@@ -80,6 +80,30 @@ jobs:
       - name: Go-dependent test suites
         run: bash scripts/run-go-tests.sh
 
+  python:
+    # Both, for the same reason as the hooks job: the permission and symlink
+    # checks copilot_session_evidence.py and contributing-gate.py carry out
+    # behave differently on macOS, which reaches /tmp through /private.
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+      - name: Configure git
+        run: |
+          git config --global user.email ci@example.com
+          git config --global user.name CI
+          git config --global init.defaultBranch main
+      - name: Install pytest and coverage
+        run: python3 -m pip install pytest 'coverage>=7.13.1'
+      - name: Python unit suites
+        run: bash scripts/run-python-tests.sh
+
   scrub:
     runs-on: ubuntu-latest
     steps:

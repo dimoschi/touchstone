@@ -56,6 +56,7 @@ LIB_DIR="$SKILL_DIR/lib"
 source "$LIB_DIR/head-pairs.sh"
 source "$LIB_DIR/tool-versions.sh"
 source "$LIB_DIR/tool-fingerprint.sh"
+source "$LIB_DIR/unsupported-sources.sh"
 
 mutation_fingerprint() {
   tool_fingerprint "$1" mutago "${MUTATION_GO_MUTAGO_VERSION:-$MUTAGO_VERSION_DEFAULT}"
@@ -66,6 +67,18 @@ REPO_ROOT="$(git rev-parse --show-toplevel 2>/dev/null)" || {
   exit 2
 }
 cd "$REPO_ROOT"
+
+# The marker's exempt patterns apply here too, matching crap-check.sh and
+# deadcode-check.sh. Without them a repo carrying both markers deadlocked: an
+# exempted path was still mutated, the run that could not measure it recorded
+# nothing, and --verify refused the PR naming a re-run that could never go green.
+#
+# Built here, not beside the selection further down, because --verify is the
+# path the PR gate calls and it exits before reaching that point.
+EXEMPT_SPEC=()
+while IFS= read -r ex; do
+  [ -n "$ex" ] && EXEMPT_SPEC+=("$ex")
+done < <(crap_exempt_pathspecs "$REPO_ROOT")
 
 # Shared across worktrees for the same reason as the ledger below, with one extra:
 # this records a decision the *user* made, so losing it with a worktree means
@@ -127,7 +140,7 @@ if [ "${1:-}" = "--verify" ]; then
   VERIFY_REF="${2:-HEAD}"
   VERIFY_BRANCH="${2:-$BRANCH}"
   PAIRS="$(git diff --name-only "$BASE...$VERIFY_REF" -- '*.go' '*.php' '*.py' \
-    | head_pairs "$VERIFY_REF")"
+    ${EXEMPT_SPEC[@]+"${EXEMPT_SPEC[@]}"} | head_pairs "$VERIFY_REF")"
   VERDICT=0
   LEDGER_OUT="$(printf '%s\n' "$PAIRS" | python3 "$LIB_DIR/scored_ledger.py" \
     verify "$LEDGER" "$VERIFY_BRANCH" --borrow --head "$VERIFY_REF" \
@@ -205,7 +218,7 @@ fi
 # the exclusions the mutators below apply. Recorded to the ledger on a green
 # run: a mutation result is only valid for the source it mutated *and* the
 # tests that killed the mutants, so a deleted test must invalidate it too.
-MUTATION_PATHS="$( (git diff --name-only "$BASE" -- '*.go' '*.php' '*.py' || true) | filter_only)"
+MUTATION_PATHS="$( (git diff --name-only "$BASE" -- '*.go' '*.php' '*.py' ${EXEMPT_SPEC[@]+"${EXEMPT_SPEC[@]}"} || true) | filter_only)"
 TOOLS="$(mutation_fingerprint "$MUTATION_PATHS")"
 
 # Both mock spellings: *mock_*.go misses the _mock.go suffix, which is where a
@@ -240,12 +253,14 @@ TOOLS="$(mutation_fingerprint "$MUTATION_PATHS")"
 # boundaries, which would also exclude a main.go nested deeper than the entry
 # file itself (cmd/x/internal/main.go), not just the entry file this is
 # limited to.
-GO_FILES="$( (git diff --name-only "$BASE" -- '*.go' ':(exclude)*_test.go' ':(exclude)*mock_*.go' ':(exclude)*_mock.go' ':(exclude)**/*test/*.go' ':(exclude)test/**' ':(exclude)**/test/**' ':(exclude)*.sql.go' ':(exclude)*.pb.go' ':(exclude,glob)**/cmd/*/main.go' || true) | filter_only)"
+GO_FILES="$( (git diff --name-only "$BASE" -- '*.go' ':(exclude)*_test.go' ':(exclude)*mock_*.go' ':(exclude)*_mock.go' ':(exclude)**/*test/*.go' ':(exclude)test/**' ':(exclude)**/test/**' ':(exclude)*.sql.go' ':(exclude)*.pb.go' ':(exclude,glob)**/cmd/*/main.go' ${EXEMPT_SPEC[@]+"${EXEMPT_SPEC[@]}"} || true) | filter_only)"
 PHP_FILES="$( (git diff --name-only "$BASE" -- '*.php' \
-  ':(exclude)tests/**' ':(exclude)**/Tests/**' ':(exclude)**/*Test.php' || true) | filter_only)"
+  ':(exclude)tests/**' ':(exclude)**/Tests/**' ':(exclude)**/*Test.php' \
+  ${EXEMPT_SPEC[@]+"${EXEMPT_SPEC[@]}"} || true) | filter_only)"
 PY_FILES="$( (git diff --name-only "$BASE" -- '*.py' \
   ':(exclude)**/test_*.py' ':(exclude)**/*_test.py' \
-  ':(exclude)tests/**' ':(exclude)**/tests/**' ':(exclude)conftest.py' ':(exclude)**/conftest.py' || true) | filter_only)"
+  ':(exclude)tests/**' ':(exclude)**/tests/**' ':(exclude)conftest.py' ':(exclude)**/conftest.py' \
+  ${EXEMPT_SPEC[@]+"${EXEMPT_SPEC[@]}"} || true) | filter_only)"
 
 ran_any=0
 RAN_LANGS=""
@@ -273,7 +288,8 @@ if [ "$FULL" -eq 0 ]; then
       | python3 "$LIB_DIR/scored_ledger.py" verify "$LEDGER" "$BRANCH" \
         --borrow --head HEAD --tools "$TOOLS" \
       | sed -n 's/^unscored=//p' || true
-    git diff --name-only --diff-filter=D "$BASE" -- '*.go' '*.php' '*.py' || true
+    git diff --name-only --diff-filter=D "$BASE" -- '*.go' '*.php' '*.py' \
+      ${EXEMPT_SPEC[@]+"${EXEMPT_SPEC[@]}"} || true
   } > "$INVALIDATED"
 
   narrow() { printf '%s\n' "$2" | python3 "$LIB_DIR/incremental_scope.py" "$1" "$INVALIDATED"; }

@@ -12,6 +12,9 @@ skills/crap-controlled-changes/test/fixture*/node_modules/
 __pycache__/
 *.py[cod]
 .pytest_cache/
+.coverage
+.coverage.*
+coverage.json
 .DS_Store
 
 # Local term list for scripts/check-no-private-refs.sh. Never tracked: the
@@ -22,6 +25,12 @@ __pycache__/
 # **/AGENTS.md. CLAUDE.md stays ignored: it is a symlink to this file, created
 # per checkout rather than committed.
 !AGENTS.md
+
+# This repo gates itself, so its own opt-in marker has to be trackable here too,
+# overriding the same kind of global ignore as AGENTS.md above (personal configs
+# commonly ignore **/.crap-gated so throwaway test fixtures elsewhere do not get
+# staged by accident).
+!.crap-gated
 
 # Run state this plugin writes into whatever repo it runs in: per-ticket run
 # records under .claude/touchstone-runs/ and the worktrees the branch phase

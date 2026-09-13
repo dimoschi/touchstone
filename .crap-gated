@@ -1,0 +1,13 @@
+# Opt-in marker for the CRAP commit gate and the contributing-guide gate.
+# See docs/architecture.md and AGENTS.md for what this commits the repo to.
+#
+# workflows/*.js is exempt: no gate module scores JavaScript, and the workflow
+# script is tested by workflows/test-fix-loop-join.sh instead.
+workflows/*.js
+
+# Go/PHP/Python source this repo carries but crap-check.sh cannot score:
+# fixtures copied into throwaway git repos by skills/crap-controlled-changes/test/
+# to exercise the gate itself (each is asserted on by its own run-*.sh suite,
+# never by this gate), and a go:build-ignore helper with no enclosing go.mod.
+skills/crap-controlled-changes/test/fixture*/**
+skills/crap-controlled-changes/lib/mainrange.go

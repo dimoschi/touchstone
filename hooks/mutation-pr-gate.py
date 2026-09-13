@@ -88,9 +88,13 @@ def push_target(rest, repo, base_names):
     tokens = [t for t in rest.split() if t and not t.startswith('-')]
     refspec = tokens[1] if len(tokens) > 1 else None
     if refspec:
-        source, _, dest = refspec.partition(':')
+        # A force-push's `+` prefixes the whole refspec (`+src:dst`), landing
+        # on `source` after the split, not on `dest`; left unstripped, the
+        # returned branch name failed to resolve and a force-push to a base
+        # branch skipped the gate entirely instead of blocking it.
+        source, _, dest = refspec.lstrip('+').partition(':')
         dest = dest or source
-        if dest.lstrip('+').rsplit('/', 1)[-1].lower() in base_names:
+        if dest.rsplit('/', 1)[-1].lower() in base_names:
             return source
         return None
     head = git(repo, 'rev-parse', '--abbrev-ref', 'HEAD')

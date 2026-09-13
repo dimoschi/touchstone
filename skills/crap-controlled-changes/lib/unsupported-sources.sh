@@ -17,6 +17,15 @@
 # mixed repo -- a Go service with a TypeScript frontend gates the Go and
 # exempts web/ -- without forcing a choice between gating everything and
 # gating nothing. An empty marker, which is the common case, exempts nothing.
+#
+# crap_exempt_pathspecs is read by all three gates, not just this refusal:
+# crap-check.sh narrows GO_SPEC/PHP_SPEC/PY_SPEC with it, deadcode-check.sh its
+# own GO_SPEC, and mutation-check.sh every selection it makes including
+# --verify. So the same patterns exempt a file these gates can measure, not
+# only one no module can score at all, and the cost of adding a pattern is the
+# whole of measurement under that path: coverage, static reachability and
+# mutation alike. Widening one of these readers without the others deadlocks a
+# repo carrying both markers, which is how mutation-check.sh came to be here.
 
 UNSUPPORTED_SPEC=(
   '*.ts' '*.tsx' '*.js' '*.jsx' '*.mjs' '*.cjs'
@@ -37,7 +46,14 @@ crap_exempt_pathspecs() {
     line="${line#"${line%%[![:space:]]*}"}"
     line="${line%"${line##*[![:space:]]}"}"
     [ -n "$line" ] || continue
-    printf '%s\n' ":(glob,exclude)$line"
+    # A leading '/' is gitignore's own anchor-to-this-file's-directory marker,
+    # not glob text: git pathspec's own :(top) magic already anchors to the
+    # repo root (where this marker lives), so keeping the '/' in the pattern
+    # text too makes git treat it as a literal absolute path and fail with
+    # "Invalid path '/x': No such file or directory" instead of matching
+    # anything. Strip it and let :(top) carry the anchoring.
+    line="${line#/}"
+    printf '%s\n' ":(glob,exclude,top)$line"
   done < "$marker"
 }
 
@@ -78,6 +94,9 @@ report_unsupported_sources() {
     echo "       gate. Add gitignore-style patterns to .crap-gated, one per line:"
     echo "         echo 'web/**' >> $root/.crap-gated"
     echo "       The marker is committed, so the whole team gets the same rule."
+    echo "       This also stops all three gates -- coverage, dead code and"
+    echo "       mutation -- from measuring Go/PHP/Python under that path, not"
+    echo "       only from refusing another language there."
     echo "    2. Add a module for the language: lib/crap-check-<lang>.sh, following"
     echo "       the contract the go, php and python modules already implement."
     echo "    3. Remove .crap-gated if this repo should not be gated at all."

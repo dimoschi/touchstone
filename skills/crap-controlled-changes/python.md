@@ -10,10 +10,14 @@ The Python module needs:
    (`complexipy`) run ephemerally via `uvx`, so no project changes are required
    (the Python analogue of Go's `go run ...@latest`). The first run downloads
    each tool; subsequent runs are cached.
-2. **coverage.py (>=7) and pytest in the project environment.** Coverage must
+2. **coverage.py (>=7.13.1) and pytest in the project environment.** Coverage must
    instrument the real test run, so it runs inside the project's own env, not in
-   isolation. The default test command is `coverage run -m pytest`. If your env
-   needs a launcher, set `CRAP_PY_RUN` (e.g. `poetry run`, `uv run`).
+   isolation. The floor is 7.13.1, not merely "7": that release is what puts a
+   `start_line` on each entry in `coverage json`'s per-function `functions` map,
+   which is the key `lib/parse_python.py` joins radon's complexity against. An
+   older coverage produces a JSON the joiner silently reads as 0% coverage for
+   every function. The default test command is `coverage run -m pytest`. If your
+   env needs a launcher, set `CRAP_PY_RUN` (e.g. `poetry run`, `uv run`).
 3. **Python 3** on PATH (used by the joiner in `lib/parse_python.py`).
 
 If `coverage` is not runnable the helper prints a remediation hint.
