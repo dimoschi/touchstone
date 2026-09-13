@@ -12,13 +12,25 @@ directory and its own `HEAD`, so two sessions never contend for either.
 
 ```bash
 git fetch origin
-git worktree add <repo-root>/.claude/worktrees/<ticket-marker>-<slug> -b <branch> origin/main
+git worktree add <repo-root>/.claude/worktrees/<marker>-<slug> -b <type>/<marker>-<slug> origin/main
 ```
 
-Run every command, git included, with `-C <worktree-path>`. Never `cd` into
-the worktree, not even for a single command: the shell's working directory
+`<marker>` is `gh-<issue-number>` for a GitHub issue or `jira-<KEY>` for a Jira
+ticket (e.g. `gh-43`), `<type>` is the change's category (`feat`, `fix`,
+`docs`, `ci`, ...), and `<slug>` is a short hyphenated description. The
+worktree directory name is always the branch name with its `<type>/` prefix
+stripped, so the two never drift apart.
+
+Run every git command with `-C <worktree-path>`. Never `cd` into the
+worktree, not even for a single command: the shell's working directory
 persists between commands in an agent session, so one `cd` moves every command
-after it, including the ones that record where the work happened.
+after it, including the ones that record where the work happened. The repo's
+own non-git commands, such as `bash scripts/run-hook-tests.sh` or
+`crap-commit.sh` (see [docs/testing.md](docs/testing.md) for the full list),
+take no `-C`; give each one an absolute path instead of relying on the working
+directory, either as the script path itself
+(`bash <worktree-path>/scripts/run-hook-tests.sh`) or as the argument it
+already expects (`crap-commit.sh <worktree-path> -m "..."`).
 
 ## Ticket-driven delivery
 
