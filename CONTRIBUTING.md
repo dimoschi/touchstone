@@ -26,11 +26,13 @@ worktree, not even for a single command: the shell's working directory
 persists between commands in an agent session, so one `cd` moves every command
 after it, including the ones that record where the work happened. The repo's
 own non-git commands, such as `bash scripts/run-hook-tests.sh` or
-`crap-commit.sh` (see [docs/testing.md](docs/testing.md) for the full list),
-take no `-C`; give each one an absolute path instead of relying on the working
-directory, either as the script path itself
+`crap-commit.sh`, take no `-C`; give each one an absolute path instead of
+relying on the working directory, either as the script path itself
 (`bash <worktree-path>/scripts/run-hook-tests.sh`) or as the argument it
 already expects (`crap-commit.sh <worktree-path> -m "..."`).
+[docs/testing.md](docs/testing.md) lists these suites' invocations for the
+main clone; adapt every one the same way, with an absolute path, when running
+it against a worktree instead.
 
 ## Ticket-driven delivery
 
