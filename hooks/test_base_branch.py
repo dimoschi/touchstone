@@ -146,3 +146,11 @@ def test_marker_path_none_outside_a_repo(tmp_path):
 def test_marker_path_none_when_no_existing_ancestor_at_all(monkeypatch):
     monkeypatch.setattr(Path, "is_dir", lambda self: False)
     assert base_branch.marker_path(Path("/definitely/not/a/real/path/x.py"), ".comment-gated") is None
+
+
+def test_worktree_root_outside_a_repository_is_none(tmp_path):
+    """None, not a Path built from an empty toplevel: callers join a marker
+    name onto this and must not be handed a path rooted at '/'."""
+    loose = tmp_path / "loose"
+    loose.mkdir()
+    assert base_branch.worktree_root(loose / "a.py") is None

@@ -388,3 +388,51 @@ def test_a_genuinely_new_comment_in_a_non_utf8_file_is_still_reported(
     rc = _run(monkeypatch, _write(target, content))
     assert rc == 2
     assert "hush, newly added" in capsys.readouterr().err
+
+
+def test_policy_matching_ignores_case(monkeypatch, tmp_path, capsys):
+    """Rules compile with re.I; dropping it silently narrows every policy."""
+    repo = _repo(tmp_path)
+    (repo / ".comment-gated").write_text("hush\n")
+    target = repo / "a.py"
+    target.write_text("x = 1\n")
+    _commit(repo)
+
+    rc = _run(monkeypatch, _write(target, "x = 1\n# HUSH this is shouted\n"))
+    assert rc == 2
+    assert "HUSH this is shouted" in capsys.readouterr().err
+
+
+def test_marker_lookup_outside_any_repo_is_a_no_op(monkeypatch, tmp_path):
+    """No repo means no marker path to build; the gate must return, not
+    try to join a marker onto None."""
+    outside = tmp_path / "loose" / "a.py"
+    outside.parent.mkdir(parents=True)
+    outside.write_text("x = 1\n")
+    assert _run(monkeypatch, _write(outside, "x = 1\n# hush\n")) == 0
+
+
+def test_repo_without_the_marker_is_a_no_op(monkeypatch, tmp_path):
+    """The marker path resolves but the file is absent: still not gated."""
+    repo = _repo(tmp_path)
+    target = repo / "a.py"
+    target.write_text("x = 1\n")
+    _commit(repo)
+    assert _run(monkeypatch, _write(target, "x = 1\n# hush\n")) == 0
+
+
+def test_edit_with_a_non_string_old_value_is_a_no_op(monkeypatch, tmp_path):
+    """A malformed Edit payload must not be diffed as if old_string were text."""
+    repo = _repo(tmp_path)
+    (repo / ".comment-gated").write_text("hush\n")
+    target = repo / "a.py"
+    target.write_text("x = 1\n")
+    _commit(repo)
+
+    payload = {
+        "tool_name": "Edit",
+        "tool_input": {"file_path": str(target), "old_string": None,
+                       "new_string": "# hush added\n"},
+        "cwd": str(repo),
+    }
+    assert _run(monkeypatch, payload) == 2
