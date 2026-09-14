@@ -1840,6 +1840,11 @@ if (args?.openPr !== false && !outOfBudget()) {
         `that branch and why. gh defaults to the default branch, which would ` +
         `show the parent's commits as this PR's own.\n`
       : '') +
+    `gh has no -C flag, so the mutation gate that intercepts gh pr ready and ` +
+    `gh pr create can only resolve this worktree from a git -C ${wt.path} ` +
+    `invocation in the same Bash command, never a separate one before it. ` +
+    `Chain the push into the same command line as the gh call, e.g. ` +
+    `git -C ${wt.path} push ... && gh pr ...; do not run them as two calls.\n` +
     (draftPr?.number
       ? `A draft PR already exists for this branch: #${draftPr.number}. Do NOT ` +
         `open a second one. Push the branch, update that PR's title and body to ` +

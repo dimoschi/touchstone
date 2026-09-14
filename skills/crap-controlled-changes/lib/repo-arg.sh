@@ -24,6 +24,12 @@ resolve_repo_root() {
       ;;
     /*)
       [ -d "$arg" ] || { echo "$gate: no such directory: $arg" >&2; exit 2; }
+      # GIT_DIR/GIT_WORK_TREE in the environment outrank `-C` in git itself,
+      # so a caller's exported vars would otherwise win silently over an
+      # explicit path here -- the same env vars the ticket-43 agent resorted
+      # to before this argument existed. Unset them so the argument, once
+      # given, is the only thing that decides.
+      unset GIT_DIR GIT_WORK_TREE
       git -C "$arg" rev-parse --show-toplevel 2>/dev/null || {
         echo "$gate: not a git repository: $arg" >&2
         exit 2

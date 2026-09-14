@@ -47,7 +47,10 @@ if [ -n "${DEADCODE_TAGS:-}" ]; then
 fi
 
 REPO_ROOT="$(resolve_repo_root deadcode-check "${1:-}")" || exit 2
-case "${1:-}" in /*) shift ;; esac
+# See crap-check.sh's identical line: GIT_DIR/GIT_WORK_TREE outrank `cd` for
+# every git call below, so an explicit path would silently lose to a
+# caller's exported vars without this.
+case "${1:-}" in /*) shift; unset GIT_DIR GIT_WORK_TREE ;; esac
 cd "$REPO_ROOT"
 
 BRANCH="$(git symbolic-ref --quiet --short HEAD || echo detached)"

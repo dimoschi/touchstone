@@ -110,12 +110,12 @@ def trigger(cmd, cwd):
     default); otherwise it names the branch to verify explicitly.
     """
     if GH_PR_READY.search(cmd):
-        return cwd, None
+        return target_repo(cmd, cwd), None
     if GH_PR_CREATE.search(cmd):
         # Only a create, and only a draft one, is exempt.
         if GH_PR_DRAFT.search(cmd):
             return None
-        return cwd, None
+        return target_repo(cmd, cwd), None
 
     repo = target_repo(cmd, cwd).resolve()
 

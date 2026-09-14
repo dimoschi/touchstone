@@ -58,6 +58,17 @@ run_from() {
   OUT="$(cd "$dir" && "$@" 2>&1)" || RC=$?
 }
 
+# run_from_with_git_dir_env <cwd> <git-dir> <work-tree> <script> [args...]:
+# same as run_from, but with GIT_DIR/GIT_WORK_TREE exported pointing at a
+# third repo -- the exact workaround the ticket-43 agent resorted to, and the
+# override an explicit leading path must win against rather than lose to.
+run_from_with_git_dir_env() {
+  local dir="$1" gd="$2" wt="$3"
+  shift 3
+  RC=0
+  OUT="$(cd "$dir" && GIT_DIR="$gd" GIT_WORK_TREE="$wt" "$@" 2>&1)" || RC=$?
+}
+
 # MAIN: a repo with no Go/PHP/Python source, so its gate runs never touch a
 # language module or need a toolchain.
 MAIN="$WORK/main"
@@ -115,6 +126,17 @@ check_contains "crap-check announces MAIN, not OTHER" "$OUT" "crap-check: repo $
 run_from "$OTHER" "$DEADCODE" "$MAIN"
 check "deadcode-check exit 0 from elsewhere" "$RC" "0"
 check_contains "deadcode-check announces MAIN, not OTHER" "$OUT" "deadcode-check: repo $MAIN branch main"
+
+echo "=== GIT_DIR/GIT_WORK_TREE env vars do not override an explicit path ==="
+run_from_with_git_dir_env "$OTHER" "$OTHER/.git" "$OTHER" "$CRAP" "$MAIN"
+check "crap-check exit 0 despite GIT_DIR/GIT_WORK_TREE pointing at OTHER" "$RC" "0"
+check_contains "crap-check still announces MAIN, not OTHER" "$OUT" \
+  "crap-check: repo $MAIN branch main"
+
+run_from_with_git_dir_env "$OTHER" "$OTHER/.git" "$OTHER" "$MUTATION" "$MAIN"
+check "mutation-check exit 0 despite GIT_DIR/GIT_WORK_TREE pointing at OTHER" "$RC" "0"
+check_contains "mutation-check still announces MAIN, not OTHER" "$OUT" \
+  "mutation-check: repo $MAIN branch main"
 
 echo "=== ticket-43: cwd on one branch, explicit path a worktree on another ==="
 run_from "$OTHER" "$CRAP" "$WT" --mark-scored

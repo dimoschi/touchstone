@@ -67,6 +67,22 @@ def test_trigger_gh_pr_create_draft_is_exempt():
     assert gate.trigger("gh pr create --title x --draft", Path("/cwd")) is None
 
 
+def test_trigger_gh_pr_ready_respects_dash_c():
+    # `gh` itself has no `-C` flag, so a worktree agent that never `cd`s can
+    # only name the repo by chaining a `git -C <path>` invocation into the
+    # same command line (e.g. the push right before `gh pr ready`). The
+    # cwd-fallback in trigger() must not shadow that.
+    hit = gate.trigger("git -C /explicit/wt push && gh pr ready 7", Path("/cwd"))
+    assert hit == (Path("/explicit/wt"), None)
+
+
+def test_trigger_gh_pr_create_respects_dash_c():
+    hit = gate.trigger(
+        "git -C /explicit/wt push -u origin feature && gh pr create --title x",
+        Path("/cwd"))
+    assert hit == (Path("/explicit/wt"), None)
+
+
 def test_trigger_git_merge_on_base_branch(tmp_path):
     repo = _repo(tmp_path)
     _git("checkout", "-q", "-b", "feature", cwd=repo)
