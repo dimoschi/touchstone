@@ -10,11 +10,19 @@ None. The helper invokes `go run github.com/padiazg/go-crap@v0.5.0 scan` directl
 
 ```bash
 crap-check.sh
+# or, to target a repo other than the process cwd (e.g. a worktree):
+crap-check.sh <absolute-repo-path>
 ```
+
+Every run prints the repo root and branch it resolved as its first line of output,
+on every code path (`--accept`, `--mark-scored`, `--anchor-committed`, and a plain
+run alike). With no leading path it resolves from the cwd, exactly as before; a
+leading path that is not a git repository refuses with exit 2 rather than
+falling back to the cwd.
 
 The helper:
 
-1. Verifies you are inside a git repo and that `go` is on PATH.
+1. Verifies you are inside a git repo (or that the given path is one) and that `go` is on PATH.
 2. Identifies changed `.go` files (excluding `_test.go`) from the staged diff.
 3. Checks HEAD out into a throwaway detached worktree and measures there (baseline), then measures your working tree (current). Your index and the stash are never touched, so concurrent runs in different worktrees cannot interfere.
 4. Joins the two outputs by `<pkg>.<func>` and prints one row per changed function:
@@ -135,7 +143,7 @@ environment the suite needs. Supply it on the command line:
 ```
 GOWORK=off GOFLAGS=-tags=<your build tags> CGO_ENABLED=0 \
   <YOUR_TEST_DB_DSN_VAR>="postgres://user:pass@localhost:5432/db?sslmode=disable" \
-  mutation-check.sh
+  mutation-check.sh <absolute-repo-path>
 ```
 
 Each part earns its place:

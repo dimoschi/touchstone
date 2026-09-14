@@ -26,6 +26,7 @@ set -euo pipefail
 SKILL_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 LIB_DIR="$SKILL_DIR/lib"
 . "$LIB_DIR/require-bash.sh"
+source "$LIB_DIR/repo-arg.sh"
 source "$LIB_DIR/head-pairs.sh"
 source "$LIB_DIR/tool-versions.sh"
 source "$LIB_DIR/tool-fingerprint.sh"
@@ -35,14 +36,17 @@ crap_fingerprint() {
   tool_fingerprint "$1" gocrap "${CRAP_GO_GOCRAP_VERSION:-$GOCRAP_VERSION_DEFAULT}"
 }
 
-REPO_ROOT="$(git rev-parse --show-toplevel 2>/dev/null)" || {
-  echo "crap-check: not inside a git repo" >&2
-  exit 2
-}
+REPO_ROOT="$(resolve_repo_root crap-check "${1:-}")" || exit 2
+# GIT_DIR/GIT_WORK_TREE outrank `cd` for every git call below, so an explicit
+# path would silently lose to a caller's exported vars without this; see
+# repo-arg.sh for why resolve_repo_root's own resolution needs the same unset.
+case "${1:-}" in /*) shift; unset GIT_DIR GIT_WORK_TREE ;; esac
 cd "$REPO_ROOT"
 
 STATE_FILE="$(git rev-parse --git-dir)/crap-check-state.json"
 BRANCH="$(git symbolic-ref --quiet --short HEAD || echo detached)"
+
+echo "crap-check: repo $REPO_ROOT branch $BRANCH"
 
 # Per-path blob SHAs of source a green run actually scored. Content-addressed,
 # so it survives amend, rebase, and unrelated commits landing in between; a

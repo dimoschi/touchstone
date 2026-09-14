@@ -103,47 +103,93 @@ def push_target(rest, repo, base_names):
     return None
 
 
+def gh_route_repo(cmd, gh_match, cwd):
+    """Repo a gh pr ready/create route in `cmd` actually acts on.
+
+    `gh` has no `-C` flag, so the only way a command can redirect it away
+    from the session cwd is a `git -C <path>` (or `cd <path>`) that ran
+    *before* the gh call, in the same command line -- that is the only thing
+    that can have changed what `gh` itself sees. target_repo() searches the
+    whole string with no regard for position, so a `-C` appearing after the
+    gh call, or inside a quoted argument the call consumes (`--body`), was
+    picked up as if it had redirected `gh` too; slicing to the text before
+    the match ties the two together, the same way the merge/push routes tie
+    their branch to the repo they resolved.
+
+    Also probes the result with `git(...)`, proving the path exists and is a
+    repo, the same proof merge/push get for free from their own branch
+    check. An unproven path handed to a later subprocess.run(cwd=...) raises
+    FileNotFoundError, an uncaught, non-blocking hook error.
+
+    An unprovable path falls back to the cwd rather than abandoning the
+    route. Since `gh` has no `-C`, a path it cannot be tied to never
+    redirected it, so the cwd is where `gh` runs. Returning None instead made
+    any `git -C <not-a-repo>` earlier on the line -- `/tmp` is enough -- turn
+    the gate off, which is the failure this route exists to prevent.
+    """
+    repo = target_repo(cmd[:gh_match.start()], cwd).resolve()
+    if git(repo, 'rev-parse', '--show-toplevel') is None:
+        repo = Path(cwd).resolve()
+    if git(repo, 'rev-parse', '--show-toplevel') is None:
+        return None
+    return repo
+
+
+def merge_hit(repo, m):
+    """(repo, branch) if the `git merge` match `m` resolves in `repo`, else None."""
+    head = git(repo, 'rev-parse', '--abbrev-ref', 'HEAD')
+    if head and head.lower() in base_branch_names(repo):
+        # The branch comes from the command text and the repo from the cwd,
+        # which are unrelated: any command merely mentioning a merge would
+        # otherwise be gated against whatever repo the shell happened to be
+        # in. Verifying the branch exists there is what ties the two
+        # together; without it mutation-check got a ref from another repo
+        # and its "bad revision" exit was reported as a red ledger.
+        if git(repo, 'rev-parse', '--verify', '--quiet',
+               f"{m.group('branch')}^{{commit}}"):
+            return repo, m.group('branch')
+    return None
+
+
+def push_hit(repo, m):
+    """(repo, branch) if the `git push` match `m` targets a base branch that resolves in `repo`, else None."""
+    target = push_target(m.group('rest'), repo, base_branch_names(repo))
+    # Same tie-break merge_hit makes above: an explicit refspec is read from
+    # the command text while the repo comes from the cwd, so the ref has to
+    # exist in that repo before the two can be treated as one change.
+    if target and git(repo, 'rev-parse', '--verify', '--quiet',
+                      f'{target}^{{commit}}'):
+        return repo, (None if target == 'HEAD' else target)
+    return None
+
+
 def trigger(cmd, cwd):
     """Return (repo, branch_arg) if cmd should be gated, else None.
 
     branch_arg is None for "verify current HEAD" (mutation-check.sh's own
     default); otherwise it names the branch to verify explicitly.
     """
-    if GH_PR_READY.search(cmd):
-        return cwd, None
-    if GH_PR_CREATE.search(cmd):
+    m = GH_PR_READY.search(cmd)
+    if m:
+        repo = gh_route_repo(cmd, m, cwd)
+        return (repo, None) if repo else None
+    m = GH_PR_CREATE.search(cmd)
+    if m:
         # Only a create, and only a draft one, is exempt.
         if GH_PR_DRAFT.search(cmd):
             return None
-        return cwd, None
+        repo = gh_route_repo(cmd, m, cwd)
+        return (repo, None) if repo else None
 
     repo = target_repo(cmd, cwd).resolve()
 
     m = GIT_MERGE.search(cmd)
     if m:
-        head = git(repo, 'rev-parse', '--abbrev-ref', 'HEAD')
-        if head and head.lower() in base_branch_names(repo):
-            # The branch comes from the command text and the repo from the cwd,
-            # which are unrelated: any command merely mentioning a merge would
-            # otherwise be gated against whatever repo the shell happened to be
-            # in. Verifying the branch exists there is what ties the two
-            # together; without it mutation-check got a ref from another repo
-            # and its "bad revision" exit was reported as a red ledger.
-            if git(repo, 'rev-parse', '--verify', '--quiet',
-                   f"{m.group('branch')}^{{commit}}"):
-                return repo, m.group('branch')
-        return None
+        return merge_hit(repo, m)
 
     m = GIT_PUSH.search(cmd)
     if m:
-        target = push_target(m.group('rest'), repo, base_branch_names(repo))
-        # Same tie-break the merge path makes above: an explicit refspec is read
-        # from the command text while the repo comes from the cwd, so the ref has
-        # to exist in that repo before the two can be treated as one change.
-        if target and git(repo, 'rev-parse', '--verify', '--quiet',
-                          f'{target}^{{commit}}'):
-            return repo, (None if target == 'HEAD' else target)
-        return None
+        return push_hit(repo, m)
 
     return None
 
@@ -164,7 +210,7 @@ def main():
     if not is_gated(repo, '.mutation-gated'):
         return 0
 
-    args = [str(MUTATION_CHECK), '--verify']
+    args = [str(MUTATION_CHECK), str(repo), '--verify']
     if branch:
         args.append(branch)
     res = subprocess.run(args, cwd=repo, capture_output=True, text=True)

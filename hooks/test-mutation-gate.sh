@@ -128,6 +128,23 @@ expect "gh pr create, unrecorded, no marker -> allowed" ALLOW "$WORK" "gh pr cre
 echo "=== .mutation-gated opts the repo in ==="
 touch "$WORK/.mutation-gated"
 expect "gh pr create, unrecorded, marker present -> blocked" BLOCK "$WORK" "gh pr create --title x"
+
+echo "=== a git -C on the line must actually have redirected gh, not just appear on it ==="
+# NONREPO is a real, existing, non-repo directory: if it were picked up as the
+# repo to gate, is_gated would find no marker there and allow, silently
+# hiding the still-red ledger on WORK.
+expect "git -C after the gh call is not the repo gh acted in -> blocked" \
+  BLOCK "$WORK" "gh pr create --title x && git -C $NONREPO status"
+expect "git -C inside a quoted --body is message content, not a redirect -> blocked" \
+  BLOCK "$WORK" "gh pr create --title x --body \"see git -C $NONREPO for notes\""
+# A path that cannot be proven a repo never redirected gh, so the route falls
+# back to the cwd and still gates. Allowing here would have let any bogus
+# git -C switch the gate off.
+expect "git -C naming a path that does not exist falls back to the cwd -> blocked" \
+  BLOCK "$WORK" "git -C $WORK/does-not-exist push && gh pr create --title x"
+expect "git -C naming an existing non-repo falls back to the cwd -> blocked" \
+  BLOCK "$WORK" "git -C $NONREPO log -1 && gh pr create --title x"
+
 record_branch feature
 expect "gh pr ready, now recorded -> allowed" ALLOW "$WORK" "gh pr ready"
 

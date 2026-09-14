@@ -701,7 +701,13 @@ const treeAgent = (prompt, opts) =>
     `cd ${wt.path} && <cmd>. The Bash working directory persists between ` +
     `calls, so one such command moves the whole session, and the run state ` +
     `written afterwards is filed under the worktree's path instead of the ` +
-    `repo's.\n\n` +
+    `repo's. crap-commit.sh, crap-check.sh, mutation-check.sh and ` +
+    `deadcode-check.sh all take this worktree path as an optional leading ` +
+    `argument (crap-commit.sh already required it; the other three now accept ` +
+    `it too) and print the repo and branch they resolved as their first line ` +
+    `of output -- read that line and pass ${wt.path} there, every time, rather ` +
+    `than relying on cwd. GIT_DIR/GIT_WORK_TREE env vars and cd are not the way ` +
+    `to target it.\n\n` +
     envelope() + `\n` + prompt + RECORD(opts.label),
     opts)
 
@@ -976,12 +982,13 @@ const impl = await treeAgent(
     : `Acceptance criteria: none were supplied with this plan. Derive them from ` +
       `it before you write anything, and state them in your summary.\n`) +
   `Follow the crap-controlled-changes skill: TDD first, iterating with the ` +
-  `repo's own test command. Commit with crap-commit.sh, which runs the gate ` +
-  `itself and refuses if it is red; do not run crap-check.sh first, since that ` +
-  `doubles a check that already runs the suite twice, and do not use either as ` +
-  `your test loop. Run it in the foreground with a Bash timeout of 600000; ` +
-  `never background it and wait with sleep. Follow its NEXT_ACTION until ` +
-  `green. Commit signed, in as many commits as the work naturally takes. Never run ` +
+  `repo's own test command. Commit with crap-commit.sh ${wt.path} -m "...", ` +
+  `which runs the gate itself and refuses if it is red; do not run ` +
+  `crap-check.sh first, since that doubles a check that already runs the ` +
+  `suite twice, and do not use either as your test loop. Run it in the ` +
+  `foreground with a Bash timeout of 600000; never background it and wait ` +
+  `with sleep. Follow its NEXT_ACTION until green. Commit signed, in as many ` +
+  `commits as the work naturally takes. Never run ` +
   `--accept or --mark-scored yourself; both need explicit user approval. ` +
   `Never create, edit or delete .crap-gated, .mutation-gated or ` +
   `.comment-gated on your own initiative: whether a repo is gated (and by ` +
@@ -1415,10 +1422,11 @@ while (open.length && round < MAX_REVIEW_ROUNDS && !outOfBudget() && !sFix.over(
   phase('Fix')
   const fixed = await treeAgent(
     `Fix these confirmed review findings in the current repo, TDD first, ` +
-    `iterating with the repo's own test command. Commit with crap-commit.sh, ` +
-    `which gates and commits in one call: run it in the foreground with a Bash ` +
-    `timeout of 600000, never background it and wait with sleep, and do not ` +
-    `pre-run crap-check.sh. Never create, edit or delete .crap-gated, ` +
+    `iterating with the repo's own test command. Commit with ` +
+    `crap-commit.sh ${wt.path} -m "...", which gates and commits in one ` +
+    `call: run it in the foreground with a Bash timeout of 600000, never ` +
+    `background it and wait with sleep, and do not pre-run crap-check.sh. ` +
+    `Never create, edit or delete .crap-gated, ` +
     `.mutation-gated or .comment-gated on your own initiative: that is the ` +
     `repo owner's decision, not yours, and a repo without any of them is ` +
     `simply not gated -- say so and continue. The one exception is a ` +
@@ -1654,9 +1662,9 @@ for (let attempt = 1; attempt <= MAX_GATE_ATTEMPTS && !mutation.green
      && !mutation.needs_user_run && !mutation.unsupported_language
      && !outOfBudget() && !sMut.over(); attempt++) {
   mutation = await treeAgent(
-    `Run mutation-check.sh from the crap-controlled-changes skill in this repo. ` +
-    `It mutates files in place and needs a clean working tree, so commit anything ` +
-    `outstanding first. Never create, edit or delete .crap-gated, ` +
+    `Run mutation-check.sh ${wt.path} from the crap-controlled-changes skill in ` +
+    `this repo. It mutates files in place and needs a clean working tree, so ` +
+    `commit anything outstanding first. Never create, edit or delete .crap-gated, ` +
     `.mutation-gated or .comment-gated on your own initiative: that is the ` +
     `repo owner's decision, not yours, and a repo without any of them is ` +
     `simply not gated -- say so and continue. The one exception is a ` +
@@ -1667,10 +1675,10 @@ for (let attempt = 1; attempt <= MAX_GATE_ATTEMPTS && !mutation.green
     `HOW TO RUN IT, in this order. The skill's Signal C settles all of this ` +
     `from measurements; do not re-derive a policy of your own, which is why ` +
     `this phase has been inconsistent run to run.\n` +
-    `1. mutation-check.sh --verify first. It reads the ledger and costs ` +
-    `milliseconds. If it reports the branch already green, you owe no run at ` +
-    `all: return green=true saying so. A branch stayed green for two hours ` +
-    `once while four full runs re-measured it.\n` +
+    `1. mutation-check.sh ${wt.path} --verify first. It reads the ledger and ` +
+    `costs milliseconds. If it reports the branch already green, you owe no ` +
+    `run at all: return green=true saying so. A branch stayed green for two ` +
+    `hours once while four full runs re-measured it.\n` +
     `2. If the repo has scripts/gate-env.sh, run ` +
     `eval "$(scripts/gate-env.sh mutation)" in the same shell invocation as the ` +
     `check. It exports the build tags, test runner and database DSN the gate ` +
@@ -1678,26 +1686,28 @@ for (let attempt = 1; attempt <= MAX_GATE_ATTEMPTS && !mutation.green
     `turning a one-minute run into ten, and on a split build it measures the ` +
     `wrong build entirely. Read the comments it prints: they name any second ` +
     `pass the repo needs.\n` +
-    `3. Run it in the FOREGROUND with a Bash timeout of 600000, no flags, so ` +
-    `the run is incremental. Do not use run_in_background: past runs here were ` +
-    `killed by a SIGTERM nobody has explained, so it is not a route to rely ` +
-    `on. Do not poll with sleep either.\n` +
+    `3. Run it in the FOREGROUND with a Bash timeout of 600000, no flags (just ` +
+    `mutation-check.sh ${wt.path}), so the run is incremental. Do not use ` +
+    `run_in_background: past runs here were killed by a SIGTERM nobody has ` +
+    `explained, so it is not a route to rely on. Do not poll with sleep either.\n` +
     `4. If one pass will not fit inside that ceiling, SPLIT IT. Do not hand it ` +
     `back. The ledger records per path, so scoped passes accumulate into one ` +
     `green: run MUTATION_ONLY='<glob>' over one module or package at a time, ` +
-    `each pass inside the ceiling, until mutation-check.sh --verify reports the ` +
-    `branch green. Name every glob you ran in detail. Asking the user to run ` +
-    `the gate in their own terminal is not an acceptable outcome, and neither ` +
-    `is reporting it unrunnable because of a timeout.\n` +
+    `each pass inside the ceiling (mutation-check.sh ${wt.path}), until ` +
+    `mutation-check.sh ${wt.path} --verify reports the branch green. Name ` +
+    `every glob you ran in detail. Asking the user to run the gate in their ` +
+    `own terminal is not an acceptable outcome, and neither is reporting it ` +
+    `unrunnable because of a timeout.\n` +
     `5. Only if one indivisible path exceeds the ceiling on its own, so there ` +
     `is nothing left to split, return green=false with needs_user_run=true and ` +
-    `the exact command in detail, including the gate-env eval from step 2. ` +
-    `That is a last resort and it means the split failed, so say which glob ` +
-    `was too big and how long it ran.\n` +
-    `6. --full re-measures every changed source, which you need when something ` +
-    `outside the ledger's key changed: a fixture, a compose file, a toolchain ` +
-    `pin. A narrowed pass records only what it measured, so say what is still ` +
-    `unmeasured.\n` +
+    `the exact command in detail, including the gate-env eval from step 2 and ` +
+    `${wt.path} as the leading argument to mutation-check.sh. That is a last ` +
+    `resort and it means the split failed, so say which glob was too big and ` +
+    `how long it ran.\n` +
+    `6. --full (mutation-check.sh ${wt.path} --full) re-measures every changed ` +
+    `source, which you need when something outside the ledger's key changed: ` +
+    `a fixture, a compose file, a toolchain pin. A narrowed pass records only ` +
+    `what it measured, so say what is still unmeasured.\n` +
     `On KILL_SURVIVORS, write a test that fails on the mutated ` +
     `code and passes on the original, TDD-style, and commit it. Never weaken or ` +
     `restructure production code to dodge a mutant. If a survivor instead reveals ` +
@@ -1749,7 +1759,7 @@ if (!mutation.green) {
         `mutants are behaviour the tests cannot detect. ${prNote()}, and ` +
         `mutation-pr-gate.py would block marking it ready. Kill them ` +
         `with tests, or approve a provably equivalent mutant with ` +
-        `mutation-check.sh --accept.`,
+        `mutation-check.sh ${wt.path} --accept.`,
   })
 }
 
@@ -1830,6 +1840,11 @@ if (args?.openPr !== false && !outOfBudget()) {
         `that branch and why. gh defaults to the default branch, which would ` +
         `show the parent's commits as this PR's own.\n`
       : '') +
+    `gh has no -C flag, so the mutation gate that intercepts gh pr ready and ` +
+    `gh pr create can only resolve this worktree from a git -C ${wt.path} ` +
+    `invocation in the same Bash command, never a separate one before it. ` +
+    `Chain the push into the same command line as the gh call, e.g. ` +
+    `git -C ${wt.path} push ... && gh pr ...; do not run them as two calls.\n` +
     (draftPr?.number
       ? `A draft PR already exists for this branch: #${draftPr.number}. Do NOT ` +
         `open a second one. Push the branch, update that PR's title and body to ` +

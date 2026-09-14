@@ -53,6 +53,7 @@ set -euo pipefail
 SKILL_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 LIB_DIR="$SKILL_DIR/lib"
 . "$LIB_DIR/require-bash.sh"
+source "$LIB_DIR/repo-arg.sh"
 source "$LIB_DIR/head-pairs.sh"
 source "$LIB_DIR/tool-versions.sh"
 source "$LIB_DIR/tool-fingerprint.sh"
@@ -62,10 +63,11 @@ mutation_fingerprint() {
   tool_fingerprint "$1" mutago "${MUTATION_GO_MUTAGO_VERSION:-$MUTAGO_VERSION_DEFAULT}"
 }
 
-REPO_ROOT="$(git rev-parse --show-toplevel 2>/dev/null)" || {
-  echo "mutation-check: not inside a git repo" >&2
-  exit 2
-}
+REPO_ROOT="$(resolve_repo_root mutation-check "${1:-}")" || exit 2
+# See crap-check.sh's identical line: GIT_DIR/GIT_WORK_TREE outrank `cd` for
+# every git call below, so an explicit path would silently lose to a
+# caller's exported vars without this.
+case "${1:-}" in /*) shift; unset GIT_DIR GIT_WORK_TREE ;; esac
 cd "$REPO_ROOT"
 
 # The marker's exempt patterns apply here too, matching crap-check.sh and
@@ -97,6 +99,8 @@ BRANCH="$(git symbolic-ref --quiet --short HEAD || echo detached)"
 # command's. Restating it as the final line means the answer survives `| tail`,
 # and copying the rows out means the findings do too.
 LOG="$(git rev-parse --path-format=absolute --git-common-dir)/mutation-check.log"
+
+echo "mutation-check: repo $REPO_ROOT branch $BRANCH"
 
 summarise() {
   local code=$? verdict

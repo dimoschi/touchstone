@@ -12,7 +12,11 @@ Two consequences to internalise before changing anything:
   `${CLAUDE_PLUGIN_ROOT}`.
 - **The target repo is not this repo.** A gate measures whatever repo the agent is
   working in. Anything that reads `git rev-parse` is asking about the target, so a hook
-  must resolve which repo a command acts on before it can decide anything.
+  must resolve which repo a command acts on before it can decide anything. All three
+  gates also take that repo as an optional leading `<absolute-repo-path>` argument
+  (matching `crap-commit.sh`'s existing one), so a caller can name it explicitly rather
+  than relying on the process cwd, and print the repo root and branch they resolved as
+  the first line of output on every code path.
 
 ## The gates (`skills/crap-controlled-changes/`)
 
@@ -32,7 +36,8 @@ extending a parser over growing a shell script.
 `crap-commit.sh` is the only sanctioned way for an agent to commit: it runs both
 commit-time gates, then `git commit`. It takes the repo as an explicit absolute path
 rather than inferring it, because every parse failure in the old inference was a silent
-bypass.
+bypass, and forwards that same path to the two gates it runs so they never fall back to
+resolving it from the cwd either.
 
 ### Exit codes are a shared vocabulary
 

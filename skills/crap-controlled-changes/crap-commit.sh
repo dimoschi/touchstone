@@ -52,6 +52,10 @@ esac
 [ -d "$REPO" ] || { echo "crap-commit: no such directory: $REPO" >&2; exit 2; }
 
 cd "$REPO"
+# The gates below unset these once given an explicit path. Leaving them set
+# here would split the run: gates score $REPO while the staged-diff check and
+# the commit itself obey GIT_DIR and land elsewhere.
+unset GIT_DIR GIT_WORK_TREE
 git rev-parse --show-toplevel >/dev/null 2>&1 || {
   echo "crap-commit: not a git repository: $REPO" >&2
   exit 2
@@ -126,7 +130,7 @@ fi
 
 run_gate() {
   local name="$1" script="$2" status=0
-  "$script" || status=$?
+  "$script" "$REPO" || status=$?
   if [ "$status" -ne 0 ]; then
     echo "" >&2
     echo "crap-commit: not committing; $name exited $status." >&2
@@ -161,6 +165,6 @@ esac
 # measured; anchoring them here is what lets a later branch reuse the scoring.
 # Never fatal: the commit has already happened.
 if [ "$COMMIT_STATUS" -eq 0 ]; then
-  "$CRAP_CHECK" --anchor-committed || true
+  "$CRAP_CHECK" "$REPO" --anchor-committed || true
 fi
 exit "$COMMIT_STATUS"
