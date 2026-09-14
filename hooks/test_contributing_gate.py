@@ -86,6 +86,83 @@ def test_claude_shaped_payload_still_blocks_an_unread_guide(monkeypatch, tmp_pat
     assert rc == 2
 
 
+def _subagent_payload(transcript, file_path, cwd, agent_id):
+    """A tool call made by a subagent: the *parent* session's transcript_path,
+    plus the acting agent's own id."""
+    return json.dumps({
+        "hook_event_name": "PreToolUse",
+        "session_id": "s1",
+        "transcript_path": str(transcript),
+        "cwd": str(cwd),
+        "agent_id": agent_id,
+        "agent_type": "general-purpose",
+        "tool_name": "Edit",
+        "tool_input": {"file_path": file_path},
+    })
+
+
+def _subagent_transcript(parent, agent_id, workflow=None):
+    """Where Claude Code writes a subagent's transcript, beside the parent's."""
+    dest = Path(str(parent)[: -len(".jsonl")]) / "subagents"
+    if workflow:
+        dest = dest / "workflows" / workflow
+    dest.mkdir(parents=True, exist_ok=True)
+    return dest / f"agent-{agent_id}.jsonl"
+
+
+def test_subagent_is_judged_by_its_own_transcript(monkeypatch, tmp_path):
+    """A subagent's Reads never reach the parent transcript until it returns,
+    which is after every edit it wanted to make."""
+    repo = _repo(tmp_path, "guided", guides=[("CONTRIBUTING.md", "read me")])
+    parent = tmp_path / "s1.jsonl"
+    _write_transcript(parent, [("Read", str(repo / "unrelated.md"))])
+    _write_transcript(_subagent_transcript(parent, "a1"),
+                      [("Read", str(repo / "CONTRIBUTING.md"))])
+    rc = _run(monkeypatch, _subagent_payload(
+        parent, str(repo / "internal" / "app.go"), repo, "a1"))
+    assert rc == 0
+
+
+def test_a_read_by_the_parent_does_not_clear_it_for_a_subagent(monkeypatch, tmp_path):
+    """The other half of the same defect, and the one that fails open: a
+    subagent that never saw the guide was waved through on the strength of the
+    parent having read it."""
+    repo = _repo(tmp_path, "guided", guides=[("CONTRIBUTING.md", "read me")])
+    parent = tmp_path / "s1.jsonl"
+    _write_transcript(parent, [("Read", str(repo / "CONTRIBUTING.md"))])
+    _write_transcript(_subagent_transcript(parent, "a1"), [("Grep", "nothing")])
+    rc = _run(monkeypatch, _subagent_payload(
+        parent, str(repo / "internal" / "app.go"), repo, "a1"))
+    assert rc == 2
+
+
+def test_workflow_subagent_transcript_is_found_one_level_deeper(monkeypatch, tmp_path):
+    """A pipeline agent's transcript sits under subagents/workflows/<run>/,
+    so the id is matched rather than the directory assumed."""
+    repo = _repo(tmp_path, "guided", guides=[("CONTRIBUTING.md", "read me")])
+    parent = tmp_path / "s1.jsonl"
+    _write_transcript(parent, [("Read", str(repo / "unrelated.md"))])
+    _write_transcript(_subagent_transcript(parent, "a1", workflow="wf_abc"),
+                      [("Read", str(repo / "CONTRIBUTING.md"))])
+    rc = _run(monkeypatch, _subagent_payload(
+        parent, str(repo / "internal" / "app.go"), repo, "a1"))
+    assert rc == 0
+
+
+def test_subagent_with_no_transcript_on_disk_says_so(monkeypatch, tmp_path, capsys):
+    """Falling back to the parent here is what fails open. Refuse instead, and
+    say it is a setup problem so nobody re-reads the guide at it."""
+    repo = _repo(tmp_path, "guided", guides=[("CONTRIBUTING.md", "read me")])
+    parent = tmp_path / "s1.jsonl"
+    _write_transcript(parent, [("Read", str(repo / "CONTRIBUTING.md"))])
+    rc = _run(monkeypatch, _subagent_payload(
+        parent, str(repo / "internal" / "app.go"), repo, "ghost"))
+    err = capsys.readouterr().err
+    assert rc == 2
+    assert "ghost" in err
+    assert "Read it before editing" not in err
+
+
 def test_edit_with_unread_guide_is_blocked(monkeypatch, tmp_path):
     repo = _repo(tmp_path, "guided", guides=[("CONTRIBUTING.md", "read me")])
     missing = tmp_path / "missing.jsonl"

@@ -8,11 +8,12 @@ otherwise (mirrors crap-commit-gate.py).
 A repo that ships no guide is never gated: the lookup that finds nothing returns
 before anything else runs. The gate exists only where there is something to read.
 
-What satisfies it is a Read of the file in this session's transcript, not a
-marker file. A marker is state that can be written once and then stops
+What satisfies it is a Read of the file in the acting agent's own transcript,
+not a marker file. A marker is state that can be written once and then stops
 measuring; the transcript is the same evidence a reader would look for, and the
 one action that clears the gate -- reading -- is always available, so there is
-no way to be stuck behind it.
+no way to be stuck behind it. A subagent is its own reader: see
+evidence_transcript for why the parent session's transcript is the wrong file.
 
 Exit 2 blocks, with the paths on stderr. Tests: test-contributing-gate.sh.
 """
@@ -214,11 +215,49 @@ def claude_guides(data):
     return [g for g in find_guides(top) if resolved(g) != resolved(target)]
 
 
-def guide_evidence(data, guides):
-    """(guides read this session, None), or (empty, why we cannot tell)."""
+def agent_transcript(parent, agent_id):
+    """A subagent's own transcript, or None if it is not on disk.
+
+    Claude Code writes it beside the parent's, under <session>/subagents/, and
+    one level deeper under workflows/<run>/ for a pipeline agent. The id is
+    matched rather than the directory assumed, so both layouts resolve.
+    """
+    session_dir = Path(parent).with_suffix('')
+    found = sorted((session_dir / 'subagents').glob(f'**/agent-{agent_id}.jsonl'))
+    return found[0] if found else None
+
+
+def evidence_transcript(data):
+    """(transcript that would record the acting agent's Reads, None), or
+    (None, why we cannot tell).
+
+    A subagent's payload carries the *parent* session's transcript_path, and
+    its own Reads do not reach that file until it returns, which is after every
+    edit it wanted to make. Reading the parent therefore answered a question
+    about a different agent: it refused one that had read the guide, and waved
+    through one that had not because the parent happened to read it.
+
+    A missing subagent transcript is not a reason to fall back to the parent.
+    That is the failing-open half, and it disables the gate for exactly the
+    agents it governs.
+    """
     transcript = data.get('transcript_path') or ''
     if not transcript:
-        return set(), 'the hook payload carried no transcript_path'
+        return None, 'the hook payload carried no transcript_path'
+    agent_id = data.get('agent_id')
+    if not agent_id:
+        return transcript, None
+    own = agent_transcript(transcript, agent_id)
+    if own is None:
+        return None, f'no transcript on disk for subagent {agent_id}'
+    return own, None
+
+
+def guide_evidence(data, guides):
+    """(guides read this session, None), or (empty, why we cannot tell)."""
+    transcript, why_not = evidence_transcript(data)
+    if why_not:
+        return set(), why_not
     try:
         return read_in_session(transcript, guides), None
     except OSError as exc:
