@@ -106,6 +106,29 @@ def test_main_returns_zero_on_parse_error(monkeypatch, tmp_path):
     assert parse_clover.main() == 0
 
 
+def test_main_changed_file_absent_from_clover_report_produces_no_rows(monkeypatch, tmp_path, capsys):
+    # Locks the counterpart of lib/parse_python.py's absent-vs-zero fix: this
+    # module already never emits a row for a <file> it did not iterate.
+    repo_root = tmp_path / "repo"
+    (repo_root / "src").mkdir(parents=True)
+    abs_other = str(repo_root / "src" / "Bar.php")
+    doc = f'''<coverage>
+  <project>
+    <file name="{abs_other}">
+      <class name="Bar" namespace="App" start="1"/>
+      <line num="1" type="method" name="baz" complexity="1" crap="1.0"/>
+    </file>
+  </project>
+</coverage>'''
+    xml_path = tmp_path / "clover.xml"
+    xml_path.write_text(doc)
+    monkeypatch.setenv("CRAP_REPO_ROOT", str(repo_root))
+    monkeypatch.setenv("CRAP_CHANGED_FILES", "src/Foo.php")
+    monkeypatch.setattr("sys.argv", ["parse_clover.py", str(xml_path)])
+    assert parse_clover.main() == 0
+    assert capsys.readouterr().out == ""
+
+
 def test_main_skips_unchanged_and_unresolvable_files(monkeypatch, tmp_path, capsys):
     repo_root = tmp_path / "repo"
     (repo_root / "src").mkdir(parents=True)
