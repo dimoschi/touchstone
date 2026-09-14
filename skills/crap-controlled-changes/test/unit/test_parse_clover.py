@@ -107,9 +107,10 @@ def test_main_returns_zero_on_parse_error(monkeypatch, tmp_path):
 
 
 def test_main_changed_file_absent_from_clover_report_produces_no_rows(monkeypatch, tmp_path, capsys):
-    # Not a PHP counterpart of parse_python.py's absent-vs-zero fix: no rows
-    # is not a refusal here, so this reads as a clean, COMMIT_OK pass. Locks
-    # the current, known-incomplete behaviour, not a fix for it.
+    # No row is built for a file Clover never mentions -- there is nothing to
+    # join against -- but --unmeasured-out still names it, which is what lets
+    # crap-check-php.sh refuse (exit 4) instead of reading this as a clean,
+    # COMMIT_OK pass on a file that was never measured at all.
     repo_root = tmp_path / "repo"
     (repo_root / "src").mkdir(parents=True)
     abs_other = str(repo_root / "src" / "Bar.php")
@@ -123,11 +124,52 @@ def test_main_changed_file_absent_from_clover_report_produces_no_rows(monkeypatc
 </coverage>'''
     xml_path = tmp_path / "clover.xml"
     xml_path.write_text(doc)
+    out_path = tmp_path / "unmeasured.txt"
     monkeypatch.setenv("CRAP_REPO_ROOT", str(repo_root))
     monkeypatch.setenv("CRAP_CHANGED_FILES", "src/Foo.php")
-    monkeypatch.setattr("sys.argv", ["parse_clover.py", str(xml_path)])
+    monkeypatch.setattr(
+        "sys.argv", ["parse_clover.py", str(xml_path), "--unmeasured-out", str(out_path)]
+    )
     assert parse_clover.main() == 0
     assert capsys.readouterr().out == ""
+    assert out_path.read_text() == "src/Foo.php\n"
+
+
+def test_main_writes_nothing_to_unmeasured_out_when_changed_file_is_present(monkeypatch, tmp_path, capsys):
+    repo_root = tmp_path / "repo"
+    repo_root.mkdir()
+    abs_changed = str(repo_root / "Foo.php")
+    doc = f'''<coverage>
+  <project>
+    <file name="{abs_changed}">
+      <class name="Foo" namespace="" start="1"/>
+      <line num="1" type="method" name="bar" count="1"/>
+    </file>
+  </project>
+</coverage>'''
+    xml_path = tmp_path / "clover.xml"
+    xml_path.write_text(doc)
+    out_path = tmp_path / "unmeasured.txt"
+    monkeypatch.setenv("CRAP_REPO_ROOT", str(repo_root))
+    monkeypatch.setenv("CRAP_CHANGED_FILES", "Foo.php")
+    monkeypatch.setattr(
+        "sys.argv", ["parse_clover.py", str(xml_path), "--unmeasured-out", str(out_path)]
+    )
+    assert parse_clover.main() == 0
+    assert out_path.read_text() == ""
+
+
+def test_main_parse_error_marks_every_changed_file_unmeasured(monkeypatch, tmp_path, capsys):
+    xml_path = tmp_path / "clover.xml"
+    xml_path.write_text("not xml at all <<<")
+    out_path = tmp_path / "unmeasured.txt"
+    monkeypatch.setenv("CRAP_CHANGED_FILES", "src/Foo.php\nsrc/Bar.php")
+    monkeypatch.setattr(
+        "sys.argv", ["parse_clover.py", str(xml_path), "--unmeasured-out", str(out_path)]
+    )
+    assert parse_clover.main() == 0
+    assert capsys.readouterr().out == ""
+    assert out_path.read_text() == "src/Bar.php\nsrc/Foo.php\n"
 
 
 def test_main_skips_unchanged_and_unresolvable_files(monkeypatch, tmp_path, capsys):

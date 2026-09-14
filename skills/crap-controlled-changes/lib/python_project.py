@@ -16,9 +16,15 @@ any) sits at the root, exactly where crap-check-python.sh already runs from.
 repo root's *own* pyproject.toml declare one of the two sections? A workspace
 member can carry its own qualifying pyproject.toml purely for its own
 standalone use, without being a separate project the gate needs to measure
-from; when the root already declares one, it is the answer regardless of what
-a member's pyproject.toml says, so the caller can skip the stdin-driven check
-above entirely.
+from; when the root already declares [tool.coverage.run], it is the answer
+regardless of what a member's pyproject.toml says. A root that declares only
+[tool.pytest.ini_options] is weaker: that section says nothing about where
+coverage.py should measure from, so it cannot license skipping a member's own
+[tool.coverage.run] the same way. `--coverage-only` narrows both
+`--root-declares` and the default find mode to that one section, so a caller
+can ask the two questions this distinction requires: does the root's own
+coverage config win outright, and if not, does some member's own coverage
+config exist that the root does not reproduce?
 
 `--group` prints "<owning-dir>\t<file>" per changed file, once the caller has
 already settled on the set of directories to measure from (a diff can span
@@ -40,31 +46,38 @@ import re
 import sys
 
 SECTION_RE = re.compile(r"^\s*\[(tool\.coverage\.run|tool\.pytest\.ini_options)\]\s*$")
+COVERAGE_SECTION_RE = re.compile(r"^\s*\[tool\.coverage\.run\]\s*$")
 
 
-def declares_project(pyproject_path):
+def declares_project(pyproject_path, coverage_only=False):
     """True if pyproject_path has a [tool.coverage.run] or
-    [tool.pytest.ini_options] table header."""
+    [tool.pytest.ini_options] table header. `coverage_only` narrows that to
+    [tool.coverage.run] alone: that is the section coverage.py actually
+    resolves relative paths from, so it is the only one that can make a
+    directory authoritative over a *different* directory's own such section
+    (see --root-declares below)."""
+    pattern = COVERAGE_SECTION_RE if coverage_only else SECTION_RE
     try:
         with open(pyproject_path, encoding="utf-8") as fh:
             for line in fh:
-                if SECTION_RE.match(line):
+                if pattern.match(line):
                     return True
     except OSError:
         return False
     return False
 
 
-def find_project_dirs(changed, repo_root):
+def find_project_dirs(changed, repo_root, coverage_only=False):
     """Sorted repo-relative dirs: the nearest pyproject.toml-owning ancestor
     of each changed file, strictly below repo_root, whose pyproject.toml
-    declares one of the two sections."""
+    declares one of the two sections (or just [tool.coverage.run], with
+    `coverage_only`)."""
     found = set()
     for rel in changed:
         d = os.path.dirname(rel)
         while d not in ("", "."):
             candidate = os.path.join(repo_root, d, "pyproject.toml")
-            if declares_project(candidate):
+            if declares_project(candidate, coverage_only=coverage_only):
                 found.add(os.path.normpath(d))
                 break
             parent = os.path.dirname(d)
@@ -111,8 +124,8 @@ def _cmd_group(changed, group_by):
         print(f"{owning_dir(rel, candidates)}\t{rel}")
 
 
-def _cmd_find(changed, repo_root):
-    for d in find_project_dirs(changed, repo_root):
+def _cmd_find(changed, repo_root, coverage_only=False):
+    for d in find_project_dirs(changed, repo_root, coverage_only=coverage_only):
         print(d)
 
 
@@ -122,6 +135,9 @@ def main():
     ap.add_argument("--root-declares", action="store_true",
                      help="print 1/0: does the repo root's own pyproject.toml "
                           "declare [tool.coverage.run] or [tool.pytest.ini_options]?")
+    ap.add_argument("--coverage-only", action="store_true",
+                     help="restrict --root-declares, or the default find mode, to "
+                          "[tool.coverage.run] alone")
     ap.add_argument("--group", action="store_true",
                      help="print '<owning-dir>\\t<file>' per changed file on stdin")
     ap.add_argument("--group-by", action="append", default=[],
@@ -131,14 +147,16 @@ def main():
     repo_root = os.path.abspath(args.repo_root)
 
     if args.root_declares:
-        print(1 if declares_project(os.path.join(repo_root, "pyproject.toml")) else 0)
+        declares = declares_project(os.path.join(repo_root, "pyproject.toml"),
+                                     coverage_only=args.coverage_only)
+        print(1 if declares else 0)
         return 0
 
     changed = _read_changed()
     if args.group:
         _cmd_group(changed, args.group_by)
     else:
-        _cmd_find(changed, repo_root)
+        _cmd_find(changed, repo_root, coverage_only=args.coverage_only)
     return 0
 
 

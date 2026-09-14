@@ -12,10 +12,15 @@
 # The suite runs from the *project* directory (or directories), resolved:
 #   1. CRAP_PY_PROJECT_DIR, if set: one directory, or several space/newline
 #      separated. Each changed file is measured from whichever one owns it.
-#   2. The repo root, if its own pyproject.toml declares [tool.coverage.run] or
-#      [tool.pytest.ini_options], regardless of a workspace member also having
-#      one of those headers for its own standalone use.
-#   3. Otherwise the repo root, unless a changed file sits under a subdirectory
+#   2. The repo root, if its own pyproject.toml declares [tool.coverage.run]:
+#      that section always wins, regardless of a workspace member also having
+#      one of the two headers for its own standalone use.
+#   3. The repo root, if its own pyproject.toml declares only
+#      [tool.pytest.ini_options] and no changed file's own, closer
+#      pyproject.toml declares [tool.coverage.run]: a pytest-only root has no
+#      coverage config to conflict with a member's own coverage.run, but also
+#      none to win over it, so a closer coverage.run still takes precedence.
+#   4. Otherwise the repo root, unless a changed file sits under a subdirectory
 #      whose own pyproject.toml declares one of those headers: a subdirectory's
 #      config only resolves from inside it, so this refuses (exit 2) and names
 #      it rather than silently measuring with the wrong config.
@@ -95,8 +100,11 @@ if [ -n "${CRAP_PY_PROJECT_DIR:-}" ]; then
   # Space/newline separated: a diff can span more than one Python project, and
   # naming all of them is the only way that case ever measures for real (see
   # the >1-subproject refusal below).
+  # `read -a` only ever consumes one line from a here-string, so a newline-
+  # separated value silently lost every directory but the first; normalise
+  # newlines to spaces first so the whole value is one line to word-split.
   RAW_PROJECT_DIRS=()
-  read -r -a RAW_PROJECT_DIRS <<< "$CRAP_PY_PROJECT_DIR"
+  read -r -a RAW_PROJECT_DIRS <<< "${CRAP_PY_PROJECT_DIR//$'\n'/ }"
   for RAW_DIR in "${RAW_PROJECT_DIRS[@]}"; do
     PROJECT_DIRS+=("$(resolve_project_dir "$RAW_DIR")")
   done
@@ -104,9 +112,26 @@ if [ -n "${CRAP_PY_PROJECT_DIR:-}" ]; then
 else
   # A workspace member's own pyproject.toml can carry one of the two headers
   # for its own standalone use without being a separate project this gate
-  # needs to measure from; the root's own config, when it has one, always wins.
-  ROOT_DECLARES="$(python3 "$SKILL_LIB/python_project.py" --repo-root "$PWD" --root-declares)"
-  if [ "$ROOT_DECLARES" = "1" ]; then
+  # needs to measure from. The root's own [tool.coverage.run] always wins over
+  # that: it is the section coverage.py actually resolves paths from. A root
+  # that declares only [tool.pytest.ini_options] is weaker and cannot win over
+  # a changed file whose own, closer pyproject.toml declares
+  # [tool.coverage.run]: the root has no coverage config to reproduce it with,
+  # so measuring from the root there would be exactly the wrong-config case
+  # the subdirectory refusal below exists to catch.
+  ROOT_DECLARES_COV="$(python3 "$SKILL_LIB/python_project.py" --repo-root "$PWD" --root-declares --coverage-only)"
+  ROOT_WINS=0
+  if [ "$ROOT_DECLARES_COV" = "1" ]; then
+    ROOT_WINS=1
+  else
+    ROOT_DECLARES_ANY="$(python3 "$SKILL_LIB/python_project.py" --repo-root "$PWD" --root-declares)"
+    SUBPROJECTS_COV=()
+    read_lines SUBPROJECTS_COV < <(printf '%s\n' "${CHANGED[@]}" | python3 "$SKILL_LIB/python_project.py" --repo-root "$PWD" --coverage-only)
+    if [ "$ROOT_DECLARES_ANY" = "1" ] && [ "${#SUBPROJECTS_COV[@]}" -eq 0 ]; then
+      ROOT_WINS=1
+    fi
+  fi
+  if [ "$ROOT_WINS" = "1" ]; then
     PROJECT_DIRS=("$REPO_ROOT_PHYS")
     PROJECT_DIR_SOURCE="repo root (its own pyproject.toml declares [tool.coverage.run] or [tool.pytest.ini_options])"
   else
@@ -316,15 +341,15 @@ measure "$BASE_TSV" "$PHASE_BASELINE" "$BASE_UNMEASURED"
 if [ -s "$BASE_UNMEASURED" ]; then
   # HEAD never having measured a file is not this run's failure: the file may
   # be new since HEAD, or only became imported by a test in the current
-  # change. It just means every row for it tags "new" rather than compared
-  # against a real baseline, same shape as the "collected no data" warning
-  # above.
+  # change. The baseline zero-fills these rows instead of dropping them, so a
+  # function unchanged since HEAD still tags "unchanged" rather than a false
+  # "new", same shape as the "collected no data" warning above.
   BASE_UNMEASURED_LIST=()
   read_lines BASE_UNMEASURED_LIST < "$BASE_UNMEASURED"
   {
     echo "crap-check[python]: baseline (HEAD) has no coverage data for:"
     printf '    %s\n' "${BASE_UNMEASURED_LIST[@]}"
-    echo "  Rows for these will tag as new against an empty baseline rather than compared to HEAD."
+    echo "  Rows for these are zero-filled at 0% and compared normally, not tagged new."
   } >&2
 fi
 restore

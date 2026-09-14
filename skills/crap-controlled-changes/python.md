@@ -76,22 +76,32 @@ Resolution order:
 1. `CRAP_PY_PROJECT_DIR`, if set: one directory, or several space/newline
    separated (absolute, or relative to the repo root). Each changed file is
    measured from whichever named directory owns it.
-2. The repo root, if its own `pyproject.toml` declares `[tool.coverage.run]`
-   or `[tool.pytest.ini_options]`. This wins regardless of a member directory
-   also carrying one of those headers for its own standalone use, e.g. a
-   uv/poetry workspace member with its own `[tool.pytest.ini_options]`: that
-   is a normal thing for a member to have, and does not make it a separate
-   project this gate needs to measure from.
-3. Otherwise the repo root, unless a changed file sits under a subdirectory
+2. The repo root, if its own `pyproject.toml` declares `[tool.coverage.run]`.
+   This wins regardless of a member directory also carrying one of the two
+   headers for its own standalone use, e.g. a uv/poetry workspace member with
+   its own `[tool.pytest.ini_options]`: that is a normal thing for a member to
+   have, and does not make it a separate project this gate needs to measure
+   from.
+3. The repo root, if its own `pyproject.toml` declares only
+   `[tool.pytest.ini_options]` (no `[tool.coverage.run]`) and no changed
+   file's own, closer `pyproject.toml` declares `[tool.coverage.run]`. A
+   pytest-only root says nothing about where coverage.py should measure from,
+   so it cannot win over a member's own coverage config the way step 2 does;
+   it only stands in when there is no such member to conflict with.
+4. Otherwise the repo root, unless a changed file sits under a subdirectory
    whose own `pyproject.toml` declares one of those headers, in which case the
    module refuses (exit 2) and names that subdirectory rather than silently
    measuring with the wrong config. `CRAP_PY_PROJECT_DIR=.` forces the repo
    root anyway, e.g. when its config lives in `.coveragerc` rather than
-   `pyproject.toml` and step 2 above could not see it.
+   `pyproject.toml` and steps 2-3 above could not see it.
 
-A repo whose Python project sits at the git root, configured through its own
-`pyproject.toml`, never trips the refusal at step 3, no matter how many
-subdirectories have their own qualifying `pyproject.toml` alongside it.
+A repo whose Python project sits at the git root, its own `pyproject.toml`
+declaring `[tool.coverage.run]`, never trips the refusal at step 4, no matter
+how many subdirectories have their own qualifying `pyproject.toml` alongside
+it. A root declaring only `[tool.pytest.ini_options]` does trip it once a
+changed file's own subdirectory declares `[tool.coverage.run]`: that member's
+coverage config is closer and more specific, and the root has none of its own
+to reproduce it with.
 
 A diff can span more than one Python project. Naming just one in
 `CRAP_PY_PROJECT_DIR` cannot measure the rest -- each project's config only

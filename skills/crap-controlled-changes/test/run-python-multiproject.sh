@@ -73,6 +73,24 @@ printf '%s' "$OUT" | grep 'projB/src/calc.py::add' | grep -qF 'coverage=100.0%' 
   && check "projB's add at real coverage, not a false zero" pass \
   || check "projB's add at real coverage, not a false zero" fail
 
+echo "case C: CRAP_PY_PROJECT_DIR names both, newline-separated"
+# Case B's pytest runs left untracked __pycache__ behind; case C's own stash
+# would otherwise collide with it on restore ("already exists, no checkout").
+find . -name '__pycache__' -type d -exec rm -rf {} +
+CRAP_PY_PROJECT_DIR="$(printf 'projA\nprojB')"
+export CRAP_PY_PROJECT_DIR
+set +e
+OUT="$("$SCRIPT" 2>&1)"
+STATUS=$?
+set -e
+printf '%s\n' "$OUT" | sed 's/^/    | /'
+[ "$STATUS" -ne 2 ] && [ "$STATUS" -ne 4 ] && check "measures rather than refusing (exit $STATUS)" pass \
+  || check "measures rather than refusing (exit $STATUS)" fail
+printf '%s' "$OUT" | grep -qF 'projA/src/calc.py::add' && check "reports projA's untouched function" pass \
+  || check "reports projA's untouched function" fail
+printf '%s' "$OUT" | grep -qF 'projB/src/calc.py::add' && check "reports projB's untouched function" pass \
+  || check "reports projB's untouched function" fail
+
 if [ "$failures" -eq 0 ]; then
   echo "MULTIPROJECT OK"
 else

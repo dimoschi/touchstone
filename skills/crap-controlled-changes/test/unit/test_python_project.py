@@ -32,6 +32,18 @@ def test_declares_project_ignores_indented_or_trailing_whitespace(tmp_path):
     assert python_project.declares_project(str(p)) is True
 
 
+def test_declares_project_coverage_only_true_for_coverage_run_section(tmp_path):
+    p = tmp_path / "pyproject.toml"
+    p.write_text("[tool.coverage.run]\n")
+    assert python_project.declares_project(str(p), coverage_only=True) is True
+
+
+def test_declares_project_coverage_only_false_for_pytest_ini_options_section(tmp_path):
+    p = tmp_path / "pyproject.toml"
+    p.write_text("[tool.pytest.ini_options]\n")
+    assert python_project.declares_project(str(p), coverage_only=True) is False
+
+
 def test_find_project_dirs_nearest_ancestor_pyproject(tmp_path):
     proj = tmp_path / "proj"
     (proj / "src").mkdir(parents=True)
@@ -84,6 +96,22 @@ def test_find_project_dirs_nearest_match_wins_over_grandparent(tmp_path):
     ]
 
 
+def test_find_project_dirs_coverage_only_skips_pytest_ini_options_only_dir(tmp_path):
+    proj = tmp_path / "proj"
+    proj.mkdir()
+    (proj / "pyproject.toml").write_text("[tool.pytest.ini_options]\n")
+    changed = ["proj/mod.py"]
+    assert python_project.find_project_dirs(changed, str(tmp_path), coverage_only=True) == []
+
+
+def test_find_project_dirs_coverage_only_still_finds_coverage_run_dir(tmp_path):
+    proj = tmp_path / "proj"
+    proj.mkdir()
+    (proj / "pyproject.toml").write_text("[tool.coverage.run]\n")
+    changed = ["proj/mod.py"]
+    assert python_project.find_project_dirs(changed, str(tmp_path), coverage_only=True) == ["proj"]
+
+
 def test_find_project_dirs_terminates_for_an_absolute_changed_path(tmp_path):
     # The filesystem root is its own parent forever, so a changed path fed in
     # absolute (CRAP_FILES set by hand) used to spin the walk-up loop without
@@ -114,6 +142,16 @@ def test_main_root_declares_prints_0_when_root_pyproject_does_not_qualify(monkey
     (tmp_path / "pyproject.toml").write_text("[project]\nname = \"x\"\n")
     monkeypatch.setattr(
         "sys.argv", ["python_project.py", "--repo-root", str(tmp_path), "--root-declares"]
+    )
+    assert python_project.main() == 0
+    assert capsys.readouterr().out == "0\n"
+
+
+def test_main_root_declares_coverage_only_prints_0_for_pytest_ini_options_only_root(monkeypatch, tmp_path, capsys):
+    (tmp_path / "pyproject.toml").write_text("[tool.pytest.ini_options]\n")
+    monkeypatch.setattr(
+        "sys.argv",
+        ["python_project.py", "--repo-root", str(tmp_path), "--root-declares", "--coverage-only"],
     )
     assert python_project.main() == 0
     assert capsys.readouterr().out == "0\n"
