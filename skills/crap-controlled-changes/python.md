@@ -60,6 +60,29 @@ exceeds the threshold. This is advisory (see SKILL.md). There is no
 
 Apply the Decision Policy in `SKILL.md` to the output.
 
+## Subdirectory projects
+
+The suite and coverage run from the repo root by default, which only works if
+the project's config (`pyproject.toml`'s `[tool.coverage.run]` /
+`[tool.pytest.ini_options]`, or `.coveragerc`) also resolves from there. A
+project one level down in a monorepo needs its own directory:
+
+```bash
+CRAP_PY_PROJECT_DIR=services/api crap-check.sh
+```
+
+Resolution order:
+
+1. `CRAP_PY_PROJECT_DIR`, if set (absolute, or relative to the repo root).
+2. The repo root, unless a changed file sits under a subdirectory whose own
+   `pyproject.toml` declares `[tool.coverage.run]` or `[tool.pytest.ini_options]`,
+   in which case the module refuses (exit 2) and names that subdirectory
+   rather than silently measuring with the wrong config.
+
+A repo whose Python project sits at the git root never trips the refusal:
+only a `pyproject.toml` strictly below the root, with one of those two
+section headers, does.
+
 ## Performance
 
 The configured pytest suite runs **twice** (baseline + current). Scope it via:
@@ -76,6 +99,7 @@ CRAP_PY_PYTEST_ARGS="tests/unit -k somepattern" crap-check.sh
 | `CRAP_PY_PYTEST_ARGS` | *(empty)* | Extra pytest args to scope/speed the suite |
 | `CRAP_PY_RADON` | `uvx radon` | Override to a project-local `radon` |
 | `CRAP_PY_COMPLEXIPY` | `uvx complexipy` | Override to a project-local `complexipy` |
+| `CRAP_PY_PROJECT_DIR` | *(repo root)* | Directory to run the suite and coverage from; see Subdirectory projects |
 
 ## Manual Equivalent (if the helper is unavailable)
 
@@ -134,10 +158,11 @@ change your suite cannot detect.
 
 ## Caveats and known gaps (prototype)
 
-- A changed file that is **never imported by any test** won't appear in coverage
-  JSON, so its functions read as 0% and surface as `NEEDS_TESTS` for new/worsened
-  code. This is the intended nudge (same blind spot as Go's `_test.go`-only
-  coverage and PHP's class-named tests). Run at least the unit suite.
+- A changed file that is **never imported by any test** produces no coverage
+  data at all. In the current phase that is could-not-measure: the run exits 4
+  and names the file rather than reporting a false `coverage=0.0%`. Import it
+  from at least the unit suite. (Same blind spot Go's `_test.go`-only coverage
+  and PHP's class-named tests have; here it refuses instead of scoring it.)
 - **Closures and module-level code are not scored.** radon only surfaces
   top-level functions and methods, so nested functions and `if __name__ ==
   "__main__":` blocks don't get a CRAP row. Extract logic into named functions to
@@ -152,12 +177,17 @@ change your suite cannot detect.
   Without it, lines that resume after an `await` crossing that boundary, e.g. a
   FastAPI handler's `return SomeResponse(...)`, read as missed even though the
   test exercised them, and new/renamed functions trip a false `NEEDS_TESTS`.
-- **A phase that collects no coverage is a warning, not a hard failure** (unlike
-  Go, which exits 4). If the baseline collected nothing, every function reads as
-  `new` against an empty baseline. When gitignored `.py` files are present the
-  warning names them: `git stash --include-untracked` does not stash ignored
-  files, so they survive from the current tree into the baseline. See the same
-  section in `go.md` for the full explanation.
-  crap-check honors the project config, so fix it in `[tool.coverage.run]`, not
-  in the tool. (Symptom: every async handler reads ~50% while directly-awaited
-  service/repo functions read 100%.)
+- **`coverage json` itself failing (import error, collection error) is a
+  warning in either phase, not a hard failure.** There is then nothing
+  per-file to tell "absent" from "zero", so the run falls back to scoring
+  every function it can still join at `coverage=0.0%` instead. When gitignored
+  `.py` files are present the warning names them: `git stash
+  --include-untracked` does not stash ignored files, so they survive from the
+  current tree into the baseline. See the same section in `go.md` for the full
+  explanation. crap-check honors the project config, so fix it in
+  `[tool.coverage.run]`, not in the tool. (Symptom: every async handler reads
+  ~50% while directly-awaited service/repo functions read 100%.)
+- **A single changed file missing from an otherwise-successful measurement is
+  different.** The baseline (HEAD) phase treats it as a warning, since the
+  file may simply be new since HEAD; the current phase treats it as
+  could-not-measure and exits 4, per the caveat above.
