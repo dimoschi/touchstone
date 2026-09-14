@@ -135,6 +135,8 @@ branch_range() {
 # recorded zero pairs and still reported success, so the override it exists to
 # provide silently did nothing and verify went on refusing.
 resolve_branch_pairs() {
+  local base
+  base="$(resolve_base)"
   read -r -a RANGE <<< "$(branch_range)"
   PAIRS="$(measurable_names "${RANGE[@]}" | head_pairs HEAD)"
   # A merge commit authors nothing. Its diff against its first parent is the
@@ -142,6 +144,18 @@ resolve_branch_pairs() {
   # name, so charging it to whoever commits next here is a false positive that
   # fires after every single merge to a base branch. Nothing to fall back to.
   if [ -z "$PAIRS" ] && git rev-parse --verify --quiet 'HEAD^2' >/dev/null; then
+    return 0
+  fi
+  # The same false positive, arriving by squash rather than by merge. A squash
+  # lands the branch's work as an ordinary one-parent commit, so the HEAD^2
+  # test never sees it, and its record was anchored to the branch that got
+  # deleted. A branch with no commits of its own then inherited the base's last
+  # commit and refused every first commit that staged nothing scorable, which
+  # is every docs, shell or JS change. Compared by short name so a base of
+  # `origin/main` still matches being on `main`, where the fallback is right
+  # because the commit really is this branch's own work.
+  if [ -z "$PAIRS" ] && [ -n "$base" ] && [ "$BRANCH" != "${base##*/}" ] \
+     && git merge-base --is-ancestor HEAD "$base" >/dev/null 2>&1; then
     return 0
   fi
   if [ -z "$PAIRS" ] && [ "${RANGE[0]}" != "HEAD~1" ]; then
