@@ -34,6 +34,7 @@ SKILL_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 LIB_DIR="$SKILL_DIR/lib"
 . "$LIB_DIR/require-bash.sh"
 . "$LIB_DIR/tool-versions.sh"
+source "$LIB_DIR/repo-arg.sh"
 source "$LIB_DIR/unsupported-sources.sh"
 DEADCODE_VERSION="${DEADCODE_GO_VERSION:-$DEADCODE_VERSION_DEFAULT}"
 DEADCODE_PKG="golang.org/x/tools/cmd/deadcode"
@@ -45,14 +46,14 @@ if [ -n "${DEADCODE_TAGS:-}" ]; then
   DEADCODE_TAGS_FLAG=(-tags="$DEADCODE_TAGS")
 fi
 
-REPO_ROOT="$(git rev-parse --show-toplevel 2>/dev/null)" || {
-  echo "deadcode-check: not inside a git repo" >&2
-  exit 2
-}
+REPO_ROOT="$(resolve_repo_root deadcode-check "${1:-}")" || exit 2
+case "${1:-}" in /*) shift ;; esac
 cd "$REPO_ROOT"
 
 BRANCH="$(git symbolic-ref --quiet --short HEAD || echo detached)"
 STORE="$(git rev-parse --git-dir)/deadcode-accepted.json"
+
+echo "deadcode-check: repo $REPO_ROOT branch $BRANCH"
 
 if [ "${1:-}" = "--accept" ]; then
   [ -n "${2:-}" ] || { echo "usage: deadcode-check.sh --accept '<file>|<symbol>'" >&2; exit 2; }

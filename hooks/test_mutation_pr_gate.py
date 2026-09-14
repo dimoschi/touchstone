@@ -172,7 +172,7 @@ def test_main_passes_explicit_branch_arg_for_a_merge(monkeypatch, tmp_path):
 
     monkeypatch.setattr(gate.subprocess, "run", fake_run)
     assert gate.main() == 0
-    assert seen_args == [[str(gate.MUTATION_CHECK), "--verify", "feature"]]
+    assert seen_args == [[str(gate.MUTATION_CHECK), str(repo), "--verify", "feature"]]
 
 
 def test_main_setup_failure_blocks_with_gate_failing_message(monkeypatch, tmp_path, capsys):

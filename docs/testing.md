@@ -46,6 +46,14 @@ bash skills/crap-controlled-changes/test/run-mutation-go.sh
 
 Neither workflow suite takes a scenario filter; both run every scenario they define.
 
+`skills/crap-controlled-changes/test/run-repo-arg.sh` covers the optional leading
+`<absolute-repo-path>` argument that `crap-check.sh`, `mutation-check.sh` and
+`deadcode-check.sh` accept (matching `crap-commit.sh`'s existing one): given a
+path, a gate measures that repository and never the process cwd, and every gate
+prints the repo root and branch it resolved as the first line of its output on
+every code path. Needs only git, bash and python3, since nothing in it mutates
+code.
+
 ## How the two runners select suites
 
 `scripts/lib/skill-suites.sh` holds one list, `NEEDS_OTHER_TOOLCHAIN`, naming every

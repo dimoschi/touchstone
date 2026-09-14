@@ -164,7 +164,7 @@ def main():
     if not is_gated(repo, '.mutation-gated'):
         return 0
 
-    args = [str(MUTATION_CHECK), '--verify']
+    args = [str(MUTATION_CHECK), str(repo), '--verify']
     if branch:
         args.append(branch)
     res = subprocess.run(args, cwd=repo, capture_output=True, text=True)

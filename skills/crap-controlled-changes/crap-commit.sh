@@ -126,7 +126,7 @@ fi
 
 run_gate() {
   local name="$1" script="$2" status=0
-  "$script" || status=$?
+  "$script" "$REPO" || status=$?
   if [ "$status" -ne 0 ]; then
     echo "" >&2
     echo "crap-commit: not committing; $name exited $status." >&2
@@ -161,6 +161,6 @@ esac
 # measured; anchoring them here is what lets a later branch reuse the scoring.
 # Never fatal: the commit has already happened.
 if [ "$COMMIT_STATUS" -eq 0 ]; then
-  "$CRAP_CHECK" --anchor-committed || true
+  "$CRAP_CHECK" "$REPO" --anchor-committed || true
 fi
 exit "$COMMIT_STATUS"

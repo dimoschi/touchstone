@@ -16,7 +16,14 @@ If `vendor/bin/phpunit` is missing the helper prints a remediation hint.
 
 ```bash
 crap-check.sh
+# or, to target a repo other than the process cwd (e.g. a worktree):
+crap-check.sh <absolute-repo-path>
 ```
+
+Every run prints the repo root and branch it resolved as its first line of
+output. With no leading path it resolves from the cwd, exactly as before; a
+leading path that is not a git repository refuses with exit 2 rather than
+falling back to the cwd.
 
 The dispatcher detects staged `.php` files (excluding `tests/`, `**/Tests/`, and `**/*Test.php`) and invokes `lib/crap-check-php.sh`. That module:
 
