@@ -1,0 +1,6 @@
+[project]
+name = "projB"
+version = "0.0.0"
+
+[tool.coverage.run]
+include = ["src/*"]

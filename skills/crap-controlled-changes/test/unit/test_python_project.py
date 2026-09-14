@@ -1,4 +1,5 @@
 import os
+import signal
 
 import python_project
 
@@ -81,6 +82,94 @@ def test_find_project_dirs_nearest_match_wins_over_grandparent(tmp_path):
     assert python_project.find_project_dirs(changed, str(tmp_path)) == [
         os.path.normpath("outer/inner")
     ]
+
+
+def test_find_project_dirs_terminates_for_an_absolute_changed_path(tmp_path):
+    # The filesystem root is its own parent forever, so a changed path fed in
+    # absolute (CRAP_FILES set by hand) used to spin the walk-up loop without
+    # ever reaching "" or ".".
+    def _on_alarm(signum, frame):
+        raise TimeoutError("find_project_dirs did not terminate for an absolute path")
+
+    old_handler = signal.signal(signal.SIGALRM, _on_alarm)
+    signal.alarm(2)
+    try:
+        result = python_project.find_project_dirs(["/no/such/project/mod.py"], str(tmp_path))
+    finally:
+        signal.alarm(0)
+        signal.signal(signal.SIGALRM, old_handler)
+    assert result == []
+
+
+def test_main_root_declares_prints_1_when_root_pyproject_qualifies(monkeypatch, tmp_path, capsys):
+    (tmp_path / "pyproject.toml").write_text("[tool.coverage.run]\n")
+    monkeypatch.setattr(
+        "sys.argv", ["python_project.py", "--repo-root", str(tmp_path), "--root-declares"]
+    )
+    assert python_project.main() == 0
+    assert capsys.readouterr().out == "1\n"
+
+
+def test_main_root_declares_prints_0_when_root_pyproject_does_not_qualify(monkeypatch, tmp_path, capsys):
+    (tmp_path / "pyproject.toml").write_text("[project]\nname = \"x\"\n")
+    monkeypatch.setattr(
+        "sys.argv", ["python_project.py", "--repo-root", str(tmp_path), "--root-declares"]
+    )
+    assert python_project.main() == 0
+    assert capsys.readouterr().out == "0\n"
+
+
+def test_main_root_declares_prints_0_when_root_has_no_pyproject(monkeypatch, tmp_path, capsys):
+    monkeypatch.setattr(
+        "sys.argv", ["python_project.py", "--repo-root", str(tmp_path), "--root-declares"]
+    )
+    assert python_project.main() == 0
+    assert capsys.readouterr().out == "0\n"
+
+
+def test_owning_dir_nearest_candidate_wins(tmp_path):
+    assert python_project.owning_dir("projA/src/mod.py", ["projA", "projB"]) == "projA"
+    assert python_project.owning_dir("projB/mod.py", ["projA", "projB"]) == "projB"
+
+
+def test_owning_dir_root_candidate_matches_anything(tmp_path):
+    assert python_project.owning_dir("mod.py", [".", "projA"]) == "."
+    assert python_project.owning_dir("projA/mod.py", [".", "projA"]) == "projA"
+
+
+def test_owning_dir_falls_back_to_first_candidate_for_a_stray_file():
+    assert python_project.owning_dir("elsewhere/mod.py", ["projA", "projB"]) == "projA"
+
+
+def test_owning_dir_exact_directory_match_not_just_a_prefix():
+    # "projAX" must not match candidate "projA" (a naive string-prefix check would).
+    assert python_project.owning_dir("projAX/mod.py", ["projA", "projB"]) == "projA"
+
+
+def test_main_group_prints_owning_dir_and_file_per_line(monkeypatch, tmp_path, capsys):
+    monkeypatch.setattr(
+        "sys.stdin", __import__("io").StringIO("projA/src/mod.py\nprojB/mod.py\n")
+    )
+    monkeypatch.setattr(
+        "sys.argv",
+        ["python_project.py", "--repo-root", str(tmp_path), "--group",
+         "--group-by", "projA", "--group-by", "projB"],
+    )
+    assert python_project.main() == 0
+    assert capsys.readouterr().out == (
+        "projA\tprojA/src/mod.py\n"
+        "projB\tprojB/mod.py\n"
+    )
+
+
+def test_main_group_ignores_blank_stdin_lines(monkeypatch, tmp_path, capsys):
+    monkeypatch.setattr("sys.stdin", __import__("io").StringIO("\nprojA/mod.py\n\n"))
+    monkeypatch.setattr(
+        "sys.argv",
+        ["python_project.py", "--repo-root", str(tmp_path), "--group", "--group-by", "projA"],
+    )
+    assert python_project.main() == 0
+    assert capsys.readouterr().out == "projA\tprojA/mod.py\n"
 
 
 def test_main_prints_one_dir_per_line(monkeypatch, tmp_path, capsys):

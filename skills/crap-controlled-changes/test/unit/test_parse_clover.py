@@ -107,8 +107,9 @@ def test_main_returns_zero_on_parse_error(monkeypatch, tmp_path):
 
 
 def test_main_changed_file_absent_from_clover_report_produces_no_rows(monkeypatch, tmp_path, capsys):
-    # Locks the counterpart of lib/parse_python.py's absent-vs-zero fix: this
-    # module already never emits a row for a <file> it did not iterate.
+    # Not a PHP counterpart of parse_python.py's absent-vs-zero fix: no rows
+    # is not a refusal here, so this reads as a clean, COMMIT_OK pass. Locks
+    # the current, known-incomplete behaviour, not a fix for it.
     repo_root = tmp_path / "repo"
     (repo_root / "src").mkdir(parents=True)
     abs_other = str(repo_root / "src" / "Bar.php")

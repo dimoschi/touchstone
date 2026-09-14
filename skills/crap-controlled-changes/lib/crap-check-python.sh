@@ -9,13 +9,16 @@
 # Reads its file list from CRAP_FILES (newline-separated, repo-relative) if set;
 # otherwise discovers from `git diff --cached`.
 #
-# The suite runs from the *project* directory, resolved in this order:
-#   1. CRAP_PY_PROJECT_DIR, if set (absolute, or relative to the repo root).
-#   2. The repo root, unless a changed file sits under a subdirectory whose own
-#      pyproject.toml declares [tool.coverage.run] or [tool.pytest.ini_options],
-#      in which case this refuses (exit 2) and names it: a monorepo's project
-#      config only resolves (e.g. a relative `include =`) from inside that
-#      directory, so silently picking one would measure with the wrong config.
+# The suite runs from the *project* directory (or directories), resolved:
+#   1. CRAP_PY_PROJECT_DIR, if set: one directory, or several space/newline
+#      separated. Each changed file is measured from whichever one owns it.
+#   2. The repo root, if its own pyproject.toml declares [tool.coverage.run] or
+#      [tool.pytest.ini_options], regardless of a workspace member also having
+#      one of those headers for its own standalone use.
+#   3. Otherwise the repo root, unless a changed file sits under a subdirectory
+#      whose own pyproject.toml declares one of those headers: a subdirectory's
+#      config only resolves from inside it, so this refuses (exit 2) and names
+#      it rather than silently measuring with the wrong config.
 #
 # The configured pytest suite runs twice (baseline + current) under coverage;
 # test failures are tolerated because coverage is wanted either way. Scope the
@@ -30,7 +33,8 @@
 #   CRAP_PY_PYTEST_ARGS    - extra pytest args (e.g. "tests/unit -k foo")
 #   CRAP_PY_RADON          - radon invocation (default "uvx radon")
 #   CRAP_PY_COMPLEXIPY     - complexipy invocation (default "uvx complexipy")
-#   CRAP_PY_PROJECT_DIR    - directory to run the suite and coverage from
+#   CRAP_PY_PROJECT_DIR    - directory (or space/newline-separated directories)
+#                            to run the suite and coverage from
 
 set -euo pipefail
 
@@ -60,52 +64,101 @@ CRAP_PY_RADON="${CRAP_PY_RADON:-uvx radon}"
 CRAP_PY_COMPLEXIPY="${CRAP_PY_COMPLEXIPY:-uvx complexipy}"
 
 # uv run/poetry run resolve their env, and coverage.py resolves its config,
-# from the process cwd, so PROJECT_DIR has to be settled before anything runs.
+# from the process cwd, so PROJECT_DIRS has to be settled before anything runs.
 # Canonicalised (pwd -P) on both sides of the containment check below: macOS
 # resolves /tmp through /private, so a plain $PWD vs. a `cd`-and-back path can
 # differ only in that prefix and falsely read as outside the repo.
 REPO_ROOT_PHYS="$(pwd -P)"
-if [ -n "${CRAP_PY_PROJECT_DIR:-}" ]; then
-  case "$CRAP_PY_PROJECT_DIR" in
-    /*) CAND="$CRAP_PY_PROJECT_DIR" ;;
-    *)  CAND="$PWD/$CRAP_PY_PROJECT_DIR" ;;
+
+resolve_project_dir() {
+  local raw="$1" cand dir
+  case "$raw" in
+    /*) cand="$raw" ;;
+    *)  cand="$PWD/$raw" ;;
   esac
-  PROJECT_DIR="$(cd "$CAND" 2>/dev/null && pwd -P)" || {
-    echo "crap-check[python]: CRAP_PY_PROJECT_DIR does not exist: $CRAP_PY_PROJECT_DIR" >&2
+  dir="$(cd "$cand" 2>/dev/null && pwd -P)" || {
+    echo "crap-check[python]: CRAP_PY_PROJECT_DIR does not exist: $raw" >&2
     exit 2
   }
-  case "$PROJECT_DIR" in
+  case "$dir" in
     "$REPO_ROOT_PHYS"|"$REPO_ROOT_PHYS"/*) ;;
     *)
-      echo "crap-check[python]: CRAP_PY_PROJECT_DIR must be inside the repo: $CRAP_PY_PROJECT_DIR" >&2
+      echo "crap-check[python]: CRAP_PY_PROJECT_DIR must be inside the repo: $raw" >&2
       exit 2
       ;;
   esac
+  printf '%s\n' "$dir"
+}
+
+PROJECT_DIRS=()
+if [ -n "${CRAP_PY_PROJECT_DIR:-}" ]; then
+  # Space/newline separated: a diff can span more than one Python project, and
+  # naming all of them is the only way that case ever measures for real (see
+  # the >1-subproject refusal below).
+  RAW_PROJECT_DIRS=()
+  read -r -a RAW_PROJECT_DIRS <<< "$CRAP_PY_PROJECT_DIR"
+  for RAW_DIR in "${RAW_PROJECT_DIRS[@]}"; do
+    PROJECT_DIRS+=("$(resolve_project_dir "$RAW_DIR")")
+  done
   PROJECT_DIR_SOURCE="CRAP_PY_PROJECT_DIR=$CRAP_PY_PROJECT_DIR"
 else
-  SUBPROJECTS=()
-  read_lines SUBPROJECTS < <(printf '%s\n' "${CHANGED[@]}" | python3 "$SKILL_LIB/python_project.py" --repo-root "$PWD")
-  if [ "${#SUBPROJECTS[@]}" -gt 0 ]; then
-    {
-      echo "crap-check[python]: changed file(s) belong to a Python project in a subdirectory, not the repo root:"
-      printf '    %s\n' "${SUBPROJECTS[@]}"
-      echo "  A subdirectory's own pyproject.toml only resolves from inside it, so"
-      echo "  running from the repo root would measure with the wrong config."
-      echo "  Re-run with CRAP_PY_PROJECT_DIR=<dir> naming which one to measure"
-      echo "  (relative to the repo root, or absolute)."
-    } >&2
-    exit 2
+  # A workspace member's own pyproject.toml can carry one of the two headers
+  # for its own standalone use without being a separate project this gate
+  # needs to measure from; the root's own config, when it has one, always wins.
+  ROOT_DECLARES="$(python3 "$SKILL_LIB/python_project.py" --repo-root "$PWD" --root-declares)"
+  if [ "$ROOT_DECLARES" = "1" ]; then
+    PROJECT_DIRS=("$REPO_ROOT_PHYS")
+    PROJECT_DIR_SOURCE="repo root (its own pyproject.toml declares [tool.coverage.run] or [tool.pytest.ini_options])"
+  else
+    SUBPROJECTS=()
+    read_lines SUBPROJECTS < <(printf '%s\n' "${CHANGED[@]}" | python3 "$SKILL_LIB/python_project.py" --repo-root "$PWD")
+    if [ "${#SUBPROJECTS[@]}" -eq 1 ]; then
+      {
+        echo "crap-check[python]: changed file(s) belong to a Python project in a subdirectory, not the repo root:"
+        printf '    %s\n' "${SUBPROJECTS[@]}"
+        echo "  A subdirectory's own pyproject.toml only resolves from inside it, so"
+        echo "  running from the repo root would measure with the wrong config."
+        echo "  Re-run with CRAP_PY_PROJECT_DIR=<dir> naming it (relative to the repo"
+        echo "  root, or absolute), or CRAP_PY_PROJECT_DIR=. if the repo root really"
+        echo "  is this change's project despite the above."
+      } >&2
+      exit 2
+    elif [ "${#SUBPROJECTS[@]}" -gt 1 ]; then
+      {
+        echo "crap-check[python]: changed files belong to more than one Python project:"
+        printf '    %s\n' "${SUBPROJECTS[@]}"
+        echo "  Each one's pyproject.toml only resolves from inside it, and no single"
+        echo "  directory measures both, so naming just one is not a fix. Re-run naming"
+        echo "  all of them together, space-separated:"
+        echo "    CRAP_PY_PROJECT_DIR=\"${SUBPROJECTS[*]}\" crap-check.sh"
+      } >&2
+      exit 2
+    fi
+    PROJECT_DIRS=("$REPO_ROOT_PHYS")
+    PROJECT_DIR_SOURCE="repo root (no CRAP_PY_PROJECT_DIR set, no subdirectory project detected)"
   fi
-  PROJECT_DIR="$PWD"
-  PROJECT_DIR_SOURCE="repo root (no CRAP_PY_PROJECT_DIR set, no subdirectory project detected)"
 fi
 
-if ! (cd "$PROJECT_DIR" && $CRAP_PY_RUN coverage --version) >/dev/null 2>&1; then
-  echo "crap-check[python]: 'coverage' not runnable via '${CRAP_PY_RUN:-<active env>}' in $PROJECT_DIR" >&2
-  echo "  Hint: install coverage.py + pytest in the project env, or set CRAP_PY_RUN" >&2
-  echo "        (e.g. CRAP_PY_RUN='poetry run' or CRAP_PY_RUN='uv run')." >&2
-  exit 2
-fi
+# Repo-relative form of each resolved directory, "." for the repo root itself;
+# used to assign a changed file to its owning directory when more than one is
+# in play (python_project.py --group, see measure() below).
+PROJECT_RELS=()
+for PDIR in "${PROJECT_DIRS[@]}"; do
+  if [ "$PDIR" = "$REPO_ROOT_PHYS" ]; then
+    PROJECT_RELS+=(".")
+  else
+    PROJECT_RELS+=("${PDIR#"$REPO_ROOT_PHYS"/}")
+  fi
+done
+
+for PDIR in "${PROJECT_DIRS[@]}"; do
+  if ! (cd "$PDIR" && $CRAP_PY_RUN coverage --version) >/dev/null 2>&1; then
+    echo "crap-check[python]: 'coverage' not runnable via '${CRAP_PY_RUN:-<active env>}' in $PDIR" >&2
+    echo "  Hint: install coverage.py + pytest in the project env, or set CRAP_PY_RUN" >&2
+    echo "        (e.g. CRAP_PY_RUN='poetry run' or CRAP_PY_RUN='uv run')." >&2
+    exit 2
+  fi
+done
 
 STASHED=0
 if ! git diff --quiet || ! git diff --cached --quiet; then
@@ -149,7 +202,10 @@ CUR_UNMEASURED="$(mktemp)"
 
 clean_artifacts() {
   rm -rf .complexipy_cache
-  rm -f "$PROJECT_DIR/.coverage"
+  local PDIR
+  for PDIR in "${PROJECT_DIRS[@]}"; do
+    rm -f "$PDIR/.coverage"
+  done
 }
 
 cleanup() {
@@ -160,22 +216,20 @@ cleanup() {
 }
 trap cleanup EXIT
 
-measure() {
-  local out_tsv="$1" phase="$2" unmeasured_out="$3"
-  local existing=() f
-  for f in "${CHANGED[@]}"; do
-    [ -f "$f" ] && existing+=("$f")
-  done
-  if [ "${#existing[@]}" -eq 0 ]; then
-    : > "$out_tsv"
-    return
-  fi
+# Coverage + radon + join for one project directory, restricted to `files`.
+# Shared by the single- and multi-project cases in measure() below, so both
+# go through the identical logic; a single project is just the N=1 case.
+measure_dir() {
+  local out_tsv="$1" phase="$2" unmeasured_out="$3" project_dir="$4"
+  shift 4
+  local files=("$@")
 
-  (cd "$PROJECT_DIR" && $CRAP_PY_RUN coverage run -m pytest $CRAP_PY_PYTEST_ARGS) >/dev/null 2>&1 || true
+  (cd "$project_dir" && $CRAP_PY_RUN coverage run -m pytest $CRAP_PY_PYTEST_ARGS) >/dev/null 2>&1 || true
   # `coverage json` failing means no data was collected at all (import error,
-  # collection error), not that tests failed. This phase then scores nothing,
-  # which silently mistags every function as "new".
-  if ! (cd "$PROJECT_DIR" && $CRAP_PY_RUN coverage json -o "$COV_JSON") >/dev/null 2>&1; then
+  # collection error), not that tests failed. Every changed file reads as
+  # unmeasured below; the baseline phase zero-fills those rows instead of
+  # dropping them, the current phase does not (see the exit-4 check below).
+  if ! (cd "$project_dir" && $CRAP_PY_RUN coverage json -o "$COV_JSON") >/dev/null 2>&1; then
     echo '{}' > "$COV_JSON"
     collect_ignored_files "$phase" '*.py' \
       ':(glob,exclude)**/.venv/**' ':(glob,exclude)**/venv/**' \
@@ -183,21 +237,78 @@ measure() {
     {
       echo "crap-check[python]: coverage.py collected no data; this phase scored nothing."
       echo "  phase: $phase$(ignored_files_phase_suffix)"
+      echo "  project directory: $project_dir"
       ignored_files_note
     } >&2
   fi
 
   # radon and complexipy stay repo-rooted on repo-relative paths regardless of
-  # PROJECT_DIR: they need no project config to resolve, so their output keys
-  # match CHANGED as-is and the join in parse_python.py needs no cov_root for them.
-  $CRAP_PY_RADON cc -j "${existing[@]}" > "$RADON_JSON" 2>/dev/null || echo '{}' > "$RADON_JSON"
+  # project_dir: they need no project config to resolve, so their output keys
+  # match `files` as-is and the join in parse_python.py needs no cov_root for them.
+  $CRAP_PY_RADON cc -j "${files[@]}" > "$RADON_JSON" 2>/dev/null || echo '{}' > "$RADON_JSON"
 
-  CRAP_CHANGED_FILES="$(printf '%s\n' "${existing[@]}")" \
+  # Baseline only: HEAD not measuring a file is not evidence its functions are
+  # new, so zero-fill instead of dropping the row. The current phase keeps
+  # dropping so the exit-4 check below still fires.
+  local zero_fill_flag=()
+  [ "$phase" = "$PHASE_BASELINE" ] && zero_fill_flag=(--zero-fill-unmeasured)
+
+  CRAP_CHANGED_FILES="$(printf '%s\n' "${files[@]}")" \
     CRAP_REPO_ROOT="$PWD" \
-    CRAP_COV_ROOT="$PROJECT_DIR" \
+    CRAP_COV_ROOT="$project_dir" \
     python3 "$SKILL_LIB/parse_python.py" "$RADON_JSON" "$COV_JSON" \
-      --unmeasured-out "$unmeasured_out" > "$out_tsv"
+      --unmeasured-out "$unmeasured_out" "${zero_fill_flag[@]}" > "$out_tsv"
 
+  rm -f "$project_dir/.coverage"
+}
+
+measure() {
+  local out_tsv="$1" phase="$2" unmeasured_out="$3"
+  local existing=() f
+  for f in "${CHANGED[@]}"; do
+    [ -f "$f" ] && existing+=("$f")
+  done
+  : > "$out_tsv"
+  : > "$unmeasured_out"
+  if [ "${#existing[@]}" -eq 0 ]; then
+    return
+  fi
+
+  if [ "${#PROJECT_DIRS[@]}" -eq 1 ]; then
+    measure_dir "$out_tsv" "$phase" "$unmeasured_out" "${PROJECT_DIRS[0]}" "${existing[@]}"
+    clean_artifacts
+    return
+  fi
+
+  # More than one project: measure each directory's own files on their own.
+  # Project A's coverage run over project B's files would just report them
+  # unmeasured -- they were never in A's source tree.
+  local group_args=() d
+  for d in "${PROJECT_RELS[@]}"; do group_args+=(--group-by "$d"); done
+  local grouped
+  grouped="$(mktemp)"
+  printf '%s\n' "${existing[@]}" \
+    | python3 "$SKILL_LIB/python_project.py" --repo-root "$PWD" --group "${group_args[@]}" \
+    > "$grouped"
+
+  local i pdir prel dir_files dtsv dunm
+  for i in "${!PROJECT_DIRS[@]}"; do
+    pdir="${PROJECT_DIRS[$i]}"
+    prel="${PROJECT_RELS[$i]}"
+    dir_files=()
+    while IFS= read -r f; do
+      [ -n "$f" ] && dir_files+=("$f")
+    done < <(awk -F'\t' -v d="$prel" '$1 == d { print $2 }' "$grouped")
+    [ "${#dir_files[@]}" -eq 0 ] && continue
+
+    dtsv="$(mktemp)"
+    dunm="$(mktemp)"
+    measure_dir "$dtsv" "$phase" "$dunm" "$pdir" "${dir_files[@]}"
+    cat "$dtsv" >> "$out_tsv"
+    cat "$dunm" >> "$unmeasured_out"
+    rm -f "$dtsv" "$dunm"
+  done
+  rm -f "$grouped"
   clean_artifacts
 }
 
@@ -225,19 +336,22 @@ if [ -s "$CUR_UNMEASURED" ]; then
   {
     echo "crap-check[python]: FAILED TO MEASURE - coverage has no data for changed file(s):"
     printf '    %s\n' "${CUR_UNMEASURED_LIST[@]}"
-    echo "  project directory used: $PROJECT_DIR"
+    echo "  project directory used: ${PROJECT_DIRS[*]}"
     echo "  resolved from:          $PROJECT_DIR_SOURCE"
-    echo "  suite ran in:           $PROJECT_DIR"
+    echo "  suite ran in:           ${PROJECT_DIRS[*]}"
     echo ""
     echo "  This is NOT a pass. No row was built for these files: there is no"
     echo "  coverage percentage to report for them, not a genuine 0%."
     echo ""
     echo "  Remedies:"
     echo "    - If this is the wrong project, set CRAP_PY_PROJECT_DIR to the one"
-    echo "      that owns these files."
+    echo "      that owns these files (or to '.' if it is the repo root itself)."
     echo "    - If a file is intentionally never imported by a test, add its"
-    echo "      package to [tool.coverage.run] source/include in the project's"
-    echo "      pyproject.toml (or .coveragerc) so it reads a real 0% instead."
+    echo "      package to [tool.coverage.run] source (not include/omit) in the"
+    echo "      project's pyproject.toml or .coveragerc: source is what makes"
+    echo "      coverage.py report a file it never executed at a real 0%;"
+    echo "      include/omit only filter files coverage already found, so they"
+    echo "      cannot make an unimported file appear."
     echo "    - Confirm coverage.py >= 7.13.1 ran: older releases omit the"
     echo "      per-function start_line this gate joins on (see python.md)."
   } >&2

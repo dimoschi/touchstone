@@ -4,7 +4,14 @@
 Reads:
   argv[1]                 - path to radon `cc -j` JSON
   argv[2]                 - path to `coverage json` output
-  --unmeasured-out <path> - optional; write unmeasured repo-relative paths here
+  --unmeasured-out <path>  - optional; write unmeasured repo-relative paths here
+  --zero-fill-unmeasured   - optional; emit unmeasured functions at 0.0% instead
+                             of dropping their rows (still listed via
+                             --unmeasured-out). For the baseline (HEAD) phase:
+                             HEAD not yet measuring a file is not evidence the
+                             function is new, and dropping the row there was
+                             tagging every one of its functions "new" against
+                             an empty baseline instead of comparing them.
   env CRAP_CHANGED_FILES  - newline-separated repo-relative paths to filter on
   env CRAP_REPO_ROOT      - repo root, used to resolve file paths
   env CRAP_COV_ROOT       - directory `coverage json` ran in, default CRAP_REPO_ROOT
@@ -130,9 +137,11 @@ def _write_unmeasured(path, unmeasured):
             fh.write(rel + "\n")
 
 
-def _emit_rows(blocks, changed, unmeasured, cov):
+def _emit_rows(blocks, changed, unmeasured, cov, zero_fill_unmeasured=False):
     for rel, name, cc, lineno in blocks:
-        if rel not in changed or rel in unmeasured:
+        if rel not in changed:
+            continue
+        if rel in unmeasured and not zero_fill_unmeasured:
             continue
         pct = cov.get(rel, {}).get(lineno, 0.0)
         sys.stdout.write(f"{rel}::{name}\t{cc}\t{pct:.1f}\t{crap(cc, pct):.1f}\n")
@@ -143,6 +152,7 @@ def main():
     ap.add_argument("radon_json")
     ap.add_argument("cov_json")
     ap.add_argument("--unmeasured-out")
+    ap.add_argument("--zero-fill-unmeasured", action="store_true")
     args = ap.parse_args()
 
     repo_root = os.path.abspath(os.environ.get("CRAP_REPO_ROOT", os.getcwd()))
@@ -160,7 +170,7 @@ def main():
     unmeasured = set(unmeasured_files(changed, cov, blocks))
 
     _write_unmeasured(args.unmeasured_out, unmeasured)
-    _emit_rows(blocks, changed, unmeasured, cov)
+    _emit_rows(blocks, changed, unmeasured, cov, args.zero_fill_unmeasured)
     return 0
 
 

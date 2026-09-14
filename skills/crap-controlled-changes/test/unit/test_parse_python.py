@@ -247,6 +247,34 @@ def test_main_writes_nothing_to_out_file_when_all_measured(monkeypatch, tmp_path
     assert out_path.read_text() == ""
 
 
+def test_main_zero_fill_unmeasured_emits_rows_at_zero_instead_of_dropping(monkeypatch, tmp_path, capsys):
+    radon = tmp_path / "radon.json"
+    cov = tmp_path / "cov.json"
+    out_path = tmp_path / "unmeasured.txt"
+    radon.write_text(json.dumps({
+        "measured.py": [{"type": "function", "name": "f", "complexity": 2, "lineno": 1}],
+        "unmeasured.py": [{"type": "function", "name": "g", "complexity": 3, "lineno": 1}],
+    }))
+    cov.write_text(json.dumps({
+        "files": {
+            "measured.py": {"functions": {"f": {"start_line": 1, "summary": {"percent_covered": 100.0}}}}
+        }
+    }))
+    monkeypatch.setenv("CRAP_REPO_ROOT", str(tmp_path))
+    monkeypatch.setenv("CRAP_CHANGED_FILES", "measured.py\nunmeasured.py\n")
+    monkeypatch.setattr(
+        "sys.argv",
+        ["parse_python.py", str(radon), str(cov), "--zero-fill-unmeasured",
+         "--unmeasured-out", str(out_path)],
+    )
+    assert parse_python.main() == 0
+    out = capsys.readouterr().out
+    assert out == "measured.py::f\t2\t100.0\t2.0\nunmeasured.py::g\t3\t0.0\t12.0\n"
+    # Still reported as unmeasured for the caller's own "HEAD never measured
+    # this file" warning, even though a row was emitted for it here.
+    assert out_path.read_text() == "unmeasured.py\n"
+
+
 def test_main_uses_crap_cov_root_env_to_join_subproject_keys(monkeypatch, tmp_path, capsys):
     radon = tmp_path / "radon.json"
     cov = tmp_path / "cov.json"

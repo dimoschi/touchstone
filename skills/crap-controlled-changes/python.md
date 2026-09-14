@@ -73,15 +73,35 @@ CRAP_PY_PROJECT_DIR=services/api crap-check.sh
 
 Resolution order:
 
-1. `CRAP_PY_PROJECT_DIR`, if set (absolute, or relative to the repo root).
-2. The repo root, unless a changed file sits under a subdirectory whose own
-   `pyproject.toml` declares `[tool.coverage.run]` or `[tool.pytest.ini_options]`,
-   in which case the module refuses (exit 2) and names that subdirectory
-   rather than silently measuring with the wrong config.
+1. `CRAP_PY_PROJECT_DIR`, if set: one directory, or several space/newline
+   separated (absolute, or relative to the repo root). Each changed file is
+   measured from whichever named directory owns it.
+2. The repo root, if its own `pyproject.toml` declares `[tool.coverage.run]`
+   or `[tool.pytest.ini_options]`. This wins regardless of a member directory
+   also carrying one of those headers for its own standalone use, e.g. a
+   uv/poetry workspace member with its own `[tool.pytest.ini_options]`: that
+   is a normal thing for a member to have, and does not make it a separate
+   project this gate needs to measure from.
+3. Otherwise the repo root, unless a changed file sits under a subdirectory
+   whose own `pyproject.toml` declares one of those headers, in which case the
+   module refuses (exit 2) and names that subdirectory rather than silently
+   measuring with the wrong config. `CRAP_PY_PROJECT_DIR=.` forces the repo
+   root anyway, e.g. when its config lives in `.coveragerc` rather than
+   `pyproject.toml` and step 2 above could not see it.
 
-A repo whose Python project sits at the git root never trips the refusal:
-only a `pyproject.toml` strictly below the root, with one of those two
-section headers, does.
+A repo whose Python project sits at the git root, configured through its own
+`pyproject.toml`, never trips the refusal at step 3, no matter how many
+subdirectories have their own qualifying `pyproject.toml` alongside it.
+
+A diff can span more than one Python project. Naming just one in
+`CRAP_PY_PROJECT_DIR` cannot measure the rest -- each project's config only
+resolves from inside its own directory -- so the module refuses (exit 2) and
+prints all of them; naming all of them together, space-separated, measures
+each from its own directory and merges the results:
+
+```bash
+CRAP_PY_PROJECT_DIR="services/api services/worker" crap-check.sh
+```
 
 ## Performance
 
@@ -99,7 +119,7 @@ CRAP_PY_PYTEST_ARGS="tests/unit -k somepattern" crap-check.sh
 | `CRAP_PY_PYTEST_ARGS` | *(empty)* | Extra pytest args to scope/speed the suite |
 | `CRAP_PY_RADON` | `uvx radon` | Override to a project-local `radon` |
 | `CRAP_PY_COMPLEXIPY` | `uvx complexipy` | Override to a project-local `complexipy` |
-| `CRAP_PY_PROJECT_DIR` | *(repo root)* | Directory to run the suite and coverage from; see Subdirectory projects |
+| `CRAP_PY_PROJECT_DIR` | *(repo root)* | Directory (or space/newline-separated directories) to run the suite and coverage from; see Subdirectory projects |
 
 ## Manual Equivalent (if the helper is unavailable)
 
@@ -178,16 +198,16 @@ change your suite cannot detect.
   FastAPI handler's `return SomeResponse(...)`, read as missed even though the
   test exercised them, and new/renamed functions trip a false `NEEDS_TESTS`.
 - **`coverage json` itself failing (import error, collection error) is a
-  warning in either phase, not a hard failure.** There is then nothing
-  per-file to tell "absent" from "zero", so the run falls back to scoring
-  every function it can still join at `coverage=0.0%` instead. When gitignored
-  `.py` files are present the warning names them: `git stash
-  --include-untracked` does not stash ignored files, so they survive from the
-  current tree into the baseline. See the same section in `go.md` for the full
-  explanation. crap-check honors the project config, so fix it in
-  `[tool.coverage.run]`, not in the tool. (Symptom: every async handler reads
-  ~50% while directly-awaited service/repo functions read 100%.)
-- **A single changed file missing from an otherwise-successful measurement is
-  different.** The baseline (HEAD) phase treats it as a warning, since the
-  file may simply be new since HEAD; the current phase treats it as
-  could-not-measure and exits 4, per the caveat above.
+  warning, not a hard failure, only in the baseline phase.** There every
+  changed file reads as unmeasured, and the baseline zero-fills those rows
+  instead of dropping them, so a function unchanged since HEAD still tags
+  `unchanged` rather than a false `new`. The current phase has no baseline to
+  fall back to: every changed file goes through the same could-not-measure
+  path as the "never imported by any test" caveat above and exits 4, whether
+  the whole suite failed to collect or only one file went unmeasured -- it is
+  one mechanism, not two. When gitignored `.py` files are present the warning
+  names them: `git stash --include-untracked` does not stash ignored files, so
+  they survive from the current tree into the baseline. See the same section
+  in `go.md` for the full explanation. crap-check honors the project config,
+  so fix it in `[tool.coverage.run]`, not in the tool. (Symptom: every async
+  handler reads ~50% while directly-awaited service/repo functions read 100%.)
