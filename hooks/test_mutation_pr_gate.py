@@ -243,3 +243,186 @@ def test_main_setup_failure_blocks_with_gate_failing_message(monkeypatch, tmp_pa
     err = capsys.readouterr().err
     assert "gate failing, not a red ledger" in err
     assert "setup broke" in err
+
+
+def test_main_could_not_measure_blocks_with_gate_failing_message(monkeypatch, tmp_path, capsys):
+    # returncode 4 (could not measure) gets the same "gate failing" wording as
+    # 2 (setup problem): neither one read the ledger, so both are the gate
+    # itself failing, not a red verdict.
+    repo = _repo(tmp_path)
+    monkeypatch.setattr("sys.stdin", io.StringIO(_payload("gh pr ready", repo)))
+    _stub_mutation_check(monkeypatch, 4, stderr="could not measure")
+    rc = gate.main()
+    assert rc == 2
+    err = capsys.readouterr().err
+    assert "gate failing, not a red ledger" in err
+    assert "could not measure" in err
+
+
+def test_gh_route_repo_probes_with_show_toplevel(monkeypatch, tmp_path):
+    repo = _repo(tmp_path)
+    calls = []
+    real_git = gate.git
+
+    def spy(r, *args):
+        calls.append(args)
+        return real_git(r, *args)
+
+    monkeypatch.setattr(gate, "git", spy)
+    m = gate.GH_PR_READY.search("gh pr ready 7")
+    assert gate.gh_route_repo("gh pr ready 7", m, repo) == repo.resolve()
+    assert ("rev-parse", "--show-toplevel") in calls
+
+
+def test_trigger_gh_pr_create_dash_c_nonexistent_repo_is_none(tmp_path):
+    # Mirrors test_trigger_gh_pr_ready_dash_c_nonexistent_repo_is_none but for
+    # the `gh pr create` branch, which builds its (repo, None) tuple from a
+    # separate occurrence of the same expression.
+    cwd = _repo(tmp_path / "cwd")
+    missing = tmp_path / "does-not-exist"
+    hit = gate.trigger(f"git -C {missing} push && gh pr create --title x", cwd)
+    assert hit is None
+
+
+def test_merge_hit_uses_exact_probe_and_verify_args(monkeypatch, tmp_path):
+    repo = _repo(tmp_path)
+    _git("checkout", "-q", "-b", "feature", cwd=repo)
+    _git("checkout", "-q", "main", cwd=repo)
+
+    git_calls = []
+    real_git = gate.git
+
+    def spy_git(r, *args):
+        git_calls.append(args)
+        return real_git(r, *args)
+
+    base_calls = []
+    real_base = gate.base_branch_names
+
+    def spy_base(r):
+        base_calls.append(r)
+        return real_base(r)
+
+    monkeypatch.setattr(gate, "git", spy_git)
+    monkeypatch.setattr(gate, "base_branch_names", spy_base)
+
+    m = gate.GIT_MERGE.search("git merge feature")
+    assert gate.merge_hit(repo, m) == (repo, "feature")
+    assert base_calls == [repo]
+    assert ("rev-parse", "--abbrev-ref", "HEAD") in git_calls
+    assert ("rev-parse", "--verify", "--quiet", "feature^{commit}") in git_calls
+
+
+def test_push_hit_uses_exact_probe_and_verify_args(monkeypatch, tmp_path):
+    repo = _repo(tmp_path)
+
+    git_calls = []
+    real_git = gate.git
+
+    def spy_git(r, *args):
+        git_calls.append(args)
+        return real_git(r, *args)
+
+    base_calls = []
+    real_base = gate.base_branch_names
+
+    def spy_base(r):
+        base_calls.append(r)
+        return real_base(r)
+
+    monkeypatch.setattr(gate, "git", spy_git)
+    monkeypatch.setattr(gate, "base_branch_names", spy_base)
+
+    m = gate.GIT_PUSH.search("git push")
+    assert gate.push_hit(repo, m) == (repo, "main")
+    assert base_calls == [repo]
+    assert ("rev-parse", "--verify", "--quiet", "main^{commit}") in git_calls
+
+
+def test_push_hit_and_short_circuits_without_verify_probe(monkeypatch, tmp_path):
+    # `target and git(...)`: when push_target finds no base-branch target, the
+    # verify probe must never run at all, not merely fail.
+    repo = _repo(tmp_path, branch="feature")
+
+    git_calls = []
+    real_git = gate.git
+
+    def spy_git(r, *args):
+        git_calls.append(args)
+        return real_git(r, *args)
+
+    monkeypatch.setattr(gate, "git", spy_git)
+
+    m = gate.GIT_PUSH.search("git push")
+    assert gate.push_hit(repo, m) is None
+    assert not any(a[0] == "rev-parse" and "--verify" in a for a in git_calls)
+
+
+def test_push_hit_head_refspec_returns_none_branch(tmp_path):
+    repo = _repo(tmp_path)
+    m = gate.GIT_PUSH.search("git push origin HEAD:main")
+    assert gate.push_hit(repo, m) == (repo, None)
+
+
+def test_main_missing_command_falls_back_to_empty_string(monkeypatch, tmp_path):
+    repo = _repo(tmp_path)
+    calls = []
+    real_trigger = gate.trigger
+
+    def spy_trigger(cmd, cwd):
+        calls.append(cmd)
+        return real_trigger(cmd, cwd)
+
+    monkeypatch.setattr(gate, "trigger", spy_trigger)
+    monkeypatch.setattr(
+        "sys.stdin", io.StringIO(json.dumps({"tool_input": {}, "cwd": str(repo)}))
+    )
+    assert gate.main() == 0
+    assert calls == [""]
+
+
+def test_main_checks_exact_marker_name(monkeypatch, tmp_path):
+    repo = _repo(tmp_path)
+    calls = []
+    real_is_gated = gate.is_gated
+
+    def spy(path, marker):
+        calls.append(marker)
+        return real_is_gated(path, marker)
+
+    monkeypatch.setattr(gate, "is_gated", spy)
+    monkeypatch.setattr("sys.stdin", io.StringIO(_payload("gh pr ready", repo)))
+    _stub_mutation_check(monkeypatch, 0)
+    assert gate.main() == 0
+    assert calls == [".mutation-gated"]
+
+
+def test_main_calls_mutation_check_with_exact_subprocess_args(monkeypatch, tmp_path):
+    repo = _repo(tmp_path)
+    monkeypatch.setattr("sys.stdin", io.StringIO(_payload("gh pr ready", repo)))
+    seen = {}
+    real_run = subprocess.run
+
+    def fake_run(args, **kwargs):
+        if args and args[0] == str(gate.MUTATION_CHECK):
+            seen["kwargs"] = kwargs
+            return SimpleNamespace(returncode=0, stdout="", stderr="")
+        return real_run(args, **kwargs)
+
+    monkeypatch.setattr(gate.subprocess, "run", fake_run)
+    assert gate.main() == 0
+    assert seen["kwargs"] == {
+        "cwd": repo.resolve(),
+        "capture_output": True,
+        "text": True,
+    }
+
+
+def test_main_red_ledger_tail_joins_stdout_and_stderr_correctly(monkeypatch, tmp_path, capsys):
+    repo = _repo(tmp_path)
+    monkeypatch.setattr("sys.stdin", io.StringIO(_payload("gh pr ready", repo)))
+    _stub_mutation_check(monkeypatch, 1, stdout="line1\nline2", stderr="line3\nline4")
+    rc = gate.main()
+    assert rc == 2
+    err = capsys.readouterr().err
+    assert "line1\nline2\nline3\nline4" in err
