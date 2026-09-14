@@ -120,8 +120,16 @@ def gh_route_repo(cmd, gh_match, cwd):
     repo, the same proof merge/push get for free from their own branch
     check. An unproven path handed to a later subprocess.run(cwd=...) raises
     FileNotFoundError, an uncaught, non-blocking hook error.
+
+    An unprovable path falls back to the cwd rather than abandoning the
+    route. Since `gh` has no `-C`, a path it cannot be tied to never
+    redirected it, so the cwd is where `gh` runs. Returning None instead made
+    any `git -C <not-a-repo>` earlier on the line -- `/tmp` is enough -- turn
+    the gate off, which is the failure this route exists to prevent.
     """
     repo = target_repo(cmd[:gh_match.start()], cwd).resolve()
+    if git(repo, 'rev-parse', '--show-toplevel') is None:
+        repo = Path(cwd).resolve()
     if git(repo, 'rev-parse', '--show-toplevel') is None:
         return None
     return repo

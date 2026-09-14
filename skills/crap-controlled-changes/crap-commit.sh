@@ -52,6 +52,10 @@ esac
 [ -d "$REPO" ] || { echo "crap-commit: no such directory: $REPO" >&2; exit 2; }
 
 cd "$REPO"
+# The gates below unset these once given an explicit path. Leaving them set
+# here would split the run: gates score $REPO while the staged-diff check and
+# the commit itself obey GIT_DIR and land elsewhere.
+unset GIT_DIR GIT_WORK_TREE
 git rev-parse --show-toplevel >/dev/null 2>&1 || {
   echo "crap-commit: not a git repository: $REPO" >&2
   exit 2

@@ -137,8 +137,13 @@ expect "git -C after the gh call is not the repo gh acted in -> blocked" \
   BLOCK "$WORK" "gh pr create --title x && git -C $NONREPO status"
 expect "git -C inside a quoted --body is message content, not a redirect -> blocked" \
   BLOCK "$WORK" "gh pr create --title x --body \"see git -C $NONREPO for notes\""
-expect "git -C naming a path that does not exist does not crash the hook" \
-  ALLOW "$WORK" "git -C $WORK/does-not-exist push && gh pr create --title x"
+# A path that cannot be proven a repo never redirected gh, so the route falls
+# back to the cwd and still gates. Allowing here would have let any bogus
+# git -C switch the gate off.
+expect "git -C naming a path that does not exist falls back to the cwd -> blocked" \
+  BLOCK "$WORK" "git -C $WORK/does-not-exist push && gh pr create --title x"
+expect "git -C naming an existing non-repo falls back to the cwd -> blocked" \
+  BLOCK "$WORK" "git -C $NONREPO log -1 && gh pr create --title x"
 
 record_branch feature
 expect "gh pr ready, now recorded -> allowed" ALLOW "$WORK" "gh pr ready"

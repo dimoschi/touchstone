@@ -13,6 +13,7 @@ SKILL_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 CRAP="$SKILL_DIR/crap-check.sh"
 MUTATION="$SKILL_DIR/mutation-check.sh"
 DEADCODE="$SKILL_DIR/deadcode-check.sh"
+COMMIT="$SKILL_DIR/crap-commit.sh"
 
 command -v git >/dev/null || { echo "SKIP: git not on PATH"; exit 0; }
 
@@ -137,6 +138,20 @@ run_from_with_git_dir_env "$OTHER" "$OTHER/.git" "$OTHER" "$MUTATION" "$MAIN"
 check "mutation-check exit 0 despite GIT_DIR/GIT_WORK_TREE pointing at OTHER" "$RC" "0"
 check_contains "mutation-check still announces MAIN, not OTHER" "$OUT" \
   "mutation-check: repo $MAIN branch main"
+
+# crap-commit.sh is the gates' only orchestrator, so honouring the env vars
+# here while they unset them would gate one repo and commit into another. Its
+# staged-diff check is the cheapest place to prove which repo it reads: MAIN
+# is clean and OTHER is not, so the answer decides the exit code.
+echo "=== crap-commit.sh reads its explicit repo's index, not GIT_DIR's ==="
+echo "staged in other" > "$OTHER/staged.md"
+git -C "$OTHER" add staged.md
+run_from_with_git_dir_env "$OTHER" "$OTHER/.git" "$OTHER" "$COMMIT" "$MAIN" \
+  -m "must not reach a commit"
+check "crap-commit exit 2 despite GIT_DIR/GIT_WORK_TREE pointing at OTHER" "$RC" "2"
+check_contains "reports MAIN as the repo with nothing staged" "$OUT" \
+  "nothing staged in $MAIN"
+git -C "$OTHER" reset -q
 
 echo "=== ticket-43: cwd on one branch, explicit path a worktree on another ==="
 run_from "$OTHER" "$CRAP" "$WT" --mark-scored

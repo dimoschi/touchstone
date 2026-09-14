@@ -109,13 +109,62 @@ def test_trigger_gh_pr_create_ignores_dash_c_inside_quoted_body(tmp_path):
     assert hit == (cwd.resolve(), None)
 
 
-def test_trigger_gh_pr_ready_dash_c_nonexistent_repo_is_none(tmp_path):
-    # An unprobed path here used to reach subprocess.run(cwd=...) in main()
-    # and crash the hook with an uncaught FileNotFoundError -- a non-blocking
-    # hook error that let the PR through with no verification at all.
+def test_trigger_gh_pr_ready_unprovable_dash_c_falls_back_to_cwd(tmp_path):
+    # Returning None here fixed a FileNotFoundError crash and opened a worse
+    # hole: any `git -C <not-a-repo>` earlier on the line switched the gate
+    # off. `gh` has no -C, so such a path never redirected it.
     cwd = _repo(tmp_path / "cwd")
     missing = tmp_path / "does-not-exist"
-    assert gate.trigger(f"git -C {missing} push && gh pr ready 7", cwd) is None
+    hit = gate.trigger(f"git -C {missing} push && gh pr ready 7", cwd)
+    assert hit == (cwd.resolve(), None)
+
+
+def test_trigger_gh_pr_ready_existing_non_repo_dash_c_falls_back_to_cwd(tmp_path):
+    # The mundane version: an ordinary directory that simply is not a repo.
+    cwd = _repo(tmp_path / "cwd")
+    plain = tmp_path / "plain"
+    plain.mkdir()
+    hit = gate.trigger(f"git -C {plain} log -1 && gh pr ready 7", cwd)
+    assert hit == (cwd.resolve(), None)
+
+
+def test_trigger_gh_pr_ready_outside_any_repo_is_none(tmp_path):
+    # The fallback is to the cwd, not past it: with no repo to gate there is
+    # nothing to verify, and that is the one case None is right for.
+    plain = tmp_path / "plain"
+    plain.mkdir()
+    assert gate.trigger("gh pr ready 7", plain) is None
+
+
+def test_trigger_gh_pr_create_outside_any_repo_is_none(tmp_path):
+    # The create branch repeats the expression, so it needs its own case.
+    plain = tmp_path / "plain"
+    plain.mkdir()
+    assert gate.trigger("gh pr create --title x", plain) is None
+
+
+def test_gh_route_repo_probes_the_slice_then_the_cwd_with_exact_args(
+        monkeypatch, tmp_path):
+    # Both probes must be asserted as a pair. A membership check passes while
+    # either one alone has its flag dropped or case-swapped, because the other
+    # still records the right args.
+    cwd = _repo(tmp_path / "cwd")
+    missing = tmp_path / "does-not-exist"
+    calls = []
+    real_git = gate.git
+
+    def spy(r, *args):
+        calls.append((str(r), args))
+        return real_git(r, *args)
+
+    monkeypatch.setattr(gate, "git", spy)
+    cmd = f"git -C {missing} push && gh pr ready 7"
+    m = gate.GH_PR_READY.search(cmd)
+    assert gate.gh_route_repo(cmd, m, cwd) == cwd.resolve()
+    assert calls == [
+        (str(missing.resolve()), ("rev-parse", "--show-toplevel")),
+        (str(cwd.resolve()), ("rev-parse", "--show-toplevel")),
+    ]
 
 
 def test_trigger_git_merge_on_base_branch(tmp_path):
@@ -168,12 +217,15 @@ def test_main_no_trigger_is_allowed(monkeypatch, tmp_path):
     assert gate.main() == 0
 
 
-def test_main_gh_pr_ready_dash_c_nonexistent_repo_does_not_crash(monkeypatch, tmp_path):
+def test_main_gh_pr_ready_unprovable_dash_c_still_gates_the_cwd(monkeypatch, tmp_path):
+    # End to end for the fallback: no crash, and the cwd's red ledger still
+    # blocks. Asserting rc 0 here only passed while the route was abandoned.
     cwd = _repo(tmp_path / "cwd")
     missing = tmp_path / "does-not-exist"
     cmd = f"git -C {missing} push && gh pr ready 7"
     monkeypatch.setattr("sys.stdin", io.StringIO(_payload(cmd, cwd)))
-    assert gate.main() == 0
+    _stub_mutation_check(monkeypatch, 1, stdout="row1\n")
+    assert gate.main() == 2
 
 
 def test_main_ungated_repo_is_allowed(monkeypatch, tmp_path):
@@ -274,14 +326,13 @@ def test_gh_route_repo_probes_with_show_toplevel(monkeypatch, tmp_path):
     assert ("rev-parse", "--show-toplevel") in calls
 
 
-def test_trigger_gh_pr_create_dash_c_nonexistent_repo_is_none(tmp_path):
-    # Mirrors test_trigger_gh_pr_ready_dash_c_nonexistent_repo_is_none but for
-    # the `gh pr create` branch, which builds its (repo, None) tuple from a
-    # separate occurrence of the same expression.
+def test_trigger_gh_pr_create_unprovable_dash_c_falls_back_to_cwd(tmp_path):
+    # The `gh pr create` branch builds its (repo, None) tuple from a separate
+    # occurrence of the same expression, so it needs its own case.
     cwd = _repo(tmp_path / "cwd")
     missing = tmp_path / "does-not-exist"
     hit = gate.trigger(f"git -C {missing} push && gh pr create --title x", cwd)
-    assert hit is None
+    assert hit == (cwd.resolve(), None)
 
 
 def test_merge_hit_uses_exact_probe_and_verify_args(monkeypatch, tmp_path):
