@@ -25,7 +25,7 @@ cd "$TEST_DIR" || { echo "!! cd $TEST_DIR failed" >&2; exit 1; }
 
 shopt -s nullglob
 
-NEEDS_OTHER_TOOLCHAIN=(run-mutation-php-live.sh run-mutation-python.sh run-python-e2e.sh)
+NEEDS_OTHER_TOOLCHAIN=(run-mutation-php-live.sh run-mutation-python.sh run-python-e2e.sh run-python-subproject.sh)
 
 select_suites() {
   local want="$1"
