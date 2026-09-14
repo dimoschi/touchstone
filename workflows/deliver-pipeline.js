@@ -1323,9 +1323,11 @@ const sFix = stage('fix')
 // claim as the known-findings list a duplicate_of reference joins against.
 const settled = []
 // A lens pointing a fresh finding at a settled one may be restating the claim
-// it was handed, or reporting the fix did not hold. Not reopened, which would
-// send the fixer to undo its own work; recorded so it is not dropped in silence.
-const regressionSuspects = []
+// it was handed, or reporting the fix did not hold. Not reopened mid-loop,
+// which would send the fixer to undo its own work; recorded, then verified
+// once the loop ends so a real one is not filed away as noise.
+let regressionSuspects = []
+let suspectsUnverified = false
 let round = 0
 // Which of the loop's four exits fired. Checked in the same order the loop
 // tests them, so the answer matches the condition that actually stopped it.
@@ -1563,6 +1565,29 @@ if (open.length && !outOfBudget()) {
       ? `${closed.length} of them were already fixed; ${open.length} still open`
       : `none of them were fixed; ${open.length} still open`)
   }
+}
+
+// duplicate_of cannot separate a lens re-reporting a fixed finding from one
+// describing a defect that finding's fix introduced: both reference the same
+// id. Assuming the first readied a PR whose mutation gate any bogus `git -C`
+// switched off, under unresolved_findings: []. No verdict means unknown,
+// which stays blocking, as it already does for the open list.
+if (regressionSuspects.length && !outOfBudget()) {
+  log(`verifying ${regressionSuspects.length} regression suspect(s) before ` +
+      `treating them as noise`)
+  const verdicts = new Map(await verifyOpen(regressionSuspects, 'verify:suspects'))
+  const live = regressionSuspects.filter(f => verdicts.get(f.id) !== true)
+  const liveIds = new Set(live.map(f => f.id))
+  regressionSuspects = regressionSuspects.filter(f => !liveIds.has(f.id))
+  open = open.concat(live)
+  log(live.length
+    ? `${live.length} suspect(s) still reproduce and are now open; ` +
+      `${regressionSuspects.length} confirmed fixed`
+    : `none reproduce; all ${regressionSuspects.length} stay advisory`)
+} else if (regressionSuspects.length) {
+  suspectsUnverified = true
+  log(`${regressionSuspects.length} regression suspect(s) could not be verified ` +
+      `(out of budget); reported unverified rather than as noise`)
 }
 sFix.close()
 
@@ -1899,11 +1924,14 @@ const result = {
   mutation,
   reviewers: reviewerCount,
   regression_suspects: regressionSuspects,
+  // An unverified suspect is an open question, not a clean bill: saying so
+  // here is what keeps "nothing outstanding" from being claimed on its behalf.
+  suspects_unverified: suspectsUnverified,
   reviewed_through: reviewedThrough,
   fix_rounds: round,
   unresolved_findings: open,
   pr,
-  needs_user: args?.openPr !== false && !pr?.opened,
+  needs_user: suspectsUnverified || (args?.openPr !== false && !pr?.opened),
 }
 result.record_path = await recordRun(result)
 return result

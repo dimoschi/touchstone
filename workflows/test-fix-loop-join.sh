@@ -671,7 +671,9 @@ async function scenarioR() {
         claim: 'boundary is wrong', evidence: 'parser.js:12' }],
       advocate: [],
     },
-    verify: (id) => id === 'f1' ? true : undefined,
+    // f2 is the suspect: this scenario's re-report is genuine noise, so the
+    // verifier confirms it does not reproduce.
+    verify: (id) => (id === 'f1' || id === 'f2') ? true : undefined,
     fixHead: () => 'fix00000000000000000000000000000000000001',
     tailReview: [{ title: 'Boundary check excludes the last element', file: 'parser.js',
       claim: 'off-by-one at the array end', evidence: 'see loop condition',
@@ -703,7 +705,9 @@ async function scenarioS() {
       correctness: [{ title: 'Foo bug', file: 'f.js', claim: 'c1', evidence: 'e1' }],
       advocate: [],
     },
-    verify: (id, round) => id === 'f1' ? (round === 2 ? true : false) : undefined,
+    // Anything that is not f1 is the round-2 suspect, which this scenario
+    // means as the same bug, now fixed.
+    verify: (id, round) => id === 'f1' ? (round === 2 ? true : false) : true,
     fixHead: (round) => `fix0000000000000000000000000000000000000${round}`,
     tailReview: [{ title: 'Different wording of foo bug', file: 'f.js',
       claim: 'reworded claim', evidence: 'reworded evidence', duplicate_of: 'f1' }],
@@ -729,7 +733,9 @@ async function scenarioT() {
         claim: 'boundary is wrong', evidence: 'parser.js:12' }],
       advocate: [],
     },
-    verify: (id) => id === 'f1' ? true : undefined,
+    // f2 is the suspect: this scenario's re-report is genuine noise, so the
+    // verifier confirms it does not reproduce.
+    verify: (id) => (id === 'f1' || id === 'f2') ? true : undefined,
     staleness: () => [],
     mutationGated: true,
     mutationResult: () => ({ green: true, head_sha: 'mut0000000000000000000000000000000000001', detail: 'stub green', scored: true }),
@@ -761,7 +767,9 @@ async function scenarioU() {
         claim: 'boundary is wrong', evidence: 'parser.js:12' }],
       advocate: [],
     },
-    verify: (id) => id === 'f1' ? true : undefined,
+    // f2 is the suspect: this scenario's re-report is genuine noise, so the
+    // verifier confirms it does not reproduce.
+    verify: (id) => (id === 'f1' || id === 'f2') ? true : undefined,
     fixHead: () => 'fix00000000000000000000000000000000000001',
     tailReview: [{ title: 'Off-by-one in parser', file: 'src/parser.js',
       claim: 'boundary is wrong', evidence: 'parser.js:12', duplicate_of: 'f1' }],
@@ -790,7 +798,9 @@ async function scenarioV() {
       ],
       advocate: [],
     },
-    verify: (id) => id === 'f1' ? true : undefined,
+    // f2 is the leak that must stay open; f3 is the suspect, which this
+    // scenario means as genuine noise.
+    verify: (id) => (id === 'f1' || id === 'f3') ? true : undefined,
     fixHead: () => 'fix00000000000000000000000000000000000001',
     tailReview: [{ title: 'Boundary check excludes the last element', file: 'parser.js',
       claim: 'off-by-one at the array end', evidence: 'see loop condition',
@@ -823,7 +833,9 @@ async function scenarioW() {
         claim: 'boundary is wrong', evidence: 'parser.js:12' }],
       advocate: [],
     },
-    verify: (id) => id === 'f1' ? true : undefined,
+    // f2 is the suspect: this scenario's re-report is genuine noise, so the
+    // verifier confirms it does not reproduce.
+    verify: (id) => (id === 'f1' || id === 'f2') ? true : undefined,
     fixHead: () => 'fix00000000000000000000000000000000000001',
     tailReview: [{ title: 'Boundary check excludes the last element', file: 'parser.js',
       claim: 'off-by-one at the array end', evidence: 'see loop condition',
@@ -850,7 +862,9 @@ function convergedWithSuspect(overrides) {
         claim: 'boundary is wrong', evidence: 'parser.js:12' }],
       advocate: [],
     },
-    verify: (id) => id === 'f1' ? true : undefined,
+    // f2 is the suspect: this scenario's re-report is genuine noise, so the
+    // verifier confirms it does not reproduce.
+    verify: (id) => (id === 'f1' || id === 'f2') ? true : undefined,
     fixHead: () => 'fix00000000000000000000000000000000000001',
     tailReview: [{ title: 'Boundary check excludes the last element', file: 'parser.js',
       claim: 'off-by-one at the array end', evidence: 'see loop condition',
@@ -1382,6 +1396,61 @@ async function scenarioAR() {
     message.includes('neither a GitHub issue number'), true)
 }
 
+// Scenario AZ -- the defect #81 is about. A lens points a fresh finding at a
+// settled one because the fix for that finding introduced this one. Assuming
+// it was a re-report readied a PR carrying a real regression, under
+// unresolved_findings: []. The verifier decides now, and a suspect that still
+// reproduces blocks like any other finding.
+async function scenarioAZ() {
+  console.log('\n== scenario AZ: a suspect that still reproduces becomes open and halts')
+  const { result } = await run({
+    args: { maxReviewRounds: 1 },
+    draftPr: { opened: true, number: 24, url: 'https://example.invalid/pr/24', detail: 'stub draft' },
+    initialReview: {
+      correctness: [{ title: 'Route resolves from cwd', file: 'src/route.js',
+        claim: 'wrong repo', evidence: 'route.js:12' }],
+      advocate: [],
+    },
+    // f1 is fixed; f2, the suspect, is the hole that fix opened, so it is not.
+    verify: (id) => id === 'f1' ? true : false,
+    fixHead: () => 'fix00000000000000000000000000000000000001',
+    tailReview: [{ title: 'The fix fails open when the path is unprovable',
+      file: 'src/route.js', claim: 'gate is skipped entirely',
+      evidence: 'route.js:20', duplicate_of: 'f1' }],
+    staleness: () => [],
+  })
+  check('halted at Fix rather than readying the PR', result.halted_at, 'Fix')
+  check('the suspect is reported as unresolved, not as noise',
+    result.unresolved_findings?.length, 1)
+  check('it is the suspect that is open',
+    result.unresolved_findings?.[0]?.claim, 'gate is skipped entirely')
+  check('it is no longer filed as an advisory suspect',
+    result.regression_suspects?.length, 0)
+}
+
+// Scenario BA -- the budget case. Skipping verification must not silently
+// downgrade a suspect to noise, so the run says it could not tell.
+async function scenarioBA() {
+  console.log('\n== scenario BA: an unverifiable suspect is reported unverified, not as noise')
+  const { result } = await run({
+    args: { maxReviewRounds: 1, tokenCeilings: { fix: 1 } },
+    draftPr: { opened: true, number: 25, url: 'https://example.invalid/pr/25', detail: 'stub draft' },
+    initialReview: {
+      correctness: [{ title: 'Route resolves from cwd', file: 'src/route.js',
+        claim: 'wrong repo', evidence: 'route.js:12' }],
+      advocate: [],
+    },
+    verify: (id) => id === 'f1' ? true : undefined,
+    fixHead: () => 'fix00000000000000000000000000000000000001',
+    tailReview: [{ title: 'The fix fails open', file: 'src/route.js',
+      claim: 'gate is skipped', evidence: 'route.js:20', duplicate_of: 'f1' }],
+    staleness: () => [],
+  })
+  check('the run does not claim the suspect was judged',
+    result.suspects_unverified === true || (result.unresolved_findings?.length ?? 0) > 0,
+    true)
+}
+
 for (const scenario of [scenarioA, scenarioB, scenarioG, scenarioC, scenarioD, scenarioE, scenarioH,
                         scenarioI, scenarioJ, scenarioK, scenarioL, scenarioM, scenarioN,
                         scenarioO, scenarioP, scenarioQ, scenarioR, scenarioS, scenarioT,
@@ -1391,7 +1460,7 @@ for (const scenario of [scenarioA, scenarioB, scenarioG, scenarioC, scenarioD, s
                         scenarioAJ, scenarioAK, scenarioAL, scenarioAM, scenarioAN,
                         scenarioAO, scenarioAS, scenarioAT, scenarioAU, scenarioAV,
                         scenarioAW, scenarioAX, scenarioAY,
-                        scenarioAP, scenarioAQ, scenarioAR]) {
+                        scenarioAP, scenarioAQ, scenarioAR, scenarioAZ, scenarioBA]) {
   await scenario()
 }
 
