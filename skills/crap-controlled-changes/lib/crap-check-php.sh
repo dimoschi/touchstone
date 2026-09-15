@@ -118,14 +118,29 @@ run_phpunit() {
 
 parse_clover() {
   local in_xml="$1" out_tsv="$2" unmeasured_out="$3"
+  # Only files present in the tree this phase ran against. `git diff --cached`
+  # lists deletions, so a removed file (or a rename's old path) reaches here
+  # and can never appear in Clover: the suite had nothing to load. Reported as
+  # unmeasured it became exit 4, refusing the commit and printing remedies that
+  # ask for coverage of a file that no longer exists. Per phase, because the
+  # baseline tree is stashed back to HEAD where the file does still exist.
+  local existing=() f
+  for f in "${CHANGED[@]}"; do
+    [ -f "$f" ] && existing+=("$f")
+  done
+  : > "$unmeasured_out"
+  if [ "${#existing[@]}" -eq 0 ]; then
+    : > "$out_tsv"
+    return
+  fi
   if [ ! -s "$in_xml" ]; then
     : > "$out_tsv"
     # No report at all means every changed file is as unmeasured as one
     # Clover genuinely omitted; feeds the same could-not-measure check below.
-    printf '%s\n' "${CHANGED[@]}" > "$unmeasured_out"
+    printf '%s\n' "${existing[@]}" > "$unmeasured_out"
     return
   fi
-  CRAP_CHANGED_FILES="$(printf '%s\n' "${CHANGED[@]}")" \
+  CRAP_CHANGED_FILES="$(printf '%s\n' "${existing[@]}")" \
     CRAP_REPO_ROOT="$PWD" \
     python3 "$SKILL_LIB/parse_clover.py" "$in_xml" --unmeasured-out "$unmeasured_out" > "$out_tsv"
 }

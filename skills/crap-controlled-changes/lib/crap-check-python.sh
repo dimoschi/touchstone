@@ -143,9 +143,17 @@ else
         printf '    %s\n' "${SUBPROJECTS[@]}"
         echo "  A subdirectory's own pyproject.toml only resolves from inside it, so"
         echo "  running from the repo root would measure with the wrong config."
-        echo "  Re-run with CRAP_PY_PROJECT_DIR=<dir> naming it (relative to the repo"
-        echo "  root, or absolute), or CRAP_PY_PROJECT_DIR=. if the repo root really"
-        echo "  is this change's project despite the above."
+        echo ""
+        echo "  Re-run with whichever directory actually holds the tests that cover"
+        echo "  this change:"
+        echo "    CRAP_PY_PROJECT_DIR=<dir>  its own tests live there (relative to the"
+        echo "                               repo root, or absolute)"
+        echo "    CRAP_PY_PROJECT_DIR=.      the tests covering it live at the repo"
+        echo "                               root, which is the usual shape when the"
+        echo "                               root pyproject.toml sets testpaths"
+        echo ""
+        echo "  Naming the subdirectory when the tests are at the root runs a suite"
+        echo "  that collects nothing, which is exit 4 rather than a measurement."
       } >&2
       exit 2
     elif [ "${#SUBPROJECTS[@]}" -gt 1 ]; then
