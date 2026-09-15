@@ -54,6 +54,13 @@ prints the repo root and branch it resolved as the first line of its output on
 every code path. Needs only git, bash and python3, since nothing in it mutates
 code.
 
+`skills/crap-controlled-changes/test/run-python-subproject.sh` covers a Python
+project living in a repo subdirectory: no `CRAP_PY_PROJECT_DIR` refuses and
+names it, the variable measures it for real, and a changed file no test
+imports still exits 4 rather than a false 0%. It needs `uv`, so it runs under
+`run-php-python-tests.sh` alongside `run-python-e2e.sh`, not under
+`run-go-tests.sh`.
+
 ## How the two runners select suites
 
 `scripts/lib/skill-suites.sh` holds one list, `NEEDS_OTHER_TOOLCHAIN`, naming every

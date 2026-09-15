@@ -3,6 +3,11 @@
 
 Reads:
   argv[1]                 - path to clover.xml
+  --unmeasured-out <path> - optional; write changed files Clover never
+                            mentions here, one per line. Absent from Clover
+                            means PHPUnit never loaded the file at all (never
+                            imported by any test), not that it measured at a
+                            real 0%; see crap-check-php.sh's own use of this.
   env CRAP_CHANGED_FILES  - newline-separated repo-relative paths to filter on
   env CRAP_REPO_ROOT      - repo root, used to resolve absolute file= attrs
 
@@ -14,13 +19,26 @@ the fraction of executable statement lines inside the method body that were
 hit at least once. CRAP is taken directly from PHPUnit's Clover output.
 """
 
+import argparse
 import os
 import sys
 import xml.etree.ElementTree as ET
 
 
+def _write_unmeasured(path, unmeasured):
+    if not path:
+        return
+    with open(path, "w") as fh:
+        for rel in sorted(unmeasured):
+            fh.write(rel + "\n")
+
+
 def main() -> int:
-    xml_path = sys.argv[1]
+    ap = argparse.ArgumentParser()
+    ap.add_argument("xml_path")
+    ap.add_argument("--unmeasured-out")
+    args = ap.parse_args()
+
     repo_root = os.path.abspath(os.environ.get("CRAP_REPO_ROOT", os.getcwd()))
     changed = {
         os.path.normpath(p)
@@ -31,11 +49,15 @@ def main() -> int:
         return 0
 
     try:
-        tree = ET.parse(xml_path)
+        tree = ET.parse(args.xml_path)
     except ET.ParseError:
+        # A doc that failed to parse mentions nothing, so every changed file
+        # is as unmeasured as one Clover genuinely omitted.
+        _write_unmeasured(args.unmeasured_out, changed)
         return 0
     root = tree.getroot()
 
+    found = set()
     for file_el in root.iter("file"):
         abs_path = file_el.get("name") or ""
         try:
@@ -44,6 +66,7 @@ def main() -> int:
             continue
         if rel not in changed:
             continue
+        found.add(rel)
 
         # Index lines by num for slicing into per-method ranges.
         lines = []
@@ -95,6 +118,7 @@ def main() -> int:
             ident = f"{rel}::{klass}::{name}"
             print(f"{ident}\t{cc}\t{cov_pct}\t{crap}")
 
+    _write_unmeasured(args.unmeasured_out, changed - found)
     return 0
 
 
