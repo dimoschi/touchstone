@@ -60,6 +60,59 @@ exceeds the threshold. This is advisory (see SKILL.md). There is no
 
 Apply the Decision Policy in `SKILL.md` to the output.
 
+## Subdirectory projects
+
+The suite and coverage run from the repo root by default, which only works if
+the project's config (`pyproject.toml`'s `[tool.coverage.run]` /
+`[tool.pytest.ini_options]`, or `.coveragerc`) also resolves from there. A
+project one level down in a monorepo needs its own directory:
+
+```bash
+CRAP_PY_PROJECT_DIR=services/api crap-check.sh
+```
+
+Resolution order:
+
+1. `CRAP_PY_PROJECT_DIR`, if set: one directory, or several space/newline
+   separated (absolute, or relative to the repo root). Each changed file is
+   measured from whichever named directory owns it.
+2. The repo root, if its own `pyproject.toml` declares `[tool.coverage.run]`.
+   This wins regardless of a member directory also carrying one of the two
+   headers for its own standalone use, e.g. a uv/poetry workspace member with
+   its own `[tool.pytest.ini_options]`: that is a normal thing for a member to
+   have, and does not make it a separate project this gate needs to measure
+   from.
+3. The repo root, if its own `pyproject.toml` declares only
+   `[tool.pytest.ini_options]` (no `[tool.coverage.run]`) and no changed
+   file's own, closer `pyproject.toml` declares `[tool.coverage.run]`. A
+   pytest-only root says nothing about where coverage.py should measure from,
+   so it cannot win over a member's own coverage config the way step 2 does;
+   it only stands in when there is no such member to conflict with.
+4. Otherwise the repo root, unless a changed file sits under a subdirectory
+   whose own `pyproject.toml` declares one of those headers, in which case the
+   module refuses (exit 2) and names that subdirectory rather than silently
+   measuring with the wrong config. `CRAP_PY_PROJECT_DIR=.` forces the repo
+   root anyway, e.g. when its config lives in `.coveragerc` rather than
+   `pyproject.toml` and steps 2-3 above could not see it.
+
+A repo whose Python project sits at the git root, its own `pyproject.toml`
+declaring `[tool.coverage.run]`, never trips the refusal at step 4, no matter
+how many subdirectories have their own qualifying `pyproject.toml` alongside
+it. A root declaring only `[tool.pytest.ini_options]` does trip it once a
+changed file's own subdirectory declares `[tool.coverage.run]`: that member's
+coverage config is closer and more specific, and the root has none of its own
+to reproduce it with.
+
+A diff can span more than one Python project. Naming just one in
+`CRAP_PY_PROJECT_DIR` cannot measure the rest -- each project's config only
+resolves from inside its own directory -- so the module refuses (exit 2) and
+prints all of them; naming all of them together, space-separated, measures
+each from its own directory and merges the results:
+
+```bash
+CRAP_PY_PROJECT_DIR="services/api services/worker" crap-check.sh
+```
+
 ## Performance
 
 The configured pytest suite runs **twice** (baseline + current). Scope it via:
@@ -76,6 +129,7 @@ CRAP_PY_PYTEST_ARGS="tests/unit -k somepattern" crap-check.sh
 | `CRAP_PY_PYTEST_ARGS` | *(empty)* | Extra pytest args to scope/speed the suite |
 | `CRAP_PY_RADON` | `uvx radon` | Override to a project-local `radon` |
 | `CRAP_PY_COMPLEXIPY` | `uvx complexipy` | Override to a project-local `complexipy` |
+| `CRAP_PY_PROJECT_DIR` | *(repo root)* | Directory (or space/newline-separated directories) to run the suite and coverage from; see Subdirectory projects |
 
 ## Manual Equivalent (if the helper is unavailable)
 
@@ -134,10 +188,11 @@ change your suite cannot detect.
 
 ## Caveats and known gaps (prototype)
 
-- A changed file that is **never imported by any test** won't appear in coverage
-  JSON, so its functions read as 0% and surface as `NEEDS_TESTS` for new/worsened
-  code. This is the intended nudge (same blind spot as Go's `_test.go`-only
-  coverage and PHP's class-named tests). Run at least the unit suite.
+- A changed file that is **never imported by any test** produces no coverage
+  data at all. In the current phase that is could-not-measure: the run exits 4
+  and names the file rather than reporting a false `coverage=0.0%`. Import it
+  from at least the unit suite. (Same blind spot Go's `_test.go`-only coverage
+  and PHP's class-named tests have; here it refuses instead of scoring it.)
 - **Closures and module-level code are not scored.** radon only surfaces
   top-level functions and methods, so nested functions and `if __name__ ==
   "__main__":` blocks don't get a CRAP row. Extract logic into named functions to
@@ -152,12 +207,17 @@ change your suite cannot detect.
   Without it, lines that resume after an `await` crossing that boundary, e.g. a
   FastAPI handler's `return SomeResponse(...)`, read as missed even though the
   test exercised them, and new/renamed functions trip a false `NEEDS_TESTS`.
-- **A phase that collects no coverage is a warning, not a hard failure** (unlike
-  Go, which exits 4). If the baseline collected nothing, every function reads as
-  `new` against an empty baseline. When gitignored `.py` files are present the
-  warning names them: `git stash --include-untracked` does not stash ignored
-  files, so they survive from the current tree into the baseline. See the same
-  section in `go.md` for the full explanation.
-  crap-check honors the project config, so fix it in `[tool.coverage.run]`, not
-  in the tool. (Symptom: every async handler reads ~50% while directly-awaited
-  service/repo functions read 100%.)
+- **`coverage json` itself failing (import error, collection error) is a
+  warning, not a hard failure, only in the baseline phase.** There every
+  changed file reads as unmeasured, and the baseline zero-fills those rows
+  instead of dropping them, so a function unchanged since HEAD still tags
+  `unchanged` rather than a false `new`. The current phase has no baseline to
+  fall back to: every changed file goes through the same could-not-measure
+  path as the "never imported by any test" caveat above and exits 4, whether
+  the whole suite failed to collect or only one file went unmeasured -- it is
+  one mechanism, not two. When gitignored `.py` files are present the warning
+  names them: `git stash --include-untracked` does not stash ignored files, so
+  they survive from the current tree into the baseline. See the same section
+  in `go.md` for the full explanation. crap-check honors the project config,
+  so fix it in `[tool.coverage.run]`, not in the tool. (Symptom: every async
+  handler reads ~50% while directly-awaited service/repo functions read 100%.)
