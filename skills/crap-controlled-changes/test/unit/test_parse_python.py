@@ -50,6 +50,26 @@ def test_load_coverage_skips_incomplete_function_entries(tmp_path):
     assert out == {"mod.py": {3: 80.0}}
 
 
+def test_load_coverage_without_a_files_key_returns_empty(tmp_path):
+    cov = tmp_path / "cov.json"
+    cov.write_text("{}")
+    assert parse_python.load_coverage(str(cov), str(tmp_path)) == {}
+
+
+def test_load_coverage_file_entry_without_a_functions_map(tmp_path):
+    cov = tmp_path / "cov.json"
+    cov.write_text(json.dumps({"files": {"mod.py": {}}}))
+    assert parse_python.load_coverage(str(cov), str(tmp_path)) == {"mod.py": {}}
+
+
+def test_load_coverage_skips_a_function_entry_without_a_summary(tmp_path):
+    cov = tmp_path / "cov.json"
+    cov.write_text(json.dumps({
+        "files": {"mod.py": {"functions": {"f": {"start_line": 3}}}}
+    }))
+    assert parse_python.load_coverage(str(cov), str(tmp_path)) == {"mod.py": {}}
+
+
 def test_load_radon_missing_file_returns_empty(tmp_path):
     assert parse_python.load_radon(str(tmp_path / "nope.json"), str(tmp_path)) == []
 
@@ -180,6 +200,27 @@ def test_unmeasured_files_ignores_files_outside_changed():
     assert parse_python.unmeasured_files(changed, cov, blocks) == ["mod.py"]
 
 
+def test_unmeasured_files_keeps_scanning_past_a_file_with_no_radon_block():
+    changed = ["noblock.py", "mod.py"]
+    cov = {}
+    blocks = [("mod.py", "f", 2, 1)]
+    assert parse_python.unmeasured_files(changed, cov, blocks) == ["mod.py"]
+
+
+def test_emit_rows_keeps_scanning_past_an_unchanged_block(capsys):
+    blocks = [("other.py", "g", 3, 1), ("mod.py", "f", 2, 1)]
+    parse_python._emit_rows(blocks, {"mod.py"}, set(), {"mod.py": {1: 100.0}})
+    assert capsys.readouterr().out == "mod.py::f\t2\t100.0\t2.0\n"
+
+
+def test_emit_rows_keeps_scanning_past_an_unmeasured_block(capsys):
+    blocks = [("unmeasured.py", "g", 3, 1), ("mod.py", "f", 2, 1)]
+    parse_python._emit_rows(
+        blocks, {"mod.py", "unmeasured.py"}, {"unmeasured.py"}, {"mod.py": {1: 100.0}}
+    )
+    assert capsys.readouterr().out == "mod.py::f\t2\t100.0\t2.0\n"
+
+
 def test_unmeasured_files_sorted_and_deduped():
     changed = {"b.py", "a.py"}
     cov = {}
@@ -273,6 +314,47 @@ def test_main_zero_fill_unmeasured_emits_rows_at_zero_instead_of_dropping(monkey
     # Still reported as unmeasured for the caller's own "HEAD never measured
     # this file" warning, even though a row was emitted for it here.
     assert out_path.read_text() == "unmeasured.py\n"
+
+
+def test_main_without_crap_changed_files_set_writes_no_unmeasured_file(monkeypatch, tmp_path, capsys):
+    radon = tmp_path / "radon.json"
+    cov = tmp_path / "cov.json"
+    out_path = tmp_path / "unmeasured.txt"
+    radon.write_text(json.dumps({
+        "mod.py": [{"type": "function", "name": "f", "complexity": 2, "lineno": 1}],
+    }))
+    cov.write_text(json.dumps({"files": {}}))
+    monkeypatch.delenv("CRAP_CHANGED_FILES", raising=False)
+    monkeypatch.setenv("CRAP_REPO_ROOT", str(tmp_path))
+    monkeypatch.setattr(
+        "sys.argv",
+        ["parse_python.py", str(radon), str(cov), "--unmeasured-out", str(out_path)],
+    )
+    assert parse_python.main() == 0
+    assert capsys.readouterr().out == ""
+    # Nothing was measured and nothing was asked about, so the caller must not
+    # be handed an unmeasured list at all.
+    assert not out_path.exists()
+
+
+def test_main_resolves_absolute_radon_paths_against_the_repo_root(monkeypatch, tmp_path, capsys):
+    radon = tmp_path / "radon.json"
+    cov = tmp_path / "cov.json"
+    radon.write_text(json.dumps({
+        str(tmp_path / "mod.py"): [
+            {"type": "function", "name": "f", "complexity": 2, "lineno": 1}
+        ],
+    }))
+    cov.write_text(json.dumps({
+        "files": {
+            "mod.py": {"functions": {"f": {"start_line": 1, "summary": {"percent_covered": 100.0}}}}
+        }
+    }))
+    monkeypatch.setenv("CRAP_REPO_ROOT", str(tmp_path))
+    monkeypatch.setenv("CRAP_CHANGED_FILES", "mod.py\n")
+    monkeypatch.setattr("sys.argv", ["parse_python.py", str(radon), str(cov)])
+    assert parse_python.main() == 0
+    assert capsys.readouterr().out == "mod.py::f\t2\t100.0\t2.0\n"
 
 
 def test_main_uses_crap_cov_root_env_to_join_subproject_keys(monkeypatch, tmp_path, capsys):
