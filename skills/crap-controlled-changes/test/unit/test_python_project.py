@@ -1,6 +1,7 @@
 import builtins
 import io
 import os
+import re
 import signal
 
 import pytest
@@ -237,6 +238,13 @@ def test_owning_dir_root_candidate_wins_over_an_earlier_candidate_that_does_not_
     assert python_project.owning_dir("sub/mod.py", ["projA", "."]) == "."
 
 
+def test_owning_dir_first_of_two_equally_weak_candidates_wins():
+    # The only tie there is: "" prefixes any absolute directory, so it scores 0
+    # exactly like ".". An absolute rel gets here through a hand-set CRAP_FILES.
+    assert python_project.owning_dir("/abs/mod.py", [".", ""]) == "."
+    assert python_project.owning_dir("/abs/mod.py", ["", "."]) == ""
+
+
 def test_owning_dir_one_char_dir_beats_the_root_candidate():
     # "." matches at length 0, below every real directory, so a one-character
     # directory still outranks it.
@@ -373,18 +381,19 @@ def test_main_root_declares_looks_for_a_lowercase_pyproject_toml(monkeypatch, tm
 
 
 def test_main_help_documents_every_option(monkeypatch, capsys):
+    # Wide enough that argparse does not wrap, so each help string is one whole
+    # line and can be matched end to end rather than as a substring.
     monkeypatch.setenv("COLUMNS", "200")
     monkeypatch.setattr("sys.argv", ["python_project.py", "--help"])
     with pytest.raises(SystemExit):
         python_project.main()
     out = capsys.readouterr().out
-    assert (
+    for text in (
         "print 1/0: does the repo root's own pyproject.toml declare "
-        "[tool.coverage.run] or [tool.pytest.ini_options]?"
-    ) in out
-    assert (
+        "[tool.coverage.run] or [tool.pytest.ini_options]?",
         "restrict --root-declares, or the default find mode, to "
-        "[tool.coverage.run] alone"
-    ) in out
-    assert "print '<owning-dir>\\t<file>' per changed file on stdin" in out
-    assert "a directory --group assigns changed files to; repeatable" in out
+        "[tool.coverage.run] alone",
+        "print '<owning-dir>\\t<file>' per changed file on stdin",
+        "a directory --group assigns changed files to; repeatable",
+    ):
+        assert re.search(r"(?m)(?<=\s)" + re.escape(text) + r"$", out), text
