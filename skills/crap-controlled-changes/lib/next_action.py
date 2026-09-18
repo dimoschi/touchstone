@@ -193,6 +193,8 @@ def run(args):
         else:
             refactor.append(r)
 
+    reported = needs_tests + refactor + surfaced
+    verb_green = not reported
     print('== NEXT_ACTION ==')
 
     if needs_tests:
@@ -213,7 +215,6 @@ def run(args):
                 print(f"  - {r['id']} ({metrics_str(r)})")
         for r in deferred:
             new_bstate[r['id']] = recorded(r, False)
-        verb_green = False
     elif refactor:
         print('REFACTOR: then re-run crap-check.sh. Do not commit yet.')
         for r in refactor:
@@ -226,7 +227,6 @@ def run(args):
                   f"(SURFACE_TO_USER will follow).")
             for r in surfaced:
                 new_bstate[r['id']] = recorded(r, False)
-        verb_green = False
     elif surfaced:
         print('SURFACE_TO_USER: refactor attempts are exhausted. Do not edit')
         print('further. Ask the user, quoting per function:')
@@ -235,12 +235,10 @@ def run(args):
             new_bstate[r['id']] = recorded(r, False)
         print("If the user approves accepting a score, run:")
         print("  crap-check.sh --accept '<function-id>'   then re-run crap-check.sh")
-        verb_green = False
     else:
         print('COMMIT_OK')
         for n in notes:
             print(f"  note for commit body: {n}")
-        verb_green = True
 
     if notes and not verb_green:
         for n in notes:
