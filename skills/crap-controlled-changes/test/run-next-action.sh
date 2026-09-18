@@ -31,7 +31,10 @@ row_main='main.run                                           complexity=9   cove
 # Under the CRAP target, held back only by the coverage floor: the shape that
 # had no hatch at all, because --accept could not find a row it never recorded.
 row_lowcov='pkg.LowCov                                        complexity=3   coverage=40.0%  CRAP=3.4  NEEDS_TESTS  (new)'
-row_lowcov_worse_cov='pkg.LowCov                                        complexity=3   coverage=20.0%  CRAP=6.1  NEEDS_TESTS  (new)'
+# CRAP held at the accepted value on purpose: a lower coverage that also
+# raises CRAP is revoked by the score check before coverage is ever read,
+# so this row is what makes the coverage half of the rule testable.
+row_lowcov_worse_cov='pkg.LowCov                                        complexity=3   coverage=20.0%  CRAP=3.4  NEEDS_TESTS  (new)'
 row_lowcov_worse_crap='pkg.LowCov                                        complexity=9   coverage=40.0%  CRAP=9.4  NEEDS_TESTS  (worsened)'
 
 # T1: all green -> COMMIT_OK, exit 0
