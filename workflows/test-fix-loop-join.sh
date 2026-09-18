@@ -192,18 +192,17 @@ function makeAgent(scenario, captured) {
     if (label === 'draft-pr') {
       return scenario.draftPr ?? { opened: false, detail: 'no draft in this test' }
     }
-    if (label.startsWith('halt-notice:')) {
-      captured.haltNoticePrompt = prompt
-      return true
+    // Opening the PR is the workflow's only write to GitHub. These two labels
+    // posted comments on it; throwing rather than stubbing them means any
+    // scenario that brings either back fails here, not just the ones whose
+    // assertions were written for it.
+    if (label.startsWith('halt-notice:') || label === 'regression-notice') {
+      throw new Error(`agent '${label}' posts to GitHub; the workflow must not`)
     }
     if (label === 'run-record') {
       captured.runRecordPrompt = prompt
       if (scenario.runRecordFails) return null
       return '/stub/main/.claude/touchstone-runs/21.json'
-    }
-    if (label === 'regression-notice') {
-      captured.regressionNoticePrompt = prompt
-      return scenario.regressionNoticePosts !== false
     }
     if (label === 'review:dedup') {
       captured.dedupPrompt = prompt
@@ -278,8 +277,7 @@ function makeAgent(scenario, captured) {
 }
 
 async function run(scenario) {
-  const captured = { calls: [], haltNoticePrompt: null, regressionNoticePrompt: null,
-    runRecordPrompt: null, dedupPrompt: null, logs: [] }
+  const captured = { calls: [], runRecordPrompt: null, dedupPrompt: null, logs: [] }
   const sandbox = {
     args: baseArgs(scenario.args),
     agent: makeAgent(scenario, captured),
@@ -388,10 +386,8 @@ async function scenarioC() {
     result.unresolved_findings[0].code_changed_since_recorded, true)
   check('the halt note says one finding needs a re-check',
     /1 of them have code that changed/.test(result.note), true)
-  const expectedLine =
-    `1. Dup Finding (fileB.js): c2 [code changed since recorded; re-check against HEAD]`
-  check('the PR halt comment renders the re-check marker for it',
-    (captured.haltNoticePrompt ?? '').includes(expectedLine), true)
+  check('no halt comment is posted to the PR',
+    callCount(captured, 'halt-notice:Fix'), 0)
 }
 
 // Scenario D -- the probe itself returns nothing (a dead subagent). The halt
@@ -449,11 +445,10 @@ async function scenarioH() {
   })
   check('halted at Review (the mutation gate\'s own commits)', result.halted_at, 'Review')
   check('exactly the one post-mutation finding is reported', result.unresolved_findings.length, 1)
-  const expectedLine = `1. Mutation gate introduced X (mutfile.js): c`
-  check('the comment renders that finding with no marker at all',
-    (captured.haltNoticePrompt ?? '').includes(expectedLine), true)
-  check('no re-check marker text leaked into the comment',
-    (captured.haltNoticePrompt ?? '').includes('code changed since recorded'), false)
+  check('the finding carries no stale marker',
+    result.unresolved_findings[0].code_changed_since_recorded, undefined)
+  check('no halt comment is posted to the PR',
+    callCount(captured, 'halt-notice:Review'), 0)
   // This halt is strictly downstream of the Mutation halt, so the draft PR
   // always exists by here, and halted() posts this note as a comment on it.
   check('the note does not claim no PR was opened',
@@ -813,10 +808,10 @@ async function scenarioV() {
     (result.note ?? '').includes('check by hand that those fixes held'), true)
   check('the halt note does not leak the field name into prose',
     (result.note ?? '').includes('regression_suspects'), false)
-  check('the comment prompt carries the suspect claim',
-    (captured.haltNoticePrompt ?? '').includes('off-by-one at the array end'), true)
-  check('the comment prompt says the fix was verified and not reopened',
-    (captured.haltNoticePrompt ?? '').includes('not reopened'), true)
+  check('the suspect claim is in the result, not on the PR',
+    result.regression_suspects[0].claim, 'off-by-one at the array end')
+  check('no halt comment is posted to the PR',
+    callCount(captured, 'halt-notice:Fix'), 0)
 }
 
 // Scenario W -- a green run that recorded a suspect. The findings all cleared,
@@ -844,12 +839,10 @@ async function scenarioW() {
   })
   check('halted_at is absent (every finding cleared)', result.halted_at, undefined)
   check('the suspect is in the result', result.regression_suspects?.length, 1)
-  check('a comment was posted for it',
-    callCount(captured, 'regression-notice'), 1)
-  check('the comment prompt carries the suspect claim',
-    (captured.regressionNoticePrompt ?? '').includes('off-by-one at the array end'), true)
-  check('the comment writer is told to keep the process out of it',
-    (captured.regressionNoticePrompt ?? '').includes('Do not name this workflow'), true)
+  check('no comment is posted for it',
+    callCount(captured, 'regression-notice'), 0)
+  check('the suspect claim is in the result instead',
+    result.regression_suspects[0].claim, 'off-by-one at the array end')
 }
 
 // Scenarios X and Y -- the two exits past the fix loop, where a suspect from a
@@ -883,8 +876,8 @@ async function scenarioX() {
   }))
   check('halted at Mutation', result.halted_at, 'Mutation')
   check('the suspect is in the payload', result.regression_suspects?.length, 1)
-  check('the comment prompt carries the suspect claim',
-    (captured.haltNoticePrompt ?? '').includes('off-by-one at the array end'), true)
+  check('no halt comment is posted to the PR',
+    callCount(captured, 'halt-notice:Mutation'), 0)
   // A mutation agent that omits scored is indistinguishable from one that
   // scored nothing, which is exactly how a scoring commit can still report
   // "nothing scorable": the schema handed to the agent must force the field.
@@ -902,8 +895,8 @@ async function scenarioY() {
   }))
   check('halted at Review', result.halted_at, 'Review')
   check('the suspect is in the payload', result.regression_suspects?.length, 1)
-  check('the comment prompt carries the suspect claim',
-    (captured.haltNoticePrompt ?? '').includes('off-by-one at the array end'), true)
+  check('no halt comment is posted to the PR',
+    callCount(captured, 'halt-notice:Review'), 0)
   check('the genuinely new finding is still reported',
     result.unresolved_findings?.length, 1)
 }

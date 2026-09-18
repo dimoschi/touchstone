@@ -164,57 +164,20 @@ const recordRun = async (record) => {
   return typeof written === 'string' ? written : null
 }
 
-const renderSuspects = (suspects) => suspects
-  .map((s, i) => `${i + 1}. ${s.title} (${s.file}): ${s.claim}. Evidence: ` +
-    `${s.evidence}. Reported again in fix round ${s.round}, after an earlier ` +
-    `finding of the same issue had been fixed and verified.`)
-  .join('\n')
-
-// A halt is a result, not an absence of one. When a draft PR is open it gets
-// the halt note as a comment, so the run's ending survives the session that
-// produced it. Async for that reason alone -- every call site is `return await`.
+// A halt is a result, not an absence of one, and the run record is where it
+// survives the session. It used to be posted as a comment on the draft PR too.
+// That put the run's internal state -- which phase stopped, which findings a
+// lens raised -- on the repository's public record, where a reviewer cannot act
+// on it and someone has to delete it by hand. Opening the PR is this workflow's
+// only write to GitHub. Async because recordRun is, and every call site is
+// `return await`.
 const halted = async (at, extra) => {
   const payload = {
     task, halted_at: at, stage_spend: stageSpend, needs_user: true, ...extra,
   }
   if (draftPr?.number) {
-    const posted = await agent(
-      `Post a comment on PR #${draftPr.number} in the current repo, then STOP.\n` +
-      `Use: gh pr comment ${draftPr.number} --body-file - with the body on stdin, ` +
-      `or --body. Do not edit the PR title or body, do not mark it ready, do ` +
-      `not close it, and do not push anything.\n` +
-      `The comment reports that an automated run stopped at the ${at} phase ` +
-      `and what a human has to decide. Write it for whoever opens this PR next ` +
-      `week with no memory of the run. Lead with the decision they owe, then ` +
-      `the reason. Keep it short.\n` +
-      `Do not name this workflow, its phases, its gates, or the fact that an ` +
-      `agent produced the change: none of that is actionable to a reviewer. ` +
-      `Say what is unfinished and what has to be judged.\n` +
-      `Stopped at: ${at}\n` +
-      `Reason: ${extra?.note ?? 'no note given'}\n` +
-      (extra?.unresolved_findings?.length
-        ? `Open findings a human must judge, fix or reject:\n` +
-          extra.unresolved_findings
-            .map((f, i) => `${i + 1}. ${f.title} (${f.file}): ${f.claim}` +
-              (f.code_changed_since_recorded
-                ? ` [code changed since recorded; re-check against HEAD]`
-                : ''))
-            .join('\n')
-        : '') +
-      (extra?.regression_suspects?.length
-        ? `\nAlso report these, as a separate list headed so a reader sees they ` +
-          `are a different kind of item from the open findings above: a fix ` +
-          `landed for each and was verified, then a later review reported the ` +
-          `same issue again. They were deliberately not reopened, so nobody has ` +
-          `judged whether the fix held. Say that plainly and say it needs ` +
-          `checking:\n` +
-          renderSuspects(extra.regression_suspects)
-        : ''),
-      { label: `halt-notice:${at}`, model: 'haiku', effort: 'low' })
-    payload.halt_reported_to = posted ? draftPr.url : null
-    log(posted
-      ? `halt at ${at} reported on ${draftPr.url}`
-      : `halt at ${at}: could not comment on the draft PR; it is in this session only`)
+    log(`halt at ${at}: draft PR ${draftPr.url} left as it is; the reason is in ` +
+        `this run's result and record`)
   }
   payload.record_path = await recordRun(payload)
   return payload
@@ -1114,12 +1077,11 @@ const draft = await treeAgent(
   `opened it or adopted one that was already there.`,
   { label: 'draft-pr', phase: 'Draft PR', schema: DRAFT, model: 'haiku',
     effort: 'low' })
-// number, not opened: the halt reporter needs something to comment on, and a
-// url with no number is not addressable by `gh pr comment`.
+// number, not opened: the PR phase addresses the draft by number to update and
+// ready it, and a url with no number is not enough for that.
 if (draft?.number) {
   draftPr = { url: draft.url, number: draft.number }
-  log(`PR #${draft.number} carries this run: ${draft.url ?? '(no url)'} -- ` +
-      `every later halt is reported there rather than only in this session`)
+  log(`PR #${draft.number} carries this run: ${draft.url ?? '(no url)'}`)
 } else {
   log(`draft PR not opened (${draft?.detail ?? 'no detail'}); continuing. ` +
       `A halt from here on is only visible in this session`)
@@ -1882,28 +1844,12 @@ if (args?.openPr !== false && !outOfBudget()) {
     `Do not merge it.`,
     { label: 'pr', schema: PR, model: 'sonnet', effort: 'medium' })
   sPr.close()
-  // Not in the PR body: the body describes the change, this is a note to its
-  // reviewer. Unposted it lives only in a return value that dies with the run.
+  // Suspects stay in the result and the run record. They used to be posted as
+  // a PR comment, which put a note about the run on the repository's permanent
+  // record for a reader who cannot act on it.
   if (pr?.opened && regressionSuspects.length) {
-    const posted = await agent(
-      `Post a comment on PR ${draftPr?.number ?? pr.url} in the current repo, ` +
-      `then STOP. Use gh pr comment with --body-file - and the body on stdin, ` +
-      `or --body. Do not edit the PR title or body, do not close it, do not ` +
-      `push anything, and do not un-ready it.\n` +
-      `The comment flags work a reviewer should check by hand. For each item ` +
-      `below: a fix for it landed on this branch and was confirmed, then a ` +
-      `later review of the same branch reported the same problem again. Nobody ` +
-      `judged which reading is right, so ask the reviewer to confirm the fix ` +
-      `holds. Be brief and concrete, quote the file, and do not speculate ` +
-      `about the cause.\n` +
-      `Do not name this workflow, its phases, its gates, its reviewers, or the ` +
-      `fact that an agent wrote the change: none of it is actionable.\n` +
-      renderSuspects(regressionSuspects),
-      { label: 'regression-notice', model: 'haiku', effort: 'low' })
-    log(posted
-      ? `${regressionSuspects.length} regression suspect(s) reported on the PR`
-      : `could not comment the ${regressionSuspects.length} regression ` +
-        `suspect(s) on the PR; they are in this run's result only`)
+    log(`${regressionSuspects.length} regression suspect(s) in this run's ` +
+        `result and record; not posted`)
   }
 } else if (args?.openPr === false) {
   log('PR skipped: openPr=false; the branch is green and committed, PR is yours to open')
