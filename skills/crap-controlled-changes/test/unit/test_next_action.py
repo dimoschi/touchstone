@@ -190,3 +190,45 @@ def test_main_entrypoint_exits_with_run_result(monkeypatch, tmp_path, capsys):
         assert False, "expected SystemExit"
     except SystemExit as exc:
         assert exc.code == 0
+
+
+ROW_LOWCOV = 'pkg.LowCov                                        complexity=3   coverage=40.0%  CRAP=3.4  NEEDS_TESTS  (new)'
+ROW_LOWCOV_THIN = 'pkg.LowCov                                        complexity=3   coverage=20.0%  CRAP=6.1  NEEDS_TESTS  (new)'
+
+
+def test_needs_tests_row_can_be_accepted(tmp_path, monkeypatch, capsys):
+    state = tmp_path / "state.json"
+    rc, _ = _run(monkeypatch, state, ROW_LOWCOV, capsys)
+    assert rc == 1
+    assert next_action.run(
+        argparse.Namespace(state_file=str(state), branch="main", accept="pkg.LowCov")) == 0
+    capsys.readouterr()
+    rc, out = _run(monkeypatch, state, ROW_LOWCOV, capsys)
+    assert rc == 0
+    assert "COMMIT_OK" in out
+    assert "coverage=40.0%" in out
+
+
+def test_accepted_coverage_falling_revokes_it(tmp_path, monkeypatch, capsys):
+    state = tmp_path / "state.json"
+    _run(monkeypatch, state, ROW_LOWCOV, capsys)
+    next_action.run(
+        argparse.Namespace(state_file=str(state), branch="main", accept="pkg.LowCov"))
+    capsys.readouterr()
+    rc, out = _run(monkeypatch, state, ROW_LOWCOV_THIN, capsys)
+    assert rc == 1
+    assert "COMMIT_OK" not in out
+
+
+def test_accept_note_names_the_metric_each_status_is_judged_on(tmp_path):
+    needs = {'id': 'pkg.A', 'status': 'NEEDS_TESTS', 'cov': '40.0', 'crap': '3.4', 'cc': '3'}
+    main = {'id': 'main.run', 'status': 'HARD_MAIN', 'cov': 'n/a', 'crap': 'n/a', 'cc': '9'}
+    plain = {'id': 'pkg.B', 'status': 'SOFT', 'cov': '90.0', 'crap': '7.1', 'cc': '7'}
+    assert next_action.accept_note(needs) == 'pkg.A accepted by user at coverage=40.0% (CRAP=3.4)'
+    assert next_action.accept_note(main) == 'main.run accepted by user at complexity=9'
+    assert next_action.accept_note(plain) == 'pkg.B accepted by user at CRAP=7.1'
+
+
+def test_an_acceptance_recorded_before_coverage_was_tracked_still_holds():
+    row = {'score': 7.1, 'cov': '90.0', 'status': 'SOFT'}
+    assert next_action.accepted_holds(row, {'accepted_score': 7.1}) is True

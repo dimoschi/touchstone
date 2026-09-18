@@ -86,11 +86,11 @@ After you believe the change is complete, but before producing a commit:
 The directives, and your move for each:
 
 - **`COMMIT_OK`** (exit 0): gate is green, commit. Copy any "note for commit body" lines into the commit body verbatim.
-- **`WRITE_TESTS`**: new/worsened functions are under 80% coverage. Do not refactor, do not edit source. A high CRAP score here is a symptom of missing tests, not of bad structure. Invoke `superpowers:test-driven-development`, write the tests, see them pass, re-run. Surface to the user only if the function is genuinely untestable as written (then extracting *to make it testable* is the right call, a structural conversation rather than a CRAP refactor).
+- **`WRITE_TESTS`**: new/worsened functions are under 80% coverage. Do not refactor, do not edit source. A high CRAP score here is a symptom of missing tests, not of bad structure. Invoke `superpowers:test-driven-development`, write the tests, see them pass, re-run. Surface to the user only if the function is genuinely untestable as written (then extracting *to make it testable* is the right call, a structural conversation rather than a CRAP refactor). On their explicit approval, `crap-check.sh --accept '<function-id>'` records it, same as for a score. Never run `--accept` on your own judgment.
 - **`REFACTOR`**: over threshold with attempts remaining (1 for SOFT, 2 for HARD). Make one focused pass per listed function (extract a helper, flatten a conditional), then re-run. For `package main` functions (thin-main rule, complexity ≤5) the fix is never testing `func main()`: extract logic into a testable sibling package (e.g. `internal/app`) and leave main as wiring.
 - **`SURFACE_TO_USER`**: attempts exhausted. Stop editing. Ask the user, quoting the message the tool prints. Only on explicit user approval run `crap-check.sh --accept '<function-id>'`, then re-run. Never run `--accept` on your own judgment.
 
-Two rules the tool applies that you get for free: legacy functions you touched but did not worsen (tag `unchanged`) pass with a "remains at CRAP=x" commit note (no worse than found), and a user acceptance is revoked automatically if the function later worsens beyond the accepted score.
+Two rules the tool applies that you get for free: legacy functions you touched but did not worsen (tag `unchanged`) pass with a "remains at CRAP=x" commit note (no worse than found), and a user acceptance is revoked automatically if the function later worsens, either past the accepted score or below the coverage it was accepted at.
 
 **Commit with `crap-commit.sh`, never with `git commit` directly:**
 

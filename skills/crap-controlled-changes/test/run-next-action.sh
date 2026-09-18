@@ -28,6 +28,11 @@ row_soft2='pkg.Softy                                          complexity=7   cov
 row_soft_worse='pkg.Softy                                          complexity=9   coverage=92.0%  CRAP=9.0  HARD         (worsened)'
 row_legacy='pkg.Legacy                                         complexity=12  coverage=50.0%  CRAP=22.5  HARD         (unchanged)'
 row_main='main.run                                           complexity=9   coverage=n/a    CRAP=n/a    HARD_MAIN    (new)'
+# Under the CRAP target, held back only by the coverage floor: the shape that
+# had no hatch at all, because --accept could not find a row it never recorded.
+row_lowcov='pkg.LowCov                                        complexity=3   coverage=40.0%  CRAP=3.4  NEEDS_TESTS  (new)'
+row_lowcov_worse_cov='pkg.LowCov                                        complexity=3   coverage=20.0%  CRAP=6.1  NEEDS_TESTS  (new)'
+row_lowcov_worse_crap='pkg.LowCov                                        complexity=9   coverage=40.0%  CRAP=9.4  NEEDS_TESTS  (worsened)'
 
 # T1: all green -> COMMIT_OK, exit 0
 rm -f "$STATE"
@@ -106,6 +111,32 @@ run <<< "$row_soft"
 run <<< 'pkg.Softy                                          complexity=4   coverage=95.0%  CRAP=4.0  OK           (new)'
 [ "$RC" -eq 0 ] || fail "T11 exit ($RC != 0)"
 grep -q 'pkg.Softy' "$STATE" 2>/dev/null && fail "T11 stale state entry survived"
+
+# T12: a NEEDS_TESTS row can be accepted at its coverage
+rm -f "$STATE"
+run <<< "$row_lowcov"
+[ "$RC" -eq 1 ] || fail "T12 exit ($RC != 1)"
+grep -q 'WRITE_TESTS' <<< "$OUT" || fail "T12 no WRITE_TESTS"
+python3 "$NA" --state-file "$STATE" --branch main --accept 'pkg.LowCov' >/dev/null \
+  || fail "T12 accept failed (the row was never recorded)"
+run <<< "$row_lowcov"
+[ "$RC" -eq 0 ] || fail "T12 exit after accept ($RC != 0)"
+grep -q 'COMMIT_OK' <<< "$OUT" || fail "T12 no COMMIT_OK after accept"
+grep -q 'coverage=40.0%' <<< "$OUT" || fail "T12 note does not name the accepted coverage"
+
+# T13: coverage falling below the accepted level revokes it
+run <<< "$row_lowcov_worse_cov"
+[ "$RC" -eq 1 ] || fail "T13 exit ($RC != 1)"
+grep -q 'COMMIT_OK' <<< "$OUT" && fail "T13 must not be COMMIT_OK"
+
+# T14: CRAP worsening revokes it too, even at the accepted coverage
+rm -f "$STATE"
+run <<< "$row_lowcov" >/dev/null
+python3 "$NA" --state-file "$STATE" --branch main --accept 'pkg.LowCov' >/dev/null \
+  || fail "T14 accept failed"
+run <<< "$row_lowcov_worse_crap"
+[ "$RC" -eq 1 ] || fail "T14 exit ($RC != 1)"
+grep -q 'COMMIT_OK' <<< "$OUT" && fail "T14 must not be COMMIT_OK"
 
 if [ "$FAILURES" -gt 0 ]; then
   echo "$FAILURES failure(s)"
