@@ -14,8 +14,9 @@ refactor for comes back still failing with changed metrics; identical
 re-runs are free, and work done under a WRITE_TESTS directive never
 burns a refactor attempt.
 
-`--accept <id>` records a user-approved score for a surfaced function;
-acceptance is revoked automatically if the function later worsens.
+`--accept <id>` records a user-approved score for a function the gate
+blocked, whether on its CRAP score or on the coverage floor; acceptance
+is revoked automatically if either metric later worsens.
 """
 
 import argparse
@@ -39,6 +40,40 @@ def score(status, cc, crap):
     if status.endswith('_MAIN'):
         return float(cc)
     return 0.0 if crap == 'n/a' else float(crap)
+
+
+def coverage(r):
+    """The row's coverage as a float, or None where it has none (main packages)."""
+    return None if r['cov'] == 'n/a' else float(r['cov'])
+
+
+def recorded(r, directed):
+    return {'attempts': r['attempts'], 'metrics': r['metrics'], 'directed': directed,
+            'score': r['score'], 'cov': coverage(r)}
+
+
+def accepted_holds(r, entry):
+    """Whether a recorded acceptance still covers this row.
+
+    An acceptance approves the function as it was, so either metric getting
+    worse revokes it. Coverage has to be checked on its own: a NEEDS_TESTS row
+    can be held back by the floor alone, at a CRAP score that never moves, so
+    scoring alone would let coverage fall to nothing under an old approval.
+    """
+    if r['score'] > entry['accepted_score'] + EPS:
+        return False
+    accepted_cov, current = entry.get('accepted_coverage'), coverage(r)
+    if accepted_cov is None or current is None:
+        return True
+    return current >= accepted_cov - EPS
+
+
+def accept_note(r):
+    if r['status'] == 'NEEDS_TESTS':
+        return f"{r['id']} accepted by user at coverage={r['cov']}% (CRAP={r['crap']})"
+    main = r['status'].endswith('_MAIN')
+    return (f"{r['id']} accepted by user at "
+            f"{'complexity' if main else 'CRAP'}={r['cc'] if main else r['crap']}")
 
 
 def load_state(path):
@@ -97,6 +132,7 @@ def run(args):
             return 2
         entry['accepted'] = True
         entry['accepted_score'] = entry['score']
+        entry['accepted_coverage'] = entry.get('cov')
         entry['directed'] = False
         state[args.branch] = bstate
         save_state(args.state_file, state)
@@ -122,19 +158,24 @@ def run(args):
         fid, st = r['id'], r['status']
         if st in ('OK', 'OK_MAIN'):
             continue
-        if st == 'NEEDS_TESTS':
-            needs_tests.append(r)
-            continue
-
         entry = bstate.get(fid)
         if entry and entry.get('accepted'):
-            if r['score'] <= entry['accepted_score'] + EPS:
-                notes.append(f"{fid} accepted by user at "
-                             f"{'complexity' if st.endswith('_MAIN') else 'CRAP'}"
-                             f"={r['crap'] if not st.endswith('_MAIN') else r['cc']}")
+            if accepted_holds(r, entry):
+                notes.append(accept_note(r))
                 new_bstate[fid] = entry
                 continue
-            entry = dict(entry, accepted=False)
+            # Copied so judging this row cannot mutate the stored entry.
+            entry = dict(entry)
+
+        if st == 'NEEDS_TESTS':
+            # Recorded like every other failing row, so --accept can find it.
+            # It used to return here first, so nothing was ever written for it:
+            # the directive pointed at a hatch that answered "no recorded state,
+            # run crap-check.sh first", and re-running never recorded it either.
+            r['attempts'] = entry['attempts'] if entry else 0
+            r['metrics'] = [r['cc'], r['cov'], r['crap']]
+            needs_tests.append(r)
+            continue
 
         if r['tag'] == 'unchanged':
             metric = f"complexity={r['cc']}" if st.endswith('_MAIN') else f"CRAP={r['crap']}"
@@ -152,6 +193,8 @@ def run(args):
         else:
             refactor.append(r)
 
+    reported = needs_tests + refactor + surfaced
+    verb_green = not reported
     print('== NEXT_ACTION ==')
 
     if needs_tests:
@@ -161,45 +204,41 @@ def run(args):
         print('tests for these functions, see them pass, then re-run crap-check.sh:')
         for r in needs_tests:
             print(f"  - {r['id']} ({metrics_str(r)})")
+        print("If one of these genuinely cannot be covered, ask the user, then on")
+        print("their approval: crap-check.sh --accept '<function-id>'")
+        for r in needs_tests:
+            new_bstate[r['id']] = recorded(r, False)
         deferred = refactor + surfaced
         if deferred:
             print('Also failing, deferred until tests exist:')
             for r in deferred:
                 print(f"  - {r['id']} ({metrics_str(r)})")
         for r in deferred:
-            new_bstate[r['id']] = {'attempts': r['attempts'], 'metrics': r['metrics'],
-                                   'directed': False, 'score': r['score']}
-        verb_green = False
+            new_bstate[r['id']] = recorded(r, False)
     elif refactor:
         print('REFACTOR: then re-run crap-check.sh. Do not commit yet.')
         for r in refactor:
             maxa = MAX_ATTEMPTS[r['status']]
             print(f"  - {r['id']} ({metrics_str(r)}) [{r['tag']}] "
                   f"attempt {r['attempts'] + 1} of {maxa}: {refactor_hint(r)}")
-            new_bstate[r['id']] = {'attempts': r['attempts'], 'metrics': r['metrics'],
-                                   'directed': True, 'score': r['score']}
+            new_bstate[r['id']] = recorded(r, True)
         if surfaced:
             print(f"After these, {len(surfaced)} function(s) need a user decision "
                   f"(SURFACE_TO_USER will follow).")
             for r in surfaced:
-                new_bstate[r['id']] = {'attempts': r['attempts'], 'metrics': r['metrics'],
-                                       'directed': False, 'score': r['score']}
-        verb_green = False
+                new_bstate[r['id']] = recorded(r, False)
     elif surfaced:
         print('SURFACE_TO_USER: refactor attempts are exhausted. Do not edit')
         print('further. Ask the user, quoting per function:')
         for r in surfaced:
             print(f"  - {r['id']}: {surface_text(r)}")
-            new_bstate[r['id']] = {'attempts': r['attempts'], 'metrics': r['metrics'],
-                                   'directed': False, 'score': r['score']}
+            new_bstate[r['id']] = recorded(r, False)
         print("If the user approves accepting a score, run:")
         print("  crap-check.sh --accept '<function-id>'   then re-run crap-check.sh")
-        verb_green = False
     else:
         print('COMMIT_OK')
         for n in notes:
             print(f"  note for commit body: {n}")
-        verb_green = True
 
     if notes and not verb_green:
         for n in notes:

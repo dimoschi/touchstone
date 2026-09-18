@@ -1,5 +1,6 @@
 import argparse
 import io
+import json
 
 import next_action
 
@@ -190,3 +191,264 @@ def test_main_entrypoint_exits_with_run_result(monkeypatch, tmp_path, capsys):
         assert False, "expected SystemExit"
     except SystemExit as exc:
         assert exc.code == 0
+
+
+ROW_LOWCOV = 'pkg.LowCov                                        complexity=3   coverage=40.0%  CRAP=3.4  NEEDS_TESTS  (new)'
+ROW_LOWCOV_THIN = 'pkg.LowCov                                        complexity=3   coverage=20.0%  CRAP=6.1  NEEDS_TESTS  (new)'
+
+
+def test_needs_tests_row_can_be_accepted(tmp_path, monkeypatch, capsys):
+    state = tmp_path / "state.json"
+    rc, _ = _run(monkeypatch, state, ROW_LOWCOV, capsys)
+    assert rc == 1
+    assert next_action.run(
+        argparse.Namespace(state_file=str(state), branch="main", accept="pkg.LowCov")) == 0
+    capsys.readouterr()
+    rc, out = _run(monkeypatch, state, ROW_LOWCOV, capsys)
+    assert rc == 0
+    assert "COMMIT_OK" in out
+    assert "coverage=40.0%" in out
+
+
+def test_accepted_coverage_falling_revokes_it(tmp_path, monkeypatch, capsys):
+    state = tmp_path / "state.json"
+    _run(monkeypatch, state, ROW_LOWCOV, capsys)
+    next_action.run(
+        argparse.Namespace(state_file=str(state), branch="main", accept="pkg.LowCov"))
+    capsys.readouterr()
+    rc, out = _run(monkeypatch, state, ROW_LOWCOV_THIN, capsys)
+    assert rc == 1
+    assert "COMMIT_OK" not in out
+
+
+def test_accept_note_names_the_metric_each_status_is_judged_on(tmp_path):
+    needs = {'id': 'pkg.A', 'status': 'NEEDS_TESTS', 'cov': '40.0', 'crap': '3.4', 'cc': '3'}
+    main = {'id': 'main.run', 'status': 'HARD_MAIN', 'cov': 'n/a', 'crap': 'n/a', 'cc': '9'}
+    plain = {'id': 'pkg.B', 'status': 'SOFT', 'cov': '90.0', 'crap': '7.1', 'cc': '7'}
+    assert next_action.accept_note(needs) == 'pkg.A accepted by user at coverage=40.0% (CRAP=3.4)'
+    assert next_action.accept_note(main) == 'main.run accepted by user at complexity=9'
+    assert next_action.accept_note(plain) == 'pkg.B accepted by user at CRAP=7.1'
+
+
+def test_an_acceptance_recorded_before_coverage_was_tracked_still_holds():
+    row = {'score': 7.1, 'cov': '90.0', 'status': 'SOFT'}
+    assert next_action.accepted_holds(row, {'accepted_score': 7.1}) is True
+
+
+ROW_OK_MAIN = 'main.wire                                          complexity=3   coverage=n/a    CRAP=n/a    OK_MAIN      (new)'
+ROW_MAIN_UNCHANGED = 'main.run                                           complexity=9   coverage=n/a    CRAP=n/a    HARD_MAIN    (unchanged)'
+ROW_HARD_B = 'pkg.Big                                            complexity=9   coverage=90.0%  CRAP=9.1  HARD         (new)'
+ROW_HARD_WORSE = 'pkg.Big                                            complexity=10  coverage=90.0%  CRAP=11.0  HARD         (new)'
+ROW_HARD_UNCOVERED = 'pkg.Big                                            complexity=9   coverage=40.0%  CRAP=22.0  NEEDS_TESTS  (new)'
+ROW_LOWCOV_SAME_CRAP_LESS_COV = 'pkg.LowCov                                        complexity=3   coverage=20.0%  CRAP=3.4  NEEDS_TESTS  (new)'
+
+
+def test_coverage_is_the_row_percentage_or_none_for_a_main_row():
+    assert next_action.coverage({'cov': '40.0'}) == 40.0
+    assert next_action.coverage({'cov': 'n/a'}) is None
+
+
+def test_recorded_entry_carries_the_rows_metrics_and_coverage():
+    row = {'attempts': 1, 'metrics': ['3', '40.0', '3.4'], 'score': 3.4, 'cov': '40.0'}
+    assert next_action.recorded(row, True) == {
+        'attempts': 1, 'metrics': ['3', '40.0', '3.4'], 'directed': True,
+        'score': 3.4, 'cov': 40.0}
+
+
+def test_a_score_exactly_at_the_tolerance_still_holds():
+    row = {'score': 7.0 + next_action.EPS, 'cov': 'n/a'}
+    assert next_action.accepted_holds(row, {'accepted_score': 7.0}) is True
+
+
+def test_coverage_exactly_at_the_tolerance_still_holds():
+    row = {'score': 3.4, 'cov': repr(40.0 - next_action.EPS)}
+    entry = {'accepted_score': 3.4, 'accepted_coverage': 40.0}
+    assert next_action.accepted_holds(row, entry) is True
+
+
+def test_coverage_below_the_accepted_level_revokes_at_an_unchanged_score():
+    row = {'score': 3.4, 'cov': '20.0'}
+    entry = {'accepted_score': 3.4, 'accepted_coverage': 40.0}
+    assert next_action.accepted_holds(row, entry) is False
+
+
+def test_commit_ok_prints_the_directive_and_nothing_else(tmp_path, monkeypatch, capsys):
+    state = tmp_path / "state.json"
+    rc, out = _run(monkeypatch, state, ROW_OK + "\n", capsys)
+    assert rc == 0
+    assert out == "== NEXT_ACTION ==\nCOMMIT_OK\n"
+
+
+def test_a_note_on_a_green_run_is_printed_once(tmp_path, monkeypatch, capsys):
+    state = tmp_path / "state.json"
+    rc, out = _run(monkeypatch, state, ROW_LEGACY + "\n", capsys)
+    assert rc == 0
+    assert out == (
+        "== NEXT_ACTION ==\n"
+        "COMMIT_OK\n"
+        "  note for commit body: pkg.Legacy remains at CRAP=22.5 (unchanged in this PR)\n")
+
+
+def test_an_unchanged_main_row_notes_complexity_not_crap(tmp_path, monkeypatch, capsys):
+    state = tmp_path / "state.json"
+    rc, out = _run(monkeypatch, state, ROW_MAIN_UNCHANGED + "\n", capsys)
+    assert rc == 0
+    assert out == (
+        "== NEXT_ACTION ==\n"
+        "COMMIT_OK\n"
+        "  note for commit body: main.run remains at complexity=9 (unchanged in this PR)\n")
+
+
+def test_an_ok_main_row_is_skipped_like_an_ok_row(tmp_path, monkeypatch, capsys):
+    state = tmp_path / "state.json"
+    rc, out = _run(monkeypatch, state, ROW_OK_MAIN + "\n", capsys)
+    assert rc == 0
+    assert out == "== NEXT_ACTION ==\nCOMMIT_OK\n"
+    assert json.loads(state.read_text()) == {"main": {}}
+
+
+def test_a_passing_row_does_not_stop_the_scan(tmp_path, monkeypatch, capsys):
+    state = tmp_path / "state.json"
+    rc, out = _run(monkeypatch, state, ROW_OK + "\n" + ROW_SOFT + "\n", capsys)
+    assert rc == 1
+    assert "pkg.Softy" in out
+
+
+def test_write_tests_directive_and_state_are_exact(tmp_path, monkeypatch, capsys):
+    state = tmp_path / "state.json"
+    rc, out = _run(monkeypatch, state, ROW_NEEDS + "\n" + ROW_HARD + "\n", capsys)
+    assert rc == 1
+    assert out == (
+        "== NEXT_ACTION ==\n"
+        "WRITE_TESTS: coverage < 80% on new/worsened functions. A high CRAP\n"
+        "score here is a symptom of missing tests, not bad structure. Do NOT\n"
+        "edit source files. Invoke superpowers:test-driven-development, write\n"
+        "tests for these functions, see them pass, then re-run crap-check.sh:\n"
+        "  - pkg.NeedsTests (CRAP=12.0, complexity=5, coverage=40.0%)\n"
+        "If one of these genuinely cannot be covered, ask the user, then on\n"
+        "their approval: crap-check.sh --accept '<function-id>'\n"
+        "Also failing, deferred until tests exist:\n"
+        "  - pkg.Big (CRAP=9.2, complexity=9, coverage=88.0%)\n")
+    assert json.loads(state.read_text()) == {"main": {
+        "pkg.NeedsTests": {"attempts": 0, "metrics": ["5", "40.0", "12.0"],
+                           "directed": False, "score": 12.0, "cov": 40.0},
+        "pkg.Big": {"attempts": 0, "metrics": ["9", "88.0", "9.2"],
+                    "directed": False, "score": 9.2, "cov": 88.0}}}
+
+
+def test_refactor_directive_and_state_are_exact(tmp_path, monkeypatch, capsys):
+    state = tmp_path / "state.json"
+    rc, out = _run(monkeypatch, state, ROW_SOFT + "\n", capsys)
+    assert rc == 1
+    assert out == (
+        "== NEXT_ACTION ==\n"
+        "REFACTOR: then re-run crap-check.sh. Do not commit yet.\n"
+        "  - pkg.Softy (CRAP=7.1, complexity=7, coverage=90.0%) [new] attempt 1 of 1: "
+        "one focused pass: extract a helper or flatten a conditional\n")
+    assert json.loads(state.read_text()) == {"main": {
+        "pkg.Softy": {"attempts": 0, "metrics": ["7", "90.0", "7.1"],
+                      "directed": True, "score": 7.1, "cov": 90.0}}}
+
+
+def test_a_surfaced_row_deferred_behind_a_refactor_is_recorded_undirected(
+        tmp_path, monkeypatch, capsys):
+    state = tmp_path / "state.json"
+    _run(monkeypatch, state, ROW_SOFT + "\n", capsys)
+    rc, out = _run(monkeypatch, state, ROW_SOFT2 + "\n" + ROW_HARD + "\n", capsys)
+    assert rc == 1
+    assert out == (
+        "== NEXT_ACTION ==\n"
+        "REFACTOR: then re-run crap-check.sh. Do not commit yet.\n"
+        "  - pkg.Big (CRAP=9.2, complexity=9, coverage=88.0%) [new] attempt 1 of 2: "
+        "one focused pass: extract a helper or flatten a conditional\n"
+        "After these, 1 function(s) need a user decision (SURFACE_TO_USER will follow).\n")
+    assert json.loads(state.read_text()) == {"main": {
+        "pkg.Big": {"attempts": 0, "metrics": ["9", "88.0", "9.2"],
+                    "directed": True, "score": 9.2, "cov": 88.0},
+        "pkg.Softy": {"attempts": 1, "metrics": ["7", "92.0", "7.5"],
+                      "directed": False, "score": 7.5, "cov": 92.0}}}
+
+
+def test_surface_directive_and_state_are_exact(tmp_path, monkeypatch, capsys):
+    state = tmp_path / "state.json"
+    _run(monkeypatch, state, ROW_SOFT + "\n", capsys)
+    rc, out = _run(monkeypatch, state, ROW_SOFT2 + "\n", capsys)
+    assert rc == 1
+    assert out == (
+        "== NEXT_ACTION ==\n"
+        "SURFACE_TO_USER: refactor attempts are exhausted. Do not edit\n"
+        "further. Ask the user, quoting per function:\n"
+        "  - pkg.Softy: \"pkg.Softy lands at CRAP=7.5 (complexity=7, coverage=92.0%). "
+        "One refactor pass did not clear it without pushing complexity into the caller. "
+        "Recommend accepting at 7.5. Approve, or try a different split?\"\n"
+        "If the user approves accepting a score, run:\n"
+        "  crap-check.sh --accept '<function-id>'   then re-run crap-check.sh\n")
+    assert json.loads(state.read_text()) == {"main": {
+        "pkg.Softy": {"attempts": 1, "metrics": ["7", "92.0", "7.5"],
+                      "directed": False, "score": 7.5, "cov": 92.0}}}
+
+
+def test_accept_records_the_score_and_the_coverage_it_approved(tmp_path, monkeypatch, capsys):
+    state = tmp_path / "state.json"
+    _run(monkeypatch, state, ROW_LOWCOV + "\n", capsys)
+    rc = next_action.run(
+        argparse.Namespace(state_file=str(state), branch="main", accept="pkg.LowCov"))
+    assert rc == 0
+    assert capsys.readouterr().out == (
+        "next-action: recorded user acceptance of pkg.LowCov at score 3.4; "
+        "re-run crap-check.sh\n")
+    assert json.loads(state.read_text()) == {"main": {
+        "pkg.LowCov": {"attempts": 0, "metrics": ["3", "40.0", "3.4"],
+                       "directed": False, "score": 3.4, "cov": 40.0,
+                       "accepted": True, "accepted_score": 3.4,
+                       "accepted_coverage": 40.0}}}
+
+
+def test_coverage_falling_at_an_unchanged_score_revokes_the_acceptance(
+        tmp_path, monkeypatch, capsys):
+    state = tmp_path / "state.json"
+    _run(monkeypatch, state, ROW_LOWCOV + "\n", capsys)
+    next_action.run(
+        argparse.Namespace(state_file=str(state), branch="main", accept="pkg.LowCov"))
+    capsys.readouterr()
+    rc, out = _run(monkeypatch, state, ROW_LOWCOV_SAME_CRAP_LESS_COV + "\n", capsys)
+    assert rc == 1
+    assert "WRITE_TESTS" in out
+
+
+def test_a_held_acceptance_is_carried_forward_and_does_not_stop_the_scan(
+        tmp_path, monkeypatch, capsys):
+    state = tmp_path / "state.json"
+    _run(monkeypatch, state, ROW_LOWCOV + "\n", capsys)
+    next_action.run(
+        argparse.Namespace(state_file=str(state), branch="main", accept="pkg.LowCov"))
+    capsys.readouterr()
+    rc, out = _run(monkeypatch, state, ROW_LOWCOV + "\n" + ROW_SOFT + "\n", capsys)
+    assert rc == 1
+    assert "pkg.Softy" in out
+    assert json.loads(state.read_text())["main"]["pkg.LowCov"] == {
+        "attempts": 0, "metrics": ["3", "40.0", "3.4"], "directed": False,
+        "score": 3.4, "cov": 40.0, "accepted": True, "accepted_score": 3.4,
+        "accepted_coverage": 40.0}
+
+
+def test_revoking_an_acceptance_keeps_the_attempts_already_spent(
+        tmp_path, monkeypatch, capsys):
+    state = tmp_path / "state.json"
+    _run(monkeypatch, state, ROW_HARD + "\n", capsys)
+    _run(monkeypatch, state, ROW_HARD_B + "\n", capsys)
+    next_action.run(
+        argparse.Namespace(state_file=str(state), branch="main", accept="pkg.Big"))
+    capsys.readouterr()
+    rc, out = _run(monkeypatch, state, ROW_HARD_WORSE + "\n", capsys)
+    assert rc == 1
+    assert "attempt 2 of 2" in out
+
+
+def test_a_needs_tests_row_keeps_the_attempts_already_spent(tmp_path, monkeypatch, capsys):
+    state = tmp_path / "state.json"
+    _run(monkeypatch, state, ROW_HARD + "\n", capsys)
+    _run(monkeypatch, state, ROW_HARD_B + "\n", capsys)
+    rc, out = _run(monkeypatch, state, ROW_HARD_UNCOVERED + "\n", capsys)
+    assert rc == 1
+    assert json.loads(state.read_text())["main"]["pkg.Big"]["attempts"] == 1
