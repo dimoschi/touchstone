@@ -164,7 +164,8 @@ def run(args):
                 notes.append(accept_note(r))
                 new_bstate[fid] = entry
                 continue
-            entry = dict(entry, accepted=False)
+            # Copied so judging this row cannot mutate the stored entry.
+            entry = dict(entry)
 
         if st == 'NEEDS_TESTS':
             # Recorded like every other failing row, so --accept can find it.
