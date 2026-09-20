@@ -216,6 +216,7 @@ const BRANCH = {
     path: { type: 'string' },
     ticket: { type: 'string' },
     detail: { type: 'string' },
+    cutFromOrigin: { type: 'boolean' },
   },
 }
 
@@ -511,15 +512,12 @@ const wt = args?.existingBranch
       `all), return created=false and say so. Do not create one for it; that is ` +
       `what the default (non-existingBranch) mode is for.\n` +
       `6. This mode commits into the tree holding the branch, and a later phase ` +
-      `runs git add -A there, so unrelated dirty files in that tree would be ` +
-      `swept into a commit. That risk exists only when the matched record's ` +
-      `path is the main checkout, found with dirname "$(git rev-parse ` +
-      `--path-format=absolute --git-common-dir)". If it is, and ` +
-      `git -C <main-checkout> status --porcelain there is non-empty, return ` +
-      `created=false and say what is dirty. Never stash, reset, or discard the ` +
-      `user's work. A dirty main checkout is not a reason to stop when the ` +
-      `matched record is a linked worktree instead: the branch lives there, not ` +
-      `in the main checkout, so the main checkout's state is irrelevant.\n` +
+      `runs git add -A there, so unrelated dirty files sitting in that tree ` +
+      `would be swept into a commit. Check git -C <path> status --porcelain, ` +
+      `using the matched record's own path from step 4, whether that is the ` +
+      `main checkout or a linked worktree; the risk is the same either way. If ` +
+      `it is non-empty, return created=false and say what is dirty. Never ` +
+      `stash, reset, or discard the user's work.\n` +
       `7. Otherwise return created=true, branch set to the current branch name, ` +
       `base set to the repo's base branch, and path set to the absolute path ` +
       `from the matching record. Note in detail whether that path is the main ` +
@@ -551,8 +549,11 @@ const wt = args?.existingBranch
       `(git rev-parse --verify ${baseOverride}) and return created=false naming ` +
       `it if it does not.\n`
     : `3. Find this repo's base branch: read the remote HEAD ` +
-      `(git symbolic-ref --short refs/remotes/origin/HEAD), falling back to ` +
-      `whichever of main or master exists. Do not assume main.\n`) +
+      `(git symbolic-ref --short refs/remotes/origin/HEAD), which prints an ` +
+      `origin/-prefixed name; strip that prefix so the base is the bare ` +
+      `branch name (main, not origin/main), falling back to whichever of ` +
+      `main or master exists when there is no remote-tracking HEAD. Do not ` +
+      `assume main.\n`) +
   `4. Name the branch exactly ` +
   `${args?.branchType ?? 'feat'}/${ticketMarker}-<slug>. The prefix is given ` +
   `in full, already resolved against the ticket: use it character for ` +
@@ -565,10 +566,14 @@ const wt = args?.existingBranch
   `6. Run git worktree list --porcelain and look for a record whose "branch ` +
   `refs/heads/<name>" line matches the branch name from step 4. If one ` +
   `exists, the branch is already checked out somewhere; git refuses to check ` +
-  `it out twice, so return created=true using that record's own path (even ` +
-  `if it differs from the path in step 5), note in detail that the branch ` +
-  `was reused rather than created, and stop: do not fetch, pull, or run any ` +
-  `worktree add.\n` +
+  `it out twice, so that record's own path (even if it differs from the ` +
+  `path in step 5) is what this task must reuse. This mode commits into ` +
+  `that tree, and a later phase runs git add -A there, so check git -C ` +
+  `<that path> status --porcelain: if it is non-empty, return created=false ` +
+  `and say what is dirty. Never stash, reset, or discard the user's work. ` +
+  `Otherwise return created=true using that path, note in detail that the ` +
+  `branch was reused rather than created, and stop: do not fetch, pull, or ` +
+  `run any worktree add.\n` +
   `7. Otherwise check whether the branch exists at all (git show-ref --verify ` +
   `--quiet refs/heads/<name>). If it does, the fetch and cut in step 10 are ` +
   `not needed; go straight to step 8.\n` +
@@ -599,8 +604,11 @@ const wt = args?.existingBranch
   `separate checkout.\n` +
   `Return the branch you created or reused, the base you cut it from (or ` +
   (baseOverride ? `${baseOverride}` : `the repo's base branch`) +
-  ` if the branch already existed), and the absolute ` +
-  `worktree path.` + RECORD('branch'),
+  ` if the branch already existed), the absolute worktree path, and ` +
+  `cutFromOrigin=true only if you took step 10's fetch-and-cut-from-origin ` +
+  `path with no baseOverride given; false for every other path (a reused ` +
+  `branch via step 6 or 9, or any baseOverride cut), since only that one ` +
+  `path is guaranteed to be cut from what is now origin/<base>.` + RECORD('branch'),
   { label: 'branch', schema: BRANCH, model: 'haiku', effort: 'low' })
 sBranch.close()
 
@@ -627,12 +635,16 @@ if (!wt?.created) {
 // actually cut from.
 if (baseOverride) wt.base = baseOverride
 // The default Worktree cut no longer fast-forwards local <base> to match
-// origin/<base>, so a merge base computed against the stale local branch
-// could reach back past the fork point and pull commits this run never
-// wrote into the reviewed range. baseOverride already names a real,
-// resolvable ref; existingBranch mode never fetches, so its origin/<base>
-// is not guaranteed to resolve, hence the fallback where this is used.
-const reviewBase = baseOverride ?? `origin/${wt.base}`
+// origin/<base>, so forcing the origin/ prefix onto every base would widen
+// the merge base for a reused or existingBranch branch that was cut from a
+// local base ahead of origin/<base>, pulling commits this run never wrote
+// into the reviewed range. Only wt.cutFromOrigin's one path (a fresh branch
+// fetched and cut straight from origin/<base>) is safe to widen this way;
+// baseOverride already names a real, resolvable ref regardless. wt.base is
+// stripped of any origin/ prefix it may already carry so the widening is
+// never doubled, by construction rather than by trusting the prompt alone.
+const reviewBase = baseOverride ??
+  (wt.cutFromOrigin ? `origin/${wt.base.replace(/^origin\//, '')}` : wt.base)
 recordedBranch = wt.branch
 log(args?.existingBranch
   ? `worktree ${wt.path} reused for branch ${wt.branch} (base ${wt.base})`
@@ -989,9 +1001,7 @@ const impl = await treeAgent(
   `judgement of the change. If it printed its own gate message, copy it ` +
   `verbatim into gate_note.\n` +
   `Return commit_range as '<base-sha>..<head-sha>' using the merge base with ` +
-  `${reviewBase} (falling back to ${wt.base} if that remote-tracking ref ` +
-  `does not resolve; existingBranch mode never fetches, so it is not ` +
-  `guaranteed to) and your final HEAD, both as full 40-character SHAs: later ` +
+  `${reviewBase} and your final HEAD, both as full 40-character SHAs: later ` +
   `phases compare their own HEAD against the head of this range to work out ` +
   `what is still unreviewed, and an abbreviated SHA never matches. ` +
   `Downstream phases are given that range and ` +

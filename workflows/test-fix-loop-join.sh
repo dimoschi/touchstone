@@ -250,7 +250,7 @@ function makeAgent(scenario, captured) {
       return { found: true, summary: 'stub ticket', description: 'd', comments: '' }
     }
     if (label === 'branch') {
-      return { created: true, branch: 'feat/gh-21-stub', base: 'main',
+      return scenario.branchResult ?? { created: true, branch: 'feat/gh-21-stub', base: 'main',
         path: '/tmp/stub-worktree', ticket: '21', detail: 'stub' }
     }
     if (label === 'branch:existing') {
@@ -1469,10 +1469,12 @@ async function scenarioAR() {
     message.includes('neither a GitHub issue number'), true)
 }
 
-// Scenario BB -- the existingBranch prompt's guard is scoped to the main
-// checkout, not to any dirty tree it happens to find a branch in.
+// Scenario BB -- the existingBranch prompt's guard checks the tree it is
+// actually going to commit into (the matched record's own path), whichever
+// tree that is, rather than special-casing the main checkout and waiving the
+// check for a linked worktree.
 async function scenarioBB() {
-  console.log('\n== scenario BB: the existingBranch prompt narrows its dirty-tree guard to the main checkout')
+  console.log('\n== scenario BB: the existingBranch prompt checks the matched record\'s own path, main checkout or not')
   const { captured } = await run({
     args: { existingBranch: true },
     initialReview: { correctness: [], advocate: [] },
@@ -1480,14 +1482,69 @@ async function scenarioBB() {
     staleness: () => [],
   })
   const p = captured.calls.find(c => c.label === 'branch:existing')?.prompt ?? ''
-  check('the guard fires only for the matched record\'s main-checkout path',
-    p.includes("the matched record's path is the main checkout"), true)
-  check('the main checkout is located the same way the default branch prompt does',
-    p.includes('--path-format=absolute --git-common-dir'), true)
-  check('a dirty main checkout is stated plainly as no reason to stop when the branch lives elsewhere',
-    p.includes('is not a reason to stop when the'), true)
+  check('the guard checks the matched record\'s own path from step 4',
+    p.includes("using the matched record's own path from step 4"), true)
+  check('the guard applies whether that path is the main checkout or a linked worktree',
+    p.includes('whether that is the main checkout or a linked worktree'), true)
+  check('the incorrect main-checkout-only carve-out is gone',
+    p.includes('A dirty main checkout is not a reason to stop'), false)
   check('the guard still forbids stashing, resetting or discarding',
     p.includes('Never stash, reset, or discard'), true)
+}
+
+// Scenario BC -- the default (non-existingBranch) branch prompt's own reuse
+// path (an existing branch already checked out elsewhere) must check that
+// record's path for dirty state before reusing it: that record can be the
+// main checkout, and a later phase runs git add -A there.
+async function scenarioBC() {
+  console.log('\n== scenario BC: the default branch prompt\'s reuse path checks the matched record for dirty state')
+  const { captured } = await run({
+    initialReview: { correctness: [], advocate: [] },
+    verify: () => undefined,
+    staleness: () => [],
+  })
+  const p = captured.calls.find(c => c.label === 'branch')?.prompt ?? ''
+  check('the reuse step checks the matched record\'s path for dirty state',
+    p.includes('This mode commits into that tree, and a later phase runs git add -A there'), true)
+  check('the reuse guard forbids stashing, resetting or discarding',
+    p.includes('Never stash, reset, or discard'), true)
+}
+
+// Scenario BD -- a fresh cut straight from origin/<base> is the one path
+// deterministically safe to widen the review range with an origin/ prefix.
+// base is stubbed already origin/-prefixed here (the shape git symbolic-ref
+// --short refs/remotes/origin/HEAD actually returns) to prove the prefix is
+// never doubled by construction, not merely because the agent followed the
+// prompt's own strip-the-prefix instruction.
+async function scenarioBD() {
+  console.log('\n== scenario BD: a fresh origin cut reviews against origin/<base>, never origin/origin/<base>')
+  const { captured } = await run({
+    branchResult: { created: true, branch: 'feat/gh-21-stub', base: 'origin/main',
+      path: '/tmp/stub-worktree', ticket: '21', detail: 'stub', cutFromOrigin: true },
+    initialReview: { correctness: [], advocate: [] },
+    verify: () => undefined,
+    staleness: () => [],
+  })
+  const p = captured.calls.find(c => c.label === 'implementer')?.prompt ?? ''
+  check('the merge base widens to origin/<base>', p.includes('merge base with origin/main'), true)
+  check('it is never doubled to origin/origin/<base>', p.includes('origin/origin/'), false)
+}
+
+// Scenario BE -- a reused branch (cutFromOrigin unset) may have been cut from
+// a local base ahead of origin/<base>, so its review range must not be forced
+// through the origin/ prefix: that would reach back past the real fork point.
+async function scenarioBE() {
+  console.log('\n== scenario BE: a reused branch reviews against the bare base, not a forced origin/<base>')
+  const { captured } = await run({
+    branchResult: { created: true, branch: 'feat/gh-21-stub', base: 'main',
+      path: '/tmp/stub-worktree', ticket: '21', detail: 'stub' },
+    initialReview: { correctness: [], advocate: [] },
+    verify: () => undefined,
+    staleness: () => [],
+  })
+  const p = captured.calls.find(c => c.label === 'implementer')?.prompt ?? ''
+  check('the merge base uses the bare base', p.includes('merge base with main'), true)
+  check('it is not widened to origin/<base>', p.includes('origin/main'), false)
 }
 
 // Scenario AZ -- the defect #81 is about. A lens points a fresh finding at a
@@ -1554,7 +1611,8 @@ for (const scenario of [scenarioA, scenarioB, scenarioG, scenarioC, scenarioD, s
                         scenarioAJ, scenarioAK, scenarioAL, scenarioAM, scenarioAN,
                         scenarioAO, scenarioAS, scenarioAT, scenarioAU, scenarioAV,
                         scenarioAW, scenarioAX, scenarioAY,
-                        scenarioAP, scenarioAQ, scenarioAR, scenarioBB, scenarioAZ, scenarioBA]) {
+                        scenarioAP, scenarioAQ, scenarioAR, scenarioBB, scenarioBC, scenarioBD,
+                        scenarioBE, scenarioAZ, scenarioBA]) {
   await scenario()
 }
 
