@@ -55,13 +55,6 @@ echo "== static: BRANCH requires dirty on every response"
 check "BRANCH's required array lists dirty" \
   "$(grep -c "required: \['created', 'branch', 'base', 'path', 'detail', 'dirty'\]" "$SCRIPT" || true)" 1
 
-echo "== static: the ready-PR brief targets the stripped base"
-# No scenario reaches the PR phase, so this text is unreachable from the
-# harness. gh takes a branch name, and baseOverride still carries whatever the
-# user typed, origin/ and all.
-check "the stacked-PR sentence uses the stripped base" \
-  "$(grep -c 'open the PR with --base ${wt.base}' "$SCRIPT" || true)" 1
-
 echo "== static: the verifier's brief no longer demands order or a verbatim title"
 # The old instruction, word for word. A hit elsewhere in the file (an
 # unrelated comment, or this test's own header explaining the old bug) must
@@ -1587,9 +1580,11 @@ async function scenarioBD() {
   console.log('\n== scenario BD: a given base reaches the merge-base rule bare, never doubled')
   for (const [given, bare] of [['feat/gh-40-parent', 'feat/gh-40-parent'], ['origin/develop', 'develop']]) {
     const { captured } = await run({
-      args: { base: given },
+      args: { base: given, openPr: true },
       branchResult: { created: true, branch: 'feat/gh-21-stub', base: 'main',
         path: '/tmp/stub-worktree', ticket: '21', detail: 'stub' },
+      draftPr: { opened: true, number: 23, url: 'https://example.invalid/pr/23', detail: 'stub draft' },
+      prResult: { opened: true, url: 'https://example.invalid/pr/23', note: 'stub ready' },
       initialReview: { correctness: [], advocate: [] },
       verify: () => undefined,
       staleness: () => [],
@@ -1601,11 +1596,14 @@ async function scenarioBD() {
     // gh resolves --base as a branch on the remote, so an origin/-qualified
     // name is rejected there -- at the very end of a run whose gates all went
     // green.
-    const d = captured.calls.find(c => c.label === 'draft-pr')?.prompt ?? ''
-    check(`${given}: the draft PR targets the bare base`,
-      d.includes(`--base ${bare}`), true)
-    check(`${given}: the draft PR does not target an origin/ name`,
-      d.includes('--base origin/'), false)
+    for (const [label, call] of [['draft', 'draft-pr'], ['ready', 'pr']]) {
+      const q = captured.calls.find(c => c.label === call)?.prompt ?? ''
+      check(`${given}: the ${label} PR phase ran`, q.length > 0, true)
+      check(`${given}: the ${label} PR targets the bare base`,
+        q.includes(`--base ${bare}`), true)
+      check(`${given}: the ${label} PR does not target an origin/ name`,
+        q.includes('--base origin/'), false)
+    }
   }
 }
 
