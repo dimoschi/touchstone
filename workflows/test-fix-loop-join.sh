@@ -48,6 +48,13 @@ echo "== static: VERDICTS requires id, title is optional"
 check "VERDICTS lists id in its required array" \
   "$(grep -c "required: \['id', 'fixed', 'note'\]" "$SCRIPT" || true)" 1
 
+echo ""
+echo "== static: BRANCH requires dirty on every response"
+# A haiku-at-low-effort branch agent that simply omits dirty must fail schema
+# validation, not have it default to false and mask a dirty checkout as clean.
+check "BRANCH's required array lists dirty" \
+  "$(grep -c "required: \['created', 'branch', 'base', 'path', 'detail', 'dirty'\]" "$SCRIPT" || true)" 1
+
 echo "== static: the verifier's brief no longer demands order or a verbatim title"
 # The old instruction, word for word. A hit elsewhere in the file (an
 # unrelated comment, or this test's own header explaining the old bug) must
@@ -119,6 +126,136 @@ check "a file with no commit in the range reports empty" \
   "$([ -n "$(run_template untouched.txt)" ] && echo yes || echo no)" no
 
 echo ""
+echo "== worktree phase: the default cut is unaffected by a dirty main checkout"
+# Runs the exact command sequence the branch prompt now prescribes for the
+# non-baseOverride cut (git fetch origin; git rev-parse --verify
+# origin/<base>; git worktree add <path> -b <branch> origin/<base>) against a
+# real remote and a real main checkout, proving the main tree's dirty state
+# and its stale local base are both irrelevant to the cut.
+ORIGIN="$WORK/wt-origin.git"
+git init -q --bare "$ORIGIN"
+
+MAIN="$WORK/wt-main"
+git clone -q "$ORIGIN" "$MAIN"
+git -C "$MAIN" config user.email test@example.com
+git -C "$MAIN" config user.name test
+git -C "$MAIN" config commit.gpgsign false
+
+echo "base v1" > "$MAIN/tracked.txt"
+git -C "$MAIN" add tracked.txt
+git -C "$MAIN" commit -qm "initial commit on main"
+git -C "$MAIN" push -q origin HEAD:main
+LOCAL_BASE_SHA_BEFORE="$(git -C "$MAIN" rev-parse main)"
+
+# A second clone advances the remote past what MAIN has fetched, so
+# origin/main (once fetched) differs from MAIN's own stale local main.
+OTHER_CLONE="$WORK/wt-other-clone"
+git clone -q "$ORIGIN" "$OTHER_CLONE"
+git -C "$OTHER_CLONE" config user.email test@example.com
+git -C "$OTHER_CLONE" config user.name test
+git -C "$OTHER_CLONE" config commit.gpgsign false
+echo "base v2" > "$OTHER_CLONE/tracked.txt"
+git -C "$OTHER_CLONE" add tracked.txt
+git -C "$OTHER_CLONE" commit -qm "a commit MAIN has not fetched yet"
+git -C "$OTHER_CLONE" push -q origin HEAD:main
+REMOTE_HEAD_SHA="$(git -C "$OTHER_CLONE" rev-parse HEAD)"
+
+# Dirty the main checkout: a modified tracked file, a staged new file, an
+# untracked file.
+echo "modified locally" > "$MAIN/tracked.txt"
+echo "staged new file" > "$MAIN/staged.txt"
+git -C "$MAIN" add staged.txt
+echo "untracked" > "$MAIN/untracked.txt"
+
+STATUS_BEFORE="$(git -C "$MAIN" status --porcelain)"
+TRACKED_BEFORE="$(cat "$MAIN/tracked.txt")"
+STAGED_BEFORE="$(cat "$MAIN/staged.txt")"
+BRANCH_BEFORE="$(git -C "$MAIN" branch --show-current)"
+
+WTPATH="$WORK/wt-new-worktree"
+git -C "$MAIN" fetch -q origin
+git -C "$MAIN" rev-parse --verify origin/main >/dev/null 2>&1
+FETCH_VERIFY_STATUS=$?
+git -C "$MAIN" worktree add -q "$WTPATH" -b feat/gh-999-test origin/main
+
+check "the fetch and verify step succeeded" "$FETCH_VERIFY_STATUS" 0
+check "git status --porcelain in the main checkout is unchanged" \
+  "$(git -C "$MAIN" status --porcelain)" "$STATUS_BEFORE"
+check "the modified tracked file's content is unchanged" \
+  "$(cat "$MAIN/tracked.txt")" "$TRACKED_BEFORE"
+check "the staged file's content is unchanged" \
+  "$(cat "$MAIN/staged.txt")" "$STAGED_BEFORE"
+check "the local base branch SHA is unchanged" \
+  "$(git -C "$MAIN" rev-parse main)" "$LOCAL_BASE_SHA_BEFORE"
+check "the main checkout is still on the same branch" \
+  "$(git -C "$MAIN" branch --show-current)" "$BRANCH_BEFORE"
+check "the new worktree's HEAD equals origin/main, not the stale local main" \
+  "$(git -C "$WTPATH" rev-parse HEAD)" "$REMOTE_HEAD_SHA"
+check "origin/main (fetched) actually differs from the stale local main" \
+  "$([ "$REMOTE_HEAD_SHA" != "$LOCAL_BASE_SHA_BEFORE" ] && echo yes || echo no)" yes
+
+echo ""
+echo "== worktree phase: a missing origin/<base> ref fails the verify step"
+git -C "$MAIN" rev-parse --verify origin/does-not-exist >/dev/null 2>&1
+MISSING_REF_STATUS=$?
+check "git rev-parse --verify on a missing remote ref exits non-zero" \
+  "$([ "$MISSING_REF_STATUS" -ne 0 ] && echo yes || echo no)" yes
+
+echo ""
+echo "== implementer's merge-base rule: the origin candidate stays at the true fork point when the local base goes stale"
+# Clone at A, a colleague pushes three commits straight to the remote, a
+# branch is cut from origin/<base> and gets one commit of its own. The local
+# <base> ref never moves, so merge-base against it alone reaches back through
+# the colleague's three commits too.
+TC_REMOTE="$WORK/tc-origin.git"
+git init -q --bare "$TC_REMOTE"
+
+TC_CLONE="$WORK/tc-clone"
+git clone -q "$TC_REMOTE" "$TC_CLONE"
+git -C "$TC_CLONE" config user.email test@example.com
+git -C "$TC_CLONE" config user.name test
+git -C "$TC_CLONE" config commit.gpgsign false
+
+echo "a" > "$TC_CLONE/f.txt"
+git -C "$TC_CLONE" add f.txt
+git -C "$TC_CLONE" commit -qm "A: initial commit"
+git -C "$TC_CLONE" push -q origin HEAD:main
+LOCAL_MAIN_SHA="$(git -C "$TC_CLONE" rev-parse main)"
+
+TC_COLLEAGUE="$WORK/tc-colleague"
+git clone -q "$TC_REMOTE" "$TC_COLLEAGUE"
+git -C "$TC_COLLEAGUE" config user.email test@example.com
+git -C "$TC_COLLEAGUE" config user.name test
+git -C "$TC_COLLEAGUE" config commit.gpgsign false
+for n in 1 2 3; do
+  echo "colleague $n" >> "$TC_COLLEAGUE/f.txt"
+  git -C "$TC_COLLEAGUE" add f.txt
+  git -C "$TC_COLLEAGUE" commit -qm "colleague commit $n"
+done
+git -C "$TC_COLLEAGUE" push -q origin HEAD:main
+COLLEAGUE_HEAD_SHA="$(git -C "$TC_COLLEAGUE" rev-parse HEAD)"
+
+git -C "$TC_CLONE" fetch -q origin
+git -C "$TC_CLONE" checkout -q -b feat/tc-test origin/main
+echo "own change" > "$TC_CLONE/g.txt"
+git -C "$TC_CLONE" add g.txt
+git -C "$TC_CLONE" commit -qm "run 1's own commit"
+
+ORIGIN_MERGE_BASE="$(git -C "$TC_CLONE" merge-base HEAD origin/main)"
+LOCAL_MERGE_BASE="$(git -C "$TC_CLONE" merge-base HEAD main)"
+check "the origin candidate is the true fork point" "$ORIGIN_MERGE_BASE" "$COLLEAGUE_HEAD_SHA"
+check "the local candidate is the stale pre-fetch main" "$LOCAL_MERGE_BASE" "$LOCAL_MAIN_SHA"
+
+git -C "$TC_CLONE" merge-base --is-ancestor "$LOCAL_MERGE_BASE" "$ORIGIN_MERGE_BASE"
+check "the origin candidate is a descendant of the local one, so the rule picks it" "$?" 0
+
+ORIGIN_RANGE_COUNT="$(git -C "$TC_CLONE" rev-list --count "$ORIGIN_MERGE_BASE"..HEAD)"
+LOCAL_RANGE_COUNT="$(git -C "$TC_CLONE" rev-list --count "$LOCAL_MERGE_BASE"..HEAD)"
+check "the origin candidate reviews exactly this run's one commit" "$ORIGIN_RANGE_COUNT" 1
+check "the stale local base alone would widen the range past it" \
+  "$([ "$LOCAL_RANGE_COUNT" -gt "$ORIGIN_RANGE_COUNT" ] && echo yes || echo no)" yes
+
+echo ""
 echo "== fix loop: running the real script under stubbed globals"
 
 cat > "$WORK/harness.mjs" <<'JS_EOF'
@@ -174,7 +311,11 @@ function makeAgent(scenario, captured) {
       return { found: true, summary: 'stub ticket', description: 'd', comments: '' }
     }
     if (label === 'branch') {
-      return { created: true, branch: 'feat/gh-21-stub', base: 'main',
+      return scenario.branchResult ?? { created: true, branch: 'feat/gh-21-stub', base: 'main',
+        path: '/tmp/stub-worktree', ticket: '21', detail: 'stub' }
+    }
+    if (label === 'branch:existing') {
+      return scenario.existingBranchResult ?? { created: true, branch: 'feat/gh-21-stub', base: 'main',
         path: '/tmp/stub-worktree', ticket: '21', detail: 'stub' }
     }
     if (label === 'triage') {
@@ -1389,6 +1530,162 @@ async function scenarioAR() {
     message.includes('neither a GitHub issue number'), true)
 }
 
+// Scenario BB -- the existingBranch prompt's guard checks the tree it is
+// actually going to commit into (the matched record's own path), whichever
+// tree that is, rather than special-casing the main checkout and waiving the
+// check for a linked worktree.
+async function scenarioBB() {
+  console.log('\n== scenario BB: the existingBranch prompt checks the matched record\'s own path, main checkout or not')
+  const { captured } = await run({
+    args: { existingBranch: true },
+    initialReview: { correctness: [], advocate: [] },
+    verify: () => undefined,
+    staleness: () => [],
+  })
+  const p = captured.calls.find(c => c.label === 'branch:existing')?.prompt ?? ''
+  check('the guard checks the matched record\'s own path from step 4',
+    p.includes("using the matched record's own path from step 4"), true)
+  check('the guard applies whether that path is the main checkout or a linked worktree',
+    p.includes('whether that is the main checkout or a linked worktree'), true)
+  check('the incorrect main-checkout-only carve-out is gone',
+    p.includes('A dirty main checkout is not a reason to stop'), false)
+  check('the guard still forbids stashing, resetting or discarding',
+    p.includes('Never stash, reset, or discard'), true)
+}
+
+// Scenario BC -- the default (non-existingBranch) branch prompt's own reuse
+// path (an existing branch already checked out elsewhere) must check that
+// record's path for dirty state before reusing it: that record can be the
+// main checkout, and a later phase runs git add -A there.
+async function scenarioBC() {
+  console.log('\n== scenario BC: the default branch prompt\'s reuse path checks the matched record for dirty state')
+  const { captured } = await run({
+    initialReview: { correctness: [], advocate: [] },
+    verify: () => undefined,
+    staleness: () => [],
+  })
+  const p = captured.calls.find(c => c.label === 'branch')?.prompt ?? ''
+  check('the reuse step checks the matched record\'s path for dirty state',
+    p.includes('This mode commits into that tree, and a later phase runs git add -A there'), true)
+  check('the reuse guard forbids stashing, resetting or discarding',
+    p.includes('Never stash, reset, or discard'), true)
+}
+
+// Scenario BD -- the script cannot resolve a fork point itself (no filesystem
+// access), so the implementer is told to try both <base> and origin/<base>
+// and pick between them at runtime. A given base must reach that rule bare in
+// both shapes it arrives in: a stacked branch name with no remote ref, and an
+// origin/<x> that must not double.
+async function scenarioBD() {
+  console.log('\n== scenario BD: a given base reaches the merge-base rule bare, never doubled')
+  for (const [given, bare] of [['feat/gh-40-parent', 'feat/gh-40-parent'], ['origin/develop', 'develop']]) {
+    const { captured } = await run({
+      args: { base: given, openPr: true },
+      branchResult: { created: true, branch: 'feat/gh-21-stub', base: 'main',
+        path: '/tmp/stub-worktree', ticket: '21', detail: 'stub' },
+      draftPr: { opened: true, number: 23, url: 'https://example.invalid/pr/23', detail: 'stub draft' },
+      prResult: { opened: true, url: 'https://example.invalid/pr/23', note: 'stub ready' },
+      initialReview: { correctness: [], advocate: [] },
+      verify: () => undefined,
+      staleness: () => [],
+    })
+    const p = captured.calls.find(c => c.label === 'implementer')?.prompt ?? ''
+    check(`${given}: the bare candidate is offered`, p.includes(`with ${bare} and`), true)
+    check(`${given}: the origin candidate is offered`, p.includes(`with origin/${bare}`), true)
+    check(`${given}: it is never doubled`, p.includes('origin/origin/'), false)
+    // gh resolves --base as a branch on the remote, so an origin/-qualified
+    // name is rejected there -- at the very end of a run whose gates all went
+    // green.
+    for (const [label, call] of [['draft', 'draft-pr'], ['ready', 'pr']]) {
+      const q = captured.calls.find(c => c.label === call)?.prompt ?? ''
+      check(`${given}: the ${label} PR phase ran`, q.length > 0, true)
+      check(`${given}: the ${label} PR targets the bare base`,
+        q.includes(`--base ${bare}`), true)
+      check(`${given}: the ${label} PR does not target an origin/ name`,
+        q.includes('--base origin/'), false)
+    }
+  }
+}
+
+// Scenario BE -- only the fresh-cut prompt's own step 3 tells its agent to
+// strip the origin/ prefix that git symbolic-ref --short refs/remotes/origin/HEAD
+// prints; a reported base of "origin/main" must still reach the merge-base
+// rule as the bare "main", not doubled into "origin/origin/main".
+async function scenarioBE() {
+  console.log('\n== scenario BE: a base reported as origin/main by the fresh-cut prompt is stripped to main')
+  const { captured } = await run({
+    branchResult: { created: true, branch: 'feat/gh-21-stub', base: 'origin/main',
+      path: '/tmp/stub-worktree', ticket: '21', detail: 'stub' },
+    initialReview: { correctness: [], advocate: [] },
+    verify: () => undefined,
+    staleness: () => [],
+  })
+  const p = captured.calls.find(c => c.label === 'implementer')?.prompt ?? ''
+  check('the bare candidate is main, not origin/main', p.includes('with main and'), true)
+  check('the origin candidate is origin/main, not origin/origin/main', p.includes('with origin/main'), true)
+  check('it is never doubled', p.includes('origin/origin/'), false)
+}
+
+// Scenario BF -- the default (non-existingBranch) branch prompt's own dirty
+// reuse halt (step 6) must report why: a dirty checkout, not the base-branch
+// note meant for the other default-mode halts (an invalid baseOverride ref, a
+// worktree path already on disk, a failed fetch or resolve).
+async function scenarioBF() {
+  console.log('\n== scenario BF: a dirty reused worktree halts with a dirty-checkout note, not a base-branch note')
+  const { result } = await run({
+    branchResult: { created: false, branch: 'feat/gh-21-stub', base: 'main',
+      path: '/tmp/stub-worktree', ticket: '21', detail: 'staged.txt is dirty', dirty: true },
+  })
+  check('halted at Worktree', result.halted_at, 'Worktree')
+  check('the note points at the dirty checkout', /[Cc]ommit or stash/.test(result.note ?? ''), true)
+  check('the note does not blame a base branch problem',
+    (result.note ?? '').includes('base branch problem'), false)
+  check('the note does not send the user toward the existingBranch guard, ' +
+    'which refuses the same tree for the same reason',
+    (result.note ?? '').includes('existingBranch: true'), false)
+}
+
+// Scenario BG -- the existingBranch prompt's step 7 never tells its agent to
+// strip an origin/ prefix off the base it reports, unlike the fresh-cut
+// prompt's own step 3. A base of "origin/main" must still reach the
+// merge-base rule stripped to "main", not doubled into "origin/origin/main".
+async function scenarioBG() {
+  console.log('\n== scenario BG: a base reported as origin/main by the existingBranch prompt is stripped to main')
+  const { captured } = await run({
+    args: { existingBranch: true },
+    existingBranchResult: { created: true, branch: 'feat/gh-21-stub', base: 'origin/main',
+      path: '/tmp/stub-worktree', ticket: '21', detail: 'stub' },
+    initialReview: { correctness: [], advocate: [] },
+    verify: () => undefined,
+    staleness: () => [],
+  })
+  const p = captured.calls.find(c => c.label === 'implementer')?.prompt ?? ''
+  check('the bare candidate is main, not origin/main', p.includes('with main and'), true)
+  check('the origin candidate is origin/main, not origin/origin/main', p.includes('with origin/main'), true)
+  check('it is never doubled', p.includes('origin/origin/'), false)
+}
+
+// Scenario BH -- the script has no filesystem access, so it cannot resolve a
+// fork point itself; the implementer must be told the exact tiebreak rule
+// (descendant wins, origin/<base> on a genuine divergence) rather than being
+// left to guess, since the gates measure against origin/HEAD and a different
+// pick here would review a range the gates never scored.
+async function scenarioBH() {
+  console.log('\n== scenario BH: the prompt states the two-candidate merge-base rule')
+  const { captured } = await run({
+    branchResult: { created: true, branch: 'feat/gh-21-stub', base: 'main',
+      path: '/tmp/stub-worktree', ticket: '21', detail: 'stub' },
+    initialReview: { correctness: [], advocate: [] },
+    verify: () => undefined,
+    staleness: () => [],
+  })
+  const p = captured.calls.find(c => c.label === 'implementer')?.prompt ?? ''
+  check('only-one-resolves is covered', p.includes('If only one of those refs resolves'), true)
+  check('the descendant tiebreak is covered', p.includes('--is-ancestor'), true)
+  check('the origin fallback names the reason: the gates diff against origin/HEAD',
+    p.includes('origin/HEAD first'), true)
+}
+
 // Scenario AZ -- the defect #81 is about. A lens points a fresh finding at a
 // settled one because the fix for that finding introduced this one. Assuming
 // it was a re-report readied a PR carrying a real regression, under
@@ -1453,7 +1750,9 @@ for (const scenario of [scenarioA, scenarioB, scenarioG, scenarioC, scenarioD, s
                         scenarioAJ, scenarioAK, scenarioAL, scenarioAM, scenarioAN,
                         scenarioAO, scenarioAS, scenarioAT, scenarioAU, scenarioAV,
                         scenarioAW, scenarioAX, scenarioAY,
-                        scenarioAP, scenarioAQ, scenarioAR, scenarioAZ, scenarioBA]) {
+                        scenarioAP, scenarioAQ, scenarioAR, scenarioBB, scenarioBC, scenarioBD,
+                        scenarioBE, scenarioAZ, scenarioBA, scenarioBF, scenarioBG,
+                        scenarioBH]) {
   await scenario()
 }
 

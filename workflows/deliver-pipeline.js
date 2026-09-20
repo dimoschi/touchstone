@@ -208,7 +208,7 @@ const PLAN = {
 // count for a change nobody has scoped yet forces a number out of thin air.
 const BRANCH = {
   type: 'object', additionalProperties: false,
-  required: ['created', 'branch', 'base', 'path', 'detail'],
+  required: ['created', 'branch', 'base', 'path', 'detail', 'dirty'],
   properties: {
     created: { type: 'boolean' },
     branch: { type: 'string' },
@@ -216,6 +216,7 @@ const BRANCH = {
     path: { type: 'string' },
     ticket: { type: 'string' },
     detail: { type: 'string' },
+    dirty: { type: 'boolean' },
   },
 }
 
@@ -490,28 +491,36 @@ const wt = args?.existingBranch
       `not create a branch, do not create a worktree, do not fetch, do not ` +
       `pull, do not plan or implement.\n` +
       `This task continues work on an existing branch for ticket ${ticket}.\n` +
-      `1. Return created=false if the working tree has uncommitted changes. Say ` +
-      `what is dirty. Never stash, reset, or discard the user's work.\n` +
-      `2. Run git worktree prune. It only removes registrations for worktree ` +
+      `One field matters on every response below, halts included: dirty is ` +
+      `true only for step 6's dirty-checkout halt, false in every other ` +
+      `response.\n` +
+      `1. Run git worktree prune. It only removes registrations for worktree ` +
       `directories that no longer exist on disk; it never touches a directory ` +
       `that does exist. Run it before listing worktrees so a stale record left ` +
       `behind by a hand-deleted directory cannot be matched below.\n` +
-      `3. Return created=false if HEAD is detached, or if the current branch is ` +
+      `2. Return created=false if HEAD is detached, or if the current branch is ` +
       `the repo's base branch (main, master, or whatever origin/HEAD names). ` +
       `Committing follow-up work straight onto the base is not what this mode is ` +
       `for.\n` +
-      `4. Note the current branch name (git branch --show-current), then run ` +
+      `3. Note the current branch name (git branch --show-current), then run ` +
       `git worktree list --porcelain. It prints one record per worktree: a ` +
       `"worktree <path>" line followed by a "branch refs/heads/<name>" line (or ` +
       `"detached"/"bare"). A branch already checked out somewhere cannot also ` +
       `have a worktree created for it here, git refuses that outright, so the ` +
       `existing record is what this task must use, not a new one.\n` +
-      `5. Find the record whose branch matches the current branch name and take ` +
+      `4. Find the record whose branch matches the current branch name and take ` +
       `its path. That path is correct whether it is the main checkout or a ` +
       `linked worktree: the branch lives there and nowhere else.\n` +
-      `6. If no record matches (the branch is checked out in no worktree at ` +
+      `5. If no record matches (the branch is checked out in no worktree at ` +
       `all), return created=false and say so. Do not create one for it; that is ` +
       `what the default (non-existingBranch) mode is for.\n` +
+      `6. This mode commits into the tree holding the branch, and a later phase ` +
+      `runs git add -A there, so unrelated dirty files sitting in that tree ` +
+      `would be swept into a commit. Check git -C <path> status --porcelain, ` +
+      `using the matched record's own path from step 4, whether that is the ` +
+      `main checkout or a linked worktree; the risk is the same either way. If ` +
+      `it is non-empty, return created=false, dirty=true, and say what is ` +
+      `dirty. Never stash, reset, or discard the user's work.\n` +
       `7. Otherwise return created=true, branch set to the current branch name, ` +
       `base set to the repo's base branch, and path set to the absolute path ` +
       `from the matching record. Note in detail whether that path is the main ` +
@@ -520,6 +529,9 @@ const wt = args?.existingBranch
       `is not a failure: it predates the convention. Say so plainly so the ` +
       `session is known to be untrackable by branch name.` + RECORD('branch:existing'),
       { label: 'branch:existing', schema: BRANCH, model: 'haiku', effort: 'low' })
+  // A worktree is a separate checkout, so the main tree's state is irrelevant
+  // to it; cutting from origin/<base> is what removes the need to touch the
+  // main checkout at all.
   : await agent(
   `[touchstone: branch]\n` +
   `Create the working branch and a git worktree for it, then STOP. Do not ` +
@@ -527,67 +539,78 @@ const wt = args?.existingBranch
   `Task: ${brief(task)}\n` +
   `Ticket: ${ticket}\n` +
   `Branch type prefix: ${args?.branchType ?? 'feat'}\n` +
-  `1. Refuse and return created=false if the working tree has uncommitted ` +
-  `changes. Say what is dirty. Never stash, reset, or discard the user's work.\n` +
-  `2. Run git worktree prune. It only removes registrations for worktree ` +
+  `One field matters on every response below, halts included: dirty is true ` +
+  `only for step 6's dirty-checkout halt, false in every other response.\n` +
+  `1. Run git worktree prune. It only removes registrations for worktree ` +
   `directories that no longer exist on disk, never a directory that does ` +
   `exist, so it is safe to run unconditionally; it clears the way for ` +
   `re-adding a worktree whose directory was deleted by hand.\n` +
-  `3. Find the repo root: dirname "$(git rev-parse --path-format=absolute ` +
+  `2. Find the repo root: dirname "$(git rev-parse --path-format=absolute ` +
   `--git-common-dir)". Do not use git rev-parse --show-toplevel for this.\n` +
   (baseOverride
-    ? `4. The base for this branch is given: ${baseOverride}. Do not read the ` +
+    ? `3. The base for this branch is given: ${baseOverride}. Do not read the ` +
       `remote HEAD and do not substitute main or master; this work is stacked ` +
       `on that branch deliberately. Verify the ref resolves ` +
       `(git rev-parse --verify ${baseOverride}) and return created=false naming ` +
       `it if it does not.\n`
-    : `4. Find this repo's base branch: read the remote HEAD ` +
-      `(git symbolic-ref --short refs/remotes/origin/HEAD), falling back to ` +
-      `whichever of main or master exists. Do not assume main.\n`) +
-  `5. Name the branch exactly ` +
+    : `3. Find this repo's base branch: read the remote HEAD ` +
+      `(git symbolic-ref --short refs/remotes/origin/HEAD), which prints an ` +
+      `origin/-prefixed name; strip that prefix so the base is the bare ` +
+      `branch name (main, not origin/main), falling back to whichever of ` +
+      `main or master exists when there is no remote-tracking HEAD. Do not ` +
+      `assume main.\n`) +
+  `4. Name the branch exactly ` +
   `${args?.branchType ?? 'feat'}/${ticketMarker}-<slug>. The prefix is given ` +
   `in full, already resolved against the ticket: use it character for ` +
   `character and do not re-derive it, abbreviate it, or swap jira- for gh- or ` +
   `back. Supply only <slug>, from the task: lowercase, hyphen-separated, at ` +
   `most 6 words, no trailing hyphen.\n` +
-  `6. The worktree path is ` +
+  `5. The worktree path is ` +
   `<repo-root>/.claude/worktrees/${ticketMarker}-<slug>, the branch name with ` +
   `its ${args?.branchType ?? 'feat'}/ prefix stripped.\n` +
-  `7. Run git worktree list --porcelain and look for a record whose "branch ` +
-  `refs/heads/<name>" line matches the branch name from step 5. If one ` +
+  `6. Run git worktree list --porcelain and look for a record whose "branch ` +
+  `refs/heads/<name>" line matches the branch name from step 4. If one ` +
   `exists, the branch is already checked out somewhere; git refuses to check ` +
-  `it out twice, so return created=true using that record's own path (even ` +
-  `if it differs from the path in step 6), note in detail that the branch ` +
-  `was reused rather than created, and stop: do not fetch, pull, or run any ` +
-  `worktree add.\n` +
-  `8. Otherwise check whether the branch exists at all (git show-ref --verify ` +
-  `--quiet refs/heads/<name>). If it does, the fetch and fast-forward in step ` +
-  `10 are not needed; go straight to step 9.\n` +
-  `9. Check whether the path from step 6 already exists on disk. If it does, ` +
+  `it out twice, so that record's own path (even if it differs from the ` +
+  `path in step 5) is what this task must reuse. This mode commits into ` +
+  `that tree, and a later phase runs git add -A there, so check git -C ` +
+  `<that path> status --porcelain: if it is non-empty, return created=false, ` +
+  `dirty=true, and say what is dirty. Never stash, reset, or discard the ` +
+  `user's work. Otherwise return created=true using that path, note in ` +
+  `detail that the branch was reused rather than created, and stop: do not ` +
+  `fetch, pull, or run any worktree add.\n` +
+  `7. Otherwise check whether the branch exists at all (git show-ref --verify ` +
+  `--quiet refs/heads/<name>). If it does, the fetch and cut in step 10 are ` +
+  `not needed; go straight to step 8.\n` +
+  `8. Check whether the path from step 5 already exists on disk. If it does, ` +
   `return created=false naming the exact path and explaining what is there. ` +
   `Do not delete it, do not rename around it, and do not pick a different ` +
   `slug: a surprising second worktree is worse than a clear halt.\n` +
-  `10. If the branch exists (step 8) and the path is clear (step 9), run ` +
+  `9. If the branch exists (step 7) and the path is clear (step 8), run ` +
   `git worktree add <path> <branch>, without -b since the branch already ` +
   `exists; a branch cannot be created twice. Note in detail that the branch ` +
   `was reused rather than created, and set base to ` +
   (baseOverride ? `${baseOverride}.\n` : `the repo's base branch.\n`) +
   (baseOverride
-    ? `11. If the branch does not exist, run ` +
+    ? `10. If the branch does not exist, run ` +
       `git worktree add <path> -b <branch> ${baseOverride} directly. Do not ` +
       `fetch, do not check out the base, and do not pull or rebase it: it is a ` +
       `branch under review whose head the user chose, and it may itself be ` +
       `checked out in another worktree, where checking it out again would fail.\n`
-    : `11. If the branch does not exist, git fetch origin, check out the base ` +
-      `branch, and fast-forward it (git pull --ff-only). If the pull is not a ` +
-      `fast-forward, return created=false and say so rather than merging or ` +
-      `rebasing. Then run git worktree add <path> -b <branch> <base>.\n`) +
+    : `10. If the branch does not exist, run git fetch origin, then resolve ` +
+      `the cut point with git rev-parse --verify origin/<base>. If the fetch ` +
+      `fails or that ref does not resolve, return created=false naming the ` +
+      `base and the reason, rather than falling back to the local branch. ` +
+      `Otherwise run git worktree add <path> -b <branch> origin/<base>. Do ` +
+      `not check out the base branch, do not run git pull, and do not modify ` +
+      `the main checkout's working tree in any way: the worktree is a ` +
+      `separate checkout, cut straight from the fetched remote ref.\n`) +
   `Do not check out the new branch in this working tree; the worktree is a ` +
   `separate checkout.\n` +
   `Return the branch you created or reused, the base you cut it from (or ` +
   (baseOverride ? `${baseOverride}` : `the repo's base branch`) +
-  ` if the branch already existed), and the absolute ` +
-  `worktree path.` + RECORD('branch'),
+  ` if the branch already existed), and the absolute worktree path.` +
+  RECORD('branch'),
   { label: 'branch', schema: BRANCH, model: 'haiku', effort: 'low' })
 sBranch.close()
 
@@ -598,22 +621,27 @@ if (!wt?.created) {
     branch: wt?.branch,
     base: wt?.base,
     detail: wt?.detail,
-    note: args?.existingBranch
-      ? 'No usable worktree, so nothing was planned or implemented. Check out ' +
-        'the branch this work belongs on, commit or stash any changes, then ' +
+    // wt.dirty names the actual cause regardless of mode: both the default
+    // reuse path (step 6) and the existingBranch guard (step 6) halt here for
+    // the same reason, an uncommitted checkout, and re-running with
+    // existingBranch: true would only hit that same existingBranch guard.
+    note: wt?.dirty
+      ? 'The checkout that holds this branch has uncommitted changes, so ' +
+        'nothing was planned or implemented. Commit or stash them, then ' +
         're-run.'
+      : args?.existingBranch
+      ? 'No usable worktree, so nothing was planned or implemented. Check ' +
+        'out the branch this work belongs on, then re-run.'
       : 'No worktree was created, so nothing was planned or implemented. ' +
-        'Commit or stash your changes, or resolve the base branch problem in ' +
-        'detail, then re-run. If fetch or pull cannot run here (a remote ' +
-        'needing a hardware key, for example), pull the base branch manually ' +
-        'first, or pass existingBranch: true if this work belongs on a branch ' +
-        'that already exists.',
+        'Resolve the base branch problem in detail, then re-run. If fetch ' +
+        'cannot run here (a remote needing a hardware key, for example), ' +
+        'fetch the base branch manually first, or pass existingBranch: true ' +
+        'if this work belongs on a branch that already exists.',
   })
 }
-// The review range and the PR target both read wt.base, and a reused branch or
-// the existingBranch path reports the repo default regardless of what it was
-// actually cut from.
-if (baseOverride) wt.base = baseOverride
+// Bare unconditionally: neither gh pr create --base nor the merge-base rule
+// below can take an origin/-qualified name.
+wt.base = (baseOverride || wt.base).replace(/^origin\//, '')
 recordedBranch = wt.branch
 log(args?.existingBranch
   ? `worktree ${wt.path} reused for branch ${wt.branch} (base ${wt.base})`
@@ -969,13 +997,19 @@ const impl = await treeAgent(
   `printed, never on whether .crap-gated exists and never on your own ` +
   `judgement of the change. If it printed its own gate message, copy it ` +
   `verbatim into gate_note.\n` +
-  `Return commit_range as '<base-sha>..<head-sha>' using the merge base with ` +
-  `${wt.base} and your final HEAD, both as full 40-character SHAs: later ` +
-  `phases compare their own HEAD against the head of this range to work out ` +
-  `what is still unreviewed, and an abbreviated SHA never matches. ` +
-  `Downstream phases are given that range and ` +
-  `read the diff themselves, so it is how your work is handed on: a summary of ` +
-  `it is not, and will not be forwarded.`,
+  `Return commit_range as '<base-sha>..<head-sha>', both as full 40-character ` +
+  `SHAs, using your final HEAD and a base you work out yourself: find the ` +
+  `merge base of HEAD with ${wt.base} and with origin/${wt.base}. If only ` +
+  `one of those refs resolves, use its merge base. If both resolve, use ` +
+  `whichever of the two merge-base commits is a descendant of the other ` +
+  `(git merge-base --is-ancestor); if neither is, use the one from ` +
+  `origin/${wt.base} -- the gates resolve their own diff base as origin/HEAD ` +
+  `first, and this keeps the reviewed range aligned with the measured one. ` +
+  `Later phases compare their own HEAD against the head of this range to ` +
+  `work out what is still unreviewed, and an abbreviated SHA never matches. ` +
+  `Downstream phases are given that range and read the diff themselves, so ` +
+  `it is how your work is handed on: a summary of it is not, and will not ` +
+  `be forwarded.`,
   { label: 'implementer', schema: IMPL, model: 'sonnet', effort: effortFor.implement })
 if (!impl) throw new Error('implementer failed')
 sImpl.close()
@@ -1061,7 +1095,7 @@ const draft = await treeAgent(
   `in detail, and change nothing about it. In particular do not re-draft a PR ` +
   `that is already marked ready for review -- someone did that deliberately.\n` +
   `Only if there is none: git push -u origin ${wt.branch}, then gh pr create --draft` +
-  (baseOverride ? ` --base ${baseOverride}` : '') + `. Push the branch either ` +
+  (baseOverride ? ` --base ${wt.base}` : '') + `. Push the branch either ` +
   `way, so the commits are on the remote rather than on one machine.\n` +
   `The body is a short statement of intent, not a report: two or three ` +
   `sentences on what this branch sets out to do and why, from the ticket. Do ` +
@@ -1822,7 +1856,7 @@ if (args?.openPr !== false && !outOfBudget()) {
     `hook, CONTRIBUTING.md) is fair to reference once you have seen it in the ` +
     `repo.\n` +
     (baseOverride
-      ? `This branch is stacked: open the PR with --base ${baseOverride}, not ` +
+      ? `This branch is stacked: open the PR with --base ${wt.base}, not ` +
         `against the repo's default branch, and say in the body that it targets ` +
         `that branch and why. gh defaults to the default branch, which would ` +
         `show the parent's commits as this PR's own.\n`

@@ -34,8 +34,8 @@ There is no flag to skip it, and the workflow's own instructions tell every agen
 never to weaken production code to kill a mutant.
 
 Touchstone is also **bounded**. Each stage carries an output-token ceiling and the
-run halts rather than looping: a disproved premise stops before any code exists, a
-dirty tree stops before it branches, and a plan that overruns stops before
+run halts rather than looping: a disproved premise stops before any code exists, an
+unresolvable base ref stops before it branches, and a plan that overruns stops before
 implementing. Unbounded agent runs are where the money goes on trajectories that
 merge nothing.
 
