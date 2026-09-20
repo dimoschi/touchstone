@@ -609,9 +609,8 @@ const wt = args?.existingBranch
   `separate checkout.\n` +
   `Return the branch you created or reused, the base you cut it from (or ` +
   (baseOverride ? `${baseOverride}` : `the repo's base branch`) +
-  ` if the branch already existed), and the absolute worktree path; only ` +
-  `step 10's fetch-and-cut path with no baseOverride is guaranteed to be cut ` +
-  `from what is now origin/<base>.` + RECORD('branch'),
+  ` if the branch already existed), and the absolute worktree path.` +
+  RECORD('branch'),
   { label: 'branch', schema: BRANCH, model: 'haiku', effort: 'low' })
 sBranch.close()
 
@@ -1096,7 +1095,7 @@ const draft = await treeAgent(
   `in detail, and change nothing about it. In particular do not re-draft a PR ` +
   `that is already marked ready for review -- someone did that deliberately.\n` +
   `Only if there is none: git push -u origin ${wt.branch}, then gh pr create --draft` +
-  (baseOverride ? ` --base ${baseOverride}` : '') + `. Push the branch either ` +
+  (baseOverride ? ` --base ${wt.base}` : '') + `. Push the branch either ` +
   `way, so the commits are on the remote rather than on one machine.\n` +
   `The body is a short statement of intent, not a report: two or three ` +
   `sentences on what this branch sets out to do and why, from the ticket. Do ` +
@@ -1857,7 +1856,7 @@ if (args?.openPr !== false && !outOfBudget()) {
     `hook, CONTRIBUTING.md) is fair to reference once you have seen it in the ` +
     `repo.\n` +
     (baseOverride
-      ? `This branch is stacked: open the PR with --base ${baseOverride}, not ` +
+      ? `This branch is stacked: open the PR with --base ${wt.base}, not ` +
         `against the repo's default branch, and say in the body that it targets ` +
         `that branch and why. gh defaults to the default branch, which would ` +
         `show the parent's commits as this PR's own.\n`
