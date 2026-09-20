@@ -664,9 +664,12 @@ if (baseOverride) {
 // the merge base for a reused or existingBranch branch that was cut from a
 // local base ahead of origin/<base>, pulling commits this run never wrote
 // into the reviewed range. Only wt.cutFromOrigin's one path (a fresh branch
-// fetched and cut straight from origin/<base>) is safe to widen this way;
-// baseOverride already names a real, resolvable ref regardless.
-const reviewBase = wt.cutFromOrigin ? `origin/${wt.base}` : wt.base
+// fetched and cut straight from origin/<base>) is safe to widen this way.
+// A given base short-circuits ahead of it: it already names a ref step 3 made
+// the agent verify, and prefixing it would invent a remote one for a stacked
+// branch or double an origin/<x>, on a response whose cutFromOrigin this
+// cannot make true by construction.
+const reviewBase = baseOverride || (wt.cutFromOrigin ? `origin/${wt.base}` : wt.base)
 // baseOverride is verified to resolve in prompt step 3, and a cutFromOrigin cut
 // is verified in step 10, so reviewBase is guaranteed resolvable for both. The
 // bare base name used by every other path (a reused branch, or existingBranch,

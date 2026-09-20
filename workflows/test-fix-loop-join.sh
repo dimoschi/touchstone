@@ -1607,6 +1607,29 @@ async function scenarioBG() {
     p.includes('falling back to origin/main if that local ref does not resolve'), true)
 }
 
+// Scenario BH -- prompt step 3 already made its agent verify a given base
+// resolves, which is why no fallback is offered for one. Prefixing it anyway
+// breaks both shapes it arrives in: a stacked branch name that has no remote
+// ref, and an origin/<x> that doubles.
+async function scenarioBH() {
+  console.log('\n== scenario BH: a given base is reviewed against as given, whatever cutFromOrigin reports')
+  for (const base of ['feat/gh-40-parent', 'origin/develop']) {
+    const { captured } = await run({
+      args: { base },
+      branchResult: { created: true, branch: 'feat/gh-21-stub', base: 'main',
+        path: '/tmp/stub-worktree', ticket: '21', detail: 'stub', cutFromOrigin: true },
+      initialReview: { correctness: [], advocate: [] },
+      verify: () => undefined,
+      staleness: () => [],
+    })
+    const p = captured.calls.find(c => c.label === 'implementer')?.prompt ?? ''
+    check(`${base} is reviewed against as given`,
+      p.includes(`merge base with ${base}`), true)
+    check(`${base} is not prefixed a second time`,
+      p.includes(`merge base with origin/${base}`), false)
+  }
+}
+
 // Scenario AZ -- the defect #81 is about. A lens points a fresh finding at a
 // settled one because the fix for that finding introduced this one. Assuming
 // it was a re-report readied a PR carrying a real regression, under
@@ -1672,7 +1695,8 @@ for (const scenario of [scenarioA, scenarioB, scenarioG, scenarioC, scenarioD, s
                         scenarioAO, scenarioAS, scenarioAT, scenarioAU, scenarioAV,
                         scenarioAW, scenarioAX, scenarioAY,
                         scenarioAP, scenarioAQ, scenarioAR, scenarioBB, scenarioBC, scenarioBD,
-                        scenarioBE, scenarioAZ, scenarioBA, scenarioBF, scenarioBG]) {
+                        scenarioBE, scenarioAZ, scenarioBA, scenarioBF, scenarioBG,
+                        scenarioBH]) {
   await scenario()
 }
 
