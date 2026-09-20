@@ -208,7 +208,7 @@ const PLAN = {
 // count for a change nobody has scoped yet forces a number out of thin air.
 const BRANCH = {
   type: 'object', additionalProperties: false,
-  required: ['created', 'branch', 'base', 'path', 'detail', 'cutFromOrigin', 'dirty'],
+  required: ['created', 'branch', 'base', 'path', 'detail', 'dirty'],
   properties: {
     created: { type: 'boolean' },
     branch: { type: 'string' },
@@ -216,7 +216,6 @@ const BRANCH = {
     path: { type: 'string' },
     ticket: { type: 'string' },
     detail: { type: 'string' },
-    cutFromOrigin: { type: 'boolean' },
     dirty: { type: 'boolean' },
   },
 }
@@ -492,9 +491,9 @@ const wt = args?.existingBranch
       `not create a branch, do not create a worktree, do not fetch, do not ` +
       `pull, do not plan or implement.\n` +
       `This task continues work on an existing branch for ticket ${ticket}.\n` +
-      `Two fields matter on every response below, halts included: cutFromOrigin ` +
-      `is always false, since this mode never cuts a branch; dirty is true only ` +
-      `for step 6's dirty-checkout halt, false in every other response.\n` +
+      `One field matters on every response below, halts included: dirty is ` +
+      `true only for step 6's dirty-checkout halt, false in every other ` +
+      `response.\n` +
       `1. Run git worktree prune. It only removes registrations for worktree ` +
       `directories that no longer exist on disk; it never touches a directory ` +
       `that does exist. Run it before listing worktrees so a stale record left ` +
@@ -540,10 +539,8 @@ const wt = args?.existingBranch
   `Task: ${brief(task)}\n` +
   `Ticket: ${ticket}\n` +
   `Branch type prefix: ${args?.branchType ?? 'feat'}\n` +
-  `Two fields matter on every response below, halts included: cutFromOrigin ` +
-  `is true only when you completed step 10's fetch-and-cut-from-origin path ` +
-  `with no baseOverride, false in every other response; dirty is true only ` +
-  `for step 6's dirty-checkout halt, false in every other response.\n` +
+  `One field matters on every response below, halts included: dirty is true ` +
+  `only for step 6's dirty-checkout halt, false in every other response.\n` +
   `1. Run git worktree prune. It only removes registrations for worktree ` +
   `directories that no longer exist on disk, never a directory that does ` +
   `exist, so it is safe to run unconditionally; it clears the way for ` +

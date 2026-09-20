@@ -49,12 +49,11 @@ check "VERDICTS lists id in its required array" \
   "$(grep -c "required: \['id', 'fixed', 'note'\]" "$SCRIPT" || true)" 1
 
 echo ""
-echo "== static: BRANCH requires cutFromOrigin and dirty on every response"
-# A haiku-at-low-effort branch agent that simply omits an optional field is
-# exactly how the fresh-cut review range silently reverted to the stale local
-# base; both flags must be mandatory, not left to the prompt's own wording.
-check "BRANCH's required array lists cutFromOrigin and dirty" \
-  "$(grep -c "required: \['created', 'branch', 'base', 'path', 'detail', 'cutFromOrigin', 'dirty'\]" "$SCRIPT" || true)" 1
+echo "== static: BRANCH requires dirty on every response"
+# A haiku-at-low-effort branch agent that simply omits dirty must fail schema
+# validation, not have it default to false and mask a dirty checkout as clean.
+check "BRANCH's required array lists dirty" \
+  "$(grep -c "required: \['created', 'branch', 'base', 'path', 'detail', 'dirty'\]" "$SCRIPT" || true)" 1
 
 echo "== static: the verifier's brief no longer demands order or a verbatim title"
 # The old instruction, word for word. A hit elsewhere in the file (an
@@ -1583,7 +1582,7 @@ async function scenarioBD() {
     const { captured } = await run({
       args: { base: given },
       branchResult: { created: true, branch: 'feat/gh-21-stub', base: 'main',
-        path: '/tmp/stub-worktree', ticket: '21', detail: 'stub', cutFromOrigin: true },
+        path: '/tmp/stub-worktree', ticket: '21', detail: 'stub' },
       initialReview: { correctness: [], advocate: [] },
       verify: () => undefined,
       staleness: () => [],
@@ -1603,7 +1602,7 @@ async function scenarioBE() {
   console.log('\n== scenario BE: a base reported as origin/main by the fresh-cut prompt is stripped to main')
   const { captured } = await run({
     branchResult: { created: true, branch: 'feat/gh-21-stub', base: 'origin/main',
-      path: '/tmp/stub-worktree', ticket: '21', detail: 'stub', cutFromOrigin: true },
+      path: '/tmp/stub-worktree', ticket: '21', detail: 'stub' },
     initialReview: { correctness: [], advocate: [] },
     verify: () => undefined,
     staleness: () => [],
