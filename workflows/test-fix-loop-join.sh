@@ -48,6 +48,14 @@ echo "== static: VERDICTS requires id, title is optional"
 check "VERDICTS lists id in its required array" \
   "$(grep -c "required: \['id', 'fixed', 'note'\]" "$SCRIPT" || true)" 1
 
+echo ""
+echo "== static: BRANCH requires cutFromOrigin and dirty on every response"
+# A haiku-at-low-effort branch agent that simply omits an optional field is
+# exactly how the fresh-cut review range silently reverted to the stale local
+# base; both flags must be mandatory, not left to the prompt's own wording.
+check "BRANCH's required array lists cutFromOrigin and dirty" \
+  "$(grep -c "required: \['created', 'branch', 'base', 'path', 'detail', 'cutFromOrigin', 'dirty'\]" "$SCRIPT" || true)" 1
+
 echo "== static: the verifier's brief no longer demands order or a verbatim title"
 # The old instruction, word for word. A hit elsewhere in the file (an
 # unrelated comment, or this test's own header explaining the old bug) must
@@ -1528,6 +1536,8 @@ async function scenarioBD() {
   const p = captured.calls.find(c => c.label === 'implementer')?.prompt ?? ''
   check('the merge base widens to origin/<base>', p.includes('merge base with origin/main'), true)
   check('it is never doubled to origin/origin/<base>', p.includes('origin/origin/'), false)
+  check('no fallback is offered: the fetch already verified this ref resolves',
+    p.includes('falling back to origin/main if that local ref does not resolve'), false)
 }
 
 // Scenario BE -- a reused branch (cutFromOrigin unset) may have been cut from
@@ -1544,7 +1554,32 @@ async function scenarioBE() {
   })
   const p = captured.calls.find(c => c.label === 'implementer')?.prompt ?? ''
   check('the merge base uses the bare base', p.includes('merge base with main'), true)
-  check('it is not widened to origin/<base>', p.includes('origin/main'), false)
+  check('it is not widened to origin/<base>', p.includes('merge base with origin/main'), false)
+  // Unlike a fresh origin cut, a reused branch's bare base name is never
+  // verified to resolve locally: a bare-clone-plus-worktrees layout, or a
+  // local base branch deleted after moving to worktrees, can leave no local
+  // ref of that name, and merge-base then has nothing to fall back to.
+  check('the implementer is told to fall back to origin/<base> if the bare name does not resolve',
+    p.includes('falling back to origin/main if that local ref does not resolve'), true)
+}
+
+// Scenario BF -- the default (non-existingBranch) branch prompt's own dirty
+// reuse halt (step 6) must report why: a dirty checkout, not the base-branch
+// note meant for the other default-mode halts (an invalid baseOverride ref, a
+// worktree path already on disk, a failed fetch or resolve).
+async function scenarioBF() {
+  console.log('\n== scenario BF: a dirty reused worktree halts with a dirty-checkout note, not a base-branch note')
+  const { result } = await run({
+    branchResult: { created: false, branch: 'feat/gh-21-stub', base: 'main',
+      path: '/tmp/stub-worktree', ticket: '21', detail: 'staged.txt is dirty', dirty: true },
+  })
+  check('halted at Worktree', result.halted_at, 'Worktree')
+  check('the note points at the dirty checkout', /[Cc]ommit or stash/.test(result.note ?? ''), true)
+  check('the note does not blame a base branch problem',
+    (result.note ?? '').includes('base branch problem'), false)
+  check('the note does not send the user toward the existingBranch guard, ' +
+    'which refuses the same tree for the same reason',
+    (result.note ?? '').includes('existingBranch: true'), false)
 }
 
 // Scenario AZ -- the defect #81 is about. A lens points a fresh finding at a
@@ -1612,7 +1647,7 @@ for (const scenario of [scenarioA, scenarioB, scenarioG, scenarioC, scenarioD, s
                         scenarioAO, scenarioAS, scenarioAT, scenarioAU, scenarioAV,
                         scenarioAW, scenarioAX, scenarioAY,
                         scenarioAP, scenarioAQ, scenarioAR, scenarioBB, scenarioBC, scenarioBD,
-                        scenarioBE, scenarioAZ, scenarioBA]) {
+                        scenarioBE, scenarioAZ, scenarioBA, scenarioBF]) {
   await scenario()
 }
 

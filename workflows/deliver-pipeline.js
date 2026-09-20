@@ -208,7 +208,7 @@ const PLAN = {
 // count for a change nobody has scoped yet forces a number out of thin air.
 const BRANCH = {
   type: 'object', additionalProperties: false,
-  required: ['created', 'branch', 'base', 'path', 'detail'],
+  required: ['created', 'branch', 'base', 'path', 'detail', 'cutFromOrigin', 'dirty'],
   properties: {
     created: { type: 'boolean' },
     branch: { type: 'string' },
@@ -217,6 +217,7 @@ const BRANCH = {
     ticket: { type: 'string' },
     detail: { type: 'string' },
     cutFromOrigin: { type: 'boolean' },
+    dirty: { type: 'boolean' },
   },
 }
 
@@ -491,6 +492,9 @@ const wt = args?.existingBranch
       `not create a branch, do not create a worktree, do not fetch, do not ` +
       `pull, do not plan or implement.\n` +
       `This task continues work on an existing branch for ticket ${ticket}.\n` +
+      `Two fields matter on every response below, halts included: cutFromOrigin ` +
+      `is always false, since this mode never cuts a branch; dirty is true only ` +
+      `for step 6's dirty-checkout halt, false in every other response.\n` +
       `1. Run git worktree prune. It only removes registrations for worktree ` +
       `directories that no longer exist on disk; it never touches a directory ` +
       `that does exist. Run it before listing worktrees so a stale record left ` +
@@ -516,8 +520,8 @@ const wt = args?.existingBranch
       `would be swept into a commit. Check git -C <path> status --porcelain, ` +
       `using the matched record's own path from step 4, whether that is the ` +
       `main checkout or a linked worktree; the risk is the same either way. If ` +
-      `it is non-empty, return created=false and say what is dirty. Never ` +
-      `stash, reset, or discard the user's work.\n` +
+      `it is non-empty, return created=false, dirty=true, and say what is ` +
+      `dirty. Never stash, reset, or discard the user's work.\n` +
       `7. Otherwise return created=true, branch set to the current branch name, ` +
       `base set to the repo's base branch, and path set to the absolute path ` +
       `from the matching record. Note in detail whether that path is the main ` +
@@ -536,6 +540,10 @@ const wt = args?.existingBranch
   `Task: ${brief(task)}\n` +
   `Ticket: ${ticket}\n` +
   `Branch type prefix: ${args?.branchType ?? 'feat'}\n` +
+  `Two fields matter on every response below, halts included: cutFromOrigin ` +
+  `is true only when you completed step 10's fetch-and-cut-from-origin path ` +
+  `with no baseOverride, false in every other response; dirty is true only ` +
+  `for step 6's dirty-checkout halt, false in every other response.\n` +
   `1. Run git worktree prune. It only removes registrations for worktree ` +
   `directories that no longer exist on disk, never a directory that does ` +
   `exist, so it is safe to run unconditionally; it clears the way for ` +
@@ -569,11 +577,11 @@ const wt = args?.existingBranch
   `it out twice, so that record's own path (even if it differs from the ` +
   `path in step 5) is what this task must reuse. This mode commits into ` +
   `that tree, and a later phase runs git add -A there, so check git -C ` +
-  `<that path> status --porcelain: if it is non-empty, return created=false ` +
-  `and say what is dirty. Never stash, reset, or discard the user's work. ` +
-  `Otherwise return created=true using that path, note in detail that the ` +
-  `branch was reused rather than created, and stop: do not fetch, pull, or ` +
-  `run any worktree add.\n` +
+  `<that path> status --porcelain: if it is non-empty, return created=false, ` +
+  `dirty=true, and say what is dirty. Never stash, reset, or discard the ` +
+  `user's work. Otherwise return created=true using that path, note in ` +
+  `detail that the branch was reused rather than created, and stop: do not ` +
+  `fetch, pull, or run any worktree add.\n` +
   `7. Otherwise check whether the branch exists at all (git show-ref --verify ` +
   `--quiet refs/heads/<name>). If it does, the fetch and cut in step 10 are ` +
   `not needed; go straight to step 8.\n` +
@@ -604,11 +612,9 @@ const wt = args?.existingBranch
   `separate checkout.\n` +
   `Return the branch you created or reused, the base you cut it from (or ` +
   (baseOverride ? `${baseOverride}` : `the repo's base branch`) +
-  ` if the branch already existed), the absolute worktree path, and ` +
-  `cutFromOrigin=true only if you took step 10's fetch-and-cut-from-origin ` +
-  `path with no baseOverride given; false for every other path (a reused ` +
-  `branch via step 6 or 9, or any baseOverride cut), since only that one ` +
-  `path is guaranteed to be cut from what is now origin/<base>.` + RECORD('branch'),
+  ` if the branch already existed), and the absolute worktree path; only ` +
+  `step 10's fetch-and-cut path with no baseOverride is guaranteed to be cut ` +
+  `from what is now origin/<base>.` + RECORD('branch'),
   { label: 'branch', schema: BRANCH, model: 'haiku', effort: 'low' })
 sBranch.close()
 
@@ -619,10 +625,17 @@ if (!wt?.created) {
     branch: wt?.branch,
     base: wt?.base,
     detail: wt?.detail,
-    note: args?.existingBranch
-      ? 'No usable worktree, so nothing was planned or implemented. Check out ' +
-        'the branch this work belongs on, commit or stash any changes in the ' +
-        'checkout that holds it, then re-run.'
+    // wt.dirty names the actual cause regardless of mode: both the default
+    // reuse path (step 6) and the existingBranch guard (step 6) halt here for
+    // the same reason, an uncommitted checkout, and re-running with
+    // existingBranch: true would only hit that same existingBranch guard.
+    note: wt?.dirty
+      ? 'The checkout that holds this branch has uncommitted changes, so ' +
+        'nothing was planned or implemented. Commit or stash them, then ' +
+        're-run.'
+      : args?.existingBranch
+      ? 'No usable worktree, so nothing was planned or implemented. Check ' +
+        'out the branch this work belongs on, then re-run.'
       : 'No worktree was created, so nothing was planned or implemented. ' +
         'Resolve the base branch problem in detail, then re-run. If fetch ' +
         'cannot run here (a remote needing a hardware key, for example), ' +
@@ -645,6 +658,15 @@ if (baseOverride) wt.base = baseOverride
 // never doubled, by construction rather than by trusting the prompt alone.
 const reviewBase = baseOverride ??
   (wt.cutFromOrigin ? `origin/${wt.base.replace(/^origin\//, '')}` : wt.base)
+// baseOverride is verified to resolve in prompt step 3, and a cutFromOrigin cut
+// is verified in step 10, so reviewBase is guaranteed resolvable for both. The
+// bare base name used by every other path (a reused branch, or existingBranch,
+// neither of which fetches) carries no such guarantee: a bare-clone-plus-
+// worktrees layout, or a local base branch deleted after moving to worktrees,
+// can leave no local ref of that name for merge-base to find.
+const reviewBaseFallback = (baseOverride || wt.cutFromOrigin) ? '' :
+  ` (falling back to origin/${wt.base.replace(/^origin\//, '')} if that local ` +
+  `ref does not resolve)`
 recordedBranch = wt.branch
 log(args?.existingBranch
   ? `worktree ${wt.path} reused for branch ${wt.branch} (base ${wt.base})`
@@ -1001,12 +1023,12 @@ const impl = await treeAgent(
   `judgement of the change. If it printed its own gate message, copy it ` +
   `verbatim into gate_note.\n` +
   `Return commit_range as '<base-sha>..<head-sha>' using the merge base with ` +
-  `${reviewBase} and your final HEAD, both as full 40-character SHAs: later ` +
-  `phases compare their own HEAD against the head of this range to work out ` +
-  `what is still unreviewed, and an abbreviated SHA never matches. ` +
-  `Downstream phases are given that range and ` +
-  `read the diff themselves, so it is how your work is handed on: a summary of ` +
-  `it is not, and will not be forwarded.`,
+  `${reviewBase}${reviewBaseFallback} and your final HEAD, both as full ` +
+  `40-character SHAs: later phases compare their own HEAD against the head ` +
+  `of this range to work out what is still unreviewed, and an abbreviated ` +
+  `SHA never matches. Downstream phases are given that range and read the ` +
+  `diff themselves, so it is how your work is handed on: a summary of it is ` +
+  `not, and will not be forwarded.`,
   { label: 'implementer', schema: IMPL, model: 'sonnet', effort: effortFor.implement })
 if (!impl) throw new Error('implementer failed')
 sImpl.close()
