@@ -84,8 +84,9 @@ downstream metric would inherit it.
 
 ## If the workflow refuses
 
-It halts on purpose: a dirty tree, a detached HEAD, a base branch that will not
-fast-forward, a missing ticket. **Report the halt and stop.** Do not copy
+It halts on purpose: a detached HEAD, a base ref that will not resolve, a dirty
+main checkout when `--existing` reuses the branch there, a missing ticket.
+**Report the halt and stop.** Do not copy
 `deliver-pipeline.js` elsewhere and edit out the phase that blocked you, and do not
 edit the original. A gate that gets neutered whenever it is inconvenient is not a
 gate.

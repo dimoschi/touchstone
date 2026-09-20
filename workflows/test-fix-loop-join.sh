@@ -119,6 +119,82 @@ check "a file with no commit in the range reports empty" \
   "$([ -n "$(run_template untouched.txt)" ] && echo yes || echo no)" no
 
 echo ""
+echo "== worktree phase: the default cut is unaffected by a dirty main checkout"
+# Runs the exact command sequence the branch prompt now prescribes for the
+# non-baseOverride cut (git fetch origin; git rev-parse --verify
+# origin/<base>; git worktree add <path> -b <branch> origin/<base>) against a
+# real remote and a real main checkout, proving the main tree's dirty state
+# and its stale local base are both irrelevant to the cut.
+ORIGIN="$WORK/wt-origin.git"
+git init -q --bare "$ORIGIN"
+
+MAIN="$WORK/wt-main"
+git clone -q "$ORIGIN" "$MAIN"
+git -C "$MAIN" config user.email test@example.com
+git -C "$MAIN" config user.name test
+git -C "$MAIN" config commit.gpgsign false
+
+echo "base v1" > "$MAIN/tracked.txt"
+git -C "$MAIN" add tracked.txt
+git -C "$MAIN" commit -qm "initial commit on main"
+git -C "$MAIN" push -q origin HEAD:main
+LOCAL_BASE_SHA_BEFORE="$(git -C "$MAIN" rev-parse main)"
+
+# A second clone advances the remote past what MAIN has fetched, so
+# origin/main (once fetched) differs from MAIN's own stale local main.
+OTHER_CLONE="$WORK/wt-other-clone"
+git clone -q "$ORIGIN" "$OTHER_CLONE"
+git -C "$OTHER_CLONE" config user.email test@example.com
+git -C "$OTHER_CLONE" config user.name test
+git -C "$OTHER_CLONE" config commit.gpgsign false
+echo "base v2" > "$OTHER_CLONE/tracked.txt"
+git -C "$OTHER_CLONE" add tracked.txt
+git -C "$OTHER_CLONE" commit -qm "a commit MAIN has not fetched yet"
+git -C "$OTHER_CLONE" push -q origin HEAD:main
+REMOTE_HEAD_SHA="$(git -C "$OTHER_CLONE" rev-parse HEAD)"
+
+# Dirty the main checkout: a modified tracked file, a staged new file, an
+# untracked file.
+echo "modified locally" > "$MAIN/tracked.txt"
+echo "staged new file" > "$MAIN/staged.txt"
+git -C "$MAIN" add staged.txt
+echo "untracked" > "$MAIN/untracked.txt"
+
+STATUS_BEFORE="$(git -C "$MAIN" status --porcelain)"
+TRACKED_BEFORE="$(cat "$MAIN/tracked.txt")"
+STAGED_BEFORE="$(cat "$MAIN/staged.txt")"
+BRANCH_BEFORE="$(git -C "$MAIN" branch --show-current)"
+
+WTPATH="$WORK/wt-new-worktree"
+git -C "$MAIN" fetch -q origin
+git -C "$MAIN" rev-parse --verify origin/main >/dev/null 2>&1
+FETCH_VERIFY_STATUS=$?
+git -C "$MAIN" worktree add -q "$WTPATH" -b feat/gh-999-test origin/main
+
+check "the fetch and verify step succeeded" "$FETCH_VERIFY_STATUS" 0
+check "git status --porcelain in the main checkout is unchanged" \
+  "$(git -C "$MAIN" status --porcelain)" "$STATUS_BEFORE"
+check "the modified tracked file's content is unchanged" \
+  "$(cat "$MAIN/tracked.txt")" "$TRACKED_BEFORE"
+check "the staged file's content is unchanged" \
+  "$(cat "$MAIN/staged.txt")" "$STAGED_BEFORE"
+check "the local base branch SHA is unchanged" \
+  "$(git -C "$MAIN" rev-parse main)" "$LOCAL_BASE_SHA_BEFORE"
+check "the main checkout is still on the same branch" \
+  "$(git -C "$MAIN" branch --show-current)" "$BRANCH_BEFORE"
+check "the new worktree's HEAD equals origin/main, not the stale local main" \
+  "$(git -C "$WTPATH" rev-parse HEAD)" "$REMOTE_HEAD_SHA"
+check "origin/main (fetched) actually differs from the stale local main" \
+  "$([ "$REMOTE_HEAD_SHA" != "$LOCAL_BASE_SHA_BEFORE" ] && echo yes || echo no)" yes
+
+echo ""
+echo "== worktree phase: a missing origin/<base> ref fails the verify step"
+git -C "$MAIN" rev-parse --verify origin/does-not-exist >/dev/null 2>&1
+MISSING_REF_STATUS=$?
+check "git rev-parse --verify on a missing remote ref exits non-zero" \
+  "$([ "$MISSING_REF_STATUS" -ne 0 ] && echo yes || echo no)" yes
+
+echo ""
 echo "== fix loop: running the real script under stubbed globals"
 
 cat > "$WORK/harness.mjs" <<'JS_EOF'
@@ -174,6 +250,10 @@ function makeAgent(scenario, captured) {
       return { found: true, summary: 'stub ticket', description: 'd', comments: '' }
     }
     if (label === 'branch') {
+      return { created: true, branch: 'feat/gh-21-stub', base: 'main',
+        path: '/tmp/stub-worktree', ticket: '21', detail: 'stub' }
+    }
+    if (label === 'branch:existing') {
       return { created: true, branch: 'feat/gh-21-stub', base: 'main',
         path: '/tmp/stub-worktree', ticket: '21', detail: 'stub' }
     }
@@ -1389,6 +1469,27 @@ async function scenarioAR() {
     message.includes('neither a GitHub issue number'), true)
 }
 
+// Scenario BB -- the existingBranch prompt's guard is scoped to the main
+// checkout, not to any dirty tree it happens to find a branch in.
+async function scenarioBB() {
+  console.log('\n== scenario BB: the existingBranch prompt narrows its dirty-tree guard to the main checkout')
+  const { captured } = await run({
+    args: { existingBranch: true },
+    initialReview: { correctness: [], advocate: [] },
+    verify: () => undefined,
+    staleness: () => [],
+  })
+  const p = captured.calls.find(c => c.label === 'branch:existing')?.prompt ?? ''
+  check('the guard fires only for the matched record\'s main-checkout path',
+    p.includes("the matched record's path is the main checkout"), true)
+  check('the main checkout is located the same way the default branch prompt does',
+    p.includes('--path-format=absolute --git-common-dir'), true)
+  check('a dirty main checkout is stated plainly as no reason to stop when the branch lives elsewhere',
+    p.includes('is not a reason to stop when the'), true)
+  check('the guard still forbids stashing, resetting or discarding',
+    p.includes('Never stash, reset, or discard'), true)
+}
+
 // Scenario AZ -- the defect #81 is about. A lens points a fresh finding at a
 // settled one because the fix for that finding introduced this one. Assuming
 // it was a re-report readied a PR carrying a real regression, under
@@ -1453,7 +1554,7 @@ for (const scenario of [scenarioA, scenarioB, scenarioG, scenarioC, scenarioD, s
                         scenarioAJ, scenarioAK, scenarioAL, scenarioAM, scenarioAN,
                         scenarioAO, scenarioAS, scenarioAT, scenarioAU, scenarioAV,
                         scenarioAW, scenarioAX, scenarioAY,
-                        scenarioAP, scenarioAQ, scenarioAR, scenarioAZ, scenarioBA]) {
+                        scenarioAP, scenarioAQ, scenarioAR, scenarioBB, scenarioAZ, scenarioBA]) {
   await scenario()
 }
 
