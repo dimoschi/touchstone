@@ -643,41 +643,9 @@ if (!wt?.created) {
         'if this work belongs on a branch that already exists.',
   })
 }
-// The review range and the PR target both read wt.base, and a reused branch or
-// the existingBranch path reports the repo default regardless of what it was
-// actually cut from.
-if (baseOverride) {
-  wt.base = baseOverride
-} else {
-  // Only the fresh-cut prompt's own step 3 tells its agent to strip the
-  // origin/-prefix that `git symbolic-ref --short refs/remotes/origin/HEAD`
-  // prints; the reused-branch and existingBranch prompts never do. Left
-  // unstripped, a reported base of "origin/main" would already look like a
-  // cutFromOrigin cut below, so the fallback comment further down would name
-  // the exact ref that just failed to resolve, and the widening that comment
-  // says must not happen would happen anyway. Stripping here, once, makes
-  // wt.base bare unconditionally rather than trusting every prompt to agree.
-  wt.base = wt.base.replace(/^origin\//, '')
-}
-// The default Worktree cut no longer fast-forwards local <base> to match
-// origin/<base>, so forcing the origin/ prefix onto every base would widen
-// the merge base for a reused or existingBranch branch that was cut from a
-// local base ahead of origin/<base>, pulling commits this run never wrote
-// into the reviewed range. Only wt.cutFromOrigin's one path (a fresh branch
-// fetched and cut straight from origin/<base>) is safe to widen this way.
-// A given base short-circuits ahead of it: it already names a ref step 3 made
-// the agent verify, and prefixing it would invent a remote one for a stacked
-// branch or double an origin/<x>, on a response whose cutFromOrigin this
-// cannot make true by construction.
-const reviewBase = baseOverride || (wt.cutFromOrigin ? `origin/${wt.base}` : wt.base)
-// baseOverride is verified to resolve in prompt step 3, and a cutFromOrigin cut
-// is verified in step 10, so reviewBase is guaranteed resolvable for both. The
-// bare base name used by every other path (a reused branch, or existingBranch,
-// neither of which fetches) carries no such guarantee: a bare-clone-plus-
-// worktrees layout, or a local base branch deleted after moving to worktrees,
-// can leave no local ref of that name for merge-base to find.
-const reviewBaseFallback = (baseOverride || wt.cutFromOrigin) ? '' :
-  ` (falling back to origin/${wt.base} if that local ref does not resolve)`
+// Bare unconditionally: neither gh pr create --base nor the merge-base rule
+// below can take an origin/-qualified name.
+wt.base = (baseOverride || wt.base).replace(/^origin\//, '')
 recordedBranch = wt.branch
 log(args?.existingBranch
   ? `worktree ${wt.path} reused for branch ${wt.branch} (base ${wt.base})`
@@ -1033,13 +1001,19 @@ const impl = await treeAgent(
   `printed, never on whether .crap-gated exists and never on your own ` +
   `judgement of the change. If it printed its own gate message, copy it ` +
   `verbatim into gate_note.\n` +
-  `Return commit_range as '<base-sha>..<head-sha>' using the merge base with ` +
-  `${reviewBase}${reviewBaseFallback} and your final HEAD, both as full ` +
-  `40-character SHAs: later phases compare their own HEAD against the head ` +
-  `of this range to work out what is still unreviewed, and an abbreviated ` +
-  `SHA never matches. Downstream phases are given that range and read the ` +
-  `diff themselves, so it is how your work is handed on: a summary of it is ` +
-  `not, and will not be forwarded.`,
+  `Return commit_range as '<base-sha>..<head-sha>', both as full 40-character ` +
+  `SHAs, using your final HEAD and a base you work out yourself: find the ` +
+  `merge base of HEAD with ${wt.base} and with origin/${wt.base}. If only ` +
+  `one of those refs resolves, use its merge base. If both resolve, use ` +
+  `whichever of the two merge-base commits is a descendant of the other ` +
+  `(git merge-base --is-ancestor); if neither is, use the one from ` +
+  `origin/${wt.base} -- the gates resolve their own diff base as origin/HEAD ` +
+  `first, and this keeps the reviewed range aligned with the measured one. ` +
+  `Later phases compare their own HEAD against the head of this range to ` +
+  `work out what is still unreviewed, and an abbreviated SHA never matches. ` +
+  `Downstream phases are given that range and read the diff themselves, so ` +
+  `it is how your work is handed on: a summary of it is not, and will not ` +
+  `be forwarded.`,
   { label: 'implementer', schema: IMPL, model: 'sonnet', effort: effortFor.implement })
 if (!impl) throw new Error('implementer failed')
 sImpl.close()

@@ -203,6 +203,60 @@ check "git rev-parse --verify on a missing remote ref exits non-zero" \
   "$([ "$MISSING_REF_STATUS" -ne 0 ] && echo yes || echo no)" yes
 
 echo ""
+echo "== implementer's merge-base rule: the origin candidate stays at the true fork point when the local base goes stale"
+# Clone at A, a colleague pushes three commits straight to the remote, a
+# branch is cut from origin/<base> and gets one commit of its own. The local
+# <base> ref never moves, so merge-base against it alone reaches back through
+# the colleague's three commits too.
+TC_REMOTE="$WORK/tc-origin.git"
+git init -q --bare "$TC_REMOTE"
+
+TC_CLONE="$WORK/tc-clone"
+git clone -q "$TC_REMOTE" "$TC_CLONE"
+git -C "$TC_CLONE" config user.email test@example.com
+git -C "$TC_CLONE" config user.name test
+git -C "$TC_CLONE" config commit.gpgsign false
+
+echo "a" > "$TC_CLONE/f.txt"
+git -C "$TC_CLONE" add f.txt
+git -C "$TC_CLONE" commit -qm "A: initial commit"
+git -C "$TC_CLONE" push -q origin HEAD:main
+LOCAL_MAIN_SHA="$(git -C "$TC_CLONE" rev-parse main)"
+
+TC_COLLEAGUE="$WORK/tc-colleague"
+git clone -q "$TC_REMOTE" "$TC_COLLEAGUE"
+git -C "$TC_COLLEAGUE" config user.email test@example.com
+git -C "$TC_COLLEAGUE" config user.name test
+git -C "$TC_COLLEAGUE" config commit.gpgsign false
+for n in 1 2 3; do
+  echo "colleague $n" >> "$TC_COLLEAGUE/f.txt"
+  git -C "$TC_COLLEAGUE" add f.txt
+  git -C "$TC_COLLEAGUE" commit -qm "colleague commit $n"
+done
+git -C "$TC_COLLEAGUE" push -q origin HEAD:main
+COLLEAGUE_HEAD_SHA="$(git -C "$TC_COLLEAGUE" rev-parse HEAD)"
+
+git -C "$TC_CLONE" fetch -q origin
+git -C "$TC_CLONE" checkout -q -b feat/tc-test origin/main
+echo "own change" > "$TC_CLONE/g.txt"
+git -C "$TC_CLONE" add g.txt
+git -C "$TC_CLONE" commit -qm "run 1's own commit"
+
+ORIGIN_MERGE_BASE="$(git -C "$TC_CLONE" merge-base HEAD origin/main)"
+LOCAL_MERGE_BASE="$(git -C "$TC_CLONE" merge-base HEAD main)"
+check "the origin candidate is the true fork point" "$ORIGIN_MERGE_BASE" "$COLLEAGUE_HEAD_SHA"
+check "the local candidate is the stale pre-fetch main" "$LOCAL_MERGE_BASE" "$LOCAL_MAIN_SHA"
+
+git -C "$TC_CLONE" merge-base --is-ancestor "$LOCAL_MERGE_BASE" "$ORIGIN_MERGE_BASE"
+check "the origin candidate is a descendant of the local one, so the rule picks it" "$?" 0
+
+ORIGIN_RANGE_COUNT="$(git -C "$TC_CLONE" rev-list --count "$ORIGIN_MERGE_BASE"..HEAD)"
+LOCAL_RANGE_COUNT="$(git -C "$TC_CLONE" rev-list --count "$LOCAL_MERGE_BASE"..HEAD)"
+check "the origin candidate reviews exactly this run's one commit" "$ORIGIN_RANGE_COUNT" 1
+check "the stale local base alone would widen the range past it" \
+  "$([ "$LOCAL_RANGE_COUNT" -gt "$ORIGIN_RANGE_COUNT" ] && echo yes || echo no)" yes
+
+echo ""
 echo "== fix loop: running the real script under stubbed globals"
 
 cat > "$WORK/harness.mjs" <<'JS_EOF'
@@ -1518,14 +1572,35 @@ async function scenarioBC() {
     p.includes('Never stash, reset, or discard'), true)
 }
 
-// Scenario BD -- a fresh cut straight from origin/<base> is the one path
-// deterministically safe to widen the review range with an origin/ prefix.
-// base is stubbed already origin/-prefixed here (the shape git symbolic-ref
-// --short refs/remotes/origin/HEAD actually returns) to prove the prefix is
-// never doubled by construction, not merely because the agent followed the
-// prompt's own strip-the-prefix instruction.
+// Scenario BD -- the script cannot resolve a fork point itself (no filesystem
+// access), so the implementer is told to try both <base> and origin/<base>
+// and pick between them at runtime. A given base must reach that rule bare in
+// both shapes it arrives in: a stacked branch name with no remote ref, and an
+// origin/<x> that must not double.
 async function scenarioBD() {
-  console.log('\n== scenario BD: a fresh origin cut reviews against origin/<base>, never origin/origin/<base>')
+  console.log('\n== scenario BD: a given base reaches the merge-base rule bare, never doubled')
+  for (const [given, bare] of [['feat/gh-40-parent', 'feat/gh-40-parent'], ['origin/develop', 'develop']]) {
+    const { captured } = await run({
+      args: { base: given },
+      branchResult: { created: true, branch: 'feat/gh-21-stub', base: 'main',
+        path: '/tmp/stub-worktree', ticket: '21', detail: 'stub', cutFromOrigin: true },
+      initialReview: { correctness: [], advocate: [] },
+      verify: () => undefined,
+      staleness: () => [],
+    })
+    const p = captured.calls.find(c => c.label === 'implementer')?.prompt ?? ''
+    check(`${given}: the bare candidate is offered`, p.includes(`with ${bare} and`), true)
+    check(`${given}: the origin candidate is offered`, p.includes(`with origin/${bare}`), true)
+    check(`${given}: it is never doubled`, p.includes('origin/origin/'), false)
+  }
+}
+
+// Scenario BE -- only the fresh-cut prompt's own step 3 tells its agent to
+// strip the origin/ prefix that git symbolic-ref --short refs/remotes/origin/HEAD
+// prints; a reported base of "origin/main" must still reach the merge-base
+// rule as the bare "main", not doubled into "origin/origin/main".
+async function scenarioBE() {
+  console.log('\n== scenario BE: a base reported as origin/main by the fresh-cut prompt is stripped to main')
   const { captured } = await run({
     branchResult: { created: true, branch: 'feat/gh-21-stub', base: 'origin/main',
       path: '/tmp/stub-worktree', ticket: '21', detail: 'stub', cutFromOrigin: true },
@@ -1534,33 +1609,9 @@ async function scenarioBD() {
     staleness: () => [],
   })
   const p = captured.calls.find(c => c.label === 'implementer')?.prompt ?? ''
-  check('the merge base widens to origin/<base>', p.includes('merge base with origin/main'), true)
-  check('it is never doubled to origin/origin/<base>', p.includes('origin/origin/'), false)
-  check('no fallback is offered: the fetch already verified this ref resolves',
-    p.includes('falling back to origin/main if that local ref does not resolve'), false)
-}
-
-// Scenario BE -- a reused branch (cutFromOrigin unset) may have been cut from
-// a local base ahead of origin/<base>, so its review range must not be forced
-// through the origin/ prefix: that would reach back past the real fork point.
-async function scenarioBE() {
-  console.log('\n== scenario BE: a reused branch reviews against the bare base, not a forced origin/<base>')
-  const { captured } = await run({
-    branchResult: { created: true, branch: 'feat/gh-21-stub', base: 'main',
-      path: '/tmp/stub-worktree', ticket: '21', detail: 'stub' },
-    initialReview: { correctness: [], advocate: [] },
-    verify: () => undefined,
-    staleness: () => [],
-  })
-  const p = captured.calls.find(c => c.label === 'implementer')?.prompt ?? ''
-  check('the merge base uses the bare base', p.includes('merge base with main'), true)
-  check('it is not widened to origin/<base>', p.includes('merge base with origin/main'), false)
-  // Unlike a fresh origin cut, a reused branch's bare base name is never
-  // verified to resolve locally: a bare-clone-plus-worktrees layout, or a
-  // local base branch deleted after moving to worktrees, can leave no local
-  // ref of that name, and merge-base then has nothing to fall back to.
-  check('the implementer is told to fall back to origin/<base> if the bare name does not resolve',
-    p.includes('falling back to origin/main if that local ref does not resolve'), true)
+  check('the bare candidate is main, not origin/main', p.includes('with main and'), true)
+  check('the origin candidate is origin/main, not origin/origin/main', p.includes('with origin/main'), true)
+  check('it is never doubled', p.includes('origin/origin/'), false)
 }
 
 // Scenario BF -- the default (non-existingBranch) branch prompt's own dirty
@@ -1584,13 +1635,10 @@ async function scenarioBF() {
 
 // Scenario BG -- the existingBranch prompt's step 7 never tells its agent to
 // strip an origin/ prefix off the base it reports, unlike the fresh-cut
-// prompt's own step 3. A base of "origin/main" must not reach the review-base
-// fallback unstripped: that makes the fallback name the exact ref that just
-// failed to resolve, and leaves the merge base widened past a local base's
-// real fork point exactly where the reused/existingBranch comment above it
-// says that must not happen.
+// prompt's own step 3. A base of "origin/main" must still reach the
+// merge-base rule stripped to "main", not doubled into "origin/origin/main".
 async function scenarioBG() {
-  console.log('\n== scenario BG: an existingBranch base reported as origin/main is stripped, not doubled')
+  console.log('\n== scenario BG: a base reported as origin/main by the existingBranch prompt is stripped to main')
   const { captured } = await run({
     args: { existingBranch: true },
     existingBranchResult: { created: true, branch: 'feat/gh-21-stub', base: 'origin/main',
@@ -1600,34 +1648,30 @@ async function scenarioBG() {
     staleness: () => [],
   })
   const p = captured.calls.find(c => c.label === 'implementer')?.prompt ?? ''
-  check('the merge base uses the bare base, not the reported origin/main',
-    p.includes('merge base with main'), true)
-  check('it is not widened to origin/<base>', p.includes('merge base with origin/main'), false)
-  check('the fallback is a real fallback, not the same ref that already failed',
-    p.includes('falling back to origin/main if that local ref does not resolve'), true)
+  check('the bare candidate is main, not origin/main', p.includes('with main and'), true)
+  check('the origin candidate is origin/main, not origin/origin/main', p.includes('with origin/main'), true)
+  check('it is never doubled', p.includes('origin/origin/'), false)
 }
 
-// Scenario BH -- prompt step 3 already made its agent verify a given base
-// resolves, which is why no fallback is offered for one. Prefixing it anyway
-// breaks both shapes it arrives in: a stacked branch name that has no remote
-// ref, and an origin/<x> that doubles.
+// Scenario BH -- the script has no filesystem access, so it cannot resolve a
+// fork point itself; the implementer must be told the exact tiebreak rule
+// (descendant wins, origin/<base> on a genuine divergence) rather than being
+// left to guess, since the gates measure against origin/HEAD and a different
+// pick here would review a range the gates never scored.
 async function scenarioBH() {
-  console.log('\n== scenario BH: a given base is reviewed against as given, whatever cutFromOrigin reports')
-  for (const base of ['feat/gh-40-parent', 'origin/develop']) {
-    const { captured } = await run({
-      args: { base },
-      branchResult: { created: true, branch: 'feat/gh-21-stub', base: 'main',
-        path: '/tmp/stub-worktree', ticket: '21', detail: 'stub', cutFromOrigin: true },
-      initialReview: { correctness: [], advocate: [] },
-      verify: () => undefined,
-      staleness: () => [],
-    })
-    const p = captured.calls.find(c => c.label === 'implementer')?.prompt ?? ''
-    check(`${base} is reviewed against as given`,
-      p.includes(`merge base with ${base}`), true)
-    check(`${base} is not prefixed a second time`,
-      p.includes(`merge base with origin/${base}`), false)
-  }
+  console.log('\n== scenario BH: the prompt states the two-candidate merge-base rule')
+  const { captured } = await run({
+    branchResult: { created: true, branch: 'feat/gh-21-stub', base: 'main',
+      path: '/tmp/stub-worktree', ticket: '21', detail: 'stub' },
+    initialReview: { correctness: [], advocate: [] },
+    verify: () => undefined,
+    staleness: () => [],
+  })
+  const p = captured.calls.find(c => c.label === 'implementer')?.prompt ?? ''
+  check('only-one-resolves is covered', p.includes('If only one of those refs resolves'), true)
+  check('the descendant tiebreak is covered', p.includes('--is-ancestor'), true)
+  check('the origin fallback names the reason: the gates diff against origin/HEAD',
+    p.includes('origin/HEAD first'), true)
 }
 
 // Scenario AZ -- the defect #81 is about. A lens points a fresh finding at a
