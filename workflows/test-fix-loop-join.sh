@@ -262,7 +262,7 @@ function makeAgent(scenario, captured) {
         path: '/tmp/stub-worktree', ticket: '21', detail: 'stub' }
     }
     if (label === 'branch:existing') {
-      return { created: true, branch: 'feat/gh-21-stub', base: 'main',
+      return scenario.existingBranchResult ?? { created: true, branch: 'feat/gh-21-stub', base: 'main',
         path: '/tmp/stub-worktree', ticket: '21', detail: 'stub' }
     }
     if (label === 'triage') {
@@ -1582,6 +1582,31 @@ async function scenarioBF() {
     (result.note ?? '').includes('existingBranch: true'), false)
 }
 
+// Scenario BG -- the existingBranch prompt's step 7 never tells its agent to
+// strip an origin/ prefix off the base it reports, unlike the fresh-cut
+// prompt's own step 3. A base of "origin/main" must not reach the review-base
+// fallback unstripped: that makes the fallback name the exact ref that just
+// failed to resolve, and leaves the merge base widened past a local base's
+// real fork point exactly where the reused/existingBranch comment above it
+// says that must not happen.
+async function scenarioBG() {
+  console.log('\n== scenario BG: an existingBranch base reported as origin/main is stripped, not doubled')
+  const { captured } = await run({
+    args: { existingBranch: true },
+    existingBranchResult: { created: true, branch: 'feat/gh-21-stub', base: 'origin/main',
+      path: '/tmp/stub-worktree', ticket: '21', detail: 'stub' },
+    initialReview: { correctness: [], advocate: [] },
+    verify: () => undefined,
+    staleness: () => [],
+  })
+  const p = captured.calls.find(c => c.label === 'implementer')?.prompt ?? ''
+  check('the merge base uses the bare base, not the reported origin/main',
+    p.includes('merge base with main'), true)
+  check('it is not widened to origin/<base>', p.includes('merge base with origin/main'), false)
+  check('the fallback is a real fallback, not the same ref that already failed',
+    p.includes('falling back to origin/main if that local ref does not resolve'), true)
+}
+
 // Scenario AZ -- the defect #81 is about. A lens points a fresh finding at a
 // settled one because the fix for that finding introduced this one. Assuming
 // it was a re-report readied a PR carrying a real regression, under
@@ -1647,7 +1672,7 @@ for (const scenario of [scenarioA, scenarioB, scenarioG, scenarioC, scenarioD, s
                         scenarioAO, scenarioAS, scenarioAT, scenarioAU, scenarioAV,
                         scenarioAW, scenarioAX, scenarioAY,
                         scenarioAP, scenarioAQ, scenarioAR, scenarioBB, scenarioBC, scenarioBD,
-                        scenarioBE, scenarioAZ, scenarioBA, scenarioBF]) {
+                        scenarioBE, scenarioAZ, scenarioBA, scenarioBF, scenarioBG]) {
   await scenario()
 }
 

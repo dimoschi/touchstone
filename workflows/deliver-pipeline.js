@@ -646,18 +646,27 @@ if (!wt?.created) {
 // The review range and the PR target both read wt.base, and a reused branch or
 // the existingBranch path reports the repo default regardless of what it was
 // actually cut from.
-if (baseOverride) wt.base = baseOverride
+if (baseOverride) {
+  wt.base = baseOverride
+} else {
+  // Only the fresh-cut prompt's own step 3 tells its agent to strip the
+  // origin/-prefix that `git symbolic-ref --short refs/remotes/origin/HEAD`
+  // prints; the reused-branch and existingBranch prompts never do. Left
+  // unstripped, a reported base of "origin/main" would already look like a
+  // cutFromOrigin cut below, so the fallback comment further down would name
+  // the exact ref that just failed to resolve, and the widening that comment
+  // says must not happen would happen anyway. Stripping here, once, makes
+  // wt.base bare unconditionally rather than trusting every prompt to agree.
+  wt.base = wt.base.replace(/^origin\//, '')
+}
 // The default Worktree cut no longer fast-forwards local <base> to match
 // origin/<base>, so forcing the origin/ prefix onto every base would widen
 // the merge base for a reused or existingBranch branch that was cut from a
 // local base ahead of origin/<base>, pulling commits this run never wrote
 // into the reviewed range. Only wt.cutFromOrigin's one path (a fresh branch
 // fetched and cut straight from origin/<base>) is safe to widen this way;
-// baseOverride already names a real, resolvable ref regardless. wt.base is
-// stripped of any origin/ prefix it may already carry so the widening is
-// never doubled, by construction rather than by trusting the prompt alone.
-const reviewBase = baseOverride ??
-  (wt.cutFromOrigin ? `origin/${wt.base.replace(/^origin\//, '')}` : wt.base)
+// baseOverride already names a real, resolvable ref regardless.
+const reviewBase = wt.cutFromOrigin ? `origin/${wt.base}` : wt.base
 // baseOverride is verified to resolve in prompt step 3, and a cutFromOrigin cut
 // is verified in step 10, so reviewBase is guaranteed resolvable for both. The
 // bare base name used by every other path (a reused branch, or existingBranch,
@@ -665,8 +674,7 @@ const reviewBase = baseOverride ??
 // worktrees layout, or a local base branch deleted after moving to worktrees,
 // can leave no local ref of that name for merge-base to find.
 const reviewBaseFallback = (baseOverride || wt.cutFromOrigin) ? '' :
-  ` (falling back to origin/${wt.base.replace(/^origin\//, '')} if that local ` +
-  `ref does not resolve)`
+  ` (falling back to origin/${wt.base} if that local ref does not resolve)`
 recordedBranch = wt.branch
 log(args?.existingBranch
   ? `worktree ${wt.path} reused for branch ${wt.branch} (base ${wt.base})`
