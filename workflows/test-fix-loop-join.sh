@@ -2195,6 +2195,33 @@ async function scenarioCA() {
     result.checks?.red?.length, 0)
 }
 
+// Scenario CB -- asked to run several commands and report every byte of their
+// output, a cheap agent dropping a row is the expected failure, not a remote
+// one. Treating a row nobody reported as a pass would hand the verdict back to
+// the shape of the model's answer.
+async function scenarioCB() {
+  console.log('\n== scenario CB: a check the runner never reported on is red, not green')
+  const { result, captured } = await run({
+    discovery: { checks: [{ name: 'a.sh', command: 'bash a.sh' },
+                          { name: 'b.sh', command: 'bash b.sh' }], detail: 'stub' },
+    checkRuns: (attempt) => attempt === 1
+      ? ({ results: [{ name: 'a.sh', command: 'bash a.sh', exit_code: 0, output: 'ok' },
+                     { name: 'b.sh', command: 'bash b.sh', exit_code: 0, output: 'ok' }] })
+      : ({ results: [{ name: 'a.sh', command: 'bash a.sh', exit_code: 0, output: 'ok' }] }),
+    initialReview: { correctness: [], advocate: [] },
+    verify: () => undefined,
+    staleness: () => [],
+  })
+  const fix = captured.calls.find(c => c.label === 'checks:fix')?.prompt ?? ''
+  check('the checks-only fix ran rather than the run reaching PR', fix.length > 0, true)
+  check('the unreported check is the one raised', fix.includes('b.sh'), true)
+  check('the reported green one is not', fix.includes('a.sh'), false)
+  check('it says no result came back, rather than inventing an exit code',
+    fix.includes('no result was reported for this check'), true)
+  check('the run did not reach PR reporting everything green',
+    result.halted_at !== undefined || (result.checks?.red ?? []).length > 0, true)
+}
+
 // Scenario BW -- #38: most repos have never heard of any of this. Discovery
 // finding nothing must be a logged, ordinary outcome, never a halt, and must
 // not spend a check-run call it has nothing to run.
@@ -2283,7 +2310,7 @@ for (const scenario of [scenarioA, scenarioB, scenarioG, scenarioC, scenarioD, s
                         scenarioBH, scenarioBI, scenarioBJ, scenarioBK, scenarioBL,
                         scenarioBM, scenarioBN, scenarioBO, scenarioBP, scenarioBQ,
                         scenarioBR, scenarioBS, scenarioBT, scenarioBU, scenarioBV, scenarioBW,
-                        scenarioBX, scenarioBY, scenarioBZ, scenarioCA]) {
+                        scenarioBX, scenarioBY, scenarioBZ, scenarioCA, scenarioCB]) {
   await scenario()
 }
 

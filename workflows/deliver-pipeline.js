@@ -1173,7 +1173,9 @@ const executeChecks = async () => {
     `Run each command below, then STOP. Do not fix, edit, or investigate a ` +
     `failure; a later phase does that.\n` +
     `This one call is the exception to the rule above about never running ` +
-    `cd: run each command as bash -c 'cd ${wt.path} && <command>'. A ` +
+    `cd, and only in the bash -c form: run each command as ` +
+    `bash -c 'cd ${wt.path} && <command>'. Never a bare ` +
+    `cd ${wt.path} && <command>, which does move this session. A ` +
     `subshell does not move this session's own working directory, and cd ` +
     `inside it is what makes a command written relative to the repo root ` +
     `(as every discovered command is) mean this worktree rather than ` +
@@ -1191,8 +1193,21 @@ const toRedList = (results) => (Array.isArray(results) ? results : [])
   .filter(r => r?.exit_code !== 0)
   .map(r => ({ id: `check:${r.name}`, name: r.name, command: r.command,
                exit_code: r.exit_code, output: r.output }))
-const runChecks = async () => discoveredChecks.length
-  ? toRedList((await executeChecks())?.results) : []
+// A check nobody reported on is unknown, and unknown is red. Reading a
+// missing row as a pass would put the verdict back in the shape of the
+// model's answer, which is the thing this phase exists to take it out of. At
+// the baseline it errs the same way it should: unreported means dropped as
+// environmental, never blocking on something that was never measured.
+const runChecks = async () => {
+  if (!discoveredChecks.length) return []
+  const outcome = await executeChecks()
+  const reported = new Set((Array.isArray(outcome?.results) ? outcome.results : [])
+    .map(r => r?.name))
+  const unreported = discoveredChecks.filter(c => !reported.has(c.name))
+    .map(c => ({ id: `check:${c.name}`, name: c.name, command: c.command,
+                 exit_code: null, output: 'no result was reported for this check' }))
+  return [...toRedList(outcome?.results), ...unreported]
+}
 
 const CHECK_HEAD_BYTES = 1024
 const CHECK_TAIL_BYTES = 8192
