@@ -56,8 +56,8 @@ check "BRANCH's required array lists dirty" \
   "$(grep -c "required: \['created', 'branch', 'base', 'path', 'detail', 'dirty'\]" "$SCRIPT" || true)" 1
 
 echo "== static: BRANCH's halt_reason enum covers the merged and occupied halts, not just ambiguous and wrong-ticket"
-check "halt_reason enum lists all four" \
-  "$(grep -c "enum: \['ambiguous', 'wrong-ticket', 'merged', 'occupied'\]" "$SCRIPT" || true)" 1
+check "halt_reason enum lists all five" \
+  "$(grep -c "enum: \['none', 'ambiguous', 'wrong-ticket', 'merged', 'occupied'\]" "$SCRIPT" || true)" 1
 
 echo "== static: the verifier's brief no longer demands order or a verbatim title"
 # The old instruction, word for word. A hit elsewhere in the file (an
@@ -1830,12 +1830,20 @@ async function scenarioBL() {
 // third branch for the same ticket).
 async function scenarioBM() {
   console.log('\n== scenario BM: an ambiguous existingBranch match halts with its own note, not the not-found note')
-  const { result } = await run({
+  const { result, captured } = await run({
     args: { existingBranch: true },
     existingBranchResult: { created: false, branch: '', base: '', path: '',
       detail: 'two branches carry the gh-21 marker: feat/gh-21-a, fix/gh-21-b',
       dirty: false, halt_reason: 'ambiguous' },
   })
+  // Read off the schema the harness was handed, not the source text: an
+  // omitted halt_reason reads as the plain not-found note, so it has to fail
+  // validation rather than default.
+  const schema = captured.calls.find(c => c.label === 'branch:existing')?.schema
+  check('the branch:existing schema requires halt_reason',
+    (schema?.required ?? []).includes('halt_reason'), true)
+  check('its enum has a member for the ordinary response',
+    (schema?.properties?.halt_reason?.enum ?? []).includes('none'), true)
   check('halted at Worktree', result.halted_at, 'Worktree')
   check('the note reports the ambiguity rather than claiming nothing was found',
     /more than one/i.test(result.note ?? ''), true)
@@ -1949,24 +1957,27 @@ async function scenarioBR() {
 }
 
 // Scenario BS -- #87 review: the merged halt's own advice told the user to
-// "re-run without existingBranch to cut a fresh branch", but with no task
-// text the branch name is derived from the ticket's own summary, identical
-// on every run, so following that advice lands the default branch-cutting
-// path on the exact name of the branch the guard just refused.
+// "re-run without existingBranch to cut a fresh branch". The default path
+// cuts nothing here: its step 6 finds the leftover worktree for that branch
+// and reuses it, so the advice lands new commits on the merged branch and
+// pushes them onto the pull request that already closed.
 async function scenarioBS() {
-  console.log('\n== scenario BS: the merged halt note warns that omitting task text recreates the merged branch\'s name')
+  console.log('\n== scenario BS: the merged halt note says re-running without existingBranch reuses the merged branch')
   const { result } = await run({
     args: { existingBranch: true },
     existingBranchResult: { created: false, branch: '', base: '', path: '',
       detail: 'branch fix/gh-21-retry-path carries the gh-21 marker but its PR #40 is MERGED',
       dirty: false, halt_reason: 'merged' },
   })
-  check('the note no longer gives the bare re-run instruction that recreates the merged name',
-    (result.note ?? '').includes('if this ticket has new work, re-run without existingBranch to cut a fresh branch.'), false)
-  check('the note says the advice only helps with task text describing the new work',
-    (result.note ?? '').includes('task text'), true)
-  check('the note explains why omitting task text recreates the same name',
-    (result.note ?? '').includes("ticket's own summary"), true)
+  const note = result.note ?? ''
+  check('the note no longer gives the bare re-run instruction',
+    note.includes('if this ticket has new work, re-run without existingBranch to cut a fresh branch.'), false)
+  check('it says the default path reuses what is already there',
+    /reuses? them|finds the leftover/.test(note), true)
+  check('it does not claim a same-named branch would be cut',
+    note.includes('would cut a branch'), false)
+  check('it names the way out: clear the leftovers, or use another ticket',
+    /delete the branch/.test(note) && /ticket of its own/.test(note), true)
 }
 
 // Scenario BT -- #87 review: step 5's re-attach action used to live in a

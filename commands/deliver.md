@@ -97,8 +97,8 @@ It halts on purpose: a detached HEAD, a base ref that will not resolve, a dirty
 checkout in the worktree `--existing` resolves to, `--existing` finding no
 worktree or branch for the ticket and the current checkout not on a feature
 branch either, `--existing` matching more than one worktree or branch for the
-ticket, `--existing` matching only a branch whose pull request already
-merged, `--existing` matching only a branch whose canonical worktree
+ticket, `--existing` matching a worktree or a branch whose pull request
+already merged, `--existing` matching only a branch whose canonical worktree
 directory is already occupied by something else, `--existing` falling back
 to a checkout that carries a different ticket's marker, a missing ticket.
 **Report the halt and stop.** Do not copy

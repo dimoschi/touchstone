@@ -222,8 +222,17 @@ const BRANCH = {
     // marker match, a fallback branch marked for a different ticket, a
     // matched branch whose pull request already merged, or a matched
     // branch's canonical worktree directory already occupied.
-    halt_reason: { type: 'string', enum: ['ambiguous', 'wrong-ticket', 'merged', 'occupied'] },
+    halt_reason: { type: 'string', enum: ['none', 'ambiguous', 'wrong-ticket', 'merged', 'occupied'] },
   },
+}
+
+// Required only here. An omitted halt_reason reads as the plain not-found
+// note, which is the note these halts exist to replace, so the field has to
+// be refused rather than defaulted; 'none' gives the other responses
+// something to say instead of relying on an absent key.
+const EXISTING_BRANCH = {
+  ...BRANCH,
+  required: [...BRANCH.required, 'halt_reason'],
 }
 
 // Answers both the CRAP and mutation opt-in questions in one call: both
@@ -503,8 +512,8 @@ const wt = args?.existingBranch
       `response; halt_reason is "ambiguous" for the two-or-more-matches halts ` +
       `in steps 4 and 5, "merged" for step 4 or 5's already-merged-PR halt, ` +
       `"occupied" for step 5's occupied-directory halt, "wrong-ticket" for ` +
-      `the different-ticket halt in step 6, and unset in every other ` +
-      `response.\n` +
+      `the different-ticket halt in step 6, and "none" in every other ` +
+      `response, including every success. Never omit it.\n` +
       `1. Run git worktree prune. It only removes registrations for worktree ` +
       `directories that no longer exist on disk; it never touches a directory ` +
       `that does exist. Run it before listing worktrees so a stale record left ` +
@@ -600,7 +609,7 @@ const wt = args?.existingBranch
       `whether that path is the main checkout or a linked worktree, and ` +
       `whether the branch name carries a jira- or gh- marker.` +
       RECORD('branch:existing'),
-      { label: 'branch:existing', schema: BRANCH, model: 'haiku', effort: 'low' })
+      { label: 'branch:existing', schema: EXISTING_BRANCH, model: 'haiku', effort: 'low' })
   // A worktree is a separate checkout, so the main tree's state is irrelevant
   // to it; cutting from origin/<base> is what removes the need to touch the
   // main checkout at all.
@@ -726,11 +735,11 @@ if (!wt?.created) {
       ? `The only branch carrying the ${ticketMarker} marker already has a ` +
         `merged pull request, so nothing was planned or implemented: ` +
         `${wt?.detail}. That work already shipped. Re-running without ` +
-        `existingBranch only helps if this ticket has new work and the run ` +
-        `is given task text describing it: the branch name is derived from ` +
-        `that text, and with none it falls back to the ticket's own ` +
-        `summary, which is identical on every run and would cut a branch ` +
-        `with the exact name of the one that just merged.`
+        `existingBranch does not escape it: the default path finds the ` +
+        `leftover worktree and branch for this marker and reuses them, so ` +
+        `the new commits land on the branch that already merged and push ` +
+        `onto its pull request. Remove that worktree and delete the branch ` +
+        `first, or track the new work under a ticket of its own.`
       : wt?.halt_reason === 'occupied'
       ? `A branch carrying the ${ticketMarker} marker was found with no ` +
         `worktree of its own, but its canonical worktree directory is ` +
