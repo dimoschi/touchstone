@@ -2174,6 +2174,27 @@ async function scenarioBV() {
   check('no red check is reported', result.checks?.red?.length, 0)
 }
 
+// Scenario CA -- a discovered check may write: a ledger, a generated file, a
+// marker. The baseline runs it against the tree the implementer is about to
+// be handed, so a write there lands in the change under review as work nobody
+// did. Refusing is the only safe answer; the pipeline cannot undo it.
+async function scenarioCA() {
+  console.log('\n== scenario CA: a check that dirties the tree during the baseline halts before Implement')
+  const { result, captured } = await run({
+    discovery: { checks: [{ name: 'gen.sh', command: 'bash gen.sh' }], detail: 'stub' },
+    checkRuns: () => ({ results: [{ name: 'gen.sh', command: 'bash gen.sh', exit_code: 0, output: 'ok' }],
+      dirty: true, porcelain: '?? generated.txt' }),
+  })
+  check('halted before any implementation ran', result.halted_at, 'Implement')
+  check('the implementer never ran', callCount(captured, 'implementer'), 0)
+  check('the note names what the check wrote',
+    (result.note ?? '').includes('?? generated.txt'), true)
+  check('the note says it happened before implementation, not during it',
+    (result.note ?? '').includes('before any implementation ran'), true)
+  check('no check is reported red: the baseline itself was green',
+    result.checks?.red?.length, 0)
+}
+
 // Scenario BW -- #38: most repos have never heard of any of this. Discovery
 // finding nothing must be a logged, ordinary outcome, never a halt, and must
 // not spend a check-run call it has nothing to run.
@@ -2262,7 +2283,7 @@ for (const scenario of [scenarioA, scenarioB, scenarioG, scenarioC, scenarioD, s
                         scenarioBH, scenarioBI, scenarioBJ, scenarioBK, scenarioBL,
                         scenarioBM, scenarioBN, scenarioBO, scenarioBP, scenarioBQ,
                         scenarioBR, scenarioBS, scenarioBT, scenarioBU, scenarioBV, scenarioBW,
-                        scenarioBX, scenarioBY, scenarioBZ]) {
+                        scenarioBX, scenarioBY, scenarioBZ, scenarioCA]) {
   await scenario()
 }
 
