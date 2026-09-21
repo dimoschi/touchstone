@@ -437,6 +437,17 @@ function makeAgent(scenario, captured) {
       return { crap_gated: scenario.crapGated ?? true,
         mutation_gated: scenario.mutationGated ?? false, detail: 'stub' }
     }
+    if (label === 'checks:discover') {
+      return scenario.discovery ?? { checks: [], detail: 'stub: no repo checks' }
+    }
+    if (label.startsWith('checks:run:')) {
+      const attempt = Number(label.slice('checks:run:'.length))
+      return (scenario.checkRuns ?? (() => ({ results: [] })))(attempt)
+    }
+    if (label === 'checks:fix') {
+      return scenario.checksFixResult ??
+        { head_sha: 'checksfix00000000000000000000000000000001', note: 'stub', scored: false }
+    }
     if (label.startsWith('mutation:')) {
       const attempt = Number(label.slice('mutation:'.length))
       return (scenario.mutationResult ?? (() => ({ green: true, head_sha: REVIEWED_THROUGH, detail: 'stub', scored: true })))(attempt)
@@ -2084,6 +2095,207 @@ async function scenarioBA() {
     true)
 }
 
+// Scenario BU -- #38: a check green at the base commit and red after
+// Implement (the version-bump incident this ticket is about) is fixed in
+// one checks-only round before Review ever runs, so the diff a reviewer
+// reads already carries the fix and no reviewer finding is ever recorded.
+async function scenarioBU() {
+  console.log('\n== scenario BU: a check green at baseline and red after Implement is fixed before Review, with no reviewer finding')
+  const { result, captured } = await run({
+    args: { openPr: true },
+    discovery: { checks: [{ name: 'run-tests.sh', command: 'bash scripts/run-tests.sh' }],
+      detail: 'stub: found in AGENTS.md Commands' },
+    checkRuns: (attempt) => attempt === 1
+      ? { results: [{ name: 'run-tests.sh', command: 'bash scripts/run-tests.sh',
+          exit_code: 0, output: 'ok' }], dirty: false }
+      : attempt === 2
+      ? { results: [{ name: 'run-tests.sh', command: 'bash scripts/run-tests.sh',
+          exit_code: 1, output: 'FAILURE: workflows/ changed with no version bump' }], dirty: false }
+      : { results: [{ name: 'run-tests.sh', command: 'bash scripts/run-tests.sh',
+          exit_code: 0, output: 'OK' }], dirty: false },
+    checksFixResult: { head_sha: 'checksfix00000000000000000000000000000002',
+      note: 'bumped the version', scored: true },
+    prResult: { opened: true, url: 'https://example.invalid/pr/38', note: 'stub ready' },
+  })
+  check('the baseline ran green, before Implement', callCount(captured, 'checks:run:1'), 1)
+  const checksFix = captured.calls.find(c => c.label === 'checks:fix')?.prompt ?? ''
+  check('the checks-only fix ran', checksFix.length > 0, true)
+  check('the fix prompt carries the failing check\'s command',
+    checksFix.includes('bash scripts/run-tests.sh'), true)
+  check('the fix prompt carries its exit code', checksFix.includes('exited 1'), true)
+  check('the fix prompt carries its output verbatim',
+    checksFix.includes('FAILURE: workflows/ changed with no version bump'), true)
+  check('the check was re-run after the pre-review fix landed', callCount(captured, 'checks:run:3'), 1)
+  const checksFixIdx = captured.calls.findIndex(c => c.label === 'checks:fix')
+  const reviewIdx = captured.calls.findIndex(c => c.label.startsWith('review:'))
+  check('the checks-only fix ran before any review lens',
+    checksFixIdx >= 0 && reviewIdx >= 0 && checksFixIdx < reviewIdx, true)
+  const reviewPrompt = captured.calls.find(c => c.label.startsWith('review:'))?.prompt ?? ''
+  check('a review lens ran', reviewPrompt.length > 0, true)
+  check('review reads the fixed range, including the checks-only commit',
+    reviewPrompt.includes('checksfix00000000000000000000000000000002'), true)
+  check('the run does not halt', result.halted_at, undefined)
+  check('no reviewer finding was recorded for the check', (result.unresolved_findings ?? []).length, 0)
+  check('the result reports the check as no longer red', result.checks?.red?.length, 0)
+  check('the run reaches the PR phase', result.pr?.opened, true)
+}
+
+// Scenario BV -- #38: a check red at the base commit, before any work
+// started, is the repo's own environment, not this run's doing. It must be
+// dropped outright, never merely downgraded, so it cannot re-enter later as
+// something an unrelated fix round is told to act on.
+async function scenarioBV() {
+  console.log('\n== scenario BV: a check red at baseline is dropped as environmental and never reaches a fixer')
+  const { result, captured } = await run({
+    args: { maxReviewRounds: 1 },
+    discovery: { checks: [{ name: 'run-go-tests.sh', command: 'bash scripts/run-go-tests.sh' }],
+      detail: 'stub' },
+    checkRuns: () => ({ results: [{ name: 'run-go-tests.sh', command: 'bash scripts/run-go-tests.sh',
+      exit_code: 1, output: 'go: command not found' }], dirty: false }),
+    initialReview: {
+      correctness: [{ title: 'Off-by-one', file: 'src/parser.js',
+        claim: 'boundary is wrong', evidence: 'parser.js:12' }],
+      advocate: [],
+    },
+    verify: () => undefined,
+    fixHead: () => 'fix00000000000000000000000000000000000003',
+    staleness: () => [],
+  })
+  check('the baseline ran exactly once', callCount(captured, 'checks:run:1'), 1)
+  check('nothing was re-checked after Implement, nothing left to check', callCount(captured, 'checks:run:2'), 0)
+  check('the checks-only pre-review fix never ran', callCount(captured, 'checks:fix'), 0)
+  check('halted at Fix, over the unrelated finding, not a check', result.halted_at, 'Fix')
+  const fix1 = captured.calls.find(c => c.label === 'fix:1')?.prompt ?? ''
+  check('the fix phase ran', fix1.length > 0, true)
+  check('the dropped check\'s command never reaches the fixer',
+    fix1.includes('run-go-tests.sh'), false)
+  check('the result explains it was dropped, not left open',
+    (result.checks?.detail ?? '').includes('dropped 1 as environmental'), true)
+  check('no red check is reported', result.checks?.red?.length, 0)
+}
+
+// Scenario CA -- a discovered check may write: a ledger, a generated file, a
+// marker. The baseline runs it against the tree the implementer is about to
+// be handed, so a write there lands in the change under review as work nobody
+// did. Refusing is the only safe answer; the pipeline cannot undo it.
+async function scenarioCA() {
+  console.log('\n== scenario CA: a check that dirties the tree during the baseline halts before Implement')
+  const { result, captured } = await run({
+    discovery: { checks: [{ name: 'gen.sh', command: 'bash gen.sh' }], detail: 'stub' },
+    checkRuns: () => ({ results: [{ name: 'gen.sh', command: 'bash gen.sh', exit_code: 0, output: 'ok' }],
+      dirty: true, porcelain: '?? generated.txt' }),
+  })
+  check('halted before any implementation ran', result.halted_at, 'Implement')
+  check('the implementer never ran', callCount(captured, 'implementer'), 0)
+  check('the note names what the check wrote',
+    (result.note ?? '').includes('?? generated.txt'), true)
+  check('the note says it happened before implementation, not during it',
+    (result.note ?? '').includes('before any implementation ran'), true)
+  check('no check is reported red: the baseline itself was green',
+    result.checks?.red?.length, 0)
+}
+
+// Scenario CB -- asked to run several commands and report every byte of their
+// output, a cheap agent dropping a row is the expected failure, not a remote
+// one. Treating a row nobody reported as a pass would hand the verdict back to
+// the shape of the model's answer.
+async function scenarioCB() {
+  console.log('\n== scenario CB: a check the runner never reported on is red, not green')
+  const { result, captured } = await run({
+    discovery: { checks: [{ name: 'a.sh', command: 'bash a.sh' },
+                          { name: 'b.sh', command: 'bash b.sh' }], detail: 'stub' },
+    checkRuns: (attempt) => attempt === 1
+      ? ({ results: [{ name: 'a.sh', command: 'bash a.sh', exit_code: 0, output: 'ok' },
+                     { name: 'b.sh', command: 'bash b.sh', exit_code: 0, output: 'ok' }] })
+      : ({ results: [{ name: 'a.sh', command: 'bash a.sh', exit_code: 0, output: 'ok' }] }),
+    initialReview: { correctness: [], advocate: [] },
+    verify: () => undefined,
+    staleness: () => [],
+  })
+  const fix = captured.calls.find(c => c.label === 'checks:fix')?.prompt ?? ''
+  check('the checks-only fix ran rather than the run reaching PR', fix.length > 0, true)
+  check('the unreported check is the one raised', fix.includes('b.sh'), true)
+  check('the reported green one is not', fix.includes('a.sh'), false)
+  check('it says no result came back, rather than inventing an exit code',
+    fix.includes('no result was reported for this check'), true)
+  check('the run did not reach PR reporting everything green',
+    result.halted_at !== undefined || (result.checks?.red ?? []).length > 0, true)
+}
+
+// Scenario BW -- #38: most repos have never heard of any of this. Discovery
+// finding nothing must be a logged, ordinary outcome, never a halt, and must
+// not spend a check-run call it has nothing to run.
+async function scenarioBW() {
+  console.log('\n== scenario BW: discovery finding no repo checks is logged, not a halt')
+  const { result, captured } = await run({})
+  check('discovery ran exactly once', callCount(captured, 'checks:discover'), 1)
+  check('no check-run call was made', callCount(captured, 'checks:run:1'), 0)
+  check('the run does not halt', result.halted_at, undefined)
+  check('discovery finding nothing is logged',
+    captured.logs.some(l => /no repo-advertised checks found/.test(l)), true)
+  check('the final result reports zero discovered checks', result.checks?.discovered, 0)
+}
+
+// Scenario BX -- #38, #87: existingBranch resumes a worktree that already
+// carries the branch's own commits, so there is no clean base tree left to
+// classify a check against. A red check there is reported, never blocking.
+async function scenarioBX() {
+  console.log('\n== scenario BX: existingBranch skips the baseline and never blocks on a discovered check')
+  const { result, captured } = await run({
+    args: { existingBranch: true, openPr: true },
+    discovery: { checks: [{ name: 'lint.sh', command: 'bash scripts/lint.sh' }], detail: 'stub' },
+    checkRuns: () => ({ results: [{ name: 'lint.sh', command: 'bash scripts/lint.sh',
+      exit_code: 1, output: 'lint: 3 problems' }], dirty: false }),
+    prResult: { opened: true, url: 'https://example.invalid/pr/38x', note: 'stub ready' },
+  })
+  const runLabels = captured.calls.filter(c => c.label.startsWith('checks:run:'))
+  check('exactly one check run happened, no separate baseline pass', runLabels.length, 1)
+  check('the checks-only pre-review fix never ran', callCount(captured, 'checks:fix'), 0)
+  check('the run does not halt', result.halted_at, undefined)
+  check('the check is reported as non-blocking', result.checks?.blocking, false)
+  check('the check is still reported red, for visibility', result.checks?.red?.length, 1)
+  check('the run reaches the PR phase', result.pr?.opened, true)
+}
+
+// Scenario BY -- #38: a cap stated only in a prompt is a request; this
+// proves the bound is a real slice. Both ends of a huge check's output must
+// survive, since a gate prints its resolved repo and branch first and its
+// verdict last, and only the middle is safe to drop.
+async function scenarioBY() {
+  console.log('\n== scenario BY: oversized check output is truncated with head and tail kept, middle marked')
+  const bigOutput = 'HEAD_MARKER' + 'x'.repeat(5000) + 'MIDDLE_MARKER_XYZ' + 'y'.repeat(15000) + 'TAIL_MARKER'
+  const { captured } = await run({
+    discovery: { checks: [{ name: 'run-tests.sh', command: 'bash scripts/run-tests.sh' }], detail: 'stub' },
+    checkRuns: (attempt) => attempt === 1
+      ? { results: [{ name: 'run-tests.sh', command: 'bash scripts/run-tests.sh', exit_code: 0, output: 'ok' }], dirty: false }
+      : { results: [{ name: 'run-tests.sh', command: 'bash scripts/run-tests.sh', exit_code: 1, output: bigOutput }], dirty: false },
+  })
+  const checksFix = captured.calls.find(c => c.label === 'checks:fix')?.prompt ?? ''
+  check('the pre-review fix ran', checksFix.length > 0, true)
+  check('the head of the output survives', checksFix.includes('HEAD_MARKER'), true)
+  check('the tail of the output survives', checksFix.includes('TAIL_MARKER'), true)
+  check('the truncation marker is present', checksFix.includes('[touchstone: truncated,'), true)
+  check('the middle of the output does not reach the prompt',
+    checksFix.includes('MIDDLE_MARKER_XYZ'), false)
+}
+
+// Scenario BZ -- #38: redness is keyed on exit_code alone. AGENTS.md is
+// explicit that exit 2 and exit 4 are not passes either, and the schema
+// carries no pass/fail field a model could misjudge one against.
+async function scenarioBZ() {
+  console.log('\n== scenario BZ: a non-zero exit code (4, could-not-measure) is treated as red')
+  const { captured } = await run({
+    discovery: { checks: [{ name: 'coverage-gate.sh', command: 'bash scripts/coverage-gate.sh' }], detail: 'stub' },
+    checkRuns: (attempt) => attempt === 1
+      ? { results: [{ name: 'coverage-gate.sh', command: 'bash scripts/coverage-gate.sh', exit_code: 0, output: 'ok' }], dirty: false }
+      : { results: [{ name: 'coverage-gate.sh', command: 'bash scripts/coverage-gate.sh', exit_code: 4, output: 'could not measure' }], dirty: false },
+  })
+  check('a check that merely ran, exit 4, still triggers the pre-review fix', callCount(captured, 'checks:fix'), 1)
+  const checksFix = captured.calls.find(c => c.label === 'checks:fix')?.prompt ?? ''
+  check('the fix phase ran', checksFix.length > 0, true)
+  check('the prompt carries the exit code verbatim', checksFix.includes('exited 4'), true)
+}
+
 for (const scenario of [scenarioA, scenarioB, scenarioG, scenarioC, scenarioD, scenarioE, scenarioH,
                         scenarioI, scenarioJ, scenarioK, scenarioL, scenarioM, scenarioN,
                         scenarioO, scenarioP, scenarioQ, scenarioR, scenarioS, scenarioT,
@@ -2097,7 +2309,8 @@ for (const scenario of [scenarioA, scenarioB, scenarioG, scenarioC, scenarioD, s
                         scenarioBE, scenarioAZ, scenarioBA, scenarioBF, scenarioBG,
                         scenarioBH, scenarioBI, scenarioBJ, scenarioBK, scenarioBL,
                         scenarioBM, scenarioBN, scenarioBO, scenarioBP, scenarioBQ,
-                        scenarioBR, scenarioBS, scenarioBT]) {
+                        scenarioBR, scenarioBS, scenarioBT, scenarioBU, scenarioBV, scenarioBW,
+                        scenarioBX, scenarioBY, scenarioBZ, scenarioCA, scenarioCB]) {
   await scenario()
 }
 

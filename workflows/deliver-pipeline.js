@@ -98,6 +98,10 @@ const CEILINGS = {
   plan: null,
   implement: null,
   gate: 120_000,
+  // Two separate windows share this ceiling: discovery+baseline before
+  // Implement, and the post-Implement run plus its one pre-review fix
+  // round. stage_spend.checks sums both; each is bounded on its own.
+  checks: 20_000,
   review: 80_000,
   // Carries the tail review of each fix round as well as the fixing itself.
   fix: 170_000,
@@ -243,6 +247,47 @@ const MARKERS = {
     crap_gated: { type: 'boolean' },
     mutation_gated: { type: 'boolean' },
     detail: { type: 'string' },
+  },
+}
+
+// Discovery source: AGENTS.md/CLAUDE.md's "## Commands" fence, not
+// CONTRIBUTING.md's "## Tests" prose or .github/workflows/ci.yml -- the one
+// list already written for an agent to run verbatim, with no CI-provider
+// interpretation needed and no dependency on any CI existing at all.
+const CHECKS = {
+  type: 'object', additionalProperties: false, required: ['checks', 'detail'],
+  properties: {
+    checks: {
+      type: 'array',
+      items: {
+        type: 'object', additionalProperties: false, required: ['name', 'command'],
+        properties: { name: { type: 'string' }, command: { type: 'string' } },
+      },
+    },
+    detail: { type: 'string' },
+  },
+}
+// One row per command, run exactly as discovered. exit_code and output are
+// what the fix phase is handed verbatim -- never a model's account of them.
+// Redness is keyed on exit_code alone, never on a model-judged boolean: exit
+// 2 and exit 4 are not passes either, and asking for a "passed" field let a
+// haiku call one of those green.
+const CHECK_RUN = {
+  type: 'object', additionalProperties: false, required: ['results', 'dirty'],
+  properties: {
+    results: {
+      type: 'array',
+      items: {
+        type: 'object', additionalProperties: false,
+        required: ['name', 'command', 'exit_code', 'output'],
+        properties: {
+          name: { type: 'string' }, command: { type: 'string' },
+          exit_code: { type: 'integer' }, output: { type: 'string' },
+        },
+      },
+    },
+    dirty: { type: 'boolean' },
+    porcelain: { type: 'string' },
   },
 }
 
@@ -827,6 +872,8 @@ const treeAgent = (prompt, opts) =>
     envelope() + `\n` + prompt + RECORD(opts.label),
     opts)
 
+const headOf = (range) => range.includes('..') ? range.split('..')[1].trim() : range.trim()
+
 // Latch 1. The premise checks that matter most are usually one grep, and a task
 // whose stated facts are wrong must not be planned around. Buying that check
 // for one cheap agent is the difference between a 2-agent run and an 11-agent
@@ -1088,7 +1135,150 @@ if (!gateProbe) {
       `opted-in (safe default: costs an extra run rather than dropping a real gate)`)
 }
 
+const sChecksPre = stage('checks')
 phase('Implement')
+const discovery = await treeAgent(
+  `[touchstone: checks:discover]\n` +
+  `Find the deterministic checks this repo advertises for its own ` +
+  `contributors, then STOP. Read only; run nothing and change nothing.\n` +
+  `1. Find the repo root: dirname "$(git rev-parse --path-format=absolute ` +
+  `--git-common-dir)".\n` +
+  `2. Read AGENTS.md at that root; if it does not exist, read CLAUDE.md ` +
+  `instead (it is conventionally a symlink to AGENTS.md).\n` +
+  `3. Find a "## Commands" heading (case-insensitive) followed by a fenced ` +
+  `code block. If neither file exists, or no such section is found, return ` +
+  `checks=[] and say why in detail.\n` +
+  `4. Otherwise return one entry per non-blank line inside that fence, in ` +
+  `the file's own order: name is the line's own script (its basename, e.g. ` +
+  `run-tests.sh), command is the full line with any trailing "#" comment ` +
+  `stripped. Do not add a check that is not literally a line there, and do ` +
+  `not drop one for looking slow or environment-specific -- that judgement ` +
+  `is the repo's, made by what it chose to list.`,
+  { label: 'checks:discover', schema: CHECKS, model: 'haiku', effort: 'low' })
+let discoveredChecks = discovery?.checks ?? []
+log(discoveredChecks.length
+  ? `checks discovered: ${discoveredChecks.map(c => c.name).join(', ')}`
+  : `no repo-advertised checks found (${discovery?.detail ?? 'discovery returned nothing'}); nothing to run alongside review`)
+
+// existingBranch resumes a branch that may already carry commits of its own,
+// so there is no clean base tree here to tell an environmental failure from
+// a real one. Checks still run and are still reported below, but never
+// block: after #87 resuming is the normal path, not an edge case.
+const checksBlocking = !args?.existingBranch
+let checkAttempt = 0
+const executeChecks = async () => {
+  checkAttempt++
+  return await treeAgent(
+    `[touchstone: checks:run]\n` +
+    `Run each command below, then STOP. Do not fix, edit, or investigate a ` +
+    `failure; a later phase does that.\n` +
+    `This one call is the exception to the rule above about never running ` +
+    `cd, and only in the bash -c form: run each command as ` +
+    `bash -c 'cd ${wt.path} && <command>'. Never a bare ` +
+    `cd ${wt.path} && <command>, which does move this session. A ` +
+    `subshell does not move this session's own working directory, and cd ` +
+    `inside it is what makes a command written relative to the repo root ` +
+    `(as every discovered command is) mean this worktree rather than ` +
+    `wherever the session's own cwd happens to be.\n` +
+    `Report each command's exit code and its combined stdout and stderr ` +
+    `verbatim -- do not summarise, truncate, or interpret what it printed.\n` +
+    `Then run git -C ${wt.path} status --porcelain and report whether it ` +
+    `printed anything (dirty) and, if so, its output (porcelain): a check ` +
+    `that writes to the tree (a ledger, a generated file) must be visible, ` +
+    `not silently carried into whatever commits next.\n` +
+    discoveredChecks.map(c => `${c.name}: ${c.command}`).join('\n'),
+    { label: `checks:run:${checkAttempt}`, schema: CHECK_RUN, model: 'haiku', effort: 'low' })
+}
+const CHECK_HEAD_BYTES = 1024
+const CHECK_TAIL_BYTES = 8192
+// A cap stated only in a prompt is a request; a slice is a bound. Head and
+// tail both, since a gate prints the repo and branch it resolved first and
+// its verdict last.
+const truncateOutput = (s) => {
+  const t = String(s ?? '')
+  if (t.length <= CHECK_HEAD_BYTES + CHECK_TAIL_BYTES) return t
+  const omitted = t.length - CHECK_HEAD_BYTES - CHECK_TAIL_BYTES
+  return t.slice(0, CHECK_HEAD_BYTES) +
+    `\n[touchstone: truncated, ${omitted} bytes omitted]\n` +
+    t.slice(t.length - CHECK_TAIL_BYTES)
+}
+const toRedList = (results) => (Array.isArray(results) ? results : [])
+  .filter(r => r?.exit_code !== 0)
+  .map(r => ({ id: `check:${r.name}`, name: r.name, command: r.command,
+               exit_code: r.exit_code, output: truncateOutput(r.output) }))
+// A check nobody reported on is unknown, and unknown is red. Reading a
+// missing row as a pass would put the verdict back in the shape of the
+// model's answer, which is the thing this phase exists to take it out of.
+// The baseline does not come through here: an unreported row there is left
+// in place rather than dropped, since a missing answer is no evidence that a
+// check is environmental.
+const runChecks = async () => {
+  if (!discoveredChecks.length) return []
+  const outcome = await executeChecks()
+  const reported = new Set((Array.isArray(outcome?.results) ? outcome.results : [])
+    .map(r => r?.name))
+  const unreported = discoveredChecks.filter(c => !reported.has(c.name))
+    .map(c => ({ id: `check:${c.name}`, name: c.name, command: c.command,
+                 exit_code: null, output: 'no result was reported for this check' }))
+  return [...toRedList(outcome?.results), ...unreported]
+}
+
+const renderCheck = (c) => `Check ${c.name} (${c.command}) exited ${c.exit_code}:\n${c.output}`
+
+// A check red before any work started is the repo's own environment, not
+// this run's doing, and there is no way to tell the two apart other than
+// measuring the base commit itself. Dropped, not merely downgraded, so it
+// can never re-enter a fixer prompt later.
+let droppedAtBaseline = []
+if (discoveredChecks.length && checksBlocking) {
+  const baseline = await executeChecks()
+  if (baseline?.dirty) {
+    sChecksPre.close()
+    return await halted('Implement', {
+      checks: { discovered: discoveredChecks.length, blocking: checksBlocking, red: [],
+        detail: 'halted before any check ran against real implementation work' },
+      note: `A discovered check wrote to the working tree while establishing ` +
+        `the environmental baseline, before any implementation ran: ` +
+        `${baseline.porcelain || '(no detail returned)'}. Nothing was planned ` +
+        `or implemented. Find which check writes, then re-run.`,
+    })
+  }
+  const baseRed = toRedList(baseline?.results)
+  if (baseRed.length) {
+    const redNames = new Set(baseRed.map(c => c.name))
+    droppedAtBaseline = baseRed
+    discoveredChecks = discoveredChecks.filter(c => !redNames.has(c.name))
+    log(`checks: dropped ${droppedAtBaseline.length} as environmental (red ` +
+        `before any work started): ${droppedAtBaseline.map(c => c.name).join(', ')}`)
+  }
+} else if (discoveredChecks.length) {
+  log(`checks: existingBranch has no clean base tree to classify against; ` +
+      `the ${discoveredChecks.length} discovered check(s) are reported but ` +
+      `never block this run`)
+}
+sChecksPre.close()
+const checksPreSpend = stageSpend.checks ?? 0
+
+function checksPayload() {
+  return {
+    discovered: discoveredChecks.length,
+    blocking: checksBlocking,
+    red: redChecks,
+    detail: (checksBlocking
+      ? (droppedAtBaseline.length
+          ? `dropped ${droppedAtBaseline.length} as environmental at the base ` +
+            `commit: ${droppedAtBaseline.map(c => c.name).join(', ')}. `
+          : '')
+      : `advisory only: existingBranch has no clean base tree to classify ` +
+        `checks against, so a red one here is reported but never blocks. `
+    ) + (discovery?.detail ?? ''),
+  }
+}
+// Red but not blocking (existingBranch) reaches the fixer as nothing at
+// all: it is visibility for a human, not work to hand to an agent.
+let preReviewFixCommitted = false
+const blockingChecksOpen = () => checksBlocking && redChecks.length > 0
+
 const sImpl = stage('implement')
 const impl = await treeAgent(
   `Implement this task in the current repo.\n` +
@@ -1179,6 +1369,77 @@ if (sImpl.over()) {
   })
 }
 
+// Run before Review spends any budget on something a script already
+// answers with an exit code.
+const sChecksPost = stage('checks')
+let lastCheckedHead = headOf(impl.commit_range)
+let redChecks = await runChecks()
+if (redChecks.length) {
+  log(`checks: ${redChecks.length} discovered check(s) red after Implement: ` +
+      redChecks.map(c => c.name).join(', '))
+}
+
+// One checks-only fix round before Review, so a purely mechanical defect
+// (a missing version bump, the incident this exists for) is applied as
+// part of the same diff Review reads, rather than reaching a reviewer as
+// something to notice.
+if (blockingChecksOpen() && !sChecksPost.over()) {
+  const preReviewFixed = await treeAgent(
+    `Fix the repo's own failing checks below in the current repo, iterating ` +
+    `with the repo's own test command if a fix needs one. Commit with ` +
+    `crap-commit.sh ${wt.path} -m "...", which gates and commits in one ` +
+    `call: run it in the foreground with a Bash timeout of 600000, never ` +
+    `background it and wait with sleep, and do not pre-run crap-check.sh. ` +
+    `Never create, edit or delete .crap-gated, .mutation-gated or ` +
+    `.comment-gated on your own initiative: that is the repo owner's ` +
+    `decision, not yours. The one exception is a NEXT_ACTION of ` +
+    `UNSUPPORTED_LANGUAGE: halt and report its three options rather than ` +
+    `editing the marker yourself. Set unsupported_language=true when you ` +
+    `do, and put the three options in note; leave head_sha as the ` +
+    `unchanged HEAD if you made no commits before hitting it. Do not push ` +
+    `or open a PR.\n` +
+    `Task: ${brief(task)}\n` +
+    redChecks.map(renderCheck).join('\n\n') + `\n` +
+    `Return head_sha: the full 40-character SHA of HEAD after your last ` +
+    `commit, or of the unchanged HEAD if you committed nothing. Return ` +
+    `scored=true if crap-commit.sh printed that it scored this round's ` +
+    `commits, scored=false otherwise; if it printed its own gate message, ` +
+    `copy it verbatim into gate_note.`,
+    { label: 'checks:fix', schema: FIXED, model: 'sonnet', effort: effortFor.implement })
+  if (preReviewFixed?.scored === true) {
+    scored = true
+    if (preReviewFixed?.gate_note) scoredNote = preReviewFixed.gate_note
+  } else if (preReviewFixed?.gate_note) {
+    unscoredNote = preReviewFixed.gate_note
+  }
+  if (preReviewFixed?.unsupported_language) {
+    sChecksPost.close()
+    stageSpend.checks = checksPreSpend + (stageSpend.checks ?? 0)
+    return await halted('Implement', {
+      plan: plan.plan, implemented: impl.summary, gates: gatesPayload(),
+      checks: checksPayload(),
+      note: preReviewFixed.note,
+    })
+  }
+  // impl.commit_range is what Review reads below; folding the pre-review
+  // fix's head into it is what keeps the version bump inside the diff a
+  // reviewer sees, instead of arriving as a fix round after the fact.
+  const preReviewHead = preReviewFixed?.head_sha?.trim()
+  if (preReviewHead && preReviewHead !== lastCheckedHead) {
+    const implBase = impl.commit_range.includes('..')
+      ? impl.commit_range.split('..')[0].trim() : impl.commit_range.trim()
+    impl.commit_range = `${implBase}..${preReviewHead}`
+    preReviewFixCommitted = true
+    lastCheckedHead = preReviewHead
+    redChecks = await runChecks()
+    log(redChecks.length
+      ? `checks: ${redChecks.length} still red after the pre-review fix round`
+      : `checks: all clear after the pre-review fix round`)
+  }
+}
+sChecksPost.close()
+stageSpend.checks = checksPreSpend + (stageSpend.checks ?? 0)
+
 // A draft PR, opened as soon as there is a commit to hang it on.
 //
 // The alternative, and what this used to do, was to produce a PR only on the
@@ -1252,7 +1513,11 @@ const sReview = stage('review')
 // and a planner asked for risky areas always returns some, so including it
 // pinned `big` to true and made the diffstat agent's answer decorative.
 const big = impl.files_changed.length > 5 || (impl.insertions ?? 999) > 200
-const trivial = impl.files_changed.length <= 1 && (impl.insertions ?? 999) < INLINE_LOC
+// files_changed and insertions describe the implementer's own commits, and
+// the checks-only fix commits after them without updating either. Since this
+// latch can skip review outright, a run that took that fix is never trivial.
+const trivial = !preReviewFixCommitted &&
+  impl.files_changed.length <= 1 && (impl.insertions ?? 999) < INLINE_LOC
 // Named, not positional. The count used to slice a list from the front, so the
 // third lens ran only when someone passed reviewers: 3 by hand, and the size
 // latches silently decided WHICH lenses existed rather than how many. The
@@ -1317,7 +1582,6 @@ if (!reviewerCount) {
 // of the model -- a model-supplied id is exactly as unreliable as the
 // model-supplied title this replaces, so the script stamps its own.
 let findingSeq = 0
-const headOf = (range) => range.includes('..') ? range.split('..')[1].trim() : range.trim()
 // A verifier told to copy an id "in brackets" sometimes copies the brackets
 // too. Strip a matching pair before joining, so [f1] lines up with f1.
 const stripBrackets = (s) => {
@@ -1499,7 +1763,7 @@ const verifyOpen = async (findings, label) => {
 // and a const declared below the loop is in its temporal dead zone.
 const markStale = async (findings) => {
   let staleness = null
-  if (round > 0) {
+  if (round > 0 && findings.length) {
     try {
       staleness = await treeAgent(
         `For each finding below, report whether the code its evidence ` +
@@ -1529,7 +1793,7 @@ const markStale = async (findings) => {
 }
 
 const fixStopReason = () =>
-  !open.length ? 'every finding was resolved'
+  !open.length && !blockingChecksOpen() ? 'every finding and check was resolved'
   : round >= MAX_REVIEW_ROUNDS
     ? `the ${MAX_REVIEW_ROUNDS}-round limit was reached; each of these was ` +
       `checked against the code and is still open`
@@ -1540,11 +1804,15 @@ const fixStopReason = () =>
     ? 'the run passed its overall token budget, so the loop stopped early'
   : 'the loop ended without reaching any of its limits, which should not happen'
 
-while (open.length && round < MAX_REVIEW_ROUNDS && !outOfBudget() && !sFix.over()) {
+while ((open.length || blockingChecksOpen()) && round < MAX_REVIEW_ROUNDS && !outOfBudget() && !sFix.over()) {
   round++
   phase('Fix')
   const fixed = await treeAgent(
-    `Fix these confirmed review findings in the current repo, TDD first, ` +
+    `Fix ` + (open.length && blockingChecksOpen()
+      ? `these confirmed review findings and the repo's own failing checks below`
+      : open.length ? `these confirmed review findings`
+      : `the repo's own failing checks below`) +
+    ` in the current repo, TDD first, ` +
     `iterating with the repo's own test command. Commit with ` +
     `crap-commit.sh ${wt.path} -m "...", which gates and commits in one ` +
     `call: run it in the foreground with a Bash timeout of 600000, never ` +
@@ -1573,8 +1841,15 @@ while (open.length && round < MAX_REVIEW_ROUNDS && !outOfBudget() && !sFix.over(
     `score. Base this on what it printed, never on whether .crap-gated exists ` +
     `and never on your own judgement of the change. If it printed its own ` +
     `gate message, copy it verbatim into gate_note.\n` +
-    `Findings:\n` +
-    open.map(f => `- ${f.title} (${f.file}): ${f.claim}`).join('\n'),
+    (open.length
+      ? `Findings:\n` + open.map(f => `- ${f.title} (${f.file}): ${f.claim}`).join('\n') + `\n`
+      : '') +
+    (blockingChecksOpen()
+      ? `The repo's own checks below are failing. Each is a script the repo ` +
+        `already runs and decides the same way every time, not a reviewer's ` +
+        `opinion; make every one pass rather than silencing its output.\n` +
+        redChecks.map(renderCheck).join('\n\n')
+      : ''),
     { label: `fix:${round}`, schema: FIXED, model: 'sonnet', effort: effortFor.implement })
   // Folded before the halt check below, not after: a fixer that committed part
   // of the work and only then hit the refusal still has a gate result, and the
@@ -1601,6 +1876,7 @@ while (open.length && round < MAX_REVIEW_ROUNDS && !outOfBudget() && !sFix.over(
         `the fixer hit a NEXT_ACTION of UNSUPPORTED_LANGUAGE and halted rather ` +
         `than editing a gate marker, so these findings have not had every round`,
       regression_suspects: regressionSuspects,
+      checks: checksPayload(),
       note: fixed.note,
     })
   }
@@ -1664,7 +1940,13 @@ while (open.length && round < MAX_REVIEW_ROUNDS && !outOfBudget() && !sFix.over(
   } else if (head) {
     reviewedThrough = head
   }
-  log(`round ${round}: ${open.length} finding(s) still open`)
+
+  if (checksBlocking && discoveredChecks.length && head && head !== lastCheckedHead && !outOfBudget()) {
+    redChecks = await runChecks()
+    lastCheckedHead = head
+  }
+  log(`round ${round}: ${open.length} finding(s) still open` +
+      (discoveredChecks.length ? `, ${redChecks.length} check(s) still red` : ''))
 }
 
 // The last round's tail review appends findings and the loop then exits, so
@@ -1744,7 +2026,7 @@ function gatesPayload() {
   }
 }
 
-if (open.length) {
+if (open.length || blockingChecksOpen()) {
   const reported = await markStale(open)
   const staleCount = reported.filter(f => f.code_changed_since_recorded).length
 
@@ -1752,15 +2034,21 @@ if (open.length) {
     plan: plan.plan, implemented: impl.summary, gates: gatesPayload(),
     unresolved_findings: reported, fix_rounds: round, stopped_because: fixStopReason(),
     regression_suspects: regressionSuspects,
+    checks: checksPayload(),
     // Report the round count that actually ran and why the loop ended. This
     // said "survived MAX_REVIEW_ROUNDS rounds" unconditionally, so a loop that
     // stopped early on its token ceiling was reported as findings surviving
     // three rounds it never got. The two need opposite remedies -- raise the
     // ceiling, or judge the findings -- and the note pointed at the wrong one.
-    note: `${open.length} review finding(s) still open after ${round} fix ` +
-          `round(s); ${fixStopReason()}. Stopping before the mutation stage ` +
-          `rather than spending it on work that cannot be marked ready. Judge ` +
-          `each finding: fix it, or reject it as wrong.` +
+    note: `${open.length} review finding(s)` +
+          (blockingChecksOpen() ? ` and ${redChecks.length} discovered check(s)` : '') +
+          ` still open after ${round} fix round(s); ${fixStopReason()}. Stopping ` +
+          `before the mutation stage rather than spending it on work that cannot ` +
+          `be marked ready. Judge each finding: fix it, or reject it as wrong.` +
+          (blockingChecksOpen()
+            ? ` A red check is the repo's own verdict, not a judgement call: ` +
+              `${redChecks.map(c => c.name).join(', ')}.`
+            : '') +
           (regressionSuspects.length
             ? ` Separately, ${regressionSuspects.length} finding(s) were ` +
               `reported again after being verified fixed, and were not ` +
@@ -2026,6 +2314,7 @@ const result = {
   stage_spend: stageSpend,
   implemented: impl.summary,
   gates: gatesPayload(),
+  checks: checksPayload(),
   mutation,
   reviewers: reviewerCount,
   regression_suspects: regressionSuspects,

@@ -37,8 +37,10 @@ check() {
 }
 
 echo "== static: the Mutation prompt carries the marker prohibition"
+# Four now, not three: the pre-review checks-only fix round commits too, so it
+# carries the same prohibition as Implement, Fix and Mutation.
 check "the Mutation prompt says never create/edit/delete the markers" \
-  "$(grep -Fc 'Never create, edit or delete .crap-gated,' "$SCRIPT" || true)" 3
+  "$(grep -Fc 'Never create, edit or delete .crap-gated,' "$SCRIPT" || true)" 4
 check "IMPL, FIXED and GATE each declare unsupported_language as a property" \
   "$(grep -Fc "unsupported_language: { type: 'boolean' }" "$SCRIPT" || true)" 3
 
@@ -117,6 +119,9 @@ function makeAgent(scenario, captured) {
     }
     if (label === 'gate:opt-in') {
       return { crap_gated: true, mutation_gated: true, detail: 'stub' }
+    }
+    if (label === 'checks:discover') {
+      return { checks: [], detail: 'stub: no repo checks' }
     }
     if (label === 'implementer') {
       return scenario.implementer
