@@ -487,7 +487,7 @@ const sBranch = stage('branch')
 const wt = args?.existingBranch
   ? await agent(
       `[touchstone: branch:existing]\n` +
-      `Find the worktree that already holds the current branch, then STOP. Do ` +
+      `Find the worktree that already holds this ticket's branch, then STOP. Do ` +
       `not create a branch, do not create a worktree, do not fetch, do not ` +
       `pull, do not plan or implement.\n` +
       `This task continues work on an existing branch for ticket ${ticket}.\n` +
@@ -498,36 +498,53 @@ const wt = args?.existingBranch
       `directories that no longer exist on disk; it never touches a directory ` +
       `that does exist. Run it before listing worktrees so a stale record left ` +
       `behind by a hand-deleted directory cannot be matched below.\n` +
-      `2. Return created=false if HEAD is detached, or if the current branch is ` +
-      `the repo's base branch (main, master, or whatever origin/HEAD names). ` +
-      `Committing follow-up work straight onto the base is not what this mode is ` +
-      `for.\n` +
-      `3. Note the current branch name (git branch --show-current), then run ` +
-      `git worktree list --porcelain. It prints one record per worktree: a ` +
-      `"worktree <path>" line followed by a "branch refs/heads/<name>" line (or ` +
-      `"detached"/"bare"). A branch already checked out somewhere cannot also ` +
-      `have a worktree created for it here, git refuses that outright, so the ` +
-      `existing record is what this task must use, not a new one.\n` +
-      `4. Find the record whose branch matches the current branch name and take ` +
-      `its path. That path is correct whether it is the main checkout or a ` +
-      `linked worktree: the branch lives there and nowhere else.\n` +
-      `5. If no record matches (the branch is checked out in no worktree at ` +
-      `all), return created=false and say so. Do not create one for it; that is ` +
-      `what the default (non-existingBranch) mode is for.\n` +
+      `2. Find the repo root: dirname "$(git rev-parse --path-format=absolute ` +
+      `--git-common-dir)". Do not use git rev-parse --show-toplevel for this: ` +
+      `the invoking session usually runs inside another worktree, and ` +
+      `--show-toplevel would return that one, not the repo.\n` +
+      `3. Run git worktree list --porcelain. It prints one record per worktree: ` +
+      `a "worktree <path>" line followed by a "branch refs/heads/<name>" line ` +
+      `(or "detached"/"bare").\n` +
+      `4. Ticket lookup, tried first regardless of what the invoking checkout is ` +
+      `on: the base branch, another feature branch, or detached HEAD are all ` +
+      `fine here, because the branch this task needs lives in its own worktree, ` +
+      `not necessarily in whichever tree happens to be checked out right now. ` +
+      `Find every record whose branch, after its first "/", begins with ` +
+      `"${ticketMarker}-" -- that is <type>/${ticketMarker}-<slug>, the exact ` +
+      `shape a fresh run of this workflow cuts. Match on that marker segment, ` +
+      `never on this task's own branch-type prefix: a branch cut as ` +
+      `feat/${ticketMarker}-x must still be found here even if this run asks ` +
+      `for a different type. Its canonical directory is ` +
+      `<repo-root>/.claude/worktrees/${ticketMarker}-<slug>, the expected ` +
+      `location, but the record's own path wins if it differs: the branch lives ` +
+      `where git says it lives, not where convention says it should.\n` +
+      `   - Exactly one match: that is the tree to use. Go to step 6.\n` +
+      `   - Two or more matches: return created=false, listing every matching ` +
+      `branch and its path. Do not guess which one this task means.\n` +
+      `5. Only if step 4 matched nothing: fall back to whatever is actually ` +
+      `checked out here (git branch --show-current). If HEAD is detached, or ` +
+      `the current branch is the repo's base branch (main, master, or whatever ` +
+      `origin/HEAD names), return created=false saying no worktree for ` +
+      `${ticketMarker} was found and the current checkout is not on a feature ` +
+      `branch either. Otherwise take the git worktree list --porcelain record ` +
+      `for that branch (every checked-out branch has one) and use its path. An ` +
+      `unmarked pre-existing branch is allowed here and is not a failure: it ` +
+      `predates the convention.\n` +
       `6. This mode commits into the tree holding the branch, and a later phase ` +
       `runs git add -A there, so unrelated dirty files sitting in that tree ` +
       `would be swept into a commit. Check git -C <path> status --porcelain, ` +
-      `using the matched record's own path from step 4, whether that is the ` +
-      `main checkout or a linked worktree; the risk is the same either way. If ` +
-      `it is non-empty, return created=false, dirty=true, and say what is ` +
+      `using the matched record's own path from step 4 or 5, whether that is ` +
+      `the main checkout or a linked worktree; the risk is the same either way. ` +
+      `If it is non-empty, return created=false, dirty=true, and say what is ` +
       `dirty. Never stash, reset, or discard the user's work.\n` +
-      `7. Otherwise return created=true, branch set to the current branch name, ` +
-      `base set to the repo's base branch, and path set to the absolute path ` +
-      `from the matching record. Note in detail whether that path is the main ` +
+      `7. Otherwise return created=true, branch set to the matched record's own ` +
+      `branch name (never git branch --show-current, which names the invoking ` +
+      `checkout and not necessarily this ticket's branch), base set to the ` +
+      `repo's base branch, and path set to the absolute path from the matching ` +
+      `record. Note in detail whether the match came from the ticket lookup ` +
+      `(step 4) or the fallback (step 5), whether that path is the main ` +
       `checkout or a linked worktree, and whether the branch name carries a ` +
-      `jira- or gh- marker. An unmarked pre-existing branch is allowed here and ` +
-      `is not a failure: it predates the convention. Say so plainly so the ` +
-      `session is known to be untrackable by branch name.` + RECORD('branch:existing'),
+      `jira- or gh- marker.` + RECORD('branch:existing'),
       { label: 'branch:existing', schema: BRANCH, model: 'haiku', effort: 'low' })
   // A worktree is a separate checkout, so the main tree's state is irrelevant
   // to it; cutting from origin/<base> is what removes the need to touch the
@@ -630,8 +647,13 @@ if (!wt?.created) {
         'nothing was planned or implemented. Commit or stash them, then ' +
         're-run.'
       : args?.existingBranch
-      ? 'No usable worktree, so nothing was planned or implemented. Check ' +
-        'out the branch this work belongs on, then re-run.'
+      ? `No usable worktree, so nothing was planned or implemented. Looked ` +
+        `for a linked worktree holding a ${args?.branchType ?? 'feat'}/` +
+        `${ticketMarker}-<slug> branch (expected under ` +
+        `.claude/worktrees/${ticketMarker}-<slug>) and found none; the ` +
+        `current checkout is not on a feature branch either. Re-run without ` +
+        `existingBranch to cut one, or pass existingBranch: true again once ` +
+        `a worktree for this ticket exists.`
       : 'No worktree was created, so nothing was planned or implemented. ' +
         'Resolve the base branch problem in detail, then re-run. If fetch ' +
         'cannot run here (a remote needing a hardware key, for example), ' +

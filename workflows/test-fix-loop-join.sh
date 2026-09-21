@@ -256,6 +256,39 @@ check "the stale local base alone would widen the range past it" \
   "$([ "$LOCAL_RANGE_COUNT" -gt "$ORIGIN_RANGE_COUNT" ] && echo yes || echo no)" yes
 
 echo ""
+echo "== existingBranch lookup: a linked worktree for a ticket's branch is found by git worktree list --porcelain, whatever the main checkout is on"
+EXIST_ORIGIN="$WORK/exist-origin.git"
+git init -q --bare "$EXIST_ORIGIN"
+
+EXIST_MAIN="$WORK/exist-main"
+git clone -q "$EXIST_ORIGIN" "$EXIST_MAIN"
+git -C "$EXIST_MAIN" config user.email test@example.com
+git -C "$EXIST_MAIN" config user.name test
+git -C "$EXIST_MAIN" config commit.gpgsign false
+
+echo "base" > "$EXIST_MAIN/tracked.txt"
+git -C "$EXIST_MAIN" add tracked.txt
+git -C "$EXIST_MAIN" commit -qm "initial commit on main"
+git -C "$EXIST_MAIN" push -q origin HEAD:main
+
+EXIST_WT="$WORK/exist-worktree-gh-21"
+git -C "$EXIST_MAIN" worktree add -q "$EXIST_WT" -b feat/gh-21-retry-path origin/main
+# git's own porcelain output reports the canonical path (symlinks resolved),
+# which on macOS differs from $EXIST_WT under /var; resolve the same way
+# before comparing rather than string-matching the pre-resolution form.
+EXIST_WT_CANON="$(cd "$EXIST_WT" && pwd -P)"
+
+MATCHED_PATH="$(git -C "$EXIST_MAIN" worktree list --porcelain | awk '
+  /^worktree / { path = $2 }
+  /^branch refs\/heads\/feat\/gh-21-retry-path$/ { print path }
+')"
+
+check "the git worktree list --porcelain match resolves to the linked worktree path" \
+  "$MATCHED_PATH" "$EXIST_WT_CANON"
+check "git branch --show-current in the main checkout reports main, not the ticket branch" \
+  "$(git -C "$EXIST_MAIN" branch --show-current)" "main"
+
+echo ""
 echo "== fix loop: running the real script under stubbed globals"
 
 cat > "$WORK/harness.mjs" <<'JS_EOF'
@@ -324,6 +357,10 @@ function makeAgent(scenario, captured) {
       return { scope: 'inline', complexity: 'trivial', complexity_note: 'stub',
         premise_ok: true, estimated_loc: 5, evidence: [], premise_note: 'stub',
         ...(scenario.triage ?? {}) }
+    }
+    if (label === 'planner') {
+      return scenario.plannerResult ?? { plan: 'stub plan', acceptance_criteria: [],
+        risky_areas: [], task_demands_implementation: false }
     }
     if (label === 'implementer') {
       return { summary: 'stub implementation', files_changed: ['a.js', 'b.js'],
@@ -1686,6 +1723,47 @@ async function scenarioBH() {
     p.includes('origin/HEAD first'), true)
 }
 
+// Scenario BI -- a marker-matching worktree record must be usable regardless
+// of the invoking checkout: it must actually carry the run through Plan, not
+// merely fail to halt at Worktree, because the two used to be conflated (the
+// old guard halted at Worktree for exactly this case).
+async function scenarioBI() {
+  console.log('\n== scenario BI: existingBranch with a matched worktree and team-scoped triage reaches Plan')
+  const { result, captured } = await run({
+    args: { existingBranch: true },
+    existingBranchResult: { created: true, branch: 'feat/gh-21-stub', base: 'main',
+      path: '/tmp/stub-worktree', ticket: '21', detail: 'stub' },
+    triage: { scope: 'team', estimated_loc: 50 },
+    plannerResult: { plan: 'stub plan', acceptance_criteria: [], risky_areas: [],
+      task_demands_implementation: false },
+    initialReview: { correctness: [], advocate: [] },
+    verify: () => undefined,
+    staleness: () => [],
+  })
+  check('the run does not halt at Worktree', result.halted_at === 'Worktree', false)
+  check('the planner ran exactly once', callCount(captured, 'planner'), 1)
+}
+
+// Scenario BJ -- the existingBranch halt note used to tell the user to check
+// out the branch in the main checkout, the one thing this project's own
+// CONTRIBUTING.md tells an agent never to do. It must instead name what the
+// prompt actually looked for.
+async function scenarioBJ() {
+  console.log('\n== scenario BJ: the existingBranch halt note names what it looked for, not a checkout instruction')
+  const { result } = await run({
+    args: { existingBranch: true },
+    existingBranchResult: { created: false, branch: '', base: '', path: '',
+      detail: 'no worktree found for gh-21', dirty: false },
+  })
+  check('halted at Worktree', result.halted_at, 'Worktree')
+  check('the note does not advise checking out a branch',
+    /check out the branch/i.test(result.note ?? ''), false)
+  check('the note names the branch shape the prompt looked for',
+    (result.note ?? '').includes('feat/gh-21-<slug>'), true)
+  check('the note names the directory the prompt looked for',
+    (result.note ?? '').includes('.claude/worktrees/gh-21-<slug>'), true)
+}
+
 // Scenario AZ -- the defect #81 is about. A lens points a fresh finding at a
 // settled one because the fix for that finding introduced this one. Assuming
 // it was a re-report readied a PR carrying a real regression, under
@@ -1752,7 +1830,7 @@ for (const scenario of [scenarioA, scenarioB, scenarioG, scenarioC, scenarioD, s
                         scenarioAW, scenarioAX, scenarioAY,
                         scenarioAP, scenarioAQ, scenarioAR, scenarioBB, scenarioBC, scenarioBD,
                         scenarioBE, scenarioAZ, scenarioBA, scenarioBF, scenarioBG,
-                        scenarioBH]) {
+                        scenarioBH, scenarioBI, scenarioBJ]) {
   await scenario()
 }
 
