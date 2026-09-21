@@ -2296,6 +2296,146 @@ async function scenarioBZ() {
   check('the prompt carries the exit code verbatim', checksFix.includes('exited 4'), true)
 }
 
+// Scenario CC -- #44: a locus a reviewer already read reaches the fix brief
+// verbatim, so the fixer can open the location directly. A single-line span
+// (line_end === line_start) must not render a redundant N-N range.
+async function scenarioCC() {
+  console.log('\n== scenario CC: a finding\'s locus reaches the fix brief with its file and line span')
+  const { result, captured } = await run({
+    initialReview: {
+      correctness: [
+        { title: 'Off-by-one span', file: 'src/parser.js', claim: 'boundary is wrong',
+          evidence: 'parser.js:12', line_start: 12, line_end: 18 },
+        { title: 'Single-line span', file: 'src/other.js', claim: 'wrong guard',
+          evidence: 'other.js:40', line_start: 40, line_end: 40 },
+      ],
+      advocate: [],
+    },
+    verify: (id) => (id === 'f1' || id === 'f2') ? true : undefined,
+  })
+  const fix1 = captured.calls.find(c => c.label === 'fix:1')?.prompt ?? ''
+  check('the fix phase ran', fix1.length > 0, true)
+  check('a multi-line locus reaches the fix brief', fix1.includes('src/parser.js:12-18'), true)
+  check('a single-line locus reaches the fix brief', fix1.includes('src/other.js:40'), true)
+  check('the single-line locus is not rendered as a 40-40 range', fix1.includes('src/other.js:40-40'), false)
+  check('halted_at is absent (both findings verified fixed)', result.halted_at, undefined)
+}
+
+// Scenario CD -- #44: the fix brief used to tell the fixer to read the whole
+// commit range for context. That instruction is gone; the locus replaces it.
+async function scenarioCD() {
+  console.log('\n== scenario CD: the fix brief no longer tells the agent to read the whole commit range for context')
+  const { captured } = await run({
+    initialReview: {
+      correctness: [{ title: 'Needs a fix', file: 'a.js', claim: 'c', evidence: 'e',
+        line_start: 5, line_end: 9 }],
+      advocate: [],
+    },
+    verify: (id) => id === 'f1' ? true : undefined,
+  })
+  const fix1 = captured.calls.find(c => c.label === 'fix:1')?.prompt ?? ''
+  check('the fix phase ran', fix1.length > 0, true)
+  check('the old whole-range-for-context instruction is gone',
+    fix1.includes('read that diff for context'), false)
+  check('the fix brief carries the locus instead', fix1.includes('a.js:5-9'), true)
+}
+
+// Scenario CE -- #44: verify used to be given no range at all (an implicit,
+// unbounded read of the whole tree). It is now judged against exactly the
+// diff the fix round it follows produced.
+async function scenarioCE() {
+  console.log('\n== scenario CE: verify is judged against the fix round\'s own commit range')
+  const { captured } = await run({
+    initialReview: {
+      correctness: [{ title: 'Needs a fix', file: 'a.js', claim: 'c', evidence: 'e',
+        line_start: 5, line_end: 9 }],
+      advocate: [],
+    },
+    verify: (id) => id === 'f1' ? true : undefined,
+    fixHead: () => 'fix00000000000000000000000000000000000001',
+  })
+  const verify1 = captured.calls.find(c => c.label === 'verify:1')?.prompt ?? ''
+  check('verify ran', verify1.length > 0, true)
+  check('verify is handed exactly this round\'s diff',
+    verify1.includes(`${REVIEWED_THROUGH}..fix00000000000000000000000000000000000001`), true)
+}
+
+// Scenario CF -- #44: silent re-ranging must not be possible. Verify may look
+// past its given range, but only when that range cannot answer the question,
+// and only while saying so in the finding's own note.
+async function scenarioCF() {
+  console.log('\n== scenario CF: verify may widen past its range only while disclosing it in the note')
+  const { captured } = await run({
+    initialReview: {
+      correctness: [{ title: 'Needs a fix', file: 'a.js', claim: 'c', evidence: 'e' }],
+      advocate: [],
+    },
+    verify: (id) => id === 'f1' ? true : undefined,
+  })
+  const verify1 = captured.calls.find(c => c.label === 'verify:1')?.prompt ?? ''
+  check('verify ran', verify1.length > 0, true)
+  check('widening is allowed only when the range cannot answer the question',
+    verify1.includes('Widen beyond this range only when the diff itself cannot answer the question'), true)
+  check('a widen must be disclosed in that finding\'s own note',
+    verify1.includes("say in that finding's note that you widened and why"), true)
+}
+
+// Scenario CG -- #44: a lens that cannot name a clean span (a deletion, a
+// repo-wide pattern) must not break the run; the schema field is optional.
+async function scenarioCG() {
+  console.log('\n== scenario CG: a finding without a line span still flows through the fix loop unbroken')
+  const { result, captured } = await run({
+    initialReview: {
+      correctness: [{ title: 'No span reported', file: 'noloc.js', claim: 'c', evidence: 'e' }],
+      advocate: [],
+    },
+    verify: (id) => id === 'f1' ? true : undefined,
+  })
+  const fix1 = captured.calls.find(c => c.label === 'fix:1')?.prompt ?? ''
+  check('the fix phase ran', fix1.length > 0, true)
+  check('the finding still renders by its bare file', fix1.includes('(noloc.js):'), true)
+  check('halted_at is absent (the run finished; the missing span did not break it)',
+    result.halted_at, undefined)
+}
+
+// Scenario CH -- #44: the fix agent's own per-round spend, the cost this
+// ticket targets, must reach a halt so a round that never converges is still
+// measurable against the ceiling that stopped it.
+async function scenarioCH() {
+  console.log('\n== scenario CH: fix_round_output records the fix agent\'s own spend per round, on a halt')
+  const { result } = await run({
+    args: { maxReviewRounds: 1 },
+    initialReview: {
+      correctness: [{ title: 'Still open', file: 'a.js', claim: 'c', evidence: 'e' }],
+      advocate: [],
+    },
+    verify: () => undefined,
+    staleness: () => [],
+  })
+  check('halted at Fix', result.halted_at, 'Fix')
+  check('one round ran', result.fix_rounds, 1)
+  check('fix_round_output has one entry', result.fix_round_output?.length, 1)
+  check('the entry names round 1', result.fix_round_output?.[0]?.round, 1)
+  check('the entry carries a finite output figure',
+    Number.isFinite(result.fix_round_output?.[0]?.output), true)
+}
+
+// Scenario CI -- #44: the same field on the ordinary, non-halt exit, so a run
+// that resolves cleanly is comparable to one that halts.
+async function scenarioCI() {
+  console.log('\n== scenario CI: fix_round_output reaches the final result on a run that resolves cleanly')
+  const { result } = await run({
+    initialReview: {
+      correctness: [{ title: 'Will be fixed', file: 'a.js', claim: 'c', evidence: 'e' }],
+      advocate: [],
+    },
+    verify: (id) => id === 'f1' ? true : undefined,
+  })
+  check('halted_at is absent (the run finished)', result.halted_at, undefined)
+  check('exactly one fix round ran', result.fix_rounds, 1)
+  check('fix_round_output carries that one round', result.fix_round_output?.length, 1)
+}
+
 for (const scenario of [scenarioA, scenarioB, scenarioG, scenarioC, scenarioD, scenarioE, scenarioH,
                         scenarioI, scenarioJ, scenarioK, scenarioL, scenarioM, scenarioN,
                         scenarioO, scenarioP, scenarioQ, scenarioR, scenarioS, scenarioT,
@@ -2310,7 +2450,9 @@ for (const scenario of [scenarioA, scenarioB, scenarioG, scenarioC, scenarioD, s
                         scenarioBH, scenarioBI, scenarioBJ, scenarioBK, scenarioBL,
                         scenarioBM, scenarioBN, scenarioBO, scenarioBP, scenarioBQ,
                         scenarioBR, scenarioBS, scenarioBT, scenarioBU, scenarioBV, scenarioBW,
-                        scenarioBX, scenarioBY, scenarioBZ, scenarioCA, scenarioCB]) {
+                        scenarioBX, scenarioBY, scenarioBZ, scenarioCA, scenarioCB,
+                        scenarioCC, scenarioCD, scenarioCE, scenarioCF, scenarioCG,
+                        scenarioCH, scenarioCI]) {
   await scenario()
 }
 
