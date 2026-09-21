@@ -1189,26 +1189,6 @@ const executeChecks = async () => {
     discoveredChecks.map(c => `${c.name}: ${c.command}`).join('\n'),
     { label: `checks:run:${checkAttempt}`, schema: CHECK_RUN, model: 'haiku', effort: 'low' })
 }
-const toRedList = (results) => (Array.isArray(results) ? results : [])
-  .filter(r => r?.exit_code !== 0)
-  .map(r => ({ id: `check:${r.name}`, name: r.name, command: r.command,
-               exit_code: r.exit_code, output: r.output }))
-// A check nobody reported on is unknown, and unknown is red. Reading a
-// missing row as a pass would put the verdict back in the shape of the
-// model's answer, which is the thing this phase exists to take it out of. At
-// the baseline it errs the same way it should: unreported means dropped as
-// environmental, never blocking on something that was never measured.
-const runChecks = async () => {
-  if (!discoveredChecks.length) return []
-  const outcome = await executeChecks()
-  const reported = new Set((Array.isArray(outcome?.results) ? outcome.results : [])
-    .map(r => r?.name))
-  const unreported = discoveredChecks.filter(c => !reported.has(c.name))
-    .map(c => ({ id: `check:${c.name}`, name: c.name, command: c.command,
-                 exit_code: null, output: 'no result was reported for this check' }))
-  return [...toRedList(outcome?.results), ...unreported]
-}
-
 const CHECK_HEAD_BYTES = 1024
 const CHECK_TAIL_BYTES = 8192
 // A cap stated only in a prompt is a request; a slice is a bound. Head and
@@ -1222,7 +1202,28 @@ const truncateOutput = (s) => {
     `\n[touchstone: truncated, ${omitted} bytes omitted]\n` +
     t.slice(t.length - CHECK_TAIL_BYTES)
 }
-const renderCheck = (c) => `Check ${c.name} (${c.command}) exited ${c.exit_code}:\n${truncateOutput(c.output)}`
+const toRedList = (results) => (Array.isArray(results) ? results : [])
+  .filter(r => r?.exit_code !== 0)
+  .map(r => ({ id: `check:${r.name}`, name: r.name, command: r.command,
+               exit_code: r.exit_code, output: truncateOutput(r.output) }))
+// A check nobody reported on is unknown, and unknown is red. Reading a
+// missing row as a pass would put the verdict back in the shape of the
+// model's answer, which is the thing this phase exists to take it out of.
+// The baseline does not come through here: an unreported row there is left
+// in place rather than dropped, since a missing answer is no evidence that a
+// check is environmental.
+const runChecks = async () => {
+  if (!discoveredChecks.length) return []
+  const outcome = await executeChecks()
+  const reported = new Set((Array.isArray(outcome?.results) ? outcome.results : [])
+    .map(r => r?.name))
+  const unreported = discoveredChecks.filter(c => !reported.has(c.name))
+    .map(c => ({ id: `check:${c.name}`, name: c.name, command: c.command,
+                 exit_code: null, output: 'no result was reported for this check' }))
+  return [...toRedList(outcome?.results), ...unreported]
+}
+
+const renderCheck = (c) => `Check ${c.name} (${c.command}) exited ${c.exit_code}:\n${c.output}`
 
 // A check red before any work started is the repo's own environment, not
 // this run's doing, and there is no way to tell the two apart other than
@@ -1275,9 +1276,9 @@ function checksPayload() {
 }
 // Red but not blocking (existingBranch) reaches the fixer as nothing at
 // all: it is visibility for a human, not work to hand to an agent.
+let preReviewFixCommitted = false
 const blockingChecksOpen = () => checksBlocking && redChecks.length > 0
 
-phase('Implement')
 const sImpl = stage('implement')
 const impl = await treeAgent(
   `Implement this task in the current repo.\n` +
@@ -1428,6 +1429,7 @@ if (blockingChecksOpen() && !sChecksPost.over()) {
     const implBase = impl.commit_range.includes('..')
       ? impl.commit_range.split('..')[0].trim() : impl.commit_range.trim()
     impl.commit_range = `${implBase}..${preReviewHead}`
+    preReviewFixCommitted = true
     lastCheckedHead = preReviewHead
     redChecks = await runChecks()
     log(redChecks.length
@@ -1511,7 +1513,11 @@ const sReview = stage('review')
 // and a planner asked for risky areas always returns some, so including it
 // pinned `big` to true and made the diffstat agent's answer decorative.
 const big = impl.files_changed.length > 5 || (impl.insertions ?? 999) > 200
-const trivial = impl.files_changed.length <= 1 && (impl.insertions ?? 999) < INLINE_LOC
+// files_changed and insertions describe the implementer's own commits, and
+// the checks-only fix commits after them without updating either. Since this
+// latch can skip review outright, a run that took that fix is never trivial.
+const trivial = !preReviewFixCommitted &&
+  impl.files_changed.length <= 1 && (impl.insertions ?? 999) < INLINE_LOC
 // Named, not positional. The count used to slice a list from the front, so the
 // third lens ran only when someone passed reviewers: 3 by hand, and the size
 // latches silently decided WHICH lenses existed rather than how many. The
@@ -1935,7 +1941,7 @@ while ((open.length || blockingChecksOpen()) && round < MAX_REVIEW_ROUNDS && !ou
     reviewedThrough = head
   }
 
-  if (discoveredChecks.length && head && head !== lastCheckedHead && !outOfBudget()) {
+  if (checksBlocking && discoveredChecks.length && head && head !== lastCheckedHead && !outOfBudget()) {
     redChecks = await runChecks()
     lastCheckedHead = head
   }
