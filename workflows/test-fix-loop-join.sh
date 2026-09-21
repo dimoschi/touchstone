@@ -1580,8 +1580,8 @@ async function scenarioBB() {
     staleness: () => [],
   })
   const p = captured.calls.find(c => c.label === 'branch:existing')?.prompt ?? ''
-  check('the guard checks the matched record\'s own path from step 4',
-    p.includes("using the matched record's own path from step 4"), true)
+  check('the guard checks the matched or re-attached path from step 4, 5, or 6',
+    p.includes("using the matched or re-attached path from step 4, 5, or 6"), true)
   check('the guard applies whether that path is the main checkout or a linked worktree',
     p.includes('whether that is the main checkout or a linked worktree'), true)
   check('the incorrect main-checkout-only carve-out is gone',
@@ -1747,7 +1747,11 @@ async function scenarioBI() {
 // Scenario BJ -- the existingBranch halt note used to tell the user to check
 // out the branch in the main checkout, the one thing this project's own
 // CONTRIBUTING.md tells an agent never to do. It must instead name what the
-// prompt actually looked for.
+// prompt actually looked for -- and the lookup ignores branch type (#87), so
+// the note must not claim it searched a type-scoped name like
+// feat/gh-21-<slug>: with --type fix that claim is both wrong and, since the
+// type has no effect on the lookup, useless advice to re-run with a different
+// --type.
 async function scenarioBJ() {
   console.log('\n== scenario BJ: the existingBranch halt note names what it looked for, not a checkout instruction')
   const { result } = await run({
@@ -1758,10 +1762,101 @@ async function scenarioBJ() {
   check('halted at Worktree', result.halted_at, 'Worktree')
   check('the note does not advise checking out a branch',
     /check out the branch/i.test(result.note ?? ''), false)
-  check('the note names the branch shape the prompt looked for',
-    (result.note ?? '').includes('feat/gh-21-<slug>'), true)
+  check('the note names the marker it looked for, with no branch-type prefix',
+    (result.note ?? '').includes('gh-21-<slug>') && !(result.note ?? '').includes('feat/gh-21-<slug>'),
+    true)
   check('the note names the directory the prompt looked for',
     (result.note ?? '').includes('.claude/worktrees/gh-21-<slug>'), true)
+  check('the note says the search was not scoped to one branch type',
+    /any branch type/i.test(result.note ?? ''), true)
+}
+
+// Scenario BK -- #87: a branch the pipeline created can lose its worktree (the
+// directory gets cleaned up by hand while the PR stays open) without losing
+// the branch itself, since git worktree prune only drops the registration.
+// The existingBranch prompt must fall back to a plain branch lookup and
+// re-attach a worktree to it, rather than stopping at the worktree-only
+// lookup and telling the user to cut a duplicate branch.
+async function scenarioBK() {
+  console.log('\n== scenario BK: the existingBranch prompt falls back to a worktree-less branch match')
+  const { captured } = await run({
+    args: { existingBranch: true },
+    initialReview: { correctness: [], advocate: [] },
+    verify: () => undefined,
+    staleness: () => [],
+  })
+  const p = captured.calls.find(c => c.label === 'branch:existing')?.prompt ?? ''
+  check('the prompt looks up a branch with no worktree of its own',
+    p.includes('git branch --list'), true)
+  check('the prompt re-attaches a worktree rather than creating a new branch',
+    p.includes('git worktree add') && p.includes('no -b, the branch already exists'), true)
+  check('the prompt explains why the branch can outlive its worktree',
+    p.includes('git worktree prune') && p.includes('never the branch itself'), true)
+  check('the top-line restriction no longer bars every worktree creation',
+    p.includes('do not create a worktree, do not fetch'), false)
+  check('the top-line restriction still bars creating a branch',
+    p.includes('Do not create a branch'), true)
+}
+
+// Scenario BL -- #87: the step 5/6 fallback to whatever is checked out here
+// must not bless a branch marked for a different ticket. The invoking
+// session usually runs inside another worktree, so this is reachable: run
+// with --existing on ticket 88 from inside the gh-87 worktree, and if 88 has
+// no worktree or branch of its own yet, the old fallback took gh-87's branch
+// unguarded and committed 88's work onto 87's PR.
+async function scenarioBL() {
+  console.log('\n== scenario BL: the existingBranch prompt refuses a fallback branch marked for another ticket')
+  const { captured } = await run({
+    args: { existingBranch: true },
+    initialReview: { correctness: [], advocate: [] },
+    verify: () => undefined,
+    staleness: () => [],
+  })
+  const p = captured.calls.find(c => c.label === 'branch:existing')?.prompt ?? ''
+  check('the fallback refuses a branch carrying another ticket\'s marker',
+    p.includes('a jira- or gh- marker other than'), true)
+  check('the refusal is distinguished from the plain not-found halt',
+    p.includes('wrong-ticket'), true)
+}
+
+// Scenario BM -- #87: two or more matching branches (from either the
+// worktree lookup or the worktree-less branch lookup) must halt with a note
+// that says an ambiguous match was found, not the plain not-found note
+// (which used to fire for both cases and, worse, told the user to cut a
+// third branch for the same ticket).
+async function scenarioBM() {
+  console.log('\n== scenario BM: an ambiguous existingBranch match halts with its own note, not the not-found note')
+  const { result } = await run({
+    args: { existingBranch: true },
+    existingBranchResult: { created: false, branch: '', base: '', path: '',
+      detail: 'two branches carry the gh-21 marker: feat/gh-21-a, fix/gh-21-b',
+      dirty: false, halt_reason: 'ambiguous' },
+  })
+  check('halted at Worktree', result.halted_at, 'Worktree')
+  check('the note reports the ambiguity rather than claiming nothing was found',
+    /more than one/i.test(result.note ?? ''), true)
+  check('the note does not recommend cutting a new branch',
+    (result.note ?? '').includes('Re-run without existingBranch to cut one'), false)
+  check('the note carries the matched branches',
+    (result.note ?? '').includes('feat/gh-21-a'), true)
+}
+
+// Scenario BN -- #87: the wrong-ticket refusal (scenario BL's prompt text)
+// must halt with a note naming the mismatch, not the plain not-found note.
+async function scenarioBN() {
+  console.log('\n== scenario BN: a fallback branch for another ticket halts with its own note')
+  const { result } = await run({
+    args: { existingBranch: true },
+    existingBranchResult: { created: false, branch: '', base: '', path: '',
+      detail: 'checked-out branch fix/gh-99-other carries the gh-99 marker, not gh-21',
+      dirty: false, halt_reason: 'wrong-ticket' },
+  })
+  check('halted at Worktree', result.halted_at, 'Worktree')
+  check('the note names the mismatch rather than claiming nothing was found',
+    /different ticket/i.test(result.note ?? ''), true)
+  check('cutting a new branch is safe advice here: the lookup already ' +
+    'covered every worktree and branch for this ticket and found none',
+    (result.note ?? '').includes('Re-run without existingBranch to cut one'), true)
 }
 
 // Scenario AZ -- the defect #81 is about. A lens points a fresh finding at a
@@ -1830,7 +1925,8 @@ for (const scenario of [scenarioA, scenarioB, scenarioG, scenarioC, scenarioD, s
                         scenarioAW, scenarioAX, scenarioAY,
                         scenarioAP, scenarioAQ, scenarioAR, scenarioBB, scenarioBC, scenarioBD,
                         scenarioBE, scenarioAZ, scenarioBA, scenarioBF, scenarioBG,
-                        scenarioBH, scenarioBI, scenarioBJ]) {
+                        scenarioBH, scenarioBI, scenarioBJ, scenarioBK, scenarioBL,
+                        scenarioBM, scenarioBN]) {
   await scenario()
 }
 

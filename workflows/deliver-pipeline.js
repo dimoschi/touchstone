@@ -217,6 +217,10 @@ const BRANCH = {
     ticket: { type: 'string' },
     detail: { type: 'string' },
     dirty: { type: 'boolean' },
+    // Only the branch:existing prompt sets this, and only on the two halts
+    // that need a note distinct from the plain not-found one: an ambiguous
+    // marker match, or a fallback branch marked for a different ticket.
+    halt_reason: { type: 'string', enum: ['ambiguous', 'wrong-ticket'] },
   },
 }
 
@@ -488,12 +492,15 @@ const wt = args?.existingBranch
   ? await agent(
       `[touchstone: branch:existing]\n` +
       `Find the worktree that already holds this ticket's branch, then STOP. Do ` +
-      `not create a branch, do not create a worktree, do not fetch, do not ` +
-      `pull, do not plan or implement.\n` +
+      `not create a branch, do not fetch, do not pull, do not plan or ` +
+      `implement. The one exception is step 5: re-attaching a worktree to a ` +
+      `branch that already exists is not creating one.\n` +
       `This task continues work on an existing branch for ticket ${ticket}.\n` +
-      `One field matters on every response below, halts included: dirty is ` +
-      `true only for step 6's dirty-checkout halt, false in every other ` +
-      `response.\n` +
+      `Two fields matter on every response below, halts included: dirty is ` +
+      `true only for step 7's dirty-checkout halt, false in every other ` +
+      `response; halt_reason is "ambiguous" for the two-or-more-matches halts ` +
+      `in steps 4 and 5, "wrong-ticket" for the different-ticket halt in step ` +
+      `6, and unset in every other response.\n` +
       `1. Run git worktree prune. It only removes registrations for worktree ` +
       `directories that no longer exist on disk; it never touches a directory ` +
       `that does exist. Run it before listing worktrees so a stale record left ` +
@@ -518,33 +525,57 @@ const wt = args?.existingBranch
       `<repo-root>/.claude/worktrees/${ticketMarker}-<slug>, the expected ` +
       `location, but the record's own path wins if it differs: the branch lives ` +
       `where git says it lives, not where convention says it should.\n` +
-      `   - Exactly one match: that is the tree to use. Go to step 6.\n` +
-      `   - Two or more matches: return created=false, listing every matching ` +
-      `branch and its path. Do not guess which one this task means.\n` +
-      `5. Only if step 4 matched nothing: fall back to whatever is actually ` +
-      `checked out here (git branch --show-current). If HEAD is detached, or ` +
-      `the current branch is the repo's base branch (main, master, or whatever ` +
-      `origin/HEAD names), return created=false saying no worktree for ` +
-      `${ticketMarker} was found and the current checkout is not on a feature ` +
-      `branch either. Otherwise take the git worktree list --porcelain record ` +
-      `for that branch (every checked-out branch has one) and use its path. An ` +
-      `unmarked pre-existing branch is allowed here and is not a failure: it ` +
-      `predates the convention.\n` +
-      `6. This mode commits into the tree holding the branch, and a later phase ` +
+      `   - Exactly one match: that is the tree to use. Go to step 7.\n` +
+      `   - Two or more matches: return created=false, halt_reason=ambiguous, ` +
+      `listing every matching branch and its path in detail. Do not guess ` +
+      `which one this task means.\n` +
+      `5. Only if step 4 matched nothing: a branch can carry the ` +
+      `${ticketMarker} marker with no worktree of its own. git worktree ` +
+      `prune (step 1) drops a worktree's registration once its directory is ` +
+      `gone, but never the branch itself, and the usual way that happens is ` +
+      `a worktree cleaned up by hand while its branch and PR stay open. Run ` +
+      `git branch --list "*/${ticketMarker}-*" to check for one.\n` +
+      `   - Exactly one match: re-attach a worktree to it rather than losing ` +
+      `it. Its canonical directory is ` +
+      `<repo-root>/.claude/worktrees/${ticketMarker}-<slug>; if that path is ` +
+      `already occupied by something else, return created=false naming the ` +
+      `path and what is there. Otherwise run git worktree add <path> ` +
+      `<branch> -- no -b, the branch already exists; a branch cannot be ` +
+      `created twice, and this step never creates one. Do not fetch or ` +
+      `pull. Go to step 7.\n` +
+      `   - Two or more matches: return created=false, halt_reason=ambiguous, ` +
+      `listing every matching branch, same as step 4.\n` +
+      `   - No match: go to step 6.\n` +
+      `6. Only if steps 4 and 5 matched nothing: fall back to whatever is ` +
+      `actually checked out here (git branch --show-current). If HEAD is ` +
+      `detached, or the current branch is the repo's base branch (main, ` +
+      `master, or whatever origin/HEAD names), return created=false saying no ` +
+      `worktree or branch for ${ticketMarker} was found and the current ` +
+      `checkout is not on a feature branch either. If that branch carries a ` +
+      `jira- or gh- marker other than ${ticketMarker}, refuse it too: return ` +
+      `created=false, halt_reason=wrong-ticket, and say in detail which other ` +
+      `ticket it belongs to. The invoking session usually runs inside another ` +
+      `worktree, so this is reachable, and committing this task's work onto ` +
+      `another ticket's branch is worse than halting. Otherwise take the git ` +
+      `worktree list --porcelain record for that branch (every checked-out ` +
+      `branch has one) and use its path. An unmarked pre-existing branch is ` +
+      `allowed here and is not a failure: it predates the convention.\n` +
+      `7. This mode commits into the tree holding the branch, and a later phase ` +
       `runs git add -A there, so unrelated dirty files sitting in that tree ` +
       `would be swept into a commit. Check git -C <path> status --porcelain, ` +
-      `using the matched record's own path from step 4 or 5, whether that is ` +
-      `the main checkout or a linked worktree; the risk is the same either way. ` +
-      `If it is non-empty, return created=false, dirty=true, and say what is ` +
-      `dirty. Never stash, reset, or discard the user's work.\n` +
-      `7. Otherwise return created=true, branch set to the matched record's own ` +
+      `using the matched or re-attached path from step 4, 5, or 6, whether ` +
+      `that is the main checkout or a linked worktree; the risk is the same ` +
+      `either way. If it is non-empty, return created=false, dirty=true, and ` +
+      `say what is dirty. Never stash, reset, or discard the user's work.\n` +
+      `8. Otherwise return created=true, branch set to the matched record's own ` +
       `branch name (never git branch --show-current, which names the invoking ` +
       `checkout and not necessarily this ticket's branch), base set to the ` +
       `repo's base branch, and path set to the absolute path from the matching ` +
       `record. Note in detail whether the match came from the ticket lookup ` +
-      `(step 4) or the fallback (step 5), whether that path is the main ` +
-      `checkout or a linked worktree, and whether the branch name carries a ` +
-      `jira- or gh- marker.` + RECORD('branch:existing'),
+      `(step 4), the worktree-less branch (step 5), or the fallback (step 6), ` +
+      `whether that path is the main checkout or a linked worktree, and ` +
+      `whether the branch name carries a jira- or gh- marker.` +
+      RECORD('branch:existing'),
       { label: 'branch:existing', schema: BRANCH, model: 'haiku', effort: 'low' })
   // A worktree is a separate checkout, so the main tree's state is irrelevant
   // to it; cutting from origin/<base> is what removes the need to touch the
@@ -639,21 +670,37 @@ if (!wt?.created) {
     base: wt?.base,
     detail: wt?.detail,
     // wt.dirty names the actual cause regardless of mode: both the default
-    // reuse path (step 6) and the existingBranch guard (step 6) halt here for
+    // reuse path (step 6) and the existingBranch guard (step 7) halt here for
     // the same reason, an uncommitted checkout, and re-running with
     // existingBranch: true would only hit that same existingBranch guard.
+    // wt.halt_reason distinguishes the existingBranch prompt's two other
+    // halts, which need their own notes rather than falling into the plain
+    // not-found one below: an ambiguous marker match, or a fallback branch
+    // marked for a different ticket. Neither is safe to answer with "cut a
+    // new branch" -- an ambiguous match already has too many candidates, and
+    // a wrong-ticket match means this ticket's own branch or worktree is
+    // still missing, not that nothing exists to reuse.
     note: wt?.dirty
       ? 'The checkout that holds this branch has uncommitted changes, so ' +
         'nothing was planned or implemented. Commit or stash them, then ' +
         're-run.'
+      : wt?.halt_reason === 'ambiguous'
+      ? `Found more than one branch carrying the ${ticketMarker} marker, so ` +
+        `nothing was planned or implemented: ${wt?.detail}. This lookup ` +
+        `cannot tell which one the task means; delete or rename the branch ` +
+        `this ticket does not need, then re-run with existingBranch: true.`
+      : wt?.halt_reason === 'wrong-ticket'
+      ? `The only checked-out branch belongs to a different ticket, so ` +
+        `nothing was planned or implemented: ${wt?.detail}. No branch or ` +
+        `worktree for ${ticketMarker} exists yet. Re-run without ` +
+        `existingBranch to cut one.`
       : args?.existingBranch
-      ? `No usable worktree, so nothing was planned or implemented. Looked ` +
-        `for a linked worktree holding a ${args?.branchType ?? 'feat'}/` +
-        `${ticketMarker}-<slug> branch (expected under ` +
-        `.claude/worktrees/${ticketMarker}-<slug>) and found none; the ` +
-        `current checkout is not on a feature branch either. Re-run without ` +
+      ? `No worktree or branch carrying the ${ticketMarker}-<slug> marker ` +
+        `was found (any branch type, e.g. under ` +
+        `.claude/worktrees/${ticketMarker}-<slug>), and the current ` +
+        `checkout is not on a branch for this ticket either. Re-run without ` +
         `existingBranch to cut one, or pass existingBranch: true again once ` +
-        `a worktree for this ticket exists.`
+        `a branch or worktree for this ticket exists.`
       : 'No worktree was created, so nothing was planned or implemented. ' +
         'Resolve the base branch problem in detail, then re-run. If fetch ' +
         'cannot run here (a remote needing a hardware key, for example), ' +
