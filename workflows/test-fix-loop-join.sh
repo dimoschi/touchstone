@@ -437,6 +437,13 @@ function makeAgent(scenario, captured) {
       return { crap_gated: scenario.crapGated ?? true,
         mutation_gated: scenario.mutationGated ?? false, detail: 'stub' }
     }
+    if (label === 'checks:discover') {
+      return scenario.discovery ?? { checks: [], detail: 'stub: no repo checks' }
+    }
+    if (label.startsWith('checks:run:')) {
+      const attempt = Number(label.slice('checks:run:'.length))
+      return (scenario.checkRuns ?? (() => ({ results: [] })))(attempt)
+    }
     if (label.startsWith('mutation:')) {
       const attempt = Number(label.slice('mutation:'.length))
       return (scenario.mutationResult ?? (() => ({ green: true, head_sha: REVIEWED_THROUGH, detail: 'stub', scored: true })))(attempt)
@@ -2084,6 +2091,78 @@ async function scenarioBA() {
     true)
 }
 
+// Scenario BU -- #38: a check the repo can already decide with an exit code
+// (a skipped version bump, in the ticket's own incident) must reach the
+// fixer as the script's own verdict, verbatim, and clear without ever
+// becoming a reviewer finding.
+async function scenarioBU() {
+  console.log('\n== scenario BU: a failing discovered check reaches the fix phase verbatim and clears without a reviewer finding')
+  const { result, captured } = await run({
+    args: { openPr: true },
+    discovery: { checks: [{ name: 'check-version-bump.sh', command: 'bash scripts/check-version-bump.sh' }],
+      detail: 'stub: found in AGENTS.md Commands' },
+    checkRuns: (attempt) => attempt === 1
+      ? { results: [{ name: 'check-version-bump.sh', command: 'bash scripts/check-version-bump.sh',
+          exit_code: 1, passed: false, output: 'FAILURE: workflows/ changed with no version bump' }] }
+      : { results: [{ name: 'check-version-bump.sh', command: 'bash scripts/check-version-bump.sh',
+          exit_code: 0, passed: true, output: 'OK' }] },
+    fixHead: () => 'fix00000000000000000000000000000000000001',
+    prResult: { opened: true, url: 'https://example.invalid/pr/38', note: 'stub ready' },
+  })
+  check('discovery ran exactly once', callCount(captured, 'checks:discover'), 1)
+  const fix1 = captured.calls.find(c => c.label === 'fix:1')?.prompt ?? ''
+  check('the fix phase ran', fix1.length > 0, true)
+  check('the fixer prompt carries the failing check\'s command',
+    fix1.includes('bash scripts/check-version-bump.sh'), true)
+  check('the fixer prompt carries its exit code',
+    fix1.includes('exited 1'), true)
+  check('the fixer prompt carries its output verbatim',
+    fix1.includes('FAILURE: workflows/ changed with no version bump'), true)
+  check('the check was re-run after the fix landed', callCount(captured, 'checks:run:2'), 1)
+  check('the run does not halt', result.halted_at, undefined)
+  check('no reviewer finding was recorded for it', (result.unresolved_findings ?? []).length, 0)
+  check('the result reports the check as no longer red', result.checks?.red?.length, 0)
+  check('the run reaches the PR phase', result.pr?.opened, true)
+}
+
+// Scenario BV -- #38: a discovered check that never turns green must block
+// the PR the same way an unresolved reviewer finding does, and must not be
+// reported as one.
+async function scenarioBV() {
+  console.log('\n== scenario BV: a discovered check that stays red halts before Mutation and PR')
+  const { result, captured } = await run({
+    args: { maxReviewRounds: 1 },
+    discovery: { checks: [{ name: 'check-no-private-refs.sh', command: 'bash scripts/check-no-private-refs.sh' }],
+      detail: 'stub' },
+    checkRuns: () => ({ results: [{ name: 'check-no-private-refs.sh',
+      command: 'bash scripts/check-no-private-refs.sh', exit_code: 1, passed: false,
+      output: 'found a private reference in docs/notes.md' }] }),
+    fixHead: () => 'fix00000000000000000000000000000000000002',
+  })
+  check('halted at Fix', result.halted_at, 'Fix')
+  check('no reviewer finding is reported', (result.unresolved_findings ?? []).length, 0)
+  check('the red check is reported in the halt', result.checks?.red?.length, 1)
+  check('the halt names the check', result.checks?.red?.[0]?.name, 'check-no-private-refs.sh')
+  check('the note carries the check\'s own verdict, not a judgement call',
+    (result.note ?? '').includes('check-no-private-refs.sh'), true)
+  check('mutation never ran', callCount(captured, 'mutation:1'), 0)
+  check('the PR phase never ran', callCount(captured, 'pr'), 0)
+}
+
+// Scenario BW -- #38: most repos have never heard of any of this. Discovery
+// finding nothing must be a logged, ordinary outcome, never a halt, and must
+// not spend a check-run call it has nothing to run.
+async function scenarioBW() {
+  console.log('\n== scenario BW: discovery finding no repo checks is logged, not a halt')
+  const { result, captured } = await run({})
+  check('discovery ran exactly once', callCount(captured, 'checks:discover'), 1)
+  check('no check-run call was made', callCount(captured, 'checks:run:1'), 0)
+  check('the run does not halt', result.halted_at, undefined)
+  check('discovery finding nothing is logged',
+    captured.logs.some(l => /no repo-advertised checks found/.test(l)), true)
+  check('the final result reports zero discovered checks', result.checks?.discovered, 0)
+}
+
 for (const scenario of [scenarioA, scenarioB, scenarioG, scenarioC, scenarioD, scenarioE, scenarioH,
                         scenarioI, scenarioJ, scenarioK, scenarioL, scenarioM, scenarioN,
                         scenarioO, scenarioP, scenarioQ, scenarioR, scenarioS, scenarioT,
@@ -2097,7 +2176,7 @@ for (const scenario of [scenarioA, scenarioB, scenarioG, scenarioC, scenarioD, s
                         scenarioBE, scenarioAZ, scenarioBA, scenarioBF, scenarioBG,
                         scenarioBH, scenarioBI, scenarioBJ, scenarioBK, scenarioBL,
                         scenarioBM, scenarioBN, scenarioBO, scenarioBP, scenarioBQ,
-                        scenarioBR, scenarioBS, scenarioBT]) {
+                        scenarioBR, scenarioBS, scenarioBT, scenarioBU, scenarioBV, scenarioBW]) {
   await scenario()
 }
 

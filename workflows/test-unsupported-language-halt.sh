@@ -118,6 +118,9 @@ function makeAgent(scenario, captured) {
     if (label === 'gate:opt-in') {
       return { crap_gated: true, mutation_gated: true, detail: 'stub' }
     }
+    if (label === 'checks:discover') {
+      return { checks: [], detail: 'stub: no repo checks' }
+    }
     if (label === 'implementer') {
       return scenario.implementer
     }
