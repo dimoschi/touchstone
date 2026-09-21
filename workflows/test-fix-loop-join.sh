@@ -2384,6 +2384,58 @@ async function scenarioCJ() {
     verify1.includes(`The fix's own commit range is ${REVIEWED_THROUGH}.`), true)
 }
 
+// Scenario CK -- the per-round figure is this ticket's measurement
+// instrument, so its arithmetic has to be pinned, not just its presence: a
+// stub budget that never moves makes any expression look right. This one
+// charges a fixed amount per agent call, so only the fix agent's own delta
+// gives the expected number.
+async function scenarioCK() {
+  console.log('\n== scenario CK: fix_round_output is the fix agent\'s own delta, not a running total')
+  let spent = 0
+  const { result } = await run({
+    args: { maxReviewRounds: 1 },
+    budget: { total: null, spent: () => (spent += 100), remaining: () => Infinity },
+    initialReview: {
+      correctness: [{ title: 'Still open', file: 'a.js', claim: 'c', evidence: 'e',
+        line_start: 5 }],
+      advocate: [],
+    },
+    verify: () => undefined,
+    staleness: () => [],
+  })
+  const entry = result.fix_round_output?.[0]
+  check('one round was recorded', result.fix_round_output?.length, 1)
+  check('the figure is positive: a reversed subtraction reads negative',
+    entry?.output > 0, true)
+  // One increment of this stub, so it spans the fix call and nothing else;
+  // the running total at that point is a larger multiple.
+  check('it spans only the fix call, not the whole run to that point',
+    entry?.output, 100)
+}
+
+// Scenario CL -- a single-line finding is the shape the charge asks for most
+// often, since a second line is wanted only when the span covers more than
+// one. Losing the locus for exactly that shape would restore the old bare
+// filename brief everywhere and break nothing else.
+async function scenarioCL() {
+  console.log('\n== scenario CL: a finding with only line_start still reaches the fixer with its line')
+  const { captured } = await run({
+    args: { maxReviewRounds: 1 },
+    initialReview: {
+      correctness: [{ title: 'Still open', file: 'a.js', claim: 'c', evidence: 'e',
+        line_start: 42 }],
+      advocate: [],
+    },
+    verify: () => undefined,
+    staleness: () => [],
+  })
+  const fix1 = captured.calls.find(c => c.label === 'fix:1')?.prompt ?? ''
+  check('the fix phase ran', fix1.length > 0, true)
+  check('the single-line locus reaches the brief', fix1.includes('a.js:42'), true)
+  check('it is not degraded to a bare filename',
+    /\(a\.js\)/.test(fix1), false)
+}
+
 // Scenario CF -- #44: silent re-ranging must not be possible. Verify may look
 // past its given range, but only when that range cannot answer the question,
 // and only while saying so in the finding's own note.
@@ -2482,7 +2534,7 @@ for (const scenario of [scenarioA, scenarioB, scenarioG, scenarioC, scenarioD, s
                         scenarioBR, scenarioBS, scenarioBT, scenarioBU, scenarioBV, scenarioBW,
                         scenarioBX, scenarioBY, scenarioBZ, scenarioCA, scenarioCB,
                         scenarioCC, scenarioCD, scenarioCE, scenarioCF, scenarioCG,
-                        scenarioCH, scenarioCI, scenarioCJ]) {
+                        scenarioCH, scenarioCI, scenarioCJ, scenarioCK, scenarioCL]) {
   await scenario()
 }
 

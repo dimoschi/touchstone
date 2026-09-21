@@ -1869,6 +1869,10 @@ while ((open.length || blockingChecksOpen()) && round < MAX_REVIEW_ROUNDS && !ou
     `unsupported_language=true when you do, and put the three options in note. ` +
     `Do not push or open a PR.\n` +
     `Task: ${brief(task)}\n` +
+    `Each finding names the place it was raised against. Work from there. ` +
+    `Read git diff ${impl.commit_range} only when that place cannot tell you ` +
+    `what the change was meant to do -- a finding about scope, an unmet ` +
+    `criterion, or a caller outside the diff.\n` +
     `Fix what the findings name and no more. If fixing one requires reverting ` +
     `or weakening a deliberate part of the change that no finding objected to, ` +
     `say so in note and leave it: an unasked-for revert is how this workflow ` +
