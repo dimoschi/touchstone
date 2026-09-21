@@ -1924,6 +1924,76 @@ async function scenarioBQ() {
     (result.note ?? '').includes('already holds an unrelated checkout'), true)
 }
 
+// Scenario BR -- #87 review: the pipeline never removes a worktree, so a
+// worktree left behind by a ticket branch whose PR already merged is just as
+// reachable through step 4 (the worktree lookup) as through step 5's
+// worktree-less fallback. Step 4 used to reuse an exactly-one match with no
+// PR-state check at all, so the guard step 5 enforces was skipped whenever
+// the merged branch's worktree directory happened to still exist on disk.
+async function scenarioBR() {
+  console.log('\n== scenario BR: the worktree-match path (step 4) also checks PR state before reusing it')
+  const { captured } = await run({
+    args: { existingBranch: true },
+    initialReview: { correctness: [], advocate: [] },
+    verify: () => undefined,
+    staleness: () => [],
+  })
+  const p = captured.calls.find(c => c.label === 'branch:existing')?.prompt ?? ''
+  const step4 = p.slice(p.indexOf('4. Ticket lookup'), p.indexOf('5. Only if step 4 matched nothing'))
+  check('step 4 no longer reuses a bare match with no PR-state check at all',
+    step4.includes('Exactly one match: that is the tree to use. Go to step 7.'), false)
+  check('step 4 checks the matched branch\'s PR state before reusing it',
+    step4.includes('gh pr view') && step4.includes('MERGED'), true)
+  check('step 4 halts distinctly on a merged match, same as step 5',
+    step4.includes('halt_reason=merged'), true)
+}
+
+// Scenario BS -- #87 review: the merged halt's own advice told the user to
+// "re-run without existingBranch to cut a fresh branch", but with no task
+// text the branch name is derived from the ticket's own summary, identical
+// on every run, so following that advice lands the default branch-cutting
+// path on the exact name of the branch the guard just refused.
+async function scenarioBS() {
+  console.log('\n== scenario BS: the merged halt note warns that omitting task text recreates the merged branch\'s name')
+  const { result } = await run({
+    args: { existingBranch: true },
+    existingBranchResult: { created: false, branch: '', base: '', path: '',
+      detail: 'branch fix/gh-21-retry-path carries the gh-21 marker but its PR #40 is MERGED',
+      dirty: false, halt_reason: 'merged' },
+  })
+  check('the note no longer gives the bare re-run instruction that recreates the merged name',
+    (result.note ?? '').includes('if this ticket has new work, re-run without existingBranch to cut a fresh branch.'), false)
+  check('the note says the advice only helps with task text describing the new work',
+    (result.note ?? '').includes('task text'), true)
+  check('the note explains why omitting task text recreates the same name',
+    (result.note ?? '').includes("ticket's own summary"), true)
+}
+
+// Scenario BT -- #87 review: step 5's re-attach action used to live in a
+// "Not merged" bullet that sits between "Exactly one match" and "Two or more
+// matches", mixing two axes (match count, PR state) in one bullet list. That
+// left the re-attach action naming no match count, and put the
+// two-or-more-matches bullet after the one that should never run for that
+// case.
+async function scenarioBT() {
+  console.log('\n== scenario BT: step 5 bullets are keyed only on match count, not mixed with a PR-state sibling')
+  const { captured } = await run({
+    args: { existingBranch: true },
+    initialReview: { correctness: [], advocate: [] },
+    verify: () => undefined,
+    staleness: () => [],
+  })
+  const p = captured.calls.find(c => c.label === 'branch:existing')?.prompt ?? ''
+  const step5 = p.slice(p.indexOf('5. Only if step 4 matched nothing'), p.indexOf('6. Only if steps 4 and 5 matched nothing'))
+  check('the re-attach action is folded into the Exactly one match bullet, not a sibling Not merged bullet',
+    step5.includes('- Not merged:'), false)
+  check('Two or more matches sits directly after Exactly one match, before No match',
+    step5.indexOf('Two or more matches') > step5.indexOf('Exactly one match') &&
+    step5.indexOf('No match') > step5.indexOf('Two or more matches'), true)
+  check('the re-attach action (git worktree add, no -b) is still reachable from Exactly one match',
+    step5.includes('git worktree add') && step5.includes('no -b, the branch already'), true)
+}
+
 // Scenario AZ -- the defect #81 is about. A lens points a fresh finding at a
 // settled one because the fix for that finding introduced this one. Assuming
 // it was a re-report readied a PR carrying a real regression, under
@@ -1991,7 +2061,8 @@ for (const scenario of [scenarioA, scenarioB, scenarioG, scenarioC, scenarioD, s
                         scenarioAP, scenarioAQ, scenarioAR, scenarioBB, scenarioBC, scenarioBD,
                         scenarioBE, scenarioAZ, scenarioBA, scenarioBF, scenarioBG,
                         scenarioBH, scenarioBI, scenarioBJ, scenarioBK, scenarioBL,
-                        scenarioBM, scenarioBN, scenarioBO, scenarioBP, scenarioBQ]) {
+                        scenarioBM, scenarioBN, scenarioBO, scenarioBP, scenarioBQ,
+                        scenarioBR, scenarioBS, scenarioBT]) {
   await scenario()
 }
 

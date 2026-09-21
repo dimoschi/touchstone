@@ -28,11 +28,15 @@ the fabricated link.
   ticket marker, whatever the invoking checkout happens to be on and skipping
   fetch and pull entirely: first among every worktree
   (`git worktree list --porcelain`), then, only if none matches, a branch with
-  no worktree of its own (its directory was removed by hand, commonly because
-  its PR merged), re-attaching a worktree to it rather than cutting a new
-  branch. **`--ticket` is still required.** Without this flag the workflow
-  cuts a fresh branch and worktree off the base, which would strand follow-up
-  work away from the PR it belongs to.
+  no worktree of its own (its directory was removed by hand -- sometimes
+  because its PR merged and the tree was cleaned up, sometimes because it was
+  cut loose mid-flight). Either match is checked for a merged PR before it is
+  touched: a merged one halts instead of being reused, since that work is
+  done, not a tree to keep implementing into; otherwise the workflow
+  re-attaches a worktree to it rather than cutting a new branch.
+  **`--ticket` is still required.** Without this flag the workflow cuts a
+  fresh branch and worktree off the base, which would strand follow-up work
+  away from the PR it belongs to.
 - Everything remaining, with the flags removed, is `task`. **Optional.** The
   workflow fetches the ticket's title, description and comments and gives them to
   every phase, so the ticket is the specification. Pass task text only to *narrow*

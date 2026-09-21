@@ -501,7 +501,7 @@ const wt = args?.existingBranch
       `Two fields matter on every response below, halts included: dirty is ` +
       `true only for step 7's dirty-checkout halt, false in every other ` +
       `response; halt_reason is "ambiguous" for the two-or-more-matches halts ` +
-      `in steps 4 and 5, "merged" for step 5's already-merged-PR halt, ` +
+      `in steps 4 and 5, "merged" for step 4 or 5's already-merged-PR halt, ` +
       `"occupied" for step 5's occupied-directory halt, "wrong-ticket" for ` +
       `the different-ticket halt in step 6, and unset in every other ` +
       `response.\n` +
@@ -529,7 +529,17 @@ const wt = args?.existingBranch
       `<repo-root>/.claude/worktrees/${ticketMarker}-<slug>, the expected ` +
       `location, but the record's own path wins if it differs: the branch lives ` +
       `where git says it lives, not where convention says it should.\n` +
-      `   - Exactly one match: that is the tree to use. Go to step 7.\n` +
+      `   - Exactly one match: before reusing it, run gh pr view <branch> ` +
+      `--json state -q .state, using the matched branch's own name. This ` +
+      `workflow never removes a worktree once it creates one, so a leftover ` +
+      `worktree here is no signal by itself that the branch is still live. If ` +
+      `that reports MERGED, the ticket's work already shipped on that ` +
+      `branch; return created=false, halt_reason=merged, naming the branch ` +
+      `and that its PR merged. Do not commit into that tree: a merged branch ` +
+      `is done, not a tree to keep implementing into. If gh reports any ` +
+      `other state (OPEN, CLOSED), no PR at all, or the call itself fails ` +
+      `(no network, no auth), treat the branch as still live and go to step ` +
+      `7.\n` +
       `   - Two or more matches: return created=false, halt_reason=ambiguous, ` +
       `listing every matching branch and its path in detail. Do not guess ` +
       `which one this task means.\n` +
@@ -550,15 +560,13 @@ const wt = args?.existingBranch
       `merged branch is done, not a tree to keep implementing into. If gh ` +
       `reports any other state (OPEN, CLOSED), no PR at all, or the call ` +
       `itself fails (no network, no auth), treat the branch as still live ` +
-      `and continue below.\n` +
-      `   - Not merged: re-attach a worktree to it rather than losing it. ` +
-      `Its canonical directory is ` +
-      `<repo-root>/.claude/worktrees/${ticketMarker}-<slug>; if that path is ` +
-      `already occupied by something else, return created=false, ` +
-      `halt_reason=occupied, naming the path and what is there. Otherwise ` +
-      `run git worktree add <path> <branch> -- no -b, the branch already ` +
-      `exists; a branch cannot be created twice, and this step never ` +
-      `creates one. Do not fetch or pull. Go to step 7.\n` +
+      `and re-attach a worktree to it rather than losing it. Its canonical ` +
+      `directory is <repo-root>/.claude/worktrees/${ticketMarker}-<slug>; if ` +
+      `that path is already occupied by something else, return ` +
+      `created=false, halt_reason=occupied, naming the path and what is ` +
+      `there. Otherwise run git worktree add <path> <branch> -- no -b, the ` +
+      `branch already exists; a branch cannot be created twice, and this ` +
+      `step never creates one. Do not fetch or pull. Go to step 7.\n` +
       `   - Two or more matches: return created=false, halt_reason=ambiguous, ` +
       `listing every matching branch, same as step 4.\n` +
       `   - No match: go to step 6.\n` +
@@ -717,8 +725,12 @@ if (!wt?.created) {
       : wt?.halt_reason === 'merged'
       ? `The only branch carrying the ${ticketMarker} marker already has a ` +
         `merged pull request, so nothing was planned or implemented: ` +
-        `${wt?.detail}. That work already shipped; if this ticket has new ` +
-        `work, re-run without existingBranch to cut a fresh branch.`
+        `${wt?.detail}. That work already shipped. Re-running without ` +
+        `existingBranch only helps if this ticket has new work and the run ` +
+        `is given task text describing it: the branch name is derived from ` +
+        `that text, and with none it falls back to the ticket's own ` +
+        `summary, which is identical on every run and would cut a branch ` +
+        `with the exact name of the one that just merged.`
       : wt?.halt_reason === 'occupied'
       ? `A branch carrying the ${ticketMarker} marker was found with no ` +
         `worktree of its own, but its canonical worktree directory is ` +
