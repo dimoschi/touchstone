@@ -220,6 +220,19 @@ const BRANCH = {
   },
 }
 
+// halt_reason lives here, not on BRANCH, so the default branch agent never
+// sees a field its own prompt says nothing about. Required, because an
+// omitted one reads as the plain not-found note, which is the note these
+// halts exist to replace; 'none' keeps an absent key from being the signal.
+const EXISTING_BRANCH = {
+  ...BRANCH,
+  required: [...BRANCH.required, 'halt_reason'],
+  properties: {
+    ...BRANCH.properties,
+    halt_reason: { type: 'string', enum: ['none', 'ambiguous', 'wrong-ticket', 'merged', 'occupied'] },
+  },
+}
+
 // Answers both the CRAP and mutation opt-in questions in one call: both
 // markers live at the same repo root, and no phase of this run writes there,
 // so timing cannot change either answer.
@@ -487,48 +500,114 @@ const sBranch = stage('branch')
 const wt = args?.existingBranch
   ? await agent(
       `[touchstone: branch:existing]\n` +
-      `Find the worktree that already holds the current branch, then STOP. Do ` +
-      `not create a branch, do not create a worktree, do not fetch, do not ` +
-      `pull, do not plan or implement.\n` +
+      `Find the worktree that already holds this ticket's branch, then STOP. Do ` +
+      `not create a branch, do not fetch, do not pull, do not plan or ` +
+      `implement. The one exception is step 5: re-attaching a worktree to a ` +
+      `branch that already exists is not creating one.\n` +
       `This task continues work on an existing branch for ticket ${ticket}.\n` +
-      `One field matters on every response below, halts included: dirty is ` +
-      `true only for step 6's dirty-checkout halt, false in every other ` +
-      `response.\n` +
+      `Two fields matter on every response below, halts included: dirty is ` +
+      `true only for step 7's dirty-checkout halt, false in every other ` +
+      `response; halt_reason is "ambiguous" for the two-or-more-matches halts ` +
+      `in steps 4 and 5, "merged" for step 4 or 5's already-merged-PR halt, ` +
+      `"occupied" for step 5's occupied-directory halt, "wrong-ticket" for ` +
+      `the different-ticket halt in step 6, and "none" in every other ` +
+      `response, including every success. Never omit it.\n` +
       `1. Run git worktree prune. It only removes registrations for worktree ` +
       `directories that no longer exist on disk; it never touches a directory ` +
       `that does exist. Run it before listing worktrees so a stale record left ` +
       `behind by a hand-deleted directory cannot be matched below.\n` +
-      `2. Return created=false if HEAD is detached, or if the current branch is ` +
-      `the repo's base branch (main, master, or whatever origin/HEAD names). ` +
-      `Committing follow-up work straight onto the base is not what this mode is ` +
-      `for.\n` +
-      `3. Note the current branch name (git branch --show-current), then run ` +
-      `git worktree list --porcelain. It prints one record per worktree: a ` +
-      `"worktree <path>" line followed by a "branch refs/heads/<name>" line (or ` +
-      `"detached"/"bare"). A branch already checked out somewhere cannot also ` +
-      `have a worktree created for it here, git refuses that outright, so the ` +
-      `existing record is what this task must use, not a new one.\n` +
-      `4. Find the record whose branch matches the current branch name and take ` +
-      `its path. That path is correct whether it is the main checkout or a ` +
-      `linked worktree: the branch lives there and nowhere else.\n` +
-      `5. If no record matches (the branch is checked out in no worktree at ` +
-      `all), return created=false and say so. Do not create one for it; that is ` +
-      `what the default (non-existingBranch) mode is for.\n` +
-      `6. This mode commits into the tree holding the branch, and a later phase ` +
+      `2. Find the repo root: dirname "$(git rev-parse --path-format=absolute ` +
+      `--git-common-dir)". Do not use git rev-parse --show-toplevel for this: ` +
+      `the invoking session usually runs inside another worktree, and ` +
+      `--show-toplevel would return that one, not the repo.\n` +
+      `3. Run git worktree list --porcelain. It prints one record per worktree: ` +
+      `a "worktree <path>" line followed by a "branch refs/heads/<name>" line ` +
+      `(or "detached"/"bare").\n` +
+      `4. Ticket lookup, tried first regardless of what the invoking checkout is ` +
+      `on: the base branch, another feature branch, or detached HEAD are all ` +
+      `fine here, because the branch this task needs lives in its own worktree, ` +
+      `not necessarily in whichever tree happens to be checked out right now. ` +
+      `Find every record whose branch, after its first "/", begins with ` +
+      `"${ticketMarker}-" -- that is <type>/${ticketMarker}-<slug>, the exact ` +
+      `shape a fresh run of this workflow cuts. Match on that marker segment, ` +
+      `never on this task's own branch-type prefix: a branch cut as ` +
+      `feat/${ticketMarker}-x must still be found here even if this run asks ` +
+      `for a different type. Its canonical directory is ` +
+      `<repo-root>/.claude/worktrees/${ticketMarker}-<slug>, the expected ` +
+      `location, but the record's own path wins if it differs: the branch lives ` +
+      `where git says it lives, not where convention says it should.\n` +
+      `   - Exactly one match: before reusing it, run gh pr view <branch> ` +
+      `--json state -q .state, using the matched branch's own name. This ` +
+      `workflow never removes a worktree once it creates one, so a leftover ` +
+      `worktree here is no signal by itself that the branch is still live. If ` +
+      `that reports MERGED, the ticket's work already shipped on that ` +
+      `branch; return created=false, halt_reason=merged, naming the branch ` +
+      `and that its PR merged. Do not commit into that tree: a merged branch ` +
+      `is done, not a tree to keep implementing into. If gh reports any ` +
+      `other state (OPEN, CLOSED), no PR at all, or the call itself fails ` +
+      `(no network, no auth), treat the branch as still live and go to step ` +
+      `7.\n` +
+      `   - Two or more matches: return created=false, halt_reason=ambiguous, ` +
+      `listing every matching branch and its path in detail. Do not guess ` +
+      `which one this task means.\n` +
+      `5. Only if step 4 matched nothing: a branch can carry the ` +
+      `${ticketMarker} marker with no worktree of its own. git worktree ` +
+      `prune (step 1) drops a worktree's registration once its directory is ` +
+      `gone, but never the branch itself. The most common way that happens ` +
+      `is the opposite of abandonment: the PR merged and the worktree was ` +
+      `cleaned up because the work was done, not because it was cut loose ` +
+      `mid-flight. Run git branch --list "*/${ticketMarker}-*" to check for ` +
+      `one.\n` +
+      `   - Exactly one match: before touching it, run gh pr view <branch> ` +
+      `--json state -q .state, using the matched branch's own name, not ` +
+      `whatever is checked out here. If that reports MERGED, the ticket's ` +
+      `work already shipped on that branch; return created=false, ` +
+      `halt_reason=merged, naming the branch and that its PR merged. Do not ` +
+      `re-attach a worktree to it and do not run any further step on it: a ` +
+      `merged branch is done, not a tree to keep implementing into. If gh ` +
+      `reports any other state (OPEN, CLOSED), no PR at all, or the call ` +
+      `itself fails (no network, no auth), treat the branch as still live ` +
+      `and re-attach a worktree to it rather than losing it. Its canonical ` +
+      `directory is <repo-root>/.claude/worktrees/${ticketMarker}-<slug>; if ` +
+      `that path is already occupied by something else, return ` +
+      `created=false, halt_reason=occupied, naming the path and what is ` +
+      `there. Otherwise run git worktree add <path> <branch> -- no -b, the ` +
+      `branch already exists; a branch cannot be created twice, and this ` +
+      `step never creates one. Do not fetch or pull. Go to step 7.\n` +
+      `   - Two or more matches: return created=false, halt_reason=ambiguous, ` +
+      `listing every matching branch, same as step 4.\n` +
+      `   - No match: go to step 6.\n` +
+      `6. Only if steps 4 and 5 matched nothing: fall back to whatever is ` +
+      `actually checked out here (git branch --show-current). If HEAD is ` +
+      `detached, or the current branch is the repo's base branch (main, ` +
+      `master, or whatever origin/HEAD names), return created=false saying no ` +
+      `worktree or branch for ${ticketMarker} was found and the current ` +
+      `checkout is not on a feature branch either. If that branch carries a ` +
+      `jira- or gh- marker other than ${ticketMarker}, refuse it too: return ` +
+      `created=false, halt_reason=wrong-ticket, and say in detail which other ` +
+      `ticket it belongs to. The invoking session usually runs inside another ` +
+      `worktree, so this is reachable, and committing this task's work onto ` +
+      `another ticket's branch is worse than halting. Otherwise take the git ` +
+      `worktree list --porcelain record for that branch (every checked-out ` +
+      `branch has one) and use its path. An unmarked pre-existing branch is ` +
+      `allowed here and is not a failure: it predates the convention.\n` +
+      `7. This mode commits into the tree holding the branch, and a later phase ` +
       `runs git add -A there, so unrelated dirty files sitting in that tree ` +
       `would be swept into a commit. Check git -C <path> status --porcelain, ` +
-      `using the matched record's own path from step 4, whether that is the ` +
-      `main checkout or a linked worktree; the risk is the same either way. If ` +
-      `it is non-empty, return created=false, dirty=true, and say what is ` +
-      `dirty. Never stash, reset, or discard the user's work.\n` +
-      `7. Otherwise return created=true, branch set to the current branch name, ` +
-      `base set to the repo's base branch, and path set to the absolute path ` +
-      `from the matching record. Note in detail whether that path is the main ` +
-      `checkout or a linked worktree, and whether the branch name carries a ` +
-      `jira- or gh- marker. An unmarked pre-existing branch is allowed here and ` +
-      `is not a failure: it predates the convention. Say so plainly so the ` +
-      `session is known to be untrackable by branch name.` + RECORD('branch:existing'),
-      { label: 'branch:existing', schema: BRANCH, model: 'haiku', effort: 'low' })
+      `using the matched or re-attached path from step 4, 5, or 6, whether ` +
+      `that is the main checkout or a linked worktree; the risk is the same ` +
+      `either way. If it is non-empty, return created=false, dirty=true, and ` +
+      `say what is dirty. Never stash, reset, or discard the user's work.\n` +
+      `8. Otherwise return created=true, branch set to the matched record's own ` +
+      `branch name (never git branch --show-current, which names the invoking ` +
+      `checkout and not necessarily this ticket's branch), base set to the ` +
+      `repo's base branch, and path set to the absolute path from the matching ` +
+      `record. Note in detail whether the match came from the ticket lookup ` +
+      `(step 4), the worktree-less branch (step 5), or the fallback (step 6), ` +
+      `whether that path is the main checkout or a linked worktree, and ` +
+      `whether the branch name carries a jira- or gh- marker.` +
+      RECORD('branch:existing'),
+      { label: 'branch:existing', schema: EXISTING_BRANCH, model: 'haiku', effort: 'low' })
   // A worktree is a separate checkout, so the main tree's state is irrelevant
   // to it; cutting from origin/<base> is what removes the need to touch the
   // main checkout at all.
@@ -622,16 +701,62 @@ if (!wt?.created) {
     base: wt?.base,
     detail: wt?.detail,
     // wt.dirty names the actual cause regardless of mode: both the default
-    // reuse path (step 6) and the existingBranch guard (step 6) halt here for
+    // reuse path (step 6) and the existingBranch guard (step 7) halt here for
     // the same reason, an uncommitted checkout, and re-running with
     // existingBranch: true would only hit that same existingBranch guard.
+    // wt.halt_reason distinguishes the existingBranch prompt's other halts,
+    // which need their own notes rather than falling into the plain
+    // not-found one below: an ambiguous marker match, a fallback branch
+    // marked for a different ticket, a matched branch whose PR already
+    // merged, or a matched branch's canonical directory already occupied.
+    // None of the four is safe to answer with "cut a new branch" -- an
+    // ambiguous match already has too many candidates, a wrong-ticket match
+    // means this ticket's own branch or worktree is still missing rather
+    // than nothing existing to reuse, a merged match means the ticket's
+    // branch already exists and shipped, and an occupied match means the
+    // ticket's branch already exists and only its directory is blocked.
     note: wt?.dirty
       ? 'The checkout that holds this branch has uncommitted changes, so ' +
         'nothing was planned or implemented. Commit or stash them, then ' +
         're-run.'
+      : wt?.halt_reason === 'ambiguous'
+      ? `Found more than one branch carrying the ${ticketMarker} marker, so ` +
+        `nothing was planned or implemented: ${wt?.detail}. This lookup ` +
+        `cannot tell which one the task means; delete or rename the branch ` +
+        `this ticket does not need, then re-run with existingBranch: true.`
+      : wt?.halt_reason === 'wrong-ticket'
+      ? `The only checked-out branch belongs to a different ticket, so ` +
+        `nothing was planned or implemented: ${wt?.detail}. No branch or ` +
+        `worktree for ${ticketMarker} exists yet. Re-run without ` +
+        `existingBranch to cut one.`
+      : wt?.halt_reason === 'merged'
+      ? `The only branch carrying the ${ticketMarker} marker already has a ` +
+        `merged pull request, so nothing was planned or implemented: ` +
+        `${wt?.detail}. That work already shipped. Re-running without ` +
+        `existingBranch is not a reliable escape: that path names the branch ` +
+        `<type>/${ticketMarker}-<slug> from this run's own type and a slug ` +
+        `it re-derives from the task, and only the name decides what ` +
+        `happens. Land on this same name and it reuses the merged branch, ` +
+        `so the new commits push onto its closed pull request; land on a ` +
+        `different one and it either cuts a fresh branch or halts on the ` +
+        `worktree directory this branch already holds. Do not rely on ` +
+        `which. Remove that worktree and delete the branch first, or track ` +
+        `the new work under a ticket of its own.`
+      : wt?.halt_reason === 'occupied'
+      ? `A branch carrying the ${ticketMarker} marker was found with no ` +
+        `worktree of its own, but its canonical worktree directory is ` +
+        `occupied, so nothing was planned or implemented: ${wt?.detail}. ` +
+        `Clear or rename what is occupying that path, then re-run with ` +
+        `existingBranch: true; re-running without existingBranch either ` +
+        `halts on this same occupied path or, if it re-derives a different ` +
+        `slug, cuts a duplicate branch for a ticket that already has one.`
       : args?.existingBranch
-      ? 'No usable worktree, so nothing was planned or implemented. Check ' +
-        'out the branch this work belongs on, then re-run.'
+      ? `No worktree or branch carrying the ${ticketMarker}-<slug> marker ` +
+        `was found (any branch type, e.g. under ` +
+        `.claude/worktrees/${ticketMarker}-<slug>), and the current ` +
+        `checkout is not on a branch for this ticket either. Re-run without ` +
+        `existingBranch to cut one, or pass existingBranch: true again once ` +
+        `a branch or worktree for this ticket exists.`
       : 'No worktree was created, so nothing was planned or implemented. ' +
         'Resolve the base branch problem in detail, then re-run. If fetch ' +
         'cannot run here (a remote needing a hardware key, for example), ' +
