@@ -2381,7 +2381,7 @@ async function scenarioCJ() {
   check('the range is not an empty self-comparison',
     verify1.includes(`${REVIEWED_THROUGH}..${REVIEWED_THROUGH}`), false)
   check('it is the bare commit, which diffs against the working tree',
-    verify1.includes(`The fix's own commit range is ${REVIEWED_THROUGH}.`), true)
+    verify1.includes(`range is ${REVIEWED_THROUGH}. Read git diff ${REVIEWED_THROUGH} and`), true)
 }
 
 // Scenario CK -- the per-round figure is this ticket's measurement
@@ -2436,6 +2436,56 @@ async function scenarioCL() {
     /\(a\.js\)/.test(fix1), false)
 }
 
+// Scenario CM -- the spanless count is the only thing that makes locus drift
+// visible, so it has to be observable itself: a lens quietly dropping spans
+// would otherwise look exactly like a lens that never had them.
+async function scenarioCM() {
+  console.log('\n== scenario CM: findings arriving with no line span are counted and named')
+  const { captured } = await run({
+    args: { maxReviewRounds: 1 },
+    initialReview: {
+      correctness: [{ title: 'No span', file: 'noloc.js', claim: 'c', evidence: 'e' },
+                    { title: 'Has one', file: 'b.js', claim: 'c2', evidence: 'e2',
+                      line_start: 7, line_end: 9 }],
+      advocate: [],
+    },
+    verify: () => undefined,
+    staleness: () => [],
+  })
+  const spanLog = captured.logs.find(l => l.includes('carry no line span')) ?? ''
+  check('the count is logged at all', spanLog.length > 0, true)
+  check('it counts only the spanless one, against the total raised',
+    spanLog.includes('1 of 2'), true)
+  check('it names which finding and file, so drift is attributable',
+    spanLog.includes('noloc.js'), true)
+  check('the one that carried a span is not counted',
+    spanLog.includes('b.js'), false)
+}
+
+// Scenario CN -- the late pass runs on findings no round ever checked, which
+// includes a run whose loop executed no rounds at all. Telling that verifier
+// it is looking at "the fix's own commit range" names a diff that does not
+// exist, and the range it gets is the implementation, not a fix.
+async function scenarioCN() {
+  console.log('\n== scenario CN: with no fix round, the late verifier is not told it has a fix diff')
+  const { captured } = await run({
+    args: { maxReviewRounds: 0 },
+    initialReview: {
+      correctness: [{ title: 'Never fixed', file: 'a.js', claim: 'c', evidence: 'e',
+        line_start: 3 }],
+      advocate: [],
+    },
+    verify: () => undefined,
+    staleness: () => [],
+  })
+  check('no fix round ran', captured.calls.filter(c => c.label.startsWith('fix:')).length, 0)
+  const late = captured.calls.find(c => c.label === 'verify:final')?.prompt ?? ''
+  check('the late verifier ran', late.length > 0, true)
+  check('it is told there is no fix diff', late.includes('No fix round ran'), true)
+  check('it does not claim a fix range that never existed',
+    late.includes("The fix's own commit range"), false)
+}
+
 // Scenario CF -- #44: silent re-ranging must not be possible. Verify may look
 // past its given range, but only when that range cannot answer the question,
 // and only while saying so in the finding's own note.
@@ -2443,10 +2493,11 @@ async function scenarioCF() {
   console.log('\n== scenario CF: verify may widen past its range only while disclosing it in the note')
   const { captured } = await run({
     initialReview: {
-      correctness: [{ title: 'Needs a fix', file: 'a.js', claim: 'c', evidence: 'e' }],
+      correctness: [{ title: 'Needs a fix', file: 'a.js', claim: 'c', evidence: 'e' },
+                    { title: 'Also needs one', file: 'b.js', claim: 'c2', evidence: 'e2' }],
       advocate: [],
     },
-    verify: (id) => id === 'f1' ? true : undefined,
+    verify: () => true,
     verifyWidened: (id) => id === 'f1',
   })
   const verify1 = captured.calls.find(c => c.label === 'verify:1')?.prompt ?? ''
@@ -2460,6 +2511,10 @@ async function scenarioCF() {
     widenLog.includes('verify:1'), true)
   check('it names the finding and carries its stated reason',
     widenLog.includes('f1') && widenLog.includes('stub verdict for f1'), true)
+  check('only the verdict that widened is named, not every verdict',
+    widenLog.includes('f2'), false)
+  check('the count is of widened verdicts, not of all of them',
+    widenLog.includes('1 verdict(s)'), true)
 }
 
 // Scenario CG -- #44: a lens that cannot name a clean span (a deletion, a
@@ -2534,7 +2589,7 @@ for (const scenario of [scenarioA, scenarioB, scenarioG, scenarioC, scenarioD, s
                         scenarioBR, scenarioBS, scenarioBT, scenarioBU, scenarioBV, scenarioBW,
                         scenarioBX, scenarioBY, scenarioBZ, scenarioCA, scenarioCB,
                         scenarioCC, scenarioCD, scenarioCE, scenarioCF, scenarioCG,
-                        scenarioCH, scenarioCI, scenarioCJ, scenarioCK, scenarioCL]) {
+                        scenarioCH, scenarioCI, scenarioCJ, scenarioCK, scenarioCL, scenarioCM, scenarioCN]) {
   await scenario()
 }
 

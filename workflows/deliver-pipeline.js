@@ -1760,12 +1760,16 @@ const everVerified = new Set()
 // pairs, keyed on the id the script assigned in reviewOf, never the title: a
 // model asked to echo a title verbatim reworded it anyway, which stalled every
 // finding until the round limit and halted the run for good.
-const verifyOpen = async (findings, label, range) => {
+const verifyOpen = async (findings, label, range, afterFix = true) => {
   if (!findings.length) return []
   for (const f of findings) everVerified.add(f.id)
   const out = await treeAgent(
     `Verify, finding by finding, whether each is now actually fixed.\n` +
-    `The fix's own commit range is ${range}. Read git diff ${range} and judge ` +
+    (afterFix
+      ? `The fix's own commit range is ${range}. `
+      : `No fix round ran, so there is no fix diff; the change under review ` +
+        `is ${range}. `) +
+    `Read git diff ${range} and judge ` +
     `each claim against that diff first, rather than re-reading the file cold ` +
     `or trusting a claim it was fixed. Widen beyond this range only when the ` +
     `diff itself cannot answer the question. When you do, set widened=true ` +
@@ -2012,7 +2016,8 @@ if (open.length && !outOfBudget()) {
   if (unchecked.length) {
     log(`${unchecked.length} finding(s) were reported too late to be checked ` +
         `by a round; verifying them before deciding to halt`)
-    const late = new Map(await verifyOpen(unchecked, 'verify:final', lastFixRange ?? reviewedThrough))
+    const late = new Map(await verifyOpen(unchecked, 'verify:final',
+      lastFixRange ?? reviewedThrough, lastFixRange !== null))
     const closed = unchecked.filter(f => late.get(f.id) === true)
     settled.push(...closed)
     const closedIds = new Set(closed.map(f => f.id))
