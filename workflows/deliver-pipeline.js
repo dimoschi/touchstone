@@ -398,13 +398,17 @@ const VERDICTS = {
       type: 'array',
       items: {
         type: 'object', additionalProperties: false,
-        required: ['id', 'fixed', 'note'],
+        required: ['id', 'fixed', 'widened', 'note'],
         properties: {
           id: { type: 'string' },
           // Ignored for matching. Present only so a verifier that still echoes
           // a finding's title cannot fail schema validation over it.
           title: { type: 'string' },
           fixed: { type: 'boolean' },
+          // Prose says why; this says whether, and only this survives the
+          // boundary below. Visibility, not enforcement: a verifier that
+          // widens and reports false is no more detectable than before.
+          widened: { type: 'boolean' },
           note: { type: 'string' },
         },
       },
@@ -1664,8 +1668,17 @@ const reviewOf = async (range, tag, picked, known = [], knownCharge = '') => {
         : ''),
       { label: `${tag}:${lens.label}`, phase: 'Review', schema: FINDINGS,
         model: 'opus', effort: effortFor.review })))
-  return out.filter(Boolean).flatMap(r => r.findings)
+  const raised = out.filter(Boolean).flatMap(r => r.findings)
     .map(f => ({ ...f, id: `f${++findingSeq}`, recorded_at: headOf(range) }))
+  // A finding with no span reaches the fixer as a bare filename, and the
+  // brief no longer points at the range either, so it arrives with less than
+  // it used to. Counted so that drift shows up instead of being argued about.
+  const spanless = raised.filter(f => typeof f.line_start !== 'number')
+  if (spanless.length) {
+    log(`${tag}: ${spanless.length} of ${raised.length} finding(s) carry no line span: ` +
+        spanless.map(f => `${f.id} (${f.file})`).join(', '))
+  }
+  return raised
 }
 
 // Everything from here to the PR is measured against reviewedThrough: the SHA
@@ -1755,8 +1768,9 @@ const verifyOpen = async (findings, label, range) => {
     `The fix's own commit range is ${range}. Read git diff ${range} and judge ` +
     `each claim against that diff first, rather than re-reading the file cold ` +
     `or trusting a claim it was fixed. Widen beyond this range only when the ` +
-    `diff itself cannot answer the question, and say in that finding's note ` +
-    `that you widened and why.\n` +
+    `diff itself cannot answer the question. When you do, set widened=true ` +
+    `on that finding's verdict and say in its note what you had to read and ` +
+    `why the diff could not answer it. Set widened=false otherwise.\n` +
     `Each finding below is listed with its id in brackets. Return one ` +
     `verdict per finding with that id copied exactly into id; order does ` +
     `not matter. A verdict whose id is not in this list is discarded, and a ` +
@@ -1772,9 +1786,13 @@ const verifyOpen = async (findings, label, range) => {
   // Pairs, not a Map: this crosses parallel() at the loop-join call site,
   // which serializes each thunk's result and strips a Map down to a plain
   // object with no .get. The Map is rebuilt at each call site instead.
-  return (out?.verdicts ?? [])
-    .filter(v => typeof v.id === 'string')
-    .map(v => [stripBrackets(v.id), v.fixed === true])
+  const kept = (out?.verdicts ?? []).filter(v => typeof v.id === 'string')
+  const widened = kept.filter(v => v.widened === true)
+  if (widened.length) {
+    log(`${label}: ${widened.length} verdict(s) read past ${range}: ` +
+        widened.map(v => `${stripBrackets(v.id)} (${v.note ?? 'no reason given'})`).join('; '))
+  }
+  return kept.map(v => [stripBrackets(v.id), v.fixed === true])
 }
 
 // Advisory only: a finding's evidence may have moved since it was recorded. One
@@ -1923,7 +1941,8 @@ while ((open.length || blockingChecksOpen()) && round < MAX_REVIEW_ROUNDS && !ou
   const head = fixed?.head_sha?.trim()
   const tailReviewable =
     reviewerCount && head && head !== reviewedThrough && !outOfBudget()
-  const roundRange = head ? `${reviewedThrough}..${head}` : reviewedThrough
+  const roundRange = head && head !== reviewedThrough
+    ? `${reviewedThrough}..${head}` : reviewedThrough
   lastFixRange = roundRange
 
   const [verdicts, freshRaw] = await parallel([

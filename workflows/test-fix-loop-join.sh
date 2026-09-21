@@ -46,7 +46,7 @@ check "no v.title reference remains" \
 
 echo "== static: VERDICTS requires id, title is optional"
 check "VERDICTS lists id in its required array" \
-  "$(grep -c "required: \['id', 'fixed', 'note'\]" "$SCRIPT" || true)" 1
+  "$(grep -c "required: \['id', 'fixed', 'widened', 'note'\]" "$SCRIPT" || true)" 1
 
 echo ""
 echo "== static: BRANCH requires dirty on every response"
@@ -425,6 +425,7 @@ function makeAgent(scenario, captured) {
         // trim was not enough to strip.
         const returnedId = scenario.verifyBracketed ? `[${id}]` : id
         verdicts.push({ id: returnedId, fixed: decision === true, title: `reworded-${id}-r${round}`,
+          widened: scenario.verifyWidened ? scenario.verifyWidened(id, round) === true : false,
           note: `stub verdict for ${id}` })
       }
       if (scenario.injectBogusVerdict) {
@@ -2360,6 +2361,29 @@ async function scenarioCE() {
     verify1.includes(`${REVIEWED_THROUGH}..fix00000000000000000000000000000000000001`), true)
 }
 
+// Scenario CJ -- a fix round that commits nothing leaves HEAD where it was,
+// and <sha>..<sha> is an empty diff: the verifier would be told to judge
+// against nothing, and any uncommitted work the fixer left would be invisible.
+// The bare SHA compares that commit to the working tree instead.
+async function scenarioCJ() {
+  console.log('\n== scenario CJ: a round that committed nothing verifies against the tree, not an empty range')
+  const { captured } = await run({
+    initialReview: {
+      correctness: [{ title: 'Needs a fix', file: 'a.js', claim: 'c', evidence: 'e',
+        line_start: 5, line_end: 9 }],
+      advocate: [],
+    },
+    verify: (id) => id === 'f1' ? true : undefined,
+    fixHead: () => REVIEWED_THROUGH,
+  })
+  const verify1 = captured.calls.find(c => c.label === 'verify:1')?.prompt ?? ''
+  check('verify ran', verify1.length > 0, true)
+  check('the range is not an empty self-comparison',
+    verify1.includes(`${REVIEWED_THROUGH}..${REVIEWED_THROUGH}`), false)
+  check('it is the bare commit, which diffs against the working tree',
+    verify1.includes(`The fix's own commit range is ${REVIEWED_THROUGH}.`), true)
+}
+
 // Scenario CF -- #44: silent re-ranging must not be possible. Verify may look
 // past its given range, but only when that range cannot answer the question,
 // and only while saying so in the finding's own note.
@@ -2371,13 +2395,19 @@ async function scenarioCF() {
       advocate: [],
     },
     verify: (id) => id === 'f1' ? true : undefined,
+    verifyWidened: (id) => id === 'f1',
   })
   const verify1 = captured.calls.find(c => c.label === 'verify:1')?.prompt ?? ''
   check('verify ran', verify1.length > 0, true)
   check('widening is allowed only when the range cannot answer the question',
     verify1.includes('Widen beyond this range only when the diff itself cannot answer the question'), true)
-  check('a widen must be disclosed in that finding\'s own note',
-    verify1.includes("say in that finding's note that you widened and why"), true)
+  const widenLog = captured.logs.find(l => l.includes('read past')) ?? ''
+  check('the widened verdict is surfaced, not discarded with the rest of it',
+    widenLog.length > 0, true)
+  check('the log names which call widened, so verify:final does not read like a round',
+    widenLog.includes('verify:1'), true)
+  check('it names the finding and carries its stated reason',
+    widenLog.includes('f1') && widenLog.includes('stub verdict for f1'), true)
 }
 
 // Scenario CG -- #44: a lens that cannot name a clean span (a deletion, a
@@ -2452,7 +2482,7 @@ for (const scenario of [scenarioA, scenarioB, scenarioG, scenarioC, scenarioD, s
                         scenarioBR, scenarioBS, scenarioBT, scenarioBU, scenarioBV, scenarioBW,
                         scenarioBX, scenarioBY, scenarioBZ, scenarioCA, scenarioCB,
                         scenarioCC, scenarioCD, scenarioCE, scenarioCF, scenarioCG,
-                        scenarioCH, scenarioCI]) {
+                        scenarioCH, scenarioCI, scenarioCJ]) {
   await scenario()
 }
 
