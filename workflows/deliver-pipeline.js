@@ -217,22 +217,20 @@ const BRANCH = {
     ticket: { type: 'string' },
     detail: { type: 'string' },
     dirty: { type: 'boolean' },
-    // Only the branch:existing prompt sets this, and only on the halts that
-    // need a note distinct from the plain not-found one: an ambiguous
-    // marker match, a fallback branch marked for a different ticket, a
-    // matched branch whose pull request already merged, or a matched
-    // branch's canonical worktree directory already occupied.
-    halt_reason: { type: 'string', enum: ['none', 'ambiguous', 'wrong-ticket', 'merged', 'occupied'] },
   },
 }
 
-// Required only here. An omitted halt_reason reads as the plain not-found
-// note, which is the note these halts exist to replace, so the field has to
-// be refused rather than defaulted; 'none' gives the other responses
-// something to say instead of relying on an absent key.
+// halt_reason lives here, not on BRANCH, so the default branch agent never
+// sees a field its own prompt says nothing about. Required, because an
+// omitted one reads as the plain not-found note, which is the note these
+// halts exist to replace; 'none' keeps an absent key from being the signal.
 const EXISTING_BRANCH = {
   ...BRANCH,
   required: [...BRANCH.required, 'halt_reason'],
+  properties: {
+    ...BRANCH.properties,
+    halt_reason: { type: 'string', enum: ['none', 'ambiguous', 'wrong-ticket', 'merged', 'occupied'] },
+  },
 }
 
 // Answers both the CRAP and mutation opt-in questions in one call: both
@@ -735,18 +733,23 @@ if (!wt?.created) {
       ? `The only branch carrying the ${ticketMarker} marker already has a ` +
         `merged pull request, so nothing was planned or implemented: ` +
         `${wt?.detail}. That work already shipped. Re-running without ` +
-        `existingBranch does not escape it: the default path finds the ` +
-        `leftover worktree and branch for this marker and reuses them, so ` +
-        `the new commits land on the branch that already merged and push ` +
-        `onto its pull request. Remove that worktree and delete the branch ` +
-        `first, or track the new work under a ticket of its own.`
+        `existingBranch is not a reliable escape: that path names the branch ` +
+        `<type>/${ticketMarker}-<slug> from this run's own type and a slug ` +
+        `it re-derives from the task, and only the name decides what ` +
+        `happens. Land on this same name and it reuses the merged branch, ` +
+        `so the new commits push onto its closed pull request; land on a ` +
+        `different one and it either cuts a fresh branch or halts on the ` +
+        `worktree directory this branch already holds. Do not rely on ` +
+        `which. Remove that worktree and delete the branch first, or track ` +
+        `the new work under a ticket of its own.`
       : wt?.halt_reason === 'occupied'
       ? `A branch carrying the ${ticketMarker} marker was found with no ` +
         `worktree of its own, but its canonical worktree directory is ` +
         `occupied, so nothing was planned or implemented: ${wt?.detail}. ` +
         `Clear or rename what is occupying that path, then re-run with ` +
-        `existingBranch: true; re-running without existingBranch would cut ` +
-        `a duplicate branch for a ticket that already has one.`
+        `existingBranch: true; re-running without existingBranch either ` +
+        `halts on this same occupied path or, if it re-derives a different ` +
+        `slug, cuts a duplicate branch for a ticket that already has one.`
       : args?.existingBranch
       ? `No worktree or branch carrying the ${ticketMarker}-<slug> marker ` +
         `was found (any branch type, e.g. under ` +

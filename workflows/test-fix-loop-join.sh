@@ -1977,12 +1977,13 @@ async function scenarioBR() {
 }
 
 // Scenario BS -- #87 review: the merged halt's own advice told the user to
-// "re-run without existingBranch to cut a fresh branch". The default path
-// cuts nothing here: its step 6 finds the leftover worktree for that branch
-// and reuses it, so the advice lands new commits on the merged branch and
-// pushes them onto the pull request that already closed.
+// "re-run without existingBranch to cut a fresh branch". What that path does
+// turns entirely on the branch name it re-derives from the task: the same
+// name reuses the merged branch and pushes onto its closed pull request, a
+// different one cuts fresh or halts on the directory. The note has to cover
+// both, because the run cannot tell which it will get.
 async function scenarioBS() {
-  console.log('\n== scenario BS: the merged halt note says re-running without existingBranch reuses the merged branch')
+  console.log('\n== scenario BS: the merged halt note covers both outcomes of re-running without existingBranch')
   const { result } = await run({
     args: { existingBranch: true },
     existingBranchResult: { created: false, branch: '', base: '', path: '',
@@ -1990,12 +1991,10 @@ async function scenarioBS() {
       dirty: false, halt_reason: 'merged' },
   })
   const note = result.note ?? ''
-  check('the note no longer gives the bare re-run instruction',
-    note.includes('if this ticket has new work, re-run without existingBranch to cut a fresh branch.'), false)
-  check('it says the default path reuses what is already there',
-    /reuses? them|finds the leftover/.test(note), true)
-  check('it does not claim a same-named branch would be cut',
-    note.includes('would cut a branch'), false)
+  check('it makes the outcome turn on the re-derived name, not on the marker',
+    /only the name decides/.test(note), true)
+  check('it names the reuse outcome and the fresh-cut outcome, not just one',
+    /reuses the merged branch/.test(note) && /cuts a fresh branch/.test(note), true)
   check('it names the way out: clear the leftovers, or use another ticket',
     /delete the branch/.test(note) && /ticket of its own/.test(note), true)
 }
