@@ -217,10 +217,12 @@ const BRANCH = {
     ticket: { type: 'string' },
     detail: { type: 'string' },
     dirty: { type: 'boolean' },
-    // Only the branch:existing prompt sets this, and only on the two halts
-    // that need a note distinct from the plain not-found one: an ambiguous
-    // marker match, or a fallback branch marked for a different ticket.
-    halt_reason: { type: 'string', enum: ['ambiguous', 'wrong-ticket'] },
+    // Only the branch:existing prompt sets this, and only on the halts that
+    // need a note distinct from the plain not-found one: an ambiguous
+    // marker match, a fallback branch marked for a different ticket, a
+    // matched branch whose pull request already merged, or a matched
+    // branch's canonical worktree directory already occupied.
+    halt_reason: { type: 'string', enum: ['ambiguous', 'wrong-ticket', 'merged', 'occupied'] },
   },
 }
 
@@ -499,8 +501,10 @@ const wt = args?.existingBranch
       `Two fields matter on every response below, halts included: dirty is ` +
       `true only for step 7's dirty-checkout halt, false in every other ` +
       `response; halt_reason is "ambiguous" for the two-or-more-matches halts ` +
-      `in steps 4 and 5, "wrong-ticket" for the different-ticket halt in step ` +
-      `6, and unset in every other response.\n` +
+      `in steps 4 and 5, "merged" for step 5's already-merged-PR halt, ` +
+      `"occupied" for step 5's occupied-directory halt, "wrong-ticket" for ` +
+      `the different-ticket halt in step 6, and unset in every other ` +
+      `response.\n` +
       `1. Run git worktree prune. It only removes registrations for worktree ` +
       `directories that no longer exist on disk; it never touches a directory ` +
       `that does exist. Run it before listing worktrees so a stale record left ` +
@@ -532,17 +536,29 @@ const wt = args?.existingBranch
       `5. Only if step 4 matched nothing: a branch can carry the ` +
       `${ticketMarker} marker with no worktree of its own. git worktree ` +
       `prune (step 1) drops a worktree's registration once its directory is ` +
-      `gone, but never the branch itself, and the usual way that happens is ` +
-      `a worktree cleaned up by hand while its branch and PR stay open. Run ` +
-      `git branch --list "*/${ticketMarker}-*" to check for one.\n` +
-      `   - Exactly one match: re-attach a worktree to it rather than losing ` +
-      `it. Its canonical directory is ` +
+      `gone, but never the branch itself. The most common way that happens ` +
+      `is the opposite of abandonment: the PR merged and the worktree was ` +
+      `cleaned up because the work was done, not because it was cut loose ` +
+      `mid-flight. Run git branch --list "*/${ticketMarker}-*" to check for ` +
+      `one.\n` +
+      `   - Exactly one match: before touching it, run gh pr view <branch> ` +
+      `--json state -q .state, using the matched branch's own name, not ` +
+      `whatever is checked out here. If that reports MERGED, the ticket's ` +
+      `work already shipped on that branch; return created=false, ` +
+      `halt_reason=merged, naming the branch and that its PR merged. Do not ` +
+      `re-attach a worktree to it and do not run any further step on it: a ` +
+      `merged branch is done, not a tree to keep implementing into. If gh ` +
+      `reports any other state (OPEN, CLOSED), no PR at all, or the call ` +
+      `itself fails (no network, no auth), treat the branch as still live ` +
+      `and continue below.\n` +
+      `   - Not merged: re-attach a worktree to it rather than losing it. ` +
+      `Its canonical directory is ` +
       `<repo-root>/.claude/worktrees/${ticketMarker}-<slug>; if that path is ` +
-      `already occupied by something else, return created=false naming the ` +
-      `path and what is there. Otherwise run git worktree add <path> ` +
-      `<branch> -- no -b, the branch already exists; a branch cannot be ` +
-      `created twice, and this step never creates one. Do not fetch or ` +
-      `pull. Go to step 7.\n` +
+      `already occupied by something else, return created=false, ` +
+      `halt_reason=occupied, naming the path and what is there. Otherwise ` +
+      `run git worktree add <path> <branch> -- no -b, the branch already ` +
+      `exists; a branch cannot be created twice, and this step never ` +
+      `creates one. Do not fetch or pull. Go to step 7.\n` +
       `   - Two or more matches: return created=false, halt_reason=ambiguous, ` +
       `listing every matching branch, same as step 4.\n` +
       `   - No match: go to step 6.\n` +
@@ -673,13 +689,17 @@ if (!wt?.created) {
     // reuse path (step 6) and the existingBranch guard (step 7) halt here for
     // the same reason, an uncommitted checkout, and re-running with
     // existingBranch: true would only hit that same existingBranch guard.
-    // wt.halt_reason distinguishes the existingBranch prompt's two other
-    // halts, which need their own notes rather than falling into the plain
-    // not-found one below: an ambiguous marker match, or a fallback branch
-    // marked for a different ticket. Neither is safe to answer with "cut a
-    // new branch" -- an ambiguous match already has too many candidates, and
-    // a wrong-ticket match means this ticket's own branch or worktree is
-    // still missing, not that nothing exists to reuse.
+    // wt.halt_reason distinguishes the existingBranch prompt's other halts,
+    // which need their own notes rather than falling into the plain
+    // not-found one below: an ambiguous marker match, a fallback branch
+    // marked for a different ticket, a matched branch whose PR already
+    // merged, or a matched branch's canonical directory already occupied.
+    // None of the four is safe to answer with "cut a new branch" -- an
+    // ambiguous match already has too many candidates, a wrong-ticket match
+    // means this ticket's own branch or worktree is still missing rather
+    // than nothing existing to reuse, a merged match means the ticket's
+    // branch already exists and shipped, and an occupied match means the
+    // ticket's branch already exists and only its directory is blocked.
     note: wt?.dirty
       ? 'The checkout that holds this branch has uncommitted changes, so ' +
         'nothing was planned or implemented. Commit or stash them, then ' +
@@ -694,6 +714,18 @@ if (!wt?.created) {
         `nothing was planned or implemented: ${wt?.detail}. No branch or ` +
         `worktree for ${ticketMarker} exists yet. Re-run without ` +
         `existingBranch to cut one.`
+      : wt?.halt_reason === 'merged'
+      ? `The only branch carrying the ${ticketMarker} marker already has a ` +
+        `merged pull request, so nothing was planned or implemented: ` +
+        `${wt?.detail}. That work already shipped; if this ticket has new ` +
+        `work, re-run without existingBranch to cut a fresh branch.`
+      : wt?.halt_reason === 'occupied'
+      ? `A branch carrying the ${ticketMarker} marker was found with no ` +
+        `worktree of its own, but its canonical worktree directory is ` +
+        `occupied, so nothing was planned or implemented: ${wt?.detail}. ` +
+        `Clear or rename what is occupying that path, then re-run with ` +
+        `existingBranch: true; re-running without existingBranch would cut ` +
+        `a duplicate branch for a ticket that already has one.`
       : args?.existingBranch
       ? `No worktree or branch carrying the ${ticketMarker}-<slug> marker ` +
         `was found (any branch type, e.g. under ` +

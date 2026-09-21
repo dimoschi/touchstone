@@ -23,14 +23,16 @@ the fabricated link.
 - `--type <word>` — optional. `feat`, `fix`, `chore`, `refactor`, `docs`, `test`,
   `perf`, `build`, or `ci`. Pass as `branchType`. Defaults to `feat`.
 - `--existing` — optional. Pass `existingBranch: true`. Use it when the work
-  continues a branch this ticket already has, in its own worktree: review
-  feedback, or scope added to a ticket whose PR is already open. The workflow
-  finds that worktree by ticket marker (`git worktree list --porcelain`),
-  whatever the invoking checkout happens to be on, and reuses it instead of
-  cutting a new one, skipping fetch and pull entirely. **`--ticket` is still
-  required.** Without this flag the workflow cuts a fresh branch and worktree
-  off the base, which would strand follow-up work away from the PR it belongs
-  to.
+  continues a branch this ticket already has: review feedback, or scope added
+  to a ticket whose PR is already open. The workflow looks up that branch by
+  ticket marker, whatever the invoking checkout happens to be on and skipping
+  fetch and pull entirely: first among every worktree
+  (`git worktree list --porcelain`), then, only if none matches, a branch with
+  no worktree of its own (its directory was removed by hand, commonly because
+  its PR merged), re-attaching a worktree to it rather than cutting a new
+  branch. **`--ticket` is still required.** Without this flag the workflow
+  cuts a fresh branch and worktree off the base, which would strand follow-up
+  work away from the PR it belongs to.
 - Everything remaining, with the flags removed, is `task`. **Optional.** The
   workflow fetches the ticket's title, description and comments and gives them to
   every phase, so the ticket is the specification. Pass task text only to *narrow*
@@ -89,9 +91,13 @@ downstream metric would inherit it.
 
 It halts on purpose: a detached HEAD, a base ref that will not resolve, a dirty
 checkout in the worktree `--existing` resolves to, `--existing` finding no
-worktree for the ticket and the current checkout not on a feature branch
-either, `--existing` matching more than one worktree for the ticket, a missing
-ticket. **Report the halt and stop.** Do not copy
+worktree or branch for the ticket and the current checkout not on a feature
+branch either, `--existing` matching more than one worktree or branch for the
+ticket, `--existing` matching only a branch whose pull request already
+merged, `--existing` matching only a branch whose canonical worktree
+directory is already occupied by something else, `--existing` falling back
+to a checkout that carries a different ticket's marker, a missing ticket.
+**Report the halt and stop.** Do not copy
 `deliver-pipeline.js` elsewhere and edit out the phase that blocked you, and do not
 edit the original. A gate that gets neutered whenever it is inconvenient is not a
 gate.

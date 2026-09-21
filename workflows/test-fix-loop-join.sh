@@ -55,6 +55,10 @@ echo "== static: BRANCH requires dirty on every response"
 check "BRANCH's required array lists dirty" \
   "$(grep -c "required: \['created', 'branch', 'base', 'path', 'detail', 'dirty'\]" "$SCRIPT" || true)" 1
 
+echo "== static: BRANCH's halt_reason enum covers the merged and occupied halts, not just ambiguous and wrong-ticket"
+check "halt_reason enum lists all four" \
+  "$(grep -c "enum: \['ambiguous', 'wrong-ticket', 'merged', 'occupied'\]" "$SCRIPT" || true)" 1
+
 echo "== static: the verifier's brief no longer demands order or a verbatim title"
 # The old instruction, word for word. A hit elsewhere in the file (an
 # unrelated comment, or this test's own header explaining the old bug) must
@@ -1859,6 +1863,67 @@ async function scenarioBN() {
     (result.note ?? '').includes('Re-run without existingBranch to cut one'), true)
 }
 
+// Scenario BO -- #87: the worktree-less branch fallback (scenario BK's
+// prompt text) must not re-attach a worktree to a branch whose pull request
+// already merged. The common way a branch outlives its worktree is the PR
+// merging and the directory being cleaned up because the work was done, not
+// because it was abandoned mid-flight -- so silently re-attaching runs a full
+// implement-and-gate cycle on a ticket that already shipped.
+async function scenarioBO() {
+  console.log('\n== scenario BO: the worktree-less fallback checks the matched branch\'s PR state before re-attaching')
+  const { captured } = await run({
+    args: { existingBranch: true },
+    initialReview: { correctness: [], advocate: [] },
+    verify: () => undefined,
+    staleness: () => [],
+  })
+  const p = captured.calls.find(c => c.label === 'branch:existing')?.prompt ?? ''
+  check('the prompt checks the matched branch\'s PR state before re-attaching',
+    p.includes('gh pr view') && p.includes('MERGED'), true)
+  check('a merged PR halts distinctly, not as ambiguous or wrong-ticket',
+    p.includes('halt_reason=merged'), true)
+  check('the prompt refuses to re-attach a merged branch',
+    p.includes('Do not re-attach a worktree to it'), true)
+}
+
+// Scenario BP -- #87: a worktree-less branch whose PR already merged must
+// halt with its own note, not the plain not-found note, whose advice to cut
+// a new branch would duplicate a branch this ticket already has.
+async function scenarioBP() {
+  console.log('\n== scenario BP: a merged-PR branch halts with its own note')
+  const { result } = await run({
+    args: { existingBranch: true },
+    existingBranchResult: { created: false, branch: '', base: '', path: '',
+      detail: 'branch fix/gh-21-retry-path carries the gh-21 marker but its PR #40 is MERGED',
+      dirty: false, halt_reason: 'merged' },
+  })
+  check('halted at Worktree', result.halted_at, 'Worktree')
+  check('the note reports the merged PR rather than claiming nothing was found',
+    /merged/i.test(result.note ?? ''), true)
+  check('the note carries the matched branch',
+    (result.note ?? '').includes('fix/gh-21-retry-path'), true)
+}
+
+// Scenario BQ -- #87: the occupied-path halt in the worktree-less fallback (a
+// branch was found, but its canonical worktree directory already holds
+// something else) must halt with its own note, not the plain not-found note,
+// which would tell the user to cut a duplicate branch for a ticket that
+// already has one.
+async function scenarioBQ() {
+  console.log('\n== scenario BQ: an occupied canonical worktree path halts with its own note')
+  const { result } = await run({
+    args: { existingBranch: true },
+    existingBranchResult: { created: false, branch: '', base: '', path: '',
+      detail: '.claude/worktrees/gh-21-retry-path already holds an unrelated checkout',
+      dirty: false, halt_reason: 'occupied' },
+  })
+  check('halted at Worktree', result.halted_at, 'Worktree')
+  check('the note does not recommend cutting a new branch',
+    (result.note ?? '').includes('Re-run without existingBranch to cut one'), false)
+  check('the note names what is occupying the path',
+    (result.note ?? '').includes('already holds an unrelated checkout'), true)
+}
+
 // Scenario AZ -- the defect #81 is about. A lens points a fresh finding at a
 // settled one because the fix for that finding introduced this one. Assuming
 // it was a re-report readied a PR carrying a real regression, under
@@ -1926,7 +1991,7 @@ for (const scenario of [scenarioA, scenarioB, scenarioG, scenarioC, scenarioD, s
                         scenarioAP, scenarioAQ, scenarioAR, scenarioBB, scenarioBC, scenarioBD,
                         scenarioBE, scenarioAZ, scenarioBA, scenarioBF, scenarioBG,
                         scenarioBH, scenarioBI, scenarioBJ, scenarioBK, scenarioBL,
-                        scenarioBM, scenarioBN]) {
+                        scenarioBM, scenarioBN, scenarioBO, scenarioBP, scenarioBQ]) {
   await scenario()
 }
 
