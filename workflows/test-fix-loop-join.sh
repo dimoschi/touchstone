@@ -474,9 +474,14 @@ function makeAgent(scenario, captured) {
 
 async function run(scenario) {
   const captured = { calls: [], runRecordPrompt: null, dedupPrompt: null, logs: [] }
+  // Charged per agent call, not per read, so a spend assertion states "one
+  // agent ran inside this window" rather than "the script read the budget
+  // twice"; an added outOfBudget() check would otherwise break it silently.
+  let agentCalls = 0
+  const stubAgent = makeAgent(scenario, captured)
   const sandbox = {
     args: baseArgs(scenario.args),
-    agent: makeAgent(scenario, captured),
+    agent: async (prompt, opts) => { agentCalls++; return stubAgent(prompt, opts) },
     // JSON round-tripped, not returned as-is: the real parallel() serializes
     // each thunk's result to hand it back across the boundary, and a class
     // instance (a Map, for instance) does not survive that. Promise.all alone
@@ -491,7 +496,10 @@ async function run(scenario) {
     workflow: async () => { throw new Error('workflow() not stubbed for this test') },
     phase: () => {},
     log: (m) => captured.logs.push(m),
-    budget: scenario.budget ?? { total: null, spent: () => 0, remaining: () => Infinity },
+    budget: scenario.budgetPerAgentCall
+      ? { total: null, spent: () => agentCalls * scenario.budgetPerAgentCall,
+          remaining: () => Infinity }
+      : (scenario.budget ?? { total: null, spent: () => 0, remaining: () => Infinity }),
   }
   const ctx = vm.createContext(sandbox)
   const fn = vm.compileFunction(body, [], { parsingContext: ctx })
@@ -2391,10 +2399,9 @@ async function scenarioCJ() {
 // gives the expected number.
 async function scenarioCK() {
   console.log('\n== scenario CK: fix_round_output is the fix agent\'s own delta, not a running total')
-  let spent = 0
   const { result } = await run({
     args: { maxReviewRounds: 1 },
-    budget: { total: null, spent: () => (spent += 100), remaining: () => Infinity },
+    budgetPerAgentCall: 100,
     initialReview: {
       correctness: [{ title: 'Still open', file: 'a.js', claim: 'c', evidence: 'e',
         line_start: 5 }],
@@ -2407,9 +2414,10 @@ async function scenarioCK() {
   check('one round was recorded', result.fix_round_output?.length, 1)
   check('the figure is positive: a reversed subtraction reads negative',
     entry?.output > 0, true)
-  // One increment of this stub, so it spans the fix call and nothing else;
-  // the running total at that point is a larger multiple.
-  check('it spans only the fix call, not the whole run to that point',
+  // Exactly one agent call inside the measured window. The running total at
+  // that point is a far larger multiple, and a reversed subtraction is
+  // negative, so both read differently from this.
+  check('it spans exactly one agent call: the fixer, and nothing before it',
     entry?.output, 100)
 }
 
