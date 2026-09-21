@@ -2031,7 +2031,7 @@ if (open.length && !outOfBudget()) {
 if (regressionSuspects.length && !outOfBudget()) {
   log(`verifying ${regressionSuspects.length} regression suspect(s) before ` +
       `treating them as noise`)
-  const verdicts = new Map(await verifyOpen(regressionSuspects, 'verify:suspects', lastFixRange ?? reviewedThrough))
+  const verdicts = new Map(await verifyOpen(regressionSuspects, 'verify:suspects', lastFixRange))
   const live = regressionSuspects.filter(f => verdicts.get(f.id) !== true)
   const liveIds = new Set(live.map(f => f.id))
   regressionSuspects = regressionSuspects.filter(f => !liveIds.has(f.id))
