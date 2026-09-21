@@ -260,7 +260,9 @@ check "the stale local base alone would widen the range past it" \
   "$([ "$LOCAL_RANGE_COUNT" -gt "$ORIGIN_RANGE_COUNT" ] && echo yes || echo no)" yes
 
 echo ""
-echo "== existingBranch lookup: a linked worktree for a ticket's branch is found by git worktree list --porcelain, whatever the main checkout is on"
+echo "== premise: git reports a ticket's linked worktree while the main checkout sits on the base branch"
+# Establishes the git facts the lookup rests on; it never runs the pipeline, so
+# it cannot fail if the lookup regresses. Scenarios BI, BJ and BK cover that.
 EXIST_ORIGIN="$WORK/exist-origin.git"
 git init -q --bare "$EXIST_ORIGIN"
 
@@ -1746,6 +1748,21 @@ async function scenarioBI() {
   })
   check('the run does not halt at Worktree', result.halted_at === 'Worktree', false)
   check('the planner ran exactly once', callCount(captured, 'planner'), 1)
+  // A hand-fed created:true record carries through the old pipeline too, so
+  // the only part of this the stub does not decide is what the lookup agent
+  // was told: that the invoking checkout's branch does not gate the match.
+  const bx = captured.calls.find(c => c.label === 'branch:existing')?.prompt ?? ''
+  check('the branch:existing phase ran', bx.length > 0, true)
+  check('the lookup runs whatever the invoking checkout is on',
+    bx.includes('regardless of what the invoking checkout is on'), true)
+  check('being on the base branch is named as fine, not an error',
+    bx.includes('the base branch, another feature branch, or detached HEAD are all'), true)
+  check('the matched record\'s branch is what the run carries',
+    result.branch, 'feat/gh-21-stub')
+  const impl = captured.calls.find(c => c.label === 'implementer')?.prompt ?? ''
+  check('the implementer phase ran', impl.length > 0, true)
+  check('the matched record\'s path is where the work happens',
+    impl.includes('/tmp/stub-worktree'), true)
 }
 
 // Scenario BJ -- the existingBranch halt note used to tell the user to check
@@ -1847,8 +1864,8 @@ async function scenarioBM() {
   check('halted at Worktree', result.halted_at, 'Worktree')
   check('the note reports the ambiguity rather than claiming nothing was found',
     /more than one/i.test(result.note ?? ''), true)
-  check('the note does not recommend cutting a new branch',
-    (result.note ?? '').includes('Re-run without existingBranch to cut one'), false)
+  check('the note is the ambiguity note, not the not-found note it replaced',
+    (result.note ?? '').startsWith('Found more than one branch carrying'), true)
   check('the note carries the matched branches',
     (result.note ?? '').includes('feat/gh-21-a'), true)
 }
@@ -1926,8 +1943,8 @@ async function scenarioBQ() {
       dirty: false, halt_reason: 'occupied' },
   })
   check('halted at Worktree', result.halted_at, 'Worktree')
-  check('the note does not recommend cutting a new branch',
-    (result.note ?? '').includes('Re-run without existingBranch to cut one'), false)
+  check('the note is the occupied note, not the not-found note it replaced',
+    (result.note ?? '').startsWith('A branch carrying the gh-21 marker was found with no'), true)
   check('the note names what is occupying the path',
     (result.note ?? '').includes('already holds an unrelated checkout'), true)
 }
@@ -1948,6 +1965,9 @@ async function scenarioBR() {
   })
   const p = captured.calls.find(c => c.label === 'branch:existing')?.prompt ?? ''
   const step4 = p.slice(p.indexOf('4. Ticket lookup'), p.indexOf('5. Only if step 4 matched nothing'))
+  // Both markers missing makes the slice empty, and every absence check below
+  // then passes on nothing.
+  check('the step 4 slice was actually found', step4.length > 0, true)
   check('step 4 no longer reuses a bare match with no PR-state check at all',
     step4.includes('Exactly one match: that is the tree to use. Go to step 7.'), false)
   check('step 4 checks the matched branch\'s PR state before reusing it',
@@ -1996,6 +2016,7 @@ async function scenarioBT() {
   })
   const p = captured.calls.find(c => c.label === 'branch:existing')?.prompt ?? ''
   const step5 = p.slice(p.indexOf('5. Only if step 4 matched nothing'), p.indexOf('6. Only if steps 4 and 5 matched nothing'))
+  check('the step 5 slice was actually found', step5.length > 0, true)
   check('the re-attach action is folded into the Exactly one match bullet, not a sibling Not merged bullet',
     step5.includes('- Not merged:'), false)
   check('Two or more matches sits directly after Exactly one match, before No match',
