@@ -880,8 +880,11 @@ const treeAgent = (prompt, opts) =>
     `-- goes under ${wt.path}/.claude/scratch/ instead, never /tmp. Before creating ` +
     `anything under it, confirm that path is excluded from git: run ` +
     `git -C ${wt.path} check-ignore -q ${wt.path}/.claude/scratch, and if that ` +
-    `fails, append that path to the file printed by ` +
-    `git -C ${wt.path} rev-parse --git-path info/exclude. Never add the entry to ` +
+    `fails, append the .claude/scratch path above written relative to the repo ` +
+    `root, not the absolute form you just used, to the file printed by ` +
+    `git -C ${wt.path} rev-parse --git-path info/exclude -- gitignore patterns ` +
+    `are resolved against the repo root, so a pattern built from the absolute ` +
+    `path matches nothing. Never add the entry to ` +
     `.gitignore itself: that file is tracked, so editing it leaves the worktree ` +
     `dirty for every phase that runs before Implement's baseline dirty-tree check, ` +
     `which would then blame a discovered check for dirt this instruction caused. ` +
