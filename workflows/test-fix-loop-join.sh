@@ -67,10 +67,12 @@ echo "== static: treeAgent tells every phase where scratch work goes (gh-40)"
 # identity and signing config from the global config instead of the worktree.
 check "the scratch path is named, not left to /tmp" \
   "$(grep -Fc '.claude/scratch/' "$SCRIPT" || true)" 1
-check "it tells the agent to gitignore the scratch path before using it" \
-  "$(grep -Fc 'covered by .gitignore (add an entry there if it is not)' "$SCRIPT" || true)" 1
-check "it names the fixture helper the pattern mirrors" \
-  "$(grep -Fc 'run-go-unmeasurable.sh' "$SCRIPT" || true)" 1
+check "it excludes the scratch path via the local exclude file, never .gitignore" \
+  "$(grep -Fc 'git-path info/exclude' "$SCRIPT" || true)" 1
+check "it does not edit .gitignore, which would dirty the tree the baseline reads" \
+  "$(grep -Fc 'covered by .gitignore (add an entry there if it is not)' "$SCRIPT" || true)" 0
+check "it does not cite a fixture path only touchstone's own repo has" \
+  "$(grep -Fc 'run-go-unmeasurable.sh' "$SCRIPT" || true)" 0
 check "it spells out signing off with an explicit test identity" \
   "$(grep -Fc 'commit.gpgsign=false' "$SCRIPT" || true)" 1
 
