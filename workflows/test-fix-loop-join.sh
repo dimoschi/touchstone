@@ -67,6 +67,8 @@ echo "== static: treeAgent tells every phase where scratch work goes (gh-40)"
 # identity and signing config from the global config instead of the worktree.
 check "the scratch path is resolved from the worktree's own git dir, not /tmp" \
   "$(grep -Fc 'git-path touchstone-scratch' "$SCRIPT" || true)" 1
+check "it still names /tmp as the default it exists to replace" \
+  "$(grep -Fc 'anything you would otherwise drop in /tmp' "$SCRIPT" || true)" 1
 check "it does not route the scratch path through info/exclude" \
   "$(grep -Fc 'git-path info/exclude' "$SCRIPT" || true)" 0
 check "it does not edit .gitignore, which would dirty the tree the baseline reads" \
