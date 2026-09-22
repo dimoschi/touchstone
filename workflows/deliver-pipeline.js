@@ -875,7 +875,21 @@ const treeAgent = (prompt, opts) =>
     `it too) and print the repo and branch they resolved as their first line ` +
     `of output -- read that line and pass ${wt.path} there, every time, rather ` +
     `than relying on cwd. GIT_DIR/GIT_WORK_TREE env vars and cd are not the way ` +
-    `to target it.\n\n` +
+    `to target it. Any reproduction or experiment -- a scratch clone, a throwaway ` +
+    `git repo to test a git behaviour, anything you would otherwise drop in /tmp ` +
+    `-- goes under ${wt.path}/.claude/scratch/ instead, never /tmp: confirm that ` +
+    `path is covered by .gitignore (add an entry there if it is not) before ` +
+    `creating anything under it, so an abandoned experiment can never be ` +
+    `committed. Git resolves identity and signing config by directory, so a repo ` +
+    `created outside the workspace inherits whatever the global config says, ` +
+    `which can mean signing with the wrong identity or blocking on a hardware ` +
+    `key no agent can satisfy. A scratch git repo is therefore always created ` +
+    `with signing off and an explicit test identity, the same pattern ` +
+    `skills/crap-controlled-changes/test/run-go-unmeasurable.sh uses for its own ` +
+    `fixtures: git init -q, then commit with ` +
+    `GIT_AUTHOR_NAME=test GIT_AUTHOR_EMAIL=t@t GIT_COMMITTER_NAME=test ` +
+    `GIT_COMMITTER_EMAIL=t@t git -c commit.gpgsign=false -c gpg.format=openpgp ` +
+    `commit.\n\n` +
     envelope() + `\n` + prompt + RECORD(opts.label),
     opts)
 

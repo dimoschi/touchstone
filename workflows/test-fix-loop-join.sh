@@ -59,6 +59,21 @@ echo "== static: BRANCH's halt_reason enum covers the merged and occupied halts,
 check "halt_reason enum lists all five" \
   "$(grep -c "enum: \['none', 'ambiguous', 'wrong-ticket', 'merged', 'occupied'\]" "$SCRIPT" || true)" 1
 
+echo ""
+echo "== static: treeAgent tells every phase where scratch work goes (gh-40)"
+# treeAgent() builds the prompt every phase (triage, plan, implement, fix,
+# review, mutation) shares, so one addition here reaches all of them. Without
+# it, an agent reproducing a behaviour defaults to /tmp, which resolves git
+# identity and signing config from the global config instead of the worktree.
+check "the scratch path is named, not left to /tmp" \
+  "$(grep -Fc '.claude/scratch/' "$SCRIPT" || true)" 1
+check "it tells the agent to gitignore the scratch path before using it" \
+  "$(grep -Fc 'covered by .gitignore (add an entry there if it is not)' "$SCRIPT" || true)" 1
+check "it names the fixture helper the pattern mirrors" \
+  "$(grep -Fc 'run-go-unmeasurable.sh' "$SCRIPT" || true)" 1
+check "it spells out signing off with an explicit test identity" \
+  "$(grep -Fc 'commit.gpgsign=false' "$SCRIPT" || true)" 1
+
 echo "== static: the verifier's brief no longer demands order or a verbatim title"
 # The old instruction, word for word. A hit elsewhere in the file (an
 # unrelated comment, or this test's own header explaining the old bug) must
