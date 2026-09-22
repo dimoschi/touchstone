@@ -59,6 +59,35 @@ echo "== static: BRANCH's halt_reason enum covers the merged and occupied halts,
 check "halt_reason enum lists all five" \
   "$(grep -c "enum: \['none', 'ambiguous', 'wrong-ticket', 'merged', 'occupied'\]" "$SCRIPT" || true)" 1
 
+echo ""
+echo "== static: treeAgent tells every phase where scratch work goes (gh-40)"
+# treeAgent() builds the prompt every phase (triage, plan, implement, fix,
+# review, mutation) shares, so one addition here reaches all of them. Without
+# it, an agent reproducing a behaviour defaults to /tmp, which resolves git
+# identity and signing config from the global config instead of the worktree.
+check "the scratch path is resolved from the worktree's own git dir, not /tmp" \
+  "$(grep -Fc 'git-path touchstone-scratch' "$SCRIPT" || true)" 1
+check "it still names /tmp as the default it exists to replace" \
+  "$(grep -Fc 'anything you would otherwise drop in /tmp' "$SCRIPT" || true)" 1
+check "it does not route the scratch path through info/exclude" \
+  "$(grep -Fc 'git-path info/exclude' "$SCRIPT" || true)" 0
+check "it does not edit .gitignore, which would dirty the tree the baseline reads" \
+  "$(grep -Fc 'covered by .gitignore (add an entry there if it is not)' "$SCRIPT" || true)" 0
+check "it does not cite a fixture path only touchstone's own repo has" \
+  "$(grep -Fc 'run-go-unmeasurable.sh' "$SCRIPT" || true)" 0
+check "it spells out signing off with an explicit test identity" \
+  "$(grep -Fc 'commit.gpgsign=false' "$SCRIPT" || true)" 1
+check "the scratch commit recipe carries git -C, not just init" \
+  "$(grep -Fc 'git -C <scratch path> -c commit.gpgsign=false' "$SCRIPT" || true)" 1
+# git -C needs the directory to exist, and --git-path only names it, so the
+# form that creates it is the one that has to be spelled out.
+check "the recipe creates the directory rather than assuming it" \
+  "$(grep -Fc 'git init -q <scratch path> creates the directory' "$SCRIPT" || true)" 1
+check "it stages before committing, so the commit is not empty" \
+  "$(grep -Fc 'git -C <scratch path> add -A' "$SCRIPT" || true)" 1
+check "it passes a message, so the commit cannot open an editor" \
+  "$(grep -Fc 'commit -q -m scratch' "$SCRIPT" || true)" 1
+
 echo "== static: the verifier's brief no longer demands order or a verbatim title"
 # The old instruction, word for word. A hit elsewhere in the file (an
 # unrelated comment, or this test's own header explaining the old bug) must
@@ -1088,6 +1117,10 @@ async function scenarioX() {
   const mutationCall = captured.calls.find((c) => c.label === 'mutation:1')
   check('the mutation schema requires scored',
     mutationCall?.schema?.required?.includes('scored'), true)
+  // The fourth phase the scratch rule has to reach, and the only one no
+  // other scenario gets far enough to see.
+  check('the mutation phase is told where scratch work goes',
+    (mutationCall?.prompt ?? '').includes('touchstone-scratch'), true)
 }
 
 async function scenarioY() {
@@ -2494,6 +2527,32 @@ async function scenarioCN() {
     late.includes("The fix's own commit range"), false)
 }
 
+// Scenario CO -- the scratch rule lives in the prompt builder every phase
+// shares, and static greps only prove the text is in the file. Emitting it
+// for one label and not the rest would leave every grep green while the
+// phases that actually run experiments never see it.
+async function scenarioCO() {
+  console.log('\n== scenario CO: the scratch rule reaches every phase that runs commands')
+  const { captured } = await run({
+    args: { maxReviewRounds: 1, mutationGated: true },
+    mutationGated: true,
+    initialReview: {
+      correctness: [{ title: 'Open', file: 'a.js', claim: 'c', evidence: 'e', line_start: 3 }],
+      advocate: [],
+    },
+    verify: () => undefined,
+    staleness: () => [],
+  })
+  for (const label of ['implementer', 'review:correctness', 'fix:1']) {
+    const p = captured.calls.find(c => c.label === label)?.prompt ?? ''
+    check(`${label} ran`, p.length > 0, true)
+    check(`${label} is told where scratch work goes`,
+      p.includes('touchstone-scratch'), true)
+    check(`${label} is told not to use /tmp`,
+      p.includes('anything you would otherwise drop in /tmp'), true)
+  }
+}
+
 // Scenario CF -- #44: silent re-ranging must not be possible. Verify may look
 // past its given range, but only when that range cannot answer the question,
 // and only while saying so in the finding's own note.
@@ -2597,7 +2656,7 @@ for (const scenario of [scenarioA, scenarioB, scenarioG, scenarioC, scenarioD, s
                         scenarioBR, scenarioBS, scenarioBT, scenarioBU, scenarioBV, scenarioBW,
                         scenarioBX, scenarioBY, scenarioBZ, scenarioCA, scenarioCB,
                         scenarioCC, scenarioCD, scenarioCE, scenarioCF, scenarioCG,
-                        scenarioCH, scenarioCI, scenarioCJ, scenarioCK, scenarioCL, scenarioCM, scenarioCN]) {
+                        scenarioCH, scenarioCI, scenarioCJ, scenarioCK, scenarioCL, scenarioCM, scenarioCN, scenarioCO]) {
   await scenario()
 }
 

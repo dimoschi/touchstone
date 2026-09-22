@@ -875,7 +875,26 @@ const treeAgent = (prompt, opts) =>
     `it too) and print the repo and branch they resolved as their first line ` +
     `of output -- read that line and pass ${wt.path} there, every time, rather ` +
     `than relying on cwd. GIT_DIR/GIT_WORK_TREE env vars and cd are not the way ` +
-    `to target it.\n\n` +
+    `to target it. Any reproduction or experiment -- a scratch clone, a throwaway ` +
+    `git repo to test a git behaviour, anything you would otherwise drop in /tmp ` +
+    `-- goes under the path printed by ` +
+    `git -C ${wt.path} rev-parse --git-path touchstone-scratch instead, never ` +
+    `/tmp. That path lives under the worktree's own git dir, not its working ` +
+    `tree, so it needs no gitignore entry and is gone once the worktree is ` +
+    `removed. Git resolves identity and signing config by directory, so a repo ` +
+    `created there inherits whatever the global config says, which can mean ` +
+    `signing with the wrong identity or blocking on a hardware key no agent can ` +
+    `satisfy. A scratch git repo is therefore always created with signing off ` +
+    `and an explicit test identity, and every git command against it names ` +
+    `that path literally, for the same reason ${wt.path} is named literally ` +
+    `above. ` +
+    `git init -q <scratch path> creates the directory, which the path above ` +
+    `only names; git -C <scratch path> init cannot, because -C needs it to ` +
+    `exist already. Then ` +
+    `git -C <scratch path> add -A, then ` +
+    `GIT_AUTHOR_NAME=test GIT_AUTHOR_EMAIL=t@t GIT_COMMITTER_NAME=test ` +
+    `GIT_COMMITTER_EMAIL=t@t git -C <scratch path> -c commit.gpgsign=false ` +
+    `-c gpg.format=openpgp commit -q -m scratch.\n\n` +
     envelope() + `\n` + prompt + RECORD(opts.label),
     opts)
 
