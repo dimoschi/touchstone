@@ -46,7 +46,7 @@ check "no v.title reference remains" \
 
 echo "== static: VERDICTS requires id, title is optional"
 check "VERDICTS lists id in its required array" \
-  "$(grep -c "required: \['id', 'fixed', 'note'\]" "$SCRIPT" || true)" 1
+  "$(grep -c "required: \['id', 'fixed', 'widened', 'note'\]" "$SCRIPT" || true)" 1
 
 echo ""
 echo "== static: BRANCH requires dirty on every response"
@@ -425,6 +425,7 @@ function makeAgent(scenario, captured) {
         // trim was not enough to strip.
         const returnedId = scenario.verifyBracketed ? `[${id}]` : id
         verdicts.push({ id: returnedId, fixed: decision === true, title: `reworded-${id}-r${round}`,
+          widened: scenario.verifyWidened ? scenario.verifyWidened(id, round) === true : false,
           note: `stub verdict for ${id}` })
       }
       if (scenario.injectBogusVerdict) {
@@ -473,9 +474,14 @@ function makeAgent(scenario, captured) {
 
 async function run(scenario) {
   const captured = { calls: [], runRecordPrompt: null, dedupPrompt: null, logs: [] }
+  // Charged per agent call, not per read, so a spend assertion states "one
+  // agent ran inside this window" rather than "the script read the budget
+  // twice"; an added outOfBudget() check would otherwise break it silently.
+  let agentCalls = 0
+  const stubAgent = makeAgent(scenario, captured)
   const sandbox = {
     args: baseArgs(scenario.args),
-    agent: makeAgent(scenario, captured),
+    agent: async (prompt, opts) => { agentCalls++; return stubAgent(prompt, opts) },
     // JSON round-tripped, not returned as-is: the real parallel() serializes
     // each thunk's result to hand it back across the boundary, and a class
     // instance (a Map, for instance) does not survive that. Promise.all alone
@@ -490,7 +496,10 @@ async function run(scenario) {
     workflow: async () => { throw new Error('workflow() not stubbed for this test') },
     phase: () => {},
     log: (m) => captured.logs.push(m),
-    budget: scenario.budget ?? { total: null, spent: () => 0, remaining: () => Infinity },
+    budget: scenario.budgetPerAgentCall
+      ? { total: null, spent: () => agentCalls * scenario.budgetPerAgentCall,
+          remaining: () => Infinity }
+      : (scenario.budget ?? { total: null, spent: () => 0, remaining: () => Infinity }),
   }
   const ctx = vm.createContext(sandbox)
   const fn = vm.compileFunction(body, [], { parsingContext: ctx })
@@ -2296,6 +2305,282 @@ async function scenarioBZ() {
   check('the prompt carries the exit code verbatim', checksFix.includes('exited 4'), true)
 }
 
+// Scenario CC -- #44: a locus a reviewer already read reaches the fix brief
+// verbatim, so the fixer can open the location directly. A single-line span
+// (line_end === line_start) must not render a redundant N-N range.
+async function scenarioCC() {
+  console.log('\n== scenario CC: a finding\'s locus reaches the fix brief with its file and line span')
+  const { result, captured } = await run({
+    initialReview: {
+      correctness: [
+        { title: 'Off-by-one span', file: 'src/parser.js', claim: 'boundary is wrong',
+          evidence: 'parser.js:12', line_start: 12, line_end: 18 },
+        { title: 'Single-line span', file: 'src/other.js', claim: 'wrong guard',
+          evidence: 'other.js:40', line_start: 40, line_end: 40 },
+      ],
+      advocate: [],
+    },
+    verify: (id) => (id === 'f1' || id === 'f2') ? true : undefined,
+  })
+  const fix1 = captured.calls.find(c => c.label === 'fix:1')?.prompt ?? ''
+  check('the fix phase ran', fix1.length > 0, true)
+  check('a multi-line locus reaches the fix brief', fix1.includes('src/parser.js:12-18'), true)
+  check('a single-line locus reaches the fix brief', fix1.includes('src/other.js:40'), true)
+  check('the single-line locus is not rendered as a 40-40 range', fix1.includes('src/other.js:40-40'), false)
+  check('halted_at is absent (both findings verified fixed)', result.halted_at, undefined)
+}
+
+// Scenario CD -- #44: the fix brief used to tell the fixer to read the whole
+// commit range for context. That instruction is gone; the locus replaces it.
+async function scenarioCD() {
+  console.log('\n== scenario CD: the fix brief no longer tells the agent to read the whole commit range for context')
+  const { captured } = await run({
+    initialReview: {
+      correctness: [{ title: 'Needs a fix', file: 'a.js', claim: 'c', evidence: 'e',
+        line_start: 5, line_end: 9 }],
+      advocate: [],
+    },
+    verify: (id) => id === 'f1' ? true : undefined,
+  })
+  const fix1 = captured.calls.find(c => c.label === 'fix:1')?.prompt ?? ''
+  check('the fix phase ran', fix1.length > 0, true)
+  check('the old whole-range-for-context instruction is gone',
+    fix1.includes('read that diff for context'), false)
+  check('the fix brief carries the locus instead', fix1.includes('a.js:5-9'), true)
+}
+
+// Scenario CE -- #44: verify used to be given no range at all (an implicit,
+// unbounded read of the whole tree). It is now judged against exactly the
+// diff the fix round it follows produced.
+async function scenarioCE() {
+  console.log('\n== scenario CE: verify is judged against the fix round\'s own commit range')
+  const { captured } = await run({
+    initialReview: {
+      correctness: [{ title: 'Needs a fix', file: 'a.js', claim: 'c', evidence: 'e',
+        line_start: 5, line_end: 9 }],
+      advocate: [],
+    },
+    verify: (id) => id === 'f1' ? true : undefined,
+    fixHead: () => 'fix00000000000000000000000000000000000001',
+  })
+  const verify1 = captured.calls.find(c => c.label === 'verify:1')?.prompt ?? ''
+  check('verify ran', verify1.length > 0, true)
+  check('verify is handed exactly this round\'s diff',
+    verify1.includes(`${REVIEWED_THROUGH}..fix00000000000000000000000000000000000001`), true)
+}
+
+// Scenario CJ -- a fix round that commits nothing leaves HEAD where it was,
+// and <sha>..<sha> is an empty diff: the verifier would be told to judge
+// against nothing, and any uncommitted work the fixer left would be invisible.
+// The bare SHA compares that commit to the working tree instead.
+async function scenarioCJ() {
+  console.log('\n== scenario CJ: a round that committed nothing verifies against the tree, not an empty range')
+  const { captured } = await run({
+    initialReview: {
+      correctness: [{ title: 'Needs a fix', file: 'a.js', claim: 'c', evidence: 'e',
+        line_start: 5, line_end: 9 }],
+      advocate: [],
+    },
+    verify: (id) => id === 'f1' ? true : undefined,
+    fixHead: () => REVIEWED_THROUGH,
+  })
+  const verify1 = captured.calls.find(c => c.label === 'verify:1')?.prompt ?? ''
+  check('verify ran', verify1.length > 0, true)
+  check('the range is not an empty self-comparison',
+    verify1.includes(`${REVIEWED_THROUGH}..${REVIEWED_THROUGH}`), false)
+  check('it is the bare commit, which diffs against the working tree',
+    verify1.includes(`range is ${REVIEWED_THROUGH}. Read git diff ${REVIEWED_THROUGH} and`), true)
+}
+
+// Scenario CK -- the per-round figure is this ticket's measurement
+// instrument, so its arithmetic has to be pinned, not just its presence: a
+// stub budget that never moves makes any expression look right. This one
+// charges a fixed amount per agent call, so only the fix agent's own delta
+// gives the expected number.
+async function scenarioCK() {
+  console.log('\n== scenario CK: fix_round_output is the fix agent\'s own delta, not a running total')
+  const { result } = await run({
+    args: { maxReviewRounds: 1 },
+    budgetPerAgentCall: 100,
+    initialReview: {
+      correctness: [{ title: 'Still open', file: 'a.js', claim: 'c', evidence: 'e',
+        line_start: 5 }],
+      advocate: [],
+    },
+    verify: () => undefined,
+    staleness: () => [],
+  })
+  const entry = result.fix_round_output?.[0]
+  check('one round was recorded', result.fix_round_output?.length, 1)
+  check('the figure is positive: a reversed subtraction reads negative',
+    entry?.output > 0, true)
+  // Exactly one agent call inside the measured window. The running total at
+  // that point is a far larger multiple, and a reversed subtraction is
+  // negative, so both read differently from this.
+  check('it spans exactly one agent call: the fixer, and nothing before it',
+    entry?.output, 100)
+}
+
+// Scenario CL -- a single-line finding is the shape the charge asks for most
+// often, since a second line is wanted only when the span covers more than
+// one. Losing the locus for exactly that shape would restore the old bare
+// filename brief everywhere and break nothing else.
+async function scenarioCL() {
+  console.log('\n== scenario CL: a finding with only line_start still reaches the fixer with its line')
+  const { captured } = await run({
+    args: { maxReviewRounds: 1 },
+    initialReview: {
+      correctness: [{ title: 'Still open', file: 'a.js', claim: 'c', evidence: 'e',
+        line_start: 42 }],
+      advocate: [],
+    },
+    verify: () => undefined,
+    staleness: () => [],
+  })
+  const fix1 = captured.calls.find(c => c.label === 'fix:1')?.prompt ?? ''
+  check('the fix phase ran', fix1.length > 0, true)
+  check('the single-line locus reaches the brief', fix1.includes('a.js:42'), true)
+  check('it is not degraded to a bare filename',
+    /\(a\.js\)/.test(fix1), false)
+}
+
+// Scenario CM -- the spanless count is the only thing that makes locus drift
+// visible, so it has to be observable itself: a lens quietly dropping spans
+// would otherwise look exactly like a lens that never had them.
+async function scenarioCM() {
+  console.log('\n== scenario CM: findings arriving with no line span are counted and named')
+  const { captured } = await run({
+    args: { maxReviewRounds: 1 },
+    initialReview: {
+      correctness: [{ title: 'No span', file: 'noloc.js', claim: 'c', evidence: 'e' },
+                    { title: 'Has one', file: 'b.js', claim: 'c2', evidence: 'e2',
+                      line_start: 7, line_end: 9 }],
+      advocate: [],
+    },
+    verify: () => undefined,
+    staleness: () => [],
+  })
+  const spanLog = captured.logs.find(l => l.includes('carry no line span')) ?? ''
+  check('the count is logged at all', spanLog.length > 0, true)
+  check('it counts only the spanless one, against the total raised',
+    spanLog.includes('1 of 2'), true)
+  check('it names which finding and file, so drift is attributable',
+    spanLog.includes('noloc.js'), true)
+  check('the one that carried a span is not counted',
+    spanLog.includes('b.js'), false)
+}
+
+// Scenario CN -- the late pass runs on findings no round ever checked, which
+// includes a run whose loop executed no rounds at all. Telling that verifier
+// it is looking at "the fix's own commit range" names a diff that does not
+// exist, and the range it gets is the implementation, not a fix.
+async function scenarioCN() {
+  console.log('\n== scenario CN: with no fix round, the late verifier is not told it has a fix diff')
+  const { captured } = await run({
+    args: { maxReviewRounds: 0 },
+    initialReview: {
+      correctness: [{ title: 'Never fixed', file: 'a.js', claim: 'c', evidence: 'e',
+        line_start: 3 }],
+      advocate: [],
+    },
+    verify: () => undefined,
+    staleness: () => [],
+  })
+  check('no fix round ran', captured.calls.filter(c => c.label.startsWith('fix:')).length, 0)
+  const late = captured.calls.find(c => c.label === 'verify:final')?.prompt ?? ''
+  check('the late verifier ran', late.length > 0, true)
+  check('it is told there is no fix diff', late.includes('No fix round ran'), true)
+  check('it does not claim a fix range that never existed',
+    late.includes("The fix's own commit range"), false)
+}
+
+// Scenario CF -- #44: silent re-ranging must not be possible. Verify may look
+// past its given range, but only when that range cannot answer the question,
+// and only while saying so in the finding's own note.
+async function scenarioCF() {
+  console.log('\n== scenario CF: verify may widen past its range only while disclosing it in the note')
+  const { captured } = await run({
+    initialReview: {
+      correctness: [{ title: 'Needs a fix', file: 'a.js', claim: 'c', evidence: 'e' },
+                    { title: 'Also needs one', file: 'b.js', claim: 'c2', evidence: 'e2' }],
+      advocate: [],
+    },
+    verify: () => true,
+    verifyWidened: (id) => id === 'f1',
+  })
+  const verify1 = captured.calls.find(c => c.label === 'verify:1')?.prompt ?? ''
+  check('verify ran', verify1.length > 0, true)
+  check('widening is allowed only when the range cannot answer the question',
+    verify1.includes('Widen beyond this range only when the diff itself cannot answer the question'), true)
+  const widenLog = captured.logs.find(l => l.includes('read past')) ?? ''
+  check('the widened verdict is surfaced, not discarded with the rest of it',
+    widenLog.length > 0, true)
+  check('the log names which call widened, so verify:final does not read like a round',
+    widenLog.includes('verify:1'), true)
+  check('it names the finding and carries its stated reason',
+    widenLog.includes('f1') && widenLog.includes('stub verdict for f1'), true)
+  check('only the verdict that widened is named, not every verdict',
+    widenLog.includes('f2'), false)
+  check('the count is of widened verdicts, not of all of them',
+    widenLog.includes('1 verdict(s)'), true)
+}
+
+// Scenario CG -- #44: a lens that cannot name a clean span (a deletion, a
+// repo-wide pattern) must not break the run; the schema field is optional.
+async function scenarioCG() {
+  console.log('\n== scenario CG: a finding without a line span still flows through the fix loop unbroken')
+  const { result, captured } = await run({
+    initialReview: {
+      correctness: [{ title: 'No span reported', file: 'noloc.js', claim: 'c', evidence: 'e' }],
+      advocate: [],
+    },
+    verify: (id) => id === 'f1' ? true : undefined,
+  })
+  const fix1 = captured.calls.find(c => c.label === 'fix:1')?.prompt ?? ''
+  check('the fix phase ran', fix1.length > 0, true)
+  check('the finding still renders by its bare file', fix1.includes('(noloc.js):'), true)
+  check('halted_at is absent (the run finished; the missing span did not break it)',
+    result.halted_at, undefined)
+}
+
+// Scenario CH -- #44: the fix agent's own per-round spend, the cost this
+// ticket targets, must reach a halt so a round that never converges is still
+// measurable against the ceiling that stopped it.
+async function scenarioCH() {
+  console.log('\n== scenario CH: fix_round_output records the fix agent\'s own spend per round, on a halt')
+  const { result } = await run({
+    args: { maxReviewRounds: 1 },
+    initialReview: {
+      correctness: [{ title: 'Still open', file: 'a.js', claim: 'c', evidence: 'e' }],
+      advocate: [],
+    },
+    verify: () => undefined,
+    staleness: () => [],
+  })
+  check('halted at Fix', result.halted_at, 'Fix')
+  check('one round ran', result.fix_rounds, 1)
+  check('fix_round_output has one entry', result.fix_round_output?.length, 1)
+  check('the entry names round 1', result.fix_round_output?.[0]?.round, 1)
+  check('the entry carries a finite output figure',
+    Number.isFinite(result.fix_round_output?.[0]?.output), true)
+}
+
+// Scenario CI -- #44: the same field on the ordinary, non-halt exit, so a run
+// that resolves cleanly is comparable to one that halts.
+async function scenarioCI() {
+  console.log('\n== scenario CI: fix_round_output reaches the final result on a run that resolves cleanly')
+  const { result } = await run({
+    initialReview: {
+      correctness: [{ title: 'Will be fixed', file: 'a.js', claim: 'c', evidence: 'e' }],
+      advocate: [],
+    },
+    verify: (id) => id === 'f1' ? true : undefined,
+  })
+  check('halted_at is absent (the run finished)', result.halted_at, undefined)
+  check('exactly one fix round ran', result.fix_rounds, 1)
+  check('fix_round_output carries that one round', result.fix_round_output?.length, 1)
+}
+
 for (const scenario of [scenarioA, scenarioB, scenarioG, scenarioC, scenarioD, scenarioE, scenarioH,
                         scenarioI, scenarioJ, scenarioK, scenarioL, scenarioM, scenarioN,
                         scenarioO, scenarioP, scenarioQ, scenarioR, scenarioS, scenarioT,
@@ -2310,7 +2595,9 @@ for (const scenario of [scenarioA, scenarioB, scenarioG, scenarioC, scenarioD, s
                         scenarioBH, scenarioBI, scenarioBJ, scenarioBK, scenarioBL,
                         scenarioBM, scenarioBN, scenarioBO, scenarioBP, scenarioBQ,
                         scenarioBR, scenarioBS, scenarioBT, scenarioBU, scenarioBV, scenarioBW,
-                        scenarioBX, scenarioBY, scenarioBZ, scenarioCA, scenarioCB]) {
+                        scenarioBX, scenarioBY, scenarioBZ, scenarioCA, scenarioCB,
+                        scenarioCC, scenarioCD, scenarioCE, scenarioCF, scenarioCG,
+                        scenarioCH, scenarioCI, scenarioCJ, scenarioCK, scenarioCL, scenarioCM, scenarioCN]) {
   await scenario()
 }
 

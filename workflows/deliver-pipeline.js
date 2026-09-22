@@ -362,6 +362,9 @@ const FINDINGS = {
         properties: {
           title: { type: 'string' }, file: { type: 'string' },
           claim: { type: 'string' }, evidence: { type: 'string' },
+          // Optional: a deletion or a repo-wide pattern has no single span,
+          // and schema validation must not fail a lens over that.
+          line_start: { type: 'integer' }, line_end: { type: 'integer' },
           // An id copied from reviewOf's `known` list, never invented. Each
           // call site states what a reference there means.
           duplicate_of: { type: 'string' },
@@ -395,13 +398,17 @@ const VERDICTS = {
       type: 'array',
       items: {
         type: 'object', additionalProperties: false,
-        required: ['id', 'fixed', 'note'],
+        required: ['id', 'fixed', 'widened', 'note'],
         properties: {
           id: { type: 'string' },
           // Ignored for matching. Present only so a verifier that still echoes
           // a finding's title cannot fail schema validation over it.
           title: { type: 'string' },
           fixed: { type: 'boolean' },
+          // Prose says why; this says whether, and only this survives the
+          // boundary below. Visibility, not enforcement: a verifier that
+          // widens and reports false is no more detectable than before.
+          widened: { type: 'boolean' },
           note: { type: 'string' },
         },
       },
@@ -1598,6 +1605,12 @@ const stripBrackets = (s) => {
 // `known` param below) and asked to reference one back instead of restating
 // it, the same way the verdict join below matches an id rather than text.
 const contentKeyOf = (f) => JSON.stringify([f.title, f.file, f.claim, f.evidence])
+// Falls back to the bare file when a lens reported no span, so a schema-legal
+// finding never breaks the fix brief that renders it.
+const locusOf = (f) =>
+  typeof f.line_start !== 'number' ? f.file
+  : (typeof f.line_end === 'number' && f.line_end !== f.line_start)
+    ? `${f.file}:${f.line_start}-${f.line_end}` : `${f.file}:${f.line_start}`
 const dupOf = (f) => (typeof f.duplicate_of === 'string' && f.duplicate_of.trim())
   ? stripBrackets(f.duplicate_of) : null
 // Reports how the duplicate matched, not just that it did: referencing a
@@ -1639,7 +1652,10 @@ const reviewOf = async (range, tag, picked, known = [], knownCharge = '') => {
       `stop the run. Do not report it.\n` +
       `Report only findings you can defend with file:line evidence. Do NOT ` +
       `report coverage, complexity, test quality, or style: deterministic ` +
-      `gates own those.` +
+      `gates own those. Set line_start (and line_end, if the span covers more ` +
+      `than one line) to where the defect sits, so the fix does not have to ` +
+      `re-read this range to find it; leave them out only when nothing that ` +
+      `narrow applies.` +
       (known.length
         ? `\nThe findings below were already reported earlier this run, each ` +
           `with its id in brackets, whether already fixed and verified or ` +
@@ -1652,8 +1668,17 @@ const reviewOf = async (range, tag, picked, known = [], knownCharge = '') => {
         : ''),
       { label: `${tag}:${lens.label}`, phase: 'Review', schema: FINDINGS,
         model: 'opus', effort: effortFor.review })))
-  return out.filter(Boolean).flatMap(r => r.findings)
+  const raised = out.filter(Boolean).flatMap(r => r.findings)
     .map(f => ({ ...f, id: `f${++findingSeq}`, recorded_at: headOf(range) }))
+  // A finding with no span reaches the fixer as a bare filename, and the
+  // brief no longer points at the range either, so it arrives with less than
+  // it used to. Counted so that drift shows up instead of being argued about.
+  const spanless = raised.filter(f => typeof f.line_start !== 'number')
+  if (spanless.length) {
+    log(`${tag}: ${spanless.length} of ${raised.length} finding(s) carry no line span: ` +
+        spanless.map(f => `${f.id} (${f.file})`).join(', '))
+  }
+  return raised
 }
 
 // Everything from here to the PR is measured against reviewedThrough: the SHA
@@ -1714,6 +1739,15 @@ const settled = []
 let regressionSuspects = []
 let suspectsUnverified = false
 let round = 0
+// Per round, just the fix agent's own output tokens (the cost this ticket
+// targets), separate from stageSpend.fix which also carries verify and the
+// tail review.
+const fixRoundSpend = []
+// The diff the most recent fix round actually produced. Verify is judged
+// against this instead of the whole commit range; a call after the loop ends
+// (the late pass, the suspect recheck) has no round of its own, so it reuses
+// the last one rather than falling back to an unbounded range.
+let lastFixRange = null
 // Which of the loop's four exits fired. Checked in the same order the loop
 // tests them, so the answer matches the condition that actually stopped it.
 // Every id a verifier has been asked about. A finding first reported by the
@@ -1726,20 +1760,28 @@ const everVerified = new Set()
 // pairs, keyed on the id the script assigned in reviewOf, never the title: a
 // model asked to echo a title verbatim reworded it anyway, which stalled every
 // finding until the round limit and halted the run for good.
-const verifyOpen = async (findings, label) => {
+const verifyOpen = async (findings, label, range, afterFix = true) => {
   if (!findings.length) return []
   for (const f of findings) everVerified.add(f.id)
   const out = await treeAgent(
-    `Verify, finding by finding, whether each is now actually fixed in the ` +
-    `repo. Read the code for each one; do not trust any claim that it was ` +
-    `fixed, including your own reasoning about a neighbouring finding.\n` +
+    `Verify, finding by finding, whether each is now actually fixed.\n` +
+    (afterFix
+      ? `The fix's own commit range is ${range}. `
+      : `No fix round ran, so there is no fix diff; the change under review ` +
+        `is ${range}. `) +
+    `Read git diff ${range} and judge ` +
+    `each claim against that diff first, rather than re-reading the file cold ` +
+    `or trusting a claim it was fixed. Widen beyond this range only when the ` +
+    `diff itself cannot answer the question. When you do, set widened=true ` +
+    `on that finding's verdict and say in its note what you had to read and ` +
+    `why the diff could not answer it. Set widened=false otherwise.\n` +
     `Each finding below is listed with its id in brackets. Return one ` +
     `verdict per finding with that id copied exactly into id; order does ` +
     `not matter. A verdict whose id is not in this list is discarded, and a ` +
     `finding with no verdict stays open. Nothing is matched on the title, ` +
     `so rewording it costs nothing.\n` +
     findings.map(f =>
-      `[${f.id}] ${f.title} (${f.file}): ${f.claim}. Evidence was: ${f.evidence}`
+      `[${f.id}] ${f.title} (${locusOf(f)}): ${f.claim}. Evidence was: ${f.evidence}`
     ).join('\n'),
     // phase is explicit: inside parallel() the global phase() cursor races
     // with the Review group the tail lens opens beside it.
@@ -1748,9 +1790,13 @@ const verifyOpen = async (findings, label) => {
   // Pairs, not a Map: this crosses parallel() at the loop-join call site,
   // which serializes each thunk's result and strips a Map down to a plain
   // object with no .get. The Map is rebuilt at each call site instead.
-  return (out?.verdicts ?? [])
-    .filter(v => typeof v.id === 'string')
-    .map(v => [stripBrackets(v.id), v.fixed === true])
+  const kept = (out?.verdicts ?? []).filter(v => typeof v.id === 'string')
+  const widened = kept.filter(v => v.widened === true)
+  if (widened.length) {
+    log(`${label}: ${widened.length} verdict(s) read past ${range}: ` +
+        widened.map(v => `${stripBrackets(v.id)} (${v.note ?? 'no reason given'})`).join('; '))
+  }
+  return kept.map(v => [stripBrackets(v.id), v.fixed === true])
 }
 
 // Advisory only: a finding's evidence may have moved since it was recorded. One
@@ -1807,6 +1853,7 @@ const fixStopReason = () =>
 while ((open.length || blockingChecksOpen()) && round < MAX_REVIEW_ROUNDS && !outOfBudget() && !sFix.over()) {
   round++
   phase('Fix')
+  const fixSpendStart = budget.spent()
   const fixed = await treeAgent(
     `Fix ` + (open.length && blockingChecksOpen()
       ? `these confirmed review findings and the repo's own failing checks below`
@@ -1826,8 +1873,10 @@ while ((open.length || blockingChecksOpen()) && round < MAX_REVIEW_ROUNDS && !ou
     `unsupported_language=true when you do, and put the three options in note. ` +
     `Do not push or open a PR.\n` +
     `Task: ${brief(task)}\n` +
-    `The work under review is ${impl.commit_range}; read that diff for context ` +
-    `rather than guessing what the change was meant to do.\n` +
+    `Each finding names the place it was raised against. Work from there. ` +
+    `Read git diff ${impl.commit_range} only when that place cannot tell you ` +
+    `what the change was meant to do -- a finding about scope, an unmet ` +
+    `criterion, or a caller outside the diff.\n` +
     `Fix what the findings name and no more. If fixing one requires reverting ` +
     `or weakening a deliberate part of the change that no finding objected to, ` +
     `say so in note and leave it: an unasked-for revert is how this workflow ` +
@@ -1842,7 +1891,10 @@ while ((open.length || blockingChecksOpen()) && round < MAX_REVIEW_ROUNDS && !ou
     `and never on your own judgement of the change. If it printed its own ` +
     `gate message, copy it verbatim into gate_note.\n` +
     (open.length
-      ? `Findings:\n` + open.map(f => `- ${f.title} (${f.file}): ${f.claim}`).join('\n') + `\n`
+      ? `Findings, each at the location its reviewer already read; open that ` +
+        `location directly rather than re-reading the whole commit range for ` +
+        `context:\n` +
+        open.map(f => `- ${f.title} (${locusOf(f)}): ${f.claim}`).join('\n') + `\n`
       : '') +
     (blockingChecksOpen()
       ? `The repo's own checks below are failing. Each is a script the repo ` +
@@ -1851,6 +1903,7 @@ while ((open.length || blockingChecksOpen()) && round < MAX_REVIEW_ROUNDS && !ou
         redChecks.map(renderCheck).join('\n\n')
       : ''),
     { label: `fix:${round}`, schema: FIXED, model: 'sonnet', effort: effortFor.implement })
+  fixRoundSpend.push({ round, output: budget.spent() - fixSpendStart })
   // Folded before the halt check below, not after: a fixer that committed part
   // of the work and only then hit the refusal still has a gate result, and the
   // halt is the only place left to report it.
@@ -1872,6 +1925,7 @@ while ((open.length || blockingChecksOpen()) && round < MAX_REVIEW_ROUNDS && !ou
     return await halted('Fix', {
       plan: plan.plan, implemented: impl.summary, gates: gatesPayload(),
       unresolved_findings: await markStale(open), fix_rounds: round,
+      fix_round_output: fixRoundSpend,
       stopped_because:
         `the fixer hit a NEXT_ACTION of UNSUPPORTED_LANGUAGE and halted rather ` +
         `than editing a gate marker, so these findings have not had every round`,
@@ -1895,16 +1949,19 @@ while ((open.length || blockingChecksOpen()) && round < MAX_REVIEW_ROUNDS && !ou
   const head = fixed?.head_sha?.trim()
   const tailReviewable =
     reviewerCount && head && head !== reviewedThrough && !outOfBudget()
+  const roundRange = head && head !== reviewedThrough
+    ? `${reviewedThrough}..${head}` : reviewedThrough
+  lastFixRange = roundRange
 
   const [verdicts, freshRaw] = await parallel([
-    () => verifyOpen(open, `verify:${round}`),
+    () => verifyOpen(open, `verify:${round}`, roundRange),
     // The point of the loop: a fix is a change, so it faces the same adversary.
     // One lens, not all of them -- correctness is where a fix round goes wrong,
     // and the range is small.
     // async, so the skip path still hands parallel() a promise rather than a
     // bare array.
     async () => tailReviewable
-      ? reviewOf(`${reviewedThrough}..${head}`, `review:fix:${round}`, [LENS.correctness],
+      ? reviewOf(roundRange, `review:fix:${round}`, [LENS.correctness],
           [...settled, ...open])
       : [],
   ])
@@ -1959,7 +2016,8 @@ if (open.length && !outOfBudget()) {
   if (unchecked.length) {
     log(`${unchecked.length} finding(s) were reported too late to be checked ` +
         `by a round; verifying them before deciding to halt`)
-    const late = new Map(await verifyOpen(unchecked, 'verify:final'))
+    const late = new Map(await verifyOpen(unchecked, 'verify:final',
+      lastFixRange ?? reviewedThrough, lastFixRange !== null))
     const closed = unchecked.filter(f => late.get(f.id) === true)
     settled.push(...closed)
     const closedIds = new Set(closed.map(f => f.id))
@@ -1978,7 +2036,7 @@ if (open.length && !outOfBudget()) {
 if (regressionSuspects.length && !outOfBudget()) {
   log(`verifying ${regressionSuspects.length} regression suspect(s) before ` +
       `treating them as noise`)
-  const verdicts = new Map(await verifyOpen(regressionSuspects, 'verify:suspects'))
+  const verdicts = new Map(await verifyOpen(regressionSuspects, 'verify:suspects', lastFixRange))
   const live = regressionSuspects.filter(f => verdicts.get(f.id) !== true)
   const liveIds = new Set(live.map(f => f.id))
   regressionSuspects = regressionSuspects.filter(f => !liveIds.has(f.id))
@@ -2033,6 +2091,7 @@ if (open.length || blockingChecksOpen()) {
   return await halted('Fix', {
     plan: plan.plan, implemented: impl.summary, gates: gatesPayload(),
     unresolved_findings: reported, fix_rounds: round, stopped_because: fixStopReason(),
+    fix_round_output: fixRoundSpend,
     regression_suspects: regressionSuspects,
     checks: checksPayload(),
     // Report the round count that actually ran and why the loop ended. This
@@ -2223,7 +2282,7 @@ if (reviewerCount && mutHead && mutHead !== reviewedThrough && !outOfBudget()) {
     return await halted('Review', {
       plan: plan.plan, implemented: impl.summary, mutation,
       gates: gatesPayload(),
-      unresolved_findings: fresh, fix_rounds: round,
+      unresolved_findings: fresh, fix_rounds: round, fix_round_output: fixRoundSpend,
       regression_suspects: regressionSuspects,
       note: `The mutation gate's own commits (${reviewedThrough}..${mutHead}) ` +
             `introduced ${fresh.length} finding(s). The fix rounds are spent. ` +
@@ -2323,6 +2382,7 @@ const result = {
   suspects_unverified: suspectsUnverified,
   reviewed_through: reviewedThrough,
   fix_rounds: round,
+  fix_round_output: fixRoundSpend,
   unresolved_findings: open,
   pr,
   needs_user: suspectsUnverified || (args?.openPr !== false && !pr?.opened),
