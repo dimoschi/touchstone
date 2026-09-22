@@ -1117,6 +1117,10 @@ async function scenarioX() {
   const mutationCall = captured.calls.find((c) => c.label === 'mutation:1')
   check('the mutation schema requires scored',
     mutationCall?.schema?.required?.includes('scored'), true)
+  // The fourth phase the scratch rule has to reach, and the only one no
+  // other scenario gets far enough to see.
+  check('the mutation phase is told where scratch work goes',
+    (mutationCall?.prompt ?? '').includes('touchstone-scratch'), true)
 }
 
 async function scenarioY() {

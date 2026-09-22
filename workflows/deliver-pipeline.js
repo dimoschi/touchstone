@@ -886,10 +886,8 @@ const treeAgent = (prompt, opts) =>
     `signing with the wrong identity or blocking on a hardware key no agent can ` +
     `satisfy. A scratch git repo is therefore always created with signing off ` +
     `and an explicit test identity, and every git command against it names ` +
-    `that path literally rather than through a shell variable: the gate that ` +
-    `reads these commands resolves a literal path and falls back to the ` +
-    `session's cwd for anything else, and that cwd is a gated repo, so it ` +
-    `refuses the commit while naming a repo you were not working in. ` +
+    `that path literally, for the same reason ${wt.path} is named literally ` +
+    `above. ` +
     `git init -q <scratch path> creates the directory, which the path above ` +
     `only names; git -C <scratch path> init cannot, because -C needs it to ` +
     `exist already. Then ` +
