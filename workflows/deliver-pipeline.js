@@ -877,27 +877,21 @@ const treeAgent = (prompt, opts) =>
     `than relying on cwd. GIT_DIR/GIT_WORK_TREE env vars and cd are not the way ` +
     `to target it. Any reproduction or experiment -- a scratch clone, a throwaway ` +
     `git repo to test a git behaviour, anything you would otherwise drop in /tmp ` +
-    `-- goes under ${wt.path}/.claude/scratch/ instead, never /tmp. Before creating ` +
-    `anything under it, confirm that path is excluded from git: run ` +
-    `git -C ${wt.path} check-ignore -q ${wt.path}/.claude/scratch, and if that ` +
-    `fails, append the .claude/scratch path above written relative to the repo ` +
-    `root, not the absolute form you just used, to the file printed by ` +
-    `git -C ${wt.path} rev-parse --git-path info/exclude. Gitignore patterns ` +
-    `are resolved against the repo root, so a pattern built from the absolute ` +
-    `path matches nothing. Never add the entry to ` +
-    `.gitignore itself: that file is tracked, so editing it leaves the worktree ` +
-    `dirty for every phase that runs before Implement's baseline dirty-tree check, ` +
-    `which would then blame a discovered check for dirt this instruction caused. ` +
-    `info/exclude is never committed, so excluding the path there can never dirty ` +
-    `the tree that check reads. Git resolves identity and signing config by ` +
-    `directory, so a repo created outside the workspace inherits whatever the ` +
-    `global config says, which can mean signing with the wrong identity or ` +
-    `blocking on a hardware key no agent can satisfy. A scratch git repo is ` +
-    `therefore always created with signing off and an explicit test identity: ` +
-    `git init -q, then commit with ` +
+    `-- goes under the path printed by ` +
+    `git -C ${wt.path} rev-parse --git-path touchstone-scratch instead, never ` +
+    `/tmp. That path lives under the worktree's own git dir, not its working ` +
+    `tree, so it needs no gitignore entry and is gone once the worktree is ` +
+    `removed. Git resolves identity and signing config by directory, so a repo ` +
+    `created there inherits whatever the global config says, which can mean ` +
+    `signing with the wrong identity or blocking on a hardware key no agent can ` +
+    `satisfy. A scratch git repo is therefore always created with signing off ` +
+    `and an explicit test identity, and every git command against it, init and ` +
+    `commit alike, carries git -C <scratch path>: drop it and the command falls ` +
+    `back to the session's cwd, which is the main checkout and gets refused as ` +
+    `a gated repo. git -C <scratch path> init -q, then ` +
     `GIT_AUTHOR_NAME=test GIT_AUTHOR_EMAIL=t@t GIT_COMMITTER_NAME=test ` +
-    `GIT_COMMITTER_EMAIL=t@t git -c commit.gpgsign=false -c gpg.format=openpgp ` +
-    `commit.\n\n` +
+    `GIT_COMMITTER_EMAIL=t@t git -C <scratch path> -c commit.gpgsign=false ` +
+    `-c gpg.format=openpgp commit.\n\n` +
     envelope() + `\n` + prompt + RECORD(opts.label),
     opts)
 

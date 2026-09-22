@@ -65,16 +65,18 @@ echo "== static: treeAgent tells every phase where scratch work goes (gh-40)"
 # review, mutation) shares, so one addition here reaches all of them. Without
 # it, an agent reproducing a behaviour defaults to /tmp, which resolves git
 # identity and signing config from the global config instead of the worktree.
-check "the scratch path is named, not left to /tmp" \
-  "$(grep -Fc '.claude/scratch/' "$SCRIPT" || true)" 1
-check "it excludes the scratch path via the local exclude file, never .gitignore" \
-  "$(grep -Fc 'git-path info/exclude' "$SCRIPT" || true)" 1
+check "the scratch path is resolved from the worktree's own git dir, not /tmp" \
+  "$(grep -Fc 'git-path touchstone-scratch' "$SCRIPT" || true)" 1
+check "it does not route the scratch path through info/exclude" \
+  "$(grep -Fc 'git-path info/exclude' "$SCRIPT" || true)" 0
 check "it does not edit .gitignore, which would dirty the tree the baseline reads" \
   "$(grep -Fc 'covered by .gitignore (add an entry there if it is not)' "$SCRIPT" || true)" 0
 check "it does not cite a fixture path only touchstone's own repo has" \
   "$(grep -Fc 'run-go-unmeasurable.sh' "$SCRIPT" || true)" 0
 check "it spells out signing off with an explicit test identity" \
   "$(grep -Fc 'commit.gpgsign=false' "$SCRIPT" || true)" 1
+check "the scratch commit recipe carries git -C, not just init" \
+  "$(grep -Fc 'git -C <scratch path> -c commit.gpgsign=false' "$SCRIPT" || true)" 1
 
 echo "== static: the verifier's brief no longer demands order or a verbatim title"
 # The old instruction, word for word. A hit elsewhere in the file (an
