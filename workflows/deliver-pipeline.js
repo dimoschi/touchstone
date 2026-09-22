@@ -882,7 +882,7 @@ const treeAgent = (prompt, opts) =>
     `git -C ${wt.path} check-ignore -q ${wt.path}/.claude/scratch, and if that ` +
     `fails, append the .claude/scratch path above written relative to the repo ` +
     `root, not the absolute form you just used, to the file printed by ` +
-    `git -C ${wt.path} rev-parse --git-path info/exclude -- gitignore patterns ` +
+    `git -C ${wt.path} rev-parse --git-path info/exclude. Gitignore patterns ` +
     `are resolved against the repo root, so a pattern built from the absolute ` +
     `path matches nothing. Never add the entry to ` +
     `.gitignore itself: that file is tracked, so editing it leaves the worktree ` +
