@@ -62,7 +62,7 @@ If `vendor/bin/phpunit` isn't where the helper looks, override with `PHPUNIT_BIN
    vendor/bin/phpunit --coverage-clover=cur.xml [--testsuite=Unit]
    ```
 3. Stash, repeat against HEAD into `base.xml`, then unstash.
-4. Parse both reports and compare per method. Apply thresholds: ≤6 OK, (6, 8] SOFT, >8 HARD. If coverage <80% and the method is new or worsened, the status is `NEEDS_TESTS` — add tests first, do not refactor.
+4. Parse both reports and compare per method. Apply thresholds: ≤6 OK, (6, 8] SOFT, >8 HARD, each of them the repo's to change in `.crap-gated` (see SKILL.md). If the method is new or worsened and is undertested for its complexity, the status is `NEEDS_TESTS` — add tests first, do not refactor. The requirement is derived from the hard cap, about 18% at the default of 8.
 
 The helper exists to keep the stash dance and the per-method join out of your hands.
 

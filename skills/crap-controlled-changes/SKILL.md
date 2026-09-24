@@ -11,12 +11,27 @@ description: MUST be invoked BEFORE writing or editing any Go, PHP, or Python fi
 1. Invoke `superpowers:test-driven-development` NOW.
 2. Follow it strictly: write a failing test, see it fail, then implement.
 
-This is non-negotiable. The CRAP gate at the bottom of this skill assumes ≥80% coverage on every changed function. Coverage that low only happens if you wrote tests first. If you skip this step, the pre-commit check will fail the coverage gate and you will have to redo the work.
+This is non-negotiable. The CRAP gate at the bottom of this skill holds every changed function to a coverage requirement that rises with its complexity. Coverage like that only happens if you wrote tests first. If you skip this step, the pre-commit check will fail and you will have to redo the work.
 
 You may not rationalize an exception. "Just exploring", "small change", "obvious code", "I'll add tests after" — none of these are valid. Every code-writing turn in this session must begin with a failing test.
 </EXTREMELY-IMPORTANT>
 
 The goal of this skill is to keep AI-generated changes small, well-tested, and easy to reason about by holding changed functions to a CRAP score of ≤6 (soft target) or ≤8 (hard ceiling). CRAP is defined as `comp(m)^2 * (1 - cov(m)/100)^3 + comp(m)`, where `comp` is cyclomatic complexity and `cov` is per-function test coverage as a percentage.
+
+### Thresholds a repo can set
+
+Four settings, written in the repo's own `.crap-gated` alongside its exemption patterns, one per line. Every one has the default below, so a repo that configures nothing behaves exactly as this skill describes.
+
+```
+crap-soft = 6              # at or under this, a row is OK
+crap-hard = 8              # over this, a row is HARD
+main-complexity = 5        # Go `package main`, complexity only
+cognitive-complexity = 15  # the advisory below; Go and Python only
+```
+
+They live in the committed marker rather than in environment variables on purpose: an environment variable is settable by the agent being measured, which makes the gate satisfiable by the thing it gates. A change to the marker shows up in review.
+
+**The coverage requirement is derived from `crap-hard`, not set separately.** CRAP already trades coverage against complexity, and above a certain complexity it demands full coverage on its own. What it cannot speak about is a trivial function, whose score is under any usable cap before coverage is considered at all. So the gate requires the lowest non-zero coverage the hard cap asks of anything, which at the default cap of 8 is about 18%. Raising the cap lowers that number; lowering the cap raises it. Do not look for a coverage setting: there is not one, and adding a second number to keep in step with the first is what this replaced.
 
 ## Workflow
 
@@ -86,7 +101,7 @@ After you believe the change is complete, but before producing a commit:
 The directives, and your move for each:
 
 - **`COMMIT_OK`** (exit 0): gate is green, commit. Copy any "note for commit body" lines into the commit body verbatim.
-- **`WRITE_TESTS`**: new/worsened functions are under 80% coverage. Do not refactor, do not edit source. A high CRAP score here is a symptom of missing tests, not of bad structure. Invoke `superpowers:test-driven-development`, write the tests, see them pass, re-run. Surface to the user only if the function is genuinely untestable as written (then extracting *to make it testable* is the right call, a structural conversation rather than a CRAP refactor). On their explicit approval, `crap-check.sh --accept '<function-id>'` records it, same as for a score. Never run `--accept` on your own judgment.
+- **`WRITE_TESTS`**: new/worsened functions are undertested for their complexity, either below the derived coverage requirement or with the coverage term of CRAP outweighing the complexity term. Do not refactor, do not edit source. A high CRAP score here is a symptom of missing tests, not of bad structure. Invoke `superpowers:test-driven-development`, write the tests, see them pass, re-run. Surface to the user only if the function is genuinely untestable as written (then extracting *to make it testable* is the right call, a structural conversation rather than a CRAP refactor). On their explicit approval, `crap-check.sh --accept '<function-id>'` records it, same as for a score. Never run `--accept` on your own judgment.
 - **`REFACTOR`**: over threshold with attempts remaining (1 for SOFT, 2 for HARD). Make one focused pass per listed function (extract a helper, flatten a conditional), then re-run. For `package main` functions (thin-main rule, complexity ≤5) the fix is never testing `func main()`: extract logic into a testable sibling package (e.g. `internal/app`) and leave main as wiring.
 - **`SURFACE_TO_USER`**: attempts exhausted. Stop editing. Ask the user, quoting the message the tool prints. Only on explicit user approval run `crap-check.sh --accept '<function-id>'`, then re-run. Never run `--accept` on your own judgment.
 
@@ -106,7 +121,7 @@ The repo is an explicit absolute argument on purpose. A PreToolUse hook (`hooks/
 
 ### Cognitive complexity (advisory)
 
-If `crap-check.sh` prints a "Cognitive complexity" section after the CRAP table, functions over the threshold (default 15) are flagged but not blocking. CRAP catches "big + untested"; cognitive complexity catches "tangled to read", typically the deep nesting AIs tend to produce. Treat each flagged function as a structural review prompt: can the branching be flattened (guard clauses, early return, extracted predicate), or is it essential to what the function does? Acting is a judgment call, not a gate.
+If `crap-check.sh` prints a "Cognitive complexity" section after the CRAP table, functions over the threshold (default 15, `cognitive-complexity` in the marker) are flagged but not blocking. CRAP catches "big + untested"; cognitive complexity catches "tangled to read", typically the deep nesting AIs tend to produce. Treat each flagged function as a structural review prompt: can the branching be flattened (guard clauses, early return, extracted predicate), or is it essential to what the function does? Acting is a judgment call, not a gate.
 
 Do not refactor a function purely because cognitive complexity is high if CRAP is OK and the structure reads cleanly. Two metrics gaming each other is worse than one metric well-followed.
 
@@ -154,4 +169,4 @@ Env knobs: `MUTATION_GO_TEST_FLAGS`, `MUTATION_PHP_INFECTION`, `MUTATION_PHP_CON
 - Languages other than Go, PHP, and Python: JS/TS and others may be added as additional procedure files alongside `go.md`, `php.md`, and `python.md`.
 - Python entrypoint special-casing (a `package main` analogue): not in v1. All Python functions get the normal CRAP + coverage gate.
 - Repo-level dashboards or trend tracking.
-- Per-repo or per-directory threshold overrides.
+- Per-*directory* threshold overrides. The four settings above are per repo.

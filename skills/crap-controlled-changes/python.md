@@ -53,9 +53,9 @@ module:
 
    `<name>` is `Class.method` for methods, the bare name for functions.
 
-After the CRAP table, the helper runs `complexipy -mx 15 -f` on the changed
-files and prints a "Cognitive complexity (advisory, >15)" section if anything
-exceeds the threshold. This is advisory (see SKILL.md). There is no
+After the CRAP table, the helper runs `complexipy -mx <cognitive-complexity> -f`
+(default 15) on the changed files and prints a "Cognitive complexity" section if
+anything exceeds the threshold. This is advisory (see SKILL.md). There is no
 `OK_MAIN`/`HARD_MAIN`: Python has no `package main` analogue in v1.
 
 Apply the Decision Policy in `SKILL.md` to the output.
@@ -147,8 +147,11 @@ CRAP_PY_PYTEST_ARGS="tests/unit -k somepattern" crap-check.sh
 3. For a baseline at HEAD, stash first (`git stash push --include-untracked`),
    repeat step 2, then `git stash pop`.
 4. Compare per `<relpath>::<name>`. Apply thresholds: <=6 OK, (6, 8] SOFT, >8
-   HARD. If coverage <80% and the function is new or worsened, the status is
-   `NEEDS_TESTS` regardless of CRAP, add tests first, do not refactor.
+   HARD, each of them the repo's to change in `.crap-gated` (see SKILL.md). If
+   the function is new or worsened and is undertested for its complexity, the
+   status is `NEEDS_TESTS` regardless of CRAP, add tests first, do not
+   refactor. The requirement is derived from the hard cap, about 18% at the
+   default of 8.
 
 The helper exists to keep the stash dance, the join, and the artifact cleanup
 (`.complexipy_cache/`, `.coverage`) out of your hands.

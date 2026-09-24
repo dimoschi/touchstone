@@ -33,7 +33,7 @@ The helper:
 
 Coverage profiles are written to temp files and removed after each measurement; nothing is left in the working tree.
 
-After the CRAP table, the helper also runs `gocognit -over 15` on the same files and prints a "Cognitive complexity" section if any function exceeds the threshold. This is advisory (see SKILL.md).
+After the CRAP table, the helper also runs `gocognit -over <cognitive-complexity>` (default 15) on the same files and prints a "Cognitive complexity" section if any function exceeds the threshold. This is advisory (see SKILL.md).
 
 Apply the Decision Policy in `SKILL.md` to the output.
 
@@ -87,8 +87,8 @@ Note that the selection excludes in `crap-check.sh` (`*_test.go`, `*mock_*.go`, 
    go run github.com/padiazg/go-crap@v0.5.0 scan ./path/to/pkg --coverage-profile /tmp/cover.out
    ```
 3. For a baseline at HEAD, stash first (`git stash push --include-untracked`), repeat step 2, then `git stash pop`.
-4. Compare the two reports per `<pkg>.<func>`. Apply thresholds: ≤6 OK, (6, 8] SOFT, >8 HARD. For `package main`, use complexity only with threshold ≤5.
-5. If coverage <80% and the function is new or worsened, the status is `NEEDS_TESTS` regardless of CRAP — add tests first, do not refactor.
+4. Compare the two reports per `<pkg>.<func>`. Apply thresholds: ≤6 OK, (6, 8] SOFT, >8 HARD. For `package main`, use complexity only with threshold ≤5. All three are the repo's to change in `.crap-gated` (see SKILL.md).
+5. If the function is new or worsened and is undertested for its complexity, the status is `NEEDS_TESTS` regardless of CRAP — add tests first, do not refactor. The requirement is derived from the hard cap, about 18% at the default of 8.
 
 The helper exists to keep you from getting the stash dance and the join wrong.
 

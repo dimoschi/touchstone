@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # Run the unit suites for hooks/*.py and skills/crap-controlled-changes/lib/*.py
-# under coverage, and enforce the floor crap-check-python.sh assumes (80% per
-# function; this checks 90% combined across both directories, the same margin
-# the ticket that added this script asked for).
+# under coverage, and enforce a floor of its own: 90% combined across both
+# directories, the margin the ticket that added this script asked for. That is
+# deliberately stricter than what crap-check-python.sh requires per function,
+# since this repo's own lib is what every gated repo then runs.
 #
 # Neither coverage nor pytest need to be importable in the active environment:
 # set CRAP_PY_RUN to a launcher prefix when they are not, e.g.

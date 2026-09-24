@@ -242,54 +242,15 @@ teardown_base_tree
 measure "$CUR" "$PHASE_CURRENT" "$REPO_ROOT" || exit $?
 clean_target
 
-# Join by "<pkg>.<func>" and classify.
-#   - non-main packages: CRAP thresholds 6 / 8, with NEEDS_TESTS gate
-#                        when cov<80% on new or worsened functions.
-#   - package main:      complexity-only rule, threshold <= 5.
-ROWS="$(awk -v BASEFILE="$BASE" '
-  function score(pkg, cc, crap) {
-    if (pkg == "main") return cc + 0
-    if (crap == "n/a") return 0
-    return crap + 0
-  }
-  function status(pkg, s, cov, tag) {
-    if (pkg != "main" && cov != "n/a" && cov+0 < 80 && (tag == "new" || tag == "worsened")) {
-      return "NEEDS_TESTS"
-    }
-    if (pkg == "main") {
-      if (s <= 5) return "OK_MAIN"
-      return "HARD_MAIN"
-    }
-    if (s <= 6) return "OK"
-    if (s <= 8) return "SOFT"
-    return "HARD"
-  }
-  FILENAME == BASEFILE {
-    base_pkg[$1]  = $2
-    base_cc[$1]   = $3
-    base_cov[$1]  = $4
-    base_crap[$1] = $5
-    next
-  }
-  {
-    fn = $1; pkg = $2; cc = $3; cov = $4; crap = $5
-    cur_score = score(pkg, cc, crap)
-    tag = "new"
-    if (fn in base_cc) {
-      base_score = score(base_pkg[fn], base_cc[fn], base_crap[fn])
-      if (cur_score > base_score + 0.05) tag = "worsened"
-      else                                tag = "unchanged"
-    }
-    st = status(pkg, cur_score, cov, tag)
-    if (pkg == "main") {
-      printf "%-50s complexity=%-2s  coverage=n/a    CRAP=n/a    %-11s  (%s)\n", \
-             fn, cc, st, tag
-    } else {
-      printf "%-50s complexity=%-2s  coverage=%s%%  CRAP=%s  %-11s  (%s)\n", \
-             fn, cc, cov, crap, st, tag
-    }
-  }
-' "$BASE" "$CUR")"
+# Join by "<pkg>.<func>" and classify. The bands, the coverage requirement and
+# the `package main` rule are lib/thresholds.py, shared with the other two
+# modules and overridable per repo in .crap-gated.
+ROWS="$(python3 "$SKILL_LIB/classify_rows.py" \
+          --base "$BASE" --current "$CUR" --layout go --repo-root "$REPO_ROOT")" || {
+  echo "crap-check: FAILED TO MEASURE - the measured rows could not be classified." >&2
+  echo "  No row was built, which is not the same as having nothing to score." >&2
+  exit 4
+}
 
 if [ -n "$ROWS" ]; then
   printf '%s\n' "$ROWS"
@@ -299,7 +260,7 @@ else
   echo "crap-check: the scan ran and had nothing to score (declaration-only or comment-only change). Clean pass, not a measurement failure."
 fi
 
-GOCOGNIT_OVER=15
+GOCOGNIT_OVER="$(python3 "$SKILL_LIB/thresholds.py" --repo-root "$REPO_ROOT" --show cognitive)"
 COGNIT_FILES=()
 for f in "${CHANGED[@]}"; do
   [ -f "$f" ] && COGNIT_FILES+=("$f")
