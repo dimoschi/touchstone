@@ -33,6 +33,10 @@
 #   7. Static: the probe resolves and fetches the repository's base branch
 #      itself rather than trusting wt.base directly, so a stacked run's own
 #      unmerged base is never read back as the comparison target.
+#   8. Static: a failed fetch is not by itself instructed to read as a missing
+#      manifest -- the probe is told to attempt the read regardless, since
+#      origin/<base> can already be populated from an earlier fetch or the
+#      initial clone.
 #
 # Needs node. Exit 0 all green, 1 any assertion failed.
 
@@ -75,6 +79,10 @@ check "the probe resolves the base itself off the remote HEAD" \
   "$(printf '%s' "$PROBE_BLOCK" | grep -Fc 'symbolic-ref' || true)" 1
 check "the probe fetches the resolved base before reading it" \
   "$(printf '%s' "$PROBE_BLOCK" | grep -Fc 'fetch origin' || true)" 1
+check "a failed fetch is not listed as its own found=false cause" \
+  "$(printf '%s' "$PROBE_BLOCK" | grep -Fc 'the fetch fails,' || true)" 0
+check "the probe is told to read the manifest even when the fetch fails" \
+  "$(printf '%s' "$PROBE_BLOCK" | grep -Fc 'read it anyway' || true)" 1
 
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT

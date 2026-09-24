@@ -963,15 +963,19 @@ const versionProbe = await treeAgent(
   `This is not necessarily ${wt.branch}'s own base: ignore what branch ${wt.branch} ` +
   `was actually cut from. Then run ` +
   `git -C ${wt.path} fetch origin <that base> to refresh the remote-tracking ` +
-  `ref before reading it -- this worktree can be sessions old. Then read ` +
+  `ref before reading it -- this worktree can be sessions old. If that fetch ` +
+  `fails (no network, no auth, a remote needing a hardware key), that is not ` +
+  `by itself a missing manifest: origin/<that base> can already hold it from ` +
+  `an earlier fetch or the initial clone, so read it anyway. Then read ` +
   `git -C ${wt.path} show origin/<that base>:.claude-plugin/plugin.json. ` +
   `Then STOP: the fetch is the only change to make; do not touch the working ` +
   `tree, commit, or push.\n` +
   `Return found=true with name and version set from that file's "name" and ` +
   `"version" fields, or found=false with empty strings if the base cannot be ` +
-  `resolved, the fetch fails, the ref still cannot be resolved, or the file ` +
-  `is missing, unreadable, or has no such fields. Do not invent either value. ` +
-  `Set detail to one line saying which case applied.`,
+  `resolved, the ref still cannot be resolved even after attempting the read, ` +
+  `or the file is missing, unreadable, or has no such fields. A failed fetch ` +
+  `does not force found=false on its own. Do not invent either value. Set ` +
+  `detail to one line saying which case applied.`,
   { label: 'plugin:version', schema: MANIFEST_PROBE, model: 'haiku', effort: 'low' })
 if (versionProbe == null) {
   // Distinct from the found:false/wrong-name case below: this means the

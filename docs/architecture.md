@@ -223,8 +223,12 @@ becomes the branch under review whenever this run is stacked (`args.base`), whos
 unmerged version bump would revive the same self-accusation through the base instead.
 The probe also fetches that base fresh before reading it, since neither reuse path in
 Worktree ever runs `git fetch` and a stale remote-tracking ref would let a stale base
-pass as `mismatch: false`. The result is a `pipeline_version` object carried on every
-exit path, a halt at any phase included:
+pass as `mismatch: false`. A failed fetch (no network, no auth, a remote needing a
+hardware key) does not by itself count as a missing manifest: `origin/<base>` can
+already hold it from an earlier fetch or the initial clone, so the probe reads it
+anyway rather than reporting the fetch failure as if the manifest were absent. The
+result is a `pipeline_version` object carried on every exit path, a halt at any phase
+included:
 
 - `executed` -- `PIPELINE_VERSION`, always present, even on a halt at Worktree
   before the probe has run.
