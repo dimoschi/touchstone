@@ -875,7 +875,12 @@ const treeAgent = (prompt, opts) =>
     `it too) and print the repo and branch they resolved as their first line ` +
     `of output -- read that line and pass ${wt.path} there, every time, rather ` +
     `than relying on cwd. GIT_DIR/GIT_WORK_TREE env vars and cd are not the way ` +
-    `to target it. Any reproduction or experiment -- a scratch clone, a throwaway ` +
+    `to target it. No commit message you write ends with a Co-Authored-By ` +
+    `trailer naming the model or the harness. A squash merge collects that ` +
+    `trailer from every commit on the branch into the one commit that lands, ` +
+    `so writing it on an intermediate commit puts it on the base branch even ` +
+    `though the commit carrying it never arrives there. ` +
+    `Any reproduction or experiment -- a scratch clone, a throwaway ` +
     `git repo to test a git behaviour, anything you would otherwise drop in /tmp ` +
     `-- goes under the path printed by ` +
     `git -C ${wt.path} rev-parse --git-path touchstone-scratch instead, never ` +

@@ -67,6 +67,10 @@ echo "== static: treeAgent tells every phase where scratch work goes (gh-40)"
 # identity and signing config from the global config instead of the worktree.
 check "the scratch path is resolved from the worktree's own git dir, not /tmp" \
   "$(grep -Fc 'git-path touchstone-scratch' "$SCRIPT" || true)" 1
+# A squash merge lifts the trailer off an intermediate commit onto the base
+# branch, so a branch that never shows one in its final commit still lands it.
+check "no phase is left free to write a Co-Authored-By trailer" \
+  "$(grep -Fc 'No commit message you write ends with a Co-Authored-By' "$SCRIPT" || true)" 1
 check "it still names /tmp as the default it exists to replace" \
   "$(grep -Fc 'anything you would otherwise drop in /tmp' "$SCRIPT" || true)" 1
 check "it does not route the scratch path through info/exclude" \
@@ -2550,6 +2554,8 @@ async function scenarioCO() {
       p.includes('touchstone-scratch'), true)
     check(`${label} is told not to use /tmp`,
       p.includes('anything you would otherwise drop in /tmp'), true)
+    check(`${label} is told not to write a Co-Authored-By trailer`,
+      p.includes('No commit message you write ends with a Co-Authored-By'), true)
   }
 }
 
