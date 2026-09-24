@@ -4,11 +4,12 @@
 # and PIPELINE_VERSION are literals (the script has no fs to read
 # .claude-plugin/plugin.json at runtime), checked against the manifest by
 # scripts/check-version-bump.sh (scripts/test-version-bump.sh covers that
-# half). This file covers the runtime half: the plugin:version probe reads the
-# worktree's own manifest once, before Triage, and every exit path -- a halt
-# at Worktree before the probe has even run, a halt at any later phase, and
-# normal completion -- carries a `pipeline_version` object reporting what it
-# found.
+# half). This file covers the runtime half: the plugin:version probe resolves
+# the repository's actual base branch itself, never wt.base (which becomes the
+# branch under review on a stacked run), fetches that base fresh, then reads
+# its manifest once before Triage, and every exit path -- a halt at Worktree
+# before the probe has even run, a halt at any later phase, and normal
+# completion -- carries a `pipeline_version` object reporting what it found.
 #
 # Checked:
 #   1. Static: the two literals and the MANIFEST_PROBE schema exist, and both
@@ -17,18 +18,21 @@
 #      Worktree, before the probe runs at all, still carries `executed` with
 #      the other two fields null.
 #   3. Dynamic: a probe reporting this plugin's name with a different version
-#      sets mismatch=true, working_tree to that version, logs a line naming
+#      sets mismatch=true, base_branch to that version, logs a line naming
 #      both versions, and the run reaches PR rather than halting.
 #   4. Dynamic: a probe reporting this plugin's name with the same version
 #      sets mismatch=false, not null -- a confirmed match is a real answer.
 #   5. Dynamic: a probe reporting no manifest, or a different plugin's name,
-#      reports working_tree=null, mismatch=null, with no version-drift line
-#      logged and no halt: the ordinary case for every repo but touchstone's
-#      own.
-#   6. Dynamic: a probe returning nothing at all also reports working_tree=null,
+#      reports base_branch=null, mismatch=null, and no halt, but logs a
+#      diagnostic line either way: the ordinary case for every repo but
+#      touchstone's own, still worth a line distinguishing it from check 6.
+#   6. Dynamic: a probe returning nothing at all also reports base_branch=null,
 #      mismatch=null, but logs a line saying the probe did not respond, so
 #      that silent non-comparison is never indistinguishable from the
 #      ordinary one in check 5.
+#   7. Static: the probe resolves and fetches the repository's base branch
+#      itself rather than trusting wt.base directly, so a stacked run's own
+#      unmerged base is never read back as the comparison target.
 #
 # Needs node. Exit 0 all green, 1 any assertion failed.
 
@@ -62,6 +66,15 @@ check "the probe is labelled plugin:version" \
 echo "== static: pipeline_version reaches both a halt and the final result"
 check "pipeline_version: pipelineVersion appears in halted()'s payload and the final result" \
   "$(grep -Fc 'pipeline_version: pipelineVersion' "$SCRIPT" || true)" 2
+
+echo "== static: the probe resolves its own base rather than trusting wt.base"
+PROBE_BLOCK="$(awk '/const versionProbe = await treeAgent/,/label: .plugin:version./' "$SCRIPT")"
+check "the probe prompt never names wt.base directly" \
+  "$(printf '%s' "$PROBE_BLOCK" | grep -Fc 'wt.base' || true)" 0
+check "the probe resolves the base itself off the remote HEAD" \
+  "$(printf '%s' "$PROBE_BLOCK" | grep -Fc 'symbolic-ref' || true)" 1
+check "the probe fetches the resolved base before reading it" \
+  "$(printf '%s' "$PROBE_BLOCK" | grep -Fc 'fetch origin' || true)" 1
 
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
@@ -200,7 +213,7 @@ async function scenarioWorktreeHaltCarriesExecuted() {
   check('halted at Worktree', result.halted_at, 'Worktree')
   check('the probe never ran', captured.versionProbeCalled, false)
   check('executed is the script\'s own literal', result.pipeline_version?.executed, SCRIPT_PIPELINE_VERSION)
-  check('working_tree is null', result.pipeline_version?.working_tree, null)
+  check('base_branch is null', result.pipeline_version?.base_branch, null)
   check('mismatch is null', result.pipeline_version?.mismatch, null)
   // recordRun() is handed the same payload halted() built, so proving it
   // reached the run-record prompt is proving it reached the written record.
@@ -215,7 +228,7 @@ async function scenarioDefaultProbeCompletesNormally() {
   check('the probe ran', captured.versionProbeCalled, true)
   check('the PR phase ran', captured.prCalled, true)
   check('executed is the script\'s own literal', result.pipeline_version?.executed, SCRIPT_PIPELINE_VERSION)
-  check('working_tree is null', result.pipeline_version?.working_tree, null)
+  check('base_branch is null', result.pipeline_version?.base_branch, null)
   check('mismatch is null', result.pipeline_version?.mismatch, null)
   check('no log line mentions a version mismatch',
     captured.logs.some(m => /working|mismatch|drift/i.test(m)), false)
@@ -230,7 +243,7 @@ async function scenarioMismatchLogsAndContinues() {
   check('no halt', result.halted_at, undefined)
   check('the PR phase ran', captured.prCalled, true)
   check('mismatch is true', result.pipeline_version?.mismatch, true)
-  check('working_tree is the drifted version', result.pipeline_version?.working_tree, drifted)
+  check('base_branch is the drifted version', result.pipeline_version?.base_branch, drifted)
   check('executed is unchanged', result.pipeline_version?.executed, SCRIPT_PIPELINE_VERSION)
   check('a log line names both versions', captured.logs.some(
     m => m.includes(SCRIPT_PIPELINE_VERSION) && m.includes(drifted)), true)
@@ -243,7 +256,7 @@ async function scenarioExactMatchIsFalseNotNull() {
   })
   check('no halt', result.halted_at, undefined)
   check('mismatch is false', result.pipeline_version?.mismatch, false)
-  check('working_tree equals executed', result.pipeline_version?.working_tree, SCRIPT_PIPELINE_VERSION)
+  check('base_branch equals executed', result.pipeline_version?.base_branch, SCRIPT_PIPELINE_VERSION)
 }
 
 async function scenarioOtherPluginIsNullNotFalse() {
@@ -252,27 +265,31 @@ async function scenarioOtherPluginIsNullNotFalse() {
     versionProbe: { found: true, name: 'some-other-plugin', version: '9.9.9', detail: 'stub' },
   })
   check('no halt', result.halted_at, undefined)
-  check('working_tree is null', result.pipeline_version?.working_tree, null)
+  check('base_branch is null', result.pipeline_version?.base_branch, null)
   check('mismatch is null', result.pipeline_version?.mismatch, null)
   check('no log line mentions a version mismatch',
     captured.logs.some(m => /working|mismatch|drift/i.test(m)), false)
+  check('a diagnostic log line still names the uncomparable manifest',
+    captured.logs.some(m => m.includes('some-other-plugin') || /no comparable manifest/i.test(m)), true)
 }
 
 async function scenarioNoManifestFoundIsNull() {
   console.log('\n== scenario: found:false reports null, same as no manifest at all')
-  const { result } = await run({
+  const { result, captured } = await run({
     versionProbe: { found: false, name: '', version: '', detail: 'no .claude-plugin/plugin.json here' },
   })
   check('no halt', result.halted_at, undefined)
-  check('working_tree is null', result.pipeline_version?.working_tree, null)
+  check('base_branch is null', result.pipeline_version?.base_branch, null)
   check('mismatch is null', result.pipeline_version?.mismatch, null)
+  check('a diagnostic log line reports what the probe found instead',
+    captured.logs.some(m => /no comparable manifest/i.test(m)), true)
 }
 
 async function scenarioProbeReturningNothingIsNull() {
   console.log('\n== scenario: the probe returning nothing at all reports null, not a crash, but logs that the comparison did not run')
   const { result, captured } = await run({ versionProbe: null })
   check('no halt', result.halted_at, undefined)
-  check('working_tree is null', result.pipeline_version?.working_tree, null)
+  check('base_branch is null', result.pipeline_version?.base_branch, null)
   check('mismatch is null', result.pipeline_version?.mismatch, null)
   check('a log line reports the probe returned nothing',
     captured.logs.some(m => /plugin:version|returned nothing/i.test(m)), true)

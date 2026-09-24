@@ -150,16 +150,17 @@ const stage = (name) => {
 // phase that opens it.
 let draftPr = null
 
-// executed never changes; working_tree and mismatch stay null until the
+// executed never changes; base_branch and mismatch stay null until the
 // plugin:version probe (before Triage) has something to report, which is why
 // a halt at Worktree carries the executed value with the other two still
 // null. mismatch is null rather than false when the probe found no comparable
 // manifest (found:false, or a different plugin's name) -- the ordinary case
-// for every repo this runs against except touchstone's own. A probe that
-// returns nothing at all leaves the same null/null pair, but it is logged
-// separately below: that case means the comparison did not run, not that
-// there was nothing to compare.
-let pipelineVersion = { executed: PIPELINE_VERSION, working_tree: null, mismatch: null }
+// for every repo this runs against except touchstone's own, but it is logged
+// too, distinct from a real mismatch. A probe that returns nothing at all
+// leaves the same null/null pair, but is logged separately again, since that
+// case means the comparison did not run, not that there was nothing to
+// compare.
+let pipelineVersion = { executed: PIPELINE_VERSION, base_branch: null, mismatch: null }
 
 // Opening the draft is allowed to fail without ending the run, so a note that
 // states either outcome flatly is wrong half the time. Every halt note that
@@ -937,40 +938,65 @@ const treeAgent = (prompt, opts) =>
 const headOf = (range) => range.includes('..') ? range.split('..')[1].trim() : range.trim()
 
 // Read once, here, rather than folded into gate:opt-in below: comparing
-// against origin/${wt.base} rather than this worktree is what makes the
-// comparison safe on a resumed branch. The worktree's own manifest already
-// carries this run's own version-bump commit whenever one landed in an
-// earlier session -- the ordinary case on touchstone itself, since
-// check-version-bump.sh forces every workflows/ change to carry one -- and
-// reading that back would report the run's own progress as drift against
-// itself. origin/<base> is something this branch cannot have touched, so it
-// stays a comparison against what actually shipped.
+// against the repository's actual base branch rather than this worktree is
+// what makes the comparison safe on a resumed branch. The worktree's own
+// manifest already carries this run's own version-bump commit whenever one
+// landed in an earlier session -- the ordinary case on touchstone itself,
+// since check-version-bump.sh forces every workflows/ change to carry one --
+// and reading that back would report the run's own progress as drift against
+// itself. The probe must not just read origin/wt.base either: wt.base
+// becomes the branch under review whenever this run is stacked (baseOverride,
+// set above from args.base), and that branch's own manifest can carry its own
+// unmerged version bump, reviving the same self-accusation against a version
+// that never shipped. The probe resolves the real base itself instead, then
+// fetches it fresh -- nothing else in this workflow is guaranteed to have
+// refreshed that remote-tracking ref on a resumed run, so a stale fetch could
+// let a stale base pass as mismatch=false.
 const versionProbe = await treeAgent(
   `[touchstone: plugin:version]\n` +
-  `Read .claude-plugin/plugin.json as of origin/${wt.base}, not this branch's ` +
-  `own working tree: git -C ${wt.path} show ` +
-  `origin/${wt.base}:.claude-plugin/plugin.json. Then STOP. Read only; run ` +
-  `nothing and change nothing.\n` +
+  `Read .claude-plugin/plugin.json off the repository's actual base branch, ` +
+  `never this run's own working tree and never any stacked branch this work ` +
+  `sits on. Resolve that base yourself, the same way branch creation does: ` +
+  `git -C ${wt.path} symbolic-ref --short refs/remotes/origin/HEAD, which ` +
+  `prints an origin/-prefixed name; strip that prefix, falling back to ` +
+  `whichever of main or master exists when there is no remote-tracking HEAD. ` +
+  `This is not necessarily ${wt.branch}'s own base: ignore what branch ${wt.branch} ` +
+  `was actually cut from. Then run ` +
+  `git -C ${wt.path} fetch origin <that base> to refresh the remote-tracking ` +
+  `ref before reading it -- this worktree can be sessions old. Then read ` +
+  `git -C ${wt.path} show origin/<that base>:.claude-plugin/plugin.json. ` +
+  `Then STOP: the fetch is the only change to make; do not touch the working ` +
+  `tree, commit, or push.\n` +
   `Return found=true with name and version set from that file's "name" and ` +
-  `"version" fields, or found=false with empty strings if the ref cannot be ` +
-  `resolved or the file is missing, unreadable, or has no such fields. Do not ` +
-  `invent either value. Set detail to one line saying which case applied.`,
+  `"version" fields, or found=false with empty strings if the base cannot be ` +
+  `resolved, the fetch fails, the ref still cannot be resolved, or the file ` +
+  `is missing, unreadable, or has no such fields. Do not invent either value. ` +
+  `Set detail to one line saying which case applied.`,
   { label: 'plugin:version', schema: MANIFEST_PROBE, model: 'haiku', effort: 'low' })
 if (versionProbe == null) {
-  // Distinct from the ordinary found:false/wrong-name case below: this means
-  // the probe never answered at all, so pipeline_version's null/null does not
+  // Distinct from the found:false/wrong-name case below: this means the
+  // probe never answered at all, so pipeline_version's null/null does not
   // mean "nothing to compare" here, it means the comparison did not run.
   log(`the plugin:version probe returned nothing, so pipeline_version could ` +
-      `not be compared against origin/${wt.base}`)
+      `not be compared against the repository's base branch`)
 } else if (versionProbe.found && versionProbe.name === PLUGIN_NAME) {
   const drift = versionProbe.version !== PIPELINE_VERSION
   pipelineVersion = {
-    executed: PIPELINE_VERSION, working_tree: versionProbe.version, mismatch: drift,
+    executed: PIPELINE_VERSION, base_branch: versionProbe.version, mismatch: drift,
   }
   if (drift) {
-    log(`this run is executing pipeline ${PIPELINE_VERSION}, but origin/` +
-        `${wt.base}'s plugin.json is now at ${versionProbe.version}`)
+    log(`this run is executing pipeline ${PIPELINE_VERSION}, but the ` +
+        `repository's base branch's plugin.json is now at ${versionProbe.version}`)
   }
+} else {
+  // The probe answered but did not confirm a comparable manifest -- the
+  // ordinary case for every repo this pipeline delivers into other than
+  // touchstone's own, but logged regardless: an answer that came back
+  // uncomparable must not collapse into the same silence as a comparison
+  // that never ran at all (the branch above).
+  log(`the plugin:version probe found no comparable manifest on the ` +
+      `repository's base branch (${versionProbe.detail}), so pipeline_version ` +
+      `stays uncompared`)
 }
 
 // Latch 1. The premise checks that matter most are usually one grep, and a task

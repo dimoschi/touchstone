@@ -214,26 +214,31 @@ literals for that reason: they travel with the executed bytes, and
 (`scripts/test-version-bump.sh` covers that half).
 
 A single `treeAgent` call labelled `plugin:version`, placed after the worktree exists
-and before Triage, reads `origin/<base>`'s manifest exactly once, not the branch's own
-working tree: a resumed branch already carries this run's own earlier version-bump
-commit as often as not (`check-version-bump.sh` forces one onto every `workflows/`
-change), and reading the working tree back would report that bump as drift against
-itself. `origin/<base>` is something this branch cannot have touched, so the
-comparison stays against what actually shipped. The result is a `pipeline_version`
-object carried on every exit path, a halt at any phase included:
+and before Triage, resolves the repository's actual base branch itself and reads its
+manifest exactly once, neither the branch's own working tree nor `wt.base`: a resumed
+branch already carries this run's own earlier version-bump commit as often as not
+(`check-version-bump.sh` forces one onto every `workflows/` change), and reading the
+working tree back would report that bump as drift against itself, while `wt.base`
+becomes the branch under review whenever this run is stacked (`args.base`), whose own
+unmerged version bump would revive the same self-accusation through the base instead.
+The probe also fetches that base fresh before reading it, since neither reuse path in
+Worktree ever runs `git fetch` and a stale remote-tracking ref would let a stale base
+pass as `mismatch: false`. The result is a `pipeline_version` object carried on every
+exit path, a halt at any phase included:
 
 - `executed` -- `PIPELINE_VERSION`, always present, even on a halt at Worktree
   before the probe has run.
-- `working_tree` -- the version the probe read off `origin/<base>`, or `null` if it
-  found no manifest naming this plugin there.
-- `mismatch` -- `true` when `origin/<base>` names this plugin at a different
+- `base_branch` -- the version the probe read off the repository's base branch, or
+  `null` if it found no manifest naming this plugin there.
+- `mismatch` -- `true` when the base branch names this plugin at a different
   version, `false` when it names this plugin at the same version, `null` when the
   probe found no comparable manifest at all (not found, or a different plugin's
   name). `null` is the ordinary case: it is what every repo this pipeline delivers
   into other than touchstone's own reports, since their manifest is never named
-  `touchstone`. A probe that returns no response at all also leaves `null`, but is
-  logged separately, since that means the comparison did not run rather than that
-  there was nothing to compare.
+  `touchstone`; that case is still logged, distinct in wording from an actual
+  mismatch, so it never reads as silence. A probe that returns no response at all
+  also leaves `null`, but is logged separately again, since that means the
+  comparison did not run rather than that there was nothing to compare.
 
 A mismatch is informational, never a halt: `log()` names both versions and the run
 continues to completion. `mismatch: true` says only that the two differ, not which
