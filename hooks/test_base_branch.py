@@ -59,6 +59,18 @@ def test_target_repo_prefers_dash_c():
     assert out == Path("/bare/path")
 
 
+def test_target_repo_dash_c_matches_git_by_basename():
+    # `\bgit\b` used to match `/usr/bin/git -C /x` too; a bare `== 'git'`
+    # token compare must not silently drop that.
+    out = base_branch.target_repo("/usr/bin/git -C /x status", Path("/cwd"))
+    assert out == Path("/x")
+
+
+def test_target_repo_dash_c_has_no_command_position_requirement():
+    out = base_branch.target_repo("sudo git -C /x status", Path("/cwd"))
+    assert out == Path("/x")
+
+
 def test_target_repo_walks_cd_chain():
     out = base_branch.target_repo("cd repo && cd sub && git commit", Path("/root"))
     assert out == Path("/root/repo/sub")
@@ -71,6 +83,78 @@ def test_target_repo_ignores_cd_dash():
 
 def test_target_repo_falls_back_to_cwd():
     assert base_branch.target_repo("git commit", Path("/root")) == Path("/root")
+
+
+def test_target_repo_ignores_dash_c_inside_quoted_argument_of_earlier_command():
+    cmd = 'gh pr comment 79 --body "see git -C /other for context" && gh pr ready 79'
+    assert base_branch.target_repo(cmd, Path("/cwd")) == Path("/cwd")
+
+
+def test_target_repo_ignores_cd_inside_quoted_argument():
+    cmd = 'gh pr comment 79 --body "run; cd /elsewhere now" && gh pr ready'
+    assert base_branch.target_repo(cmd, Path("/cwd")) == Path("/cwd")
+
+
+def test_target_repo_backslash_escaped_quote_does_not_reexpose_contents():
+    cmd = 'git commit -m "he said \\"git -C /x\\"" && git -C /r push'
+    assert base_branch.target_repo(cmd, Path("/cwd")) == Path("/r")
+
+
+def test_target_repo_unterminated_quote_falls_back_to_cwd():
+    cmd = 'gh pr comment 79 --body "unterminated'
+    assert base_branch.target_repo(cmd, Path("/cwd")) == Path("/cwd")
+
+
+def test_target_repo_dash_c_matches_at_minimal_three_token_command():
+    assert base_branch.target_repo("git -C /x", Path("/cwd")) == Path("/x")
+
+
+def test_target_repo_cd_walk_matches_at_minimal_two_token_command():
+    assert base_branch.target_repo("cd repo", Path("/root")) == Path("/root/repo")
+
+
+def test_target_repo_skippable_cd_path_does_not_abort_the_walk():
+    out = base_branch.target_repo("cd - && cd repo", Path("/root"))
+    assert out == Path("/root/repo")
+
+
+def test_is_operator_true_only_for_pure_shell_punctuation():
+    assert base_branch._is_operator('') is False
+    assert base_branch._is_operator('a') is False
+    assert base_branch._is_operator('&&') is True
+    # A token whose character set exactly equals OPERATOR_CHARS: `<=` (equal
+    # counts as a subset) and `<` (proper subset only) disagree here.
+    assert base_branch._is_operator('();<>|&') is True
+
+
+def test_shell_tokens_splits_quoted_argument_as_one_token():
+    tokens = base_branch.shell_tokens(
+        'gh pr comment 79 --body "see git -C /other for context"')
+    assert tokens == [
+        'gh', 'pr', 'comment', '79', '--body',
+        'see git -C /other for context',
+    ]
+
+
+def test_shell_tokens_backslash_escaped_quote_stays_inside_the_word():
+    tokens = base_branch.shell_tokens('git commit -m "he said \\"git -C /x\\""')
+    assert tokens == ['git', 'commit', '-m', 'he said "git -C /x"']
+
+
+def test_shell_tokens_keeps_punctuation_operators_without_surrounding_spaces():
+    assert base_branch.shell_tokens('cd a&&cd b') == ['cd', 'a', '&&', 'cd', 'b']
+
+
+def test_shell_tokens_unterminated_quote_returns_words_lexed_before_it():
+    tokens = base_branch.shell_tokens('echo one "two three')
+    assert tokens == ['echo', 'one']
+
+
+def test_shell_tokens_whitespace_split_keeps_a_colon_inside_one_word():
+    # ':' is not a wordchar and not a punctuation_chars operator, so without
+    # whitespace_split=True it splits off as its own token.
+    tokens = base_branch.shell_tokens('git push origin main:main')
+    assert tokens == ['git', 'push', 'origin', 'main:main']
 
 
 def test_base_branch_names_includes_origin_head(tmp_path):
