@@ -386,6 +386,9 @@ function makeAgent(scenario, captured) {
       return scenario.existingBranchResult ?? { created: true, branch: 'feat/gh-21-stub', base: 'main',
         path: '/tmp/stub-worktree', ticket: '21', detail: 'stub' }
     }
+    if (label === 'plugin:version') {
+      return scenario.versionProbe ?? { found: false, name: '', version: '', detail: 'stub' }
+    }
     if (label === 'triage') {
       // scope: 'inline' skips the Plan phase, which this test has no reason
       // to exercise: it is not part of the join this ticket fixes.

@@ -45,6 +45,8 @@ jobs:
         run: bash workflows/test-fix-loop-join.sh
       - name: Unsupported-language halt test suite
         run: bash workflows/test-unsupported-language-halt.sh
+      - name: Pipeline version transparency test suite
+        run: bash workflows/test-pipeline-version.sh
       - name: Version bump test suite
         run: bash scripts/test-version-bump.sh
 

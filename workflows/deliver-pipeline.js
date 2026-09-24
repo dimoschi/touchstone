@@ -15,6 +15,19 @@ export const meta = {
   ],
 }
 
+// A snapshot of this script can keep running after main moves past it: the
+// host that persists a copy under its own session directory, the plugin
+// cache, and this checkout can all disagree on which version actually
+// executed. The script has no fs and no imports (see docs/architecture.md),
+// so it cannot read .claude-plugin/plugin.json to find out -- any runtime
+// read would report whatever the *current* file holds, which is exactly
+// wrong when the point is to say what this *running* snapshot is. A literal
+// is the only value that travels with the executed bytes; a regex checks it
+// against the manifest in scripts/check-version-bump.sh, so drift is a
+// gate's job rather than something this script verifies about itself.
+const PLUGIN_NAME = 'touchstone'
+const PIPELINE_VERSION = '0.19.0'
+
 // Boundaries. Wall-clock deadlines are not expressible here (no Date.now, by
 // design); the bounds are rounds, counts, and token budget instead.
 // The ticket is the specification: its description and comments are fetched
@@ -137,6 +150,14 @@ const stage = (name) => {
 // phase that opens it.
 let draftPr = null
 
+// executed never changes; working_tree and mismatch stay null until the
+// plugin:version probe (before Triage) has something to report, which is why
+// a halt at Worktree carries the executed value with the other two still
+// null. mismatch is null rather than false when the probe found no comparable
+// manifest (found:false, a different plugin's name, or no response at all) --
+// the ordinary case for every repo this runs against except touchstone's own.
+let pipelineVersion = { executed: PIPELINE_VERSION, working_tree: null, mismatch: null }
+
 // Opening the draft is allowed to fail without ending the run, so a note that
 // states either outcome flatly is wrong half the time. Every halt note that
 // mentions the PR reads this instead of asserting one.
@@ -177,7 +198,8 @@ const recordRun = async (record) => {
 // `return await`.
 const halted = async (at, extra) => {
   const payload = {
-    task, halted_at: at, stage_spend: stageSpend, needs_user: true, ...extra,
+    task, halted_at: at, pipeline_version: pipelineVersion, stage_spend: stageSpend,
+    needs_user: true, ...extra,
   }
   if (draftPr?.number) {
     log(`halt at ${at}: draft PR ${draftPr.url} left as it is; the reason is in ` +
@@ -459,6 +481,17 @@ const TICKET = {
     summary: { type: 'string' },
     description: { type: 'string' },
     comments: { type: 'string' },
+  },
+}
+
+const MANIFEST_PROBE = {
+  type: 'object', additionalProperties: false,
+  required: ['found', 'name', 'version', 'detail'],
+  properties: {
+    found: { type: 'boolean' },
+    name: { type: 'string' },
+    version: { type: 'string' },
+    detail: { type: 'string' },
   },
 }
 
@@ -899,6 +932,29 @@ const treeAgent = (prompt, opts) =>
     opts)
 
 const headOf = (range) => range.includes('..') ? range.split('..')[1].trim() : range.trim()
+
+// Read once, here, rather than folded into gate:opt-in below: that probe
+// reads the repo root, and this has to read the worktree specifically, before
+// Implement can touch it -- a version bump this same run makes later must not
+// read back as a mismatch against itself.
+const versionProbe = await treeAgent(
+  `[touchstone: plugin:version]\n` +
+  `Read .claude-plugin/plugin.json in this worktree, then STOP. Read only; ` +
+  `run nothing and change nothing.\n` +
+  `Return found=true with name and version set from that file's "name" and ` +
+  `"version" fields, or found=false with empty strings if the file is ` +
+  `missing, unreadable, or has no such fields. Do not invent either value.`,
+  { label: 'plugin:version', schema: MANIFEST_PROBE, model: 'haiku', effort: 'low' })
+if (versionProbe?.found && versionProbe.name === PLUGIN_NAME) {
+  const drift = versionProbe.version !== PIPELINE_VERSION
+  pipelineVersion = {
+    executed: PIPELINE_VERSION, working_tree: versionProbe.version, mismatch: drift,
+  }
+  if (drift) {
+    log(`this run is executing pipeline ${PIPELINE_VERSION}, but the working ` +
+        `tree's plugin.json is now at ${versionProbe.version}`)
+  }
+}
 
 // Latch 1. The premise checks that matter most are usually one grep, and a task
 // whose stated facts are wrong must not be planned around. Buying that check
@@ -2389,6 +2445,7 @@ const result = {
   ticket: wt.ticket,
   worktree: wt.path,
   plan: plan.plan,
+  pipeline_version: pipelineVersion,
   stage_spend: stageSpend,
   implemented: impl.summary,
   gates: gatesPayload(),
