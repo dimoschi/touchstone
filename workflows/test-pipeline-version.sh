@@ -21,9 +21,14 @@
 #      both versions, and the run reaches PR rather than halting.
 #   4. Dynamic: a probe reporting this plugin's name with the same version
 #      sets mismatch=false, not null -- a confirmed match is a real answer.
-#   5. Dynamic: a probe reporting no manifest, a different plugin's name, or
-#      nothing at all all report working_tree=null, mismatch=null, with no
-#      version-drift line logged and no halt.
+#   5. Dynamic: a probe reporting no manifest, or a different plugin's name,
+#      reports working_tree=null, mismatch=null, with no version-drift line
+#      logged and no halt: the ordinary case for every repo but touchstone's
+#      own.
+#   6. Dynamic: a probe returning nothing at all also reports working_tree=null,
+#      mismatch=null, but logs a line saying the probe did not respond, so
+#      that silent non-comparison is never indistinguishable from the
+#      ordinary one in check 5.
 #
 # Needs node. Exit 0 all green, 1 any assertion failed.
 
@@ -116,7 +121,12 @@ function makeAgent(scenario, captured) {
     }
     if (label === 'plugin:version') {
       captured.versionProbeCalled = true
-      return scenario.versionProbe ?? { found: false, name: '', version: '', detail: 'stub' }
+      // ?? would replace an explicit `versionProbe: null` (the "probe
+      // returned nothing" scenario) with this default, indistinguishable
+      // from never overriding it at all: check the key itself, not its value.
+      return Object.prototype.hasOwnProperty.call(scenario, 'versionProbe')
+        ? scenario.versionProbe
+        : { found: false, name: '', version: '', detail: 'stub' }
     }
     if (label === 'triage') {
       return scenario.triage ??
@@ -259,11 +269,13 @@ async function scenarioNoManifestFoundIsNull() {
 }
 
 async function scenarioProbeReturningNothingIsNull() {
-  console.log('\n== scenario: the probe returning nothing at all reports null, not a crash')
-  const { result } = await run({ versionProbe: null })
+  console.log('\n== scenario: the probe returning nothing at all reports null, not a crash, but logs that the comparison did not run')
+  const { result, captured } = await run({ versionProbe: null })
   check('no halt', result.halted_at, undefined)
   check('working_tree is null', result.pipeline_version?.working_tree, null)
   check('mismatch is null', result.pipeline_version?.mismatch, null)
+  check('a log line reports the probe returned nothing',
+    captured.logs.some(m => /plugin:version|returned nothing/i.test(m)), true)
 }
 
 async function main() {

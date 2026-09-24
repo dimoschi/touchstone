@@ -20,10 +20,13 @@
 # main compares main against itself and is a deliberate no-op: it exists to
 # gate PRs, not to catch a bypass of the PR process.
 #
-# Exit 0 clean, 1 a gated file changed without the version advancing past the
-# base's, 2 usage (missing manifest, no version key, a version that is not
-# dotted integers, no origin/main or main to compare against, or a shallow
-# clone).
+# Exit 0 clean. Exit 1: either a gated file changed without the version
+# advancing past the base's, or workflows/deliver-pipeline.js's
+# PLUGIN_NAME/PIPELINE_VERSION literals disagree with the manifest at HEAD --
+# the latter is checked whenever that script exists at HEAD, whether or not
+# this PR touched anything gated. Exit 2: usage (missing manifest, no
+# readable "version" or "name", a version that is not dotted integers, no
+# origin/main or main to compare against, or a shallow clone).
 
 set -euo pipefail
 

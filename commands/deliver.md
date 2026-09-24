@@ -141,10 +141,11 @@ one was opened. If it halted, report the phase and the halt note verbatim: the h
 are diagnostic, and paraphrasing them loses the reason.
 
 Report `pipeline_version.executed`, the version of `deliver-pipeline.js` this run
-actually ran. If `pipeline_version.mismatch` is `true`, say so and name
-`pipeline_version.working_tree`: the running snapshot is older than what the
-branch now carries, and a newer one may be worth picking up for the next run. A
-`mismatch` of `false` or `null` needs no mention.
+actually ran. If `pipeline_version.mismatch` is `true`, say so and name both
+`pipeline_version.executed` and `pipeline_version.working_tree`: `mismatch` only
+means the two differ, never which one is ahead. Compare the two version strings
+yourself before describing a direction; do not assume the executed snapshot is
+the older one. A `mismatch` of `false` or `null` needs no mention.
 
 ### Add the run id to the run record
 

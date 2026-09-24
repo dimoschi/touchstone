@@ -154,8 +154,11 @@ let draftPr = null
 // plugin:version probe (before Triage) has something to report, which is why
 // a halt at Worktree carries the executed value with the other two still
 // null. mismatch is null rather than false when the probe found no comparable
-// manifest (found:false, a different plugin's name, or no response at all) --
-// the ordinary case for every repo this runs against except touchstone's own.
+// manifest (found:false, or a different plugin's name) -- the ordinary case
+// for every repo this runs against except touchstone's own. A probe that
+// returns nothing at all leaves the same null/null pair, but it is logged
+// separately below: that case means the comparison did not run, not that
+// there was nothing to compare.
 let pipelineVersion = { executed: PIPELINE_VERSION, working_tree: null, mismatch: null }
 
 // Opening the draft is allowed to fail without ending the run, so a note that
@@ -933,26 +936,40 @@ const treeAgent = (prompt, opts) =>
 
 const headOf = (range) => range.includes('..') ? range.split('..')[1].trim() : range.trim()
 
-// Read once, here, rather than folded into gate:opt-in below: that probe
-// reads the repo root, and this has to read the worktree specifically, before
-// Implement can touch it -- a version bump this same run makes later must not
-// read back as a mismatch against itself.
+// Read once, here, rather than folded into gate:opt-in below: comparing
+// against origin/${wt.base} rather than this worktree is what makes the
+// comparison safe on a resumed branch. The worktree's own manifest already
+// carries this run's own version-bump commit whenever one landed in an
+// earlier session -- the ordinary case on touchstone itself, since
+// check-version-bump.sh forces every workflows/ change to carry one -- and
+// reading that back would report the run's own progress as drift against
+// itself. origin/<base> is something this branch cannot have touched, so it
+// stays a comparison against what actually shipped.
 const versionProbe = await treeAgent(
   `[touchstone: plugin:version]\n` +
-  `Read .claude-plugin/plugin.json in this worktree, then STOP. Read only; ` +
-  `run nothing and change nothing.\n` +
+  `Read .claude-plugin/plugin.json as of origin/${wt.base}, not this branch's ` +
+  `own working tree: git -C ${wt.path} show ` +
+  `origin/${wt.base}:.claude-plugin/plugin.json. Then STOP. Read only; run ` +
+  `nothing and change nothing.\n` +
   `Return found=true with name and version set from that file's "name" and ` +
-  `"version" fields, or found=false with empty strings if the file is ` +
-  `missing, unreadable, or has no such fields. Do not invent either value.`,
+  `"version" fields, or found=false with empty strings if the ref cannot be ` +
+  `resolved or the file is missing, unreadable, or has no such fields. Do not ` +
+  `invent either value. Set detail to one line saying which case applied.`,
   { label: 'plugin:version', schema: MANIFEST_PROBE, model: 'haiku', effort: 'low' })
-if (versionProbe?.found && versionProbe.name === PLUGIN_NAME) {
+if (versionProbe == null) {
+  // Distinct from the ordinary found:false/wrong-name case below: this means
+  // the probe never answered at all, so pipeline_version's null/null does not
+  // mean "nothing to compare" here, it means the comparison did not run.
+  log(`the plugin:version probe returned nothing, so pipeline_version could ` +
+      `not be compared against origin/${wt.base}`)
+} else if (versionProbe.found && versionProbe.name === PLUGIN_NAME) {
   const drift = versionProbe.version !== PIPELINE_VERSION
   pipelineVersion = {
     executed: PIPELINE_VERSION, working_tree: versionProbe.version, mismatch: drift,
   }
   if (drift) {
-    log(`this run is executing pipeline ${PIPELINE_VERSION}, but the working ` +
-        `tree's plugin.json is now at ${versionProbe.version}`)
+    log(`this run is executing pipeline ${PIPELINE_VERSION}, but origin/` +
+        `${wt.base}'s plugin.json is now at ${versionProbe.version}`)
   }
 }
 
