@@ -200,3 +200,37 @@ Two invariants the script exists to hold:
 
 `workflows/test-fix-loop-join.sh` drives the real script with stubbed globals, which is
 how the loop logic is tested without spending tokens.
+
+### Pipeline version transparency
+
+A host can persist a snapshot of this script and keep executing it after `main`
+moves on, so the running code and the checkout it operates on can silently disagree.
+The script has no `fs` and no imports, so it cannot read `.claude-plugin/plugin.json`
+at runtime to find out -- any such read would report whatever the *current* file
+holds, which is exactly wrong when the point is to name what this *running*
+snapshot is. `PLUGIN_NAME` and `PIPELINE_VERSION`, near the top of the script, are
+literals for that reason: they travel with the executed bytes, and
+`scripts/check-version-bump.sh` checks them against the manifest at HEAD
+(`scripts/test-version-bump.sh` covers that half).
+
+A single `treeAgent` call labelled `plugin:version`, placed after the worktree exists
+and before Triage, reads the working tree's own manifest exactly once -- before any
+later phase (Implement, most often) can change it, which would otherwise let a
+version bump made mid-run read back as drift against itself. The result is a
+`pipeline_version` object carried on every exit path, a halt at any phase included:
+
+- `executed` -- `PIPELINE_VERSION`, always present, even on a halt at Worktree
+  before the probe has run.
+- `working_tree` -- the version the probe read, or `null` if it found no manifest
+  naming this plugin.
+- `mismatch` -- `true` when the working tree names this plugin at a different
+  version, `false` when it names this plugin at the same version, `null` when the
+  probe found no comparable manifest at all (not found, or a different plugin's
+  name). `null` is the ordinary case: it is what every repo this pipeline delivers
+  into other than touchstone's own reports, since their manifest is never named
+  `touchstone`.
+
+A mismatch is informational, never a halt: `log()` names both versions and the run
+continues to completion. Refusing to proceed would make the messenger the failure;
+the gate above is where drift is actually enforced. Refreshing the host's snapshot
+so it executes the newer code is host behaviour, out of scope for this script.

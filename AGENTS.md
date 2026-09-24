@@ -40,7 +40,9 @@ Running one suite, fixture handling, and what CI installs: [docs/testing.md](doc
   `workflows/`, `hooks/`, `skills/`, `agents/` or `commands/`. `claude plugin update`
   keys its cache on that string, so an unbumped change is invisible to every existing
   install. `check-version-bump.sh` enforces it; the reasoning is in the README's
-  Versioning section.
+  Versioning section. A change to `workflows/deliver-pipeline.js` also needs its
+  `PLUGIN_NAME`/`PIPELINE_VERSION` literals moved to match, which the same check
+  enforces; see docs/architecture.md's Pipeline version transparency section.
 - **bash 4.0 is the floor.** macOS ships 3.2 as `/bin/bash`. Guard `"${arr[@]}"` on
   possibly-empty arrays under `set -u`, since bash before 4.4 treats that as unbound.
 - **Exit 2 and exit 4 are not passes.** They mean setup problem and could-not-measure.
