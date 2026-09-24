@@ -175,6 +175,18 @@ def test_trigger_git_merge_on_base_branch(tmp_path):
     assert hit == (repo.resolve(), "feature")
 
 
+def test_trigger_git_merge_ignores_quoted_dash_c_on_an_earlier_command(tmp_path):
+    # `target_repo` is scanned once for the whole command line, so the merge
+    # route needs its own proof that a quoted `git -C` on an earlier command
+    # does not redirect it either.
+    other = _repo(tmp_path / "other")
+    repo = _repo(tmp_path / "cwd")
+    _git("checkout", "-q", "-b", "feature", cwd=repo)
+    _git("checkout", "-q", "main", cwd=repo)
+    hit = gate.trigger(f'echo "git -C {other}" && git merge feature', repo)
+    assert hit == (repo.resolve(), "feature")
+
+
 def test_trigger_git_merge_on_non_base_branch_is_none(tmp_path):
     repo = _repo(tmp_path)
     _git("checkout", "-q", "-b", "feature", cwd=repo)

@@ -8,7 +8,7 @@ branches a raw commit would); duplicating it risked the two hooks disagreeing
 about what counts as a base branch.
 """
 
-import re
+import shlex
 import subprocess
 from pathlib import Path
 
@@ -17,8 +17,7 @@ BASE_BRANCHES = frozenset({
     'trunk',
 })
 
-DASH_C = re.compile(r'\bgit\s+-C\s+(?P<path>"[^"]+"|\'[^\']+\'|\S+)')
-CD = re.compile(r'(?:^|[;&|(]\s*)cd\s+(?P<path>"[^"]+"|\'[^\']+\'|[^\s;&|)]+)')
+OPERATOR_CHARS = frozenset('();<>|&')
 
 
 def git(repo, *args):
@@ -34,24 +33,90 @@ def git(repo, *args):
     return p.stdout.strip() if p.returncode == 0 else None
 
 
-def target_repo(cmd, session_cwd):
-    """Repo a command acts on: `git -C`, else any `cd` it performs, else cwd.
+def shell_tokens(cmd):
+    """Lex `cmd` into shell words, quoting and escapes resolved like bash would.
 
-    The `cd` walk matters because a harness can pin the session cwd somewhere
-    that is not the repo (or not a repo at all), leaving `cd <repo> && git ...`
-    as the only thing naming the real target. Without it the gates resolve to
-    the pinned cwd and verify a repo the command never touches.
+    `posix=True` collapses a quoted argument into exactly one token (a `--body
+    "..."` value becomes one word, not the words inside it) and honours a
+    backslash-escaped quote inside it rather than letting it reopen the word;
+    without this a message like `"he said \\"git -C /x\\""` split back into
+    `git`, `-C`, `/x` as separate tokens, which is the redirect bug again.
+    `punctuation_chars=True` keeps `&&`, `;`, `|` etc. as their own tokens even
+    with no surrounding whitespace (`cd a&&cd b`). An unterminated quote raises
+    after yielding the words seen before it; that is a command bash itself
+    would refuse to run, so returning the partial lex rather than raising keeps
+    a hook from crashing on it.
+
+    Shell constructs beyond quoting are deliberately not modelled: comments,
+    line continuations and heredocs. Each of them ends the lex early, which
+    leaves no redirect to find, and the caller then resolves the session's own
+    repository, which is the answer that still gates something. Modelling them
+    means reimplementing bash's word splitting, and the attempt reached for
+    shlex's private attributes to do it.
     """
-    m = DASH_C.search(cmd)
-    if m:
-        return Path(m.group('path').strip('"\'')).expanduser()
+    lexer = shlex.shlex(cmd, posix=True, punctuation_chars=True)
+    lexer.whitespace_split = True
+    tokens = []
+    try:
+        for tok in lexer:
+            tokens.append(tok)
+    except ValueError:
+        pass
+    return tokens
+
+
+def _is_operator(tok):
+    return tok != '' and set(tok) <= OPERATOR_CHARS
+
+
+def _dash_c_target(tokens):
+    """Path named by the first `git -C <path>` among `tokens`, or None."""
+    for i in range(len(tokens) - 2):
+        if tokens[i].split('/')[-1] == 'git' and tokens[i + 1] == '-C':
+            return Path(tokens[i + 2]).expanduser()
+    return None
+
+
+def _is_cd_at(tokens, i):
+    """Whether `tokens[i]` is a `cd` in command position: first token, or
+    right after an operator, mirroring where a shell would actually run it
+    rather than treat it as an argument to something else."""
+    return tokens[i] == 'cd' and (i == 0 or _is_operator(tokens[i - 1]))
+
+
+def _is_skippable_cd_path(path):
+    """`cd -` (previous directory) and a bare operator in the path slot
+    (`cd && ls`, which the old `[^\\s;&|)]+` class could not match either)
+    are not paths to walk into."""
+    return path == '-' or _is_operator(path)
+
+
+def _cd_walk(tokens, session_cwd):
+    """`session_cwd` after applying every `cd` among `tokens` in order."""
     repo = Path(session_cwd)
-    for m in CD.finditer(cmd):
-        path = m.group('path').strip('"\'')
-        if path == '-':
+    for i in range(len(tokens) - 1):
+        if not _is_cd_at(tokens, i):
+            continue
+        path = tokens[i + 1]
+        if _is_skippable_cd_path(path):
             continue
         repo = repo / Path(path).expanduser()
     return repo
+
+
+def target_repo(cmd, session_cwd):
+    """Repo a command acts on: `git -C`, else any `cd` it performs, else cwd.
+
+    Scans lexed tokens, not the raw string, so a `git -C` or `cd` that only
+    appears inside a quoted argument (message text, `--body`) is data, not a
+    redirect. The `cd` walk matters because a harness can pin the session cwd
+    somewhere that is not the repo (or not a repo at all), leaving
+    `cd <repo> && git ...` as the only thing naming the real target. Without it
+    the gates resolve to the pinned cwd and verify a repo the command never
+    touches.
+    """
+    tokens = shell_tokens(cmd)
+    return _dash_c_target(tokens) or _cd_walk(tokens, session_cwd)
 
 
 def base_branch_names(repo):
