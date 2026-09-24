@@ -70,6 +70,24 @@ Only their own tools write them. Never hand-edit a ledger and never regenerate o
 clear a failure: a gate that can be satisfied by editing its own record measures
 nothing. `--accept` and `--mark-scored` are user-approved overrides, not agent moves.
 
+### Thresholds and classification live in one place
+
+`lib/thresholds.py` holds the four settings, their defaults, and the rule that
+turns a complexity/coverage pair into a status. `lib/classify_rows.py` joins the
+baseline and current measurements and prints the report rows. Both are shared by
+all three language modules.
+
+They used to be an awk program inside each of `crap-check-go.sh`,
+`crap-check-php.sh` and `crap-check-python.sh`, plus a fourth copy in
+`test/run-php.sh` which meant that suite verified its own replica rather than
+the module. Per-repo settings are only possible with one implementation.
+
+A repo sets any of the four in its `.crap-gated`, which already carries the
+exemption patterns. The marker rather than the environment, because an
+environment variable is settable by the agent under measurement. The coverage
+requirement is not a setting: it is derived from the hard cap, so the two cannot
+drift apart.
+
 ### Module resolution lives in one place
 
 `lib/go_modules.py` answers "which module owns this file" for all three Go gates. It was

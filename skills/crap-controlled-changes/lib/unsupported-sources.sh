@@ -46,6 +46,12 @@ crap_exempt_pathspecs() {
     line="${line#"${line%%[![:space:]]*}"}"
     line="${line%"${line##*[![:space:]]}"}"
     [ -n "$line" ] || continue
+    # The marker carries the gate's threshold settings too. They are
+    # configuration rather than paths, and lib/thresholds.py owns the key list:
+    # a key added there has to be added here or it becomes an exemption pattern.
+    case "$line" in
+      crap-soft*=*|crap-hard*=*|main-complexity*=*|cognitive-complexity*=*) continue ;;
+    esac
     # A leading '/' is gitignore's own anchor-to-this-file's-directory marker,
     # not glob text: git pathspec's own :(top) magic already anchors to the
     # repo root (where this marker lives), so keeping the '/' in the pattern

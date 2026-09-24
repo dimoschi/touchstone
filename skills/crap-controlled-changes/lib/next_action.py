@@ -198,10 +198,11 @@ def run(args):
     print('== NEXT_ACTION ==')
 
     if needs_tests:
-        print('WRITE_TESTS: coverage < 80% on new/worsened functions. A high CRAP')
-        print('score here is a symptom of missing tests, not bad structure. Do NOT')
-        print('edit source files. Invoke superpowers:test-driven-development, write')
-        print('tests for these functions, see them pass, then re-run crap-check.sh:')
+        print('WRITE_TESTS: new/worsened functions are undertested for their')
+        print('complexity. A high CRAP score here is a symptom of missing tests,')
+        print('not bad structure. Do NOT edit source files. Invoke')
+        print('superpowers:test-driven-development, write tests for these')
+        print('functions, see them pass, then re-run crap-check.sh:')
         for r in needs_tests:
             print(f"  - {r['id']} ({metrics_str(r)})")
         print("If one of these genuinely cannot be covered, ask the user, then on")

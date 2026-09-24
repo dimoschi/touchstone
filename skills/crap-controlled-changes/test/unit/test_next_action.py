@@ -320,10 +320,11 @@ def test_write_tests_directive_and_state_are_exact(tmp_path, monkeypatch, capsys
     assert rc == 1
     assert out == (
         "== NEXT_ACTION ==\n"
-        "WRITE_TESTS: coverage < 80% on new/worsened functions. A high CRAP\n"
-        "score here is a symptom of missing tests, not bad structure. Do NOT\n"
-        "edit source files. Invoke superpowers:test-driven-development, write\n"
-        "tests for these functions, see them pass, then re-run crap-check.sh:\n"
+        "WRITE_TESTS: new/worsened functions are undertested for their\n"
+        "complexity. A high CRAP score here is a symptom of missing tests,\n"
+        "not bad structure. Do NOT edit source files. Invoke\n"
+        "superpowers:test-driven-development, write tests for these\n"
+        "functions, see them pass, then re-run crap-check.sh:\n"
         "  - pkg.NeedsTests (CRAP=12.0, complexity=5, coverage=40.0%)\n"
         "If one of these genuinely cannot be covered, ask the user, then on\n"
         "their approval: crap-check.sh --accept '<function-id>'\n"

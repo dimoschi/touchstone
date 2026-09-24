@@ -33,32 +33,27 @@ echo "$CUR_TSV"  | grep 'branchy' | grep -q $'\t0.0\t' || { echo "FAIL: current 
 echo "$BASE_TSV" > "$WORK/base.tsv"
 echo "$CUR_TSV"  > "$WORK/cur.tsv"
 
-OUT="$(awk -v BASEFILE="$WORK/base.tsv" -F '\t' '
-  function status(s, cov, tag) {
-    if (cov != "n/a" && cov+0 < 80 && (tag == "new" || tag == "worsened")) return "NEEDS_TESTS"
-    if (s <= 6) return "OK"
-    if (s <= 8) return "SOFT"
-    return "HARD"
-  }
-  FILENAME == BASEFILE {
-    base_cc[$1] = $2; base_cov[$1] = $3; base_crap[$1] = $4; next
-  }
-  {
-    id=$1; cc=$2; cov=$3; crap=$4
-    cur=(crap == "n/a") ? 0 : crap+0
-    tag="new"
-    if (id in base_cc) {
-      base=(base_crap[id] == "n/a") ? 0 : base_crap[id]+0
-      tag = (cur > base + 0.05) ? "worsened" : "unchanged"
-    }
-    printf "%s  cc=%s  cov=%s  crap=%s  %s  (%s)\n", id, cc, cov, crap, status(cur,cov,tag), tag
-  }
-' "$WORK/base.tsv" "$WORK/cur.tsv")"
+# The shared classifier crap-check-php.sh itself calls. This used to be a fourth
+# copy of the bands and the join, so the suite passed on its own replica while
+# saying nothing about the module that ships.
+classify() {
+  python3 "$SKILL_DIR/lib/classify_rows.py" \
+    --base "$WORK/base.tsv" --current "$WORK/cur.tsv" \
+    --layout plain --repo-root "$WORK"
+}
+
+OUT="$(classify)"
 
 echo "--- joined ---"
 echo "$OUT"
 
 echo "$OUT" | grep -q 'NEEDS_TESTS.*worsened'  || { echo "FAIL: branchy should be NEEDS_TESTS worsened"; exit 1; }
 echo "$OUT" | grep -q 'simple.*OK.*unchanged'  || { echo "FAIL: simple should be OK unchanged"; exit 1; }
+
+printf 'crap-soft = 0.5\n' > "$WORK/.crap-gated"
+TUNED="$(classify)"
+echo "--- with crap-soft = 0.5 ---"
+echo "$TUNED"
+echo "$TUNED" | grep -q 'simple.*SOFT.*unchanged' || { echo "FAIL: the marker's soft cap did not reach the PHP rows"; exit 1; }
 
 echo "OK"

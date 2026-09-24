@@ -147,6 +147,17 @@ check "the unrelated exempted path is filtered out" \
 check "a non-exempted Go file is still selected for measurement" \
       "1" "$(printf '%s\n' "$GO_OUT" | grep -c '^measured.go$')"
 
+echo "threshold settings share the marker and are configuration, not path patterns"
+printf 'crap-soft = 8\ncrap-hard = 10\nmain-complexity = 7\ncognitive-complexity = 20\nunrelated/**\n' > .crap-gated
+git add -A
+SETTING_SPEC=()
+while IFS= read -r ex; do
+  [ -n "$ex" ] && SETTING_SPEC+=("$ex")
+done < <(crap_exempt_pathspecs "$PWD")
+check "only the pattern line becomes a pathspec" "1" "${#SETTING_SPEC[@]}"
+check "the pattern line is the one that survived" \
+      "1" "$(printf '%s\n' "${SETTING_SPEC[@]+"${SETTING_SPEC[@]}"}" | grep -c 'unrelated/\*\*$')"
+
 echo ""
 if [ "$failures" -eq 0 ]; then
   echo "UNSUPPORTED SOURCES OK"

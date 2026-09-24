@@ -24,7 +24,7 @@ asking the model to be careful:
 | Gate | What it measures | When |
 |---|---|---|
 | **Dead code** | Static reachability. Code nothing can reach is not a feature. | Every commit |
-| **CRAP** | `complexity² × (1 − coverage)³ + complexity` per *changed function*, ≤6 soft, ≤8 hard | Every commit |
+| **CRAP** | `complexity² × (1 − coverage)³ + complexity` per *changed function*, ≤6 soft, ≤8 hard by default, set per repo in `.crap-gated` | Every commit |
 | **Mutation** | Whether your tests actually fail when the code is wrong | Before the PR opens |
 
 The mutation gate is the sharp one. Coverage asks whether a line ran; mutation

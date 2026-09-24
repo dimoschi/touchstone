@@ -3,6 +3,11 @@
 # Builds a real git fixture repo, stages a change to calc.py, runs crap-check.sh,
 # and asserts branchy reports NEEDS_TESTS (worsened). Uses ephemeral uv to supply
 # coverage+pytest, so no committed virtualenv is needed.
+#
+# The fixture's one thin test is deliberate. It puts branchy above the derived
+# coverage minimum but with the coverage term of CRAP still dominating the
+# complexity term, which is the case that has to route to WRITE_TESTS rather
+# than REFACTOR. A fuller test would leave a score the gate is content with.
 
 set -euo pipefail
 

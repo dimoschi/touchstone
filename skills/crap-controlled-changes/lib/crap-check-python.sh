@@ -391,47 +391,28 @@ if [ -s "$CUR_UNMEASURED" ]; then
   exit "$EXIT_UNMEASURABLE"
 fi
 
-awk -v BASEFILE="$BASE_TSV" -F '\t' '
-  function status(s, cov, tag) {
-    if (cov != "n/a" && cov+0 < 80 && (tag == "new" || tag == "worsened")) {
-      return "NEEDS_TESTS"
-    }
-    if (s <= 6) return "OK"
-    if (s <= 8) return "SOFT"
-    return "HARD"
-  }
-  FILENAME == BASEFILE {
-    base_cc[$1]   = $2
-    base_cov[$1]  = $3
-    base_crap[$1] = $4
-    next
-  }
-  {
-    id = $1; cc = $2; cov = $3; crap = $4
-    cur_score = (crap == "n/a") ? 0 : crap + 0
-    tag = "new"
-    if (id in base_cc) {
-      base_score = (base_crap[id] == "n/a") ? 0 : base_crap[id] + 0
-      if (cur_score > base_score + 0.05) tag = "worsened"
-      else                                tag = "unchanged"
-    }
-    st = status(cur_score, cov, tag)
-    printf "%-60s complexity=%-2s  coverage=%s%%  CRAP=%s  %-11s  (%s)\n", \
-           id, cc, cov, crap, st, tag
-  }
-' "$BASE_TSV" "$CUR_TSV"
+CLASSIFIED="$(python3 "$SKILL_LIB/classify_rows.py" \
+  --base "$BASE_TSV" --current "$CUR_TSV" --layout plain --repo-root "$PWD")" || {
+  echo "crap-check[python]: FAILED TO MEASURE - the measured rows could not be classified." >&2
+  echo "  No row was built, which is not the same as having nothing to score." >&2
+  exit "$EXIT_UNMEASURABLE"
+}
+if [ -n "$CLASSIFIED" ]; then
+  printf '%s\n' "$CLASSIFIED"
+fi
 
 COGNIT_FILES=() f=
 for f in "${CHANGED[@]}"; do
   [ -f "$f" ] && COGNIT_FILES+=("$f")
 done
 if [ "${#COGNIT_FILES[@]}" -gt 0 ]; then
-  COGNIT_OUT="$($CRAP_PY_COMPLEXIPY -mx 15 -f -C no "${COGNIT_FILES[@]}" 2>/dev/null \
+  COMPLEXIPY_OVER="$(python3 "$SKILL_LIB/thresholds.py" --repo-root "$PWD" --show cognitive)"
+  COGNIT_OUT="$($CRAP_PY_COMPLEXIPY -mx "$COMPLEXIPY_OVER" -f -C no "${COGNIT_FILES[@]}" 2>/dev/null \
     | grep -E '^[[:space:]]*-[[:space:]]' || true)"
   clean_artifacts
   if [ -n "$COGNIT_OUT" ]; then
     echo ""
-    echo "Cognitive complexity (advisory, >15):"
+    echo "Cognitive complexity (advisory, >${COMPLEXIPY_OVER}):"
     printf '%s\n' "$COGNIT_OUT"
   fi
 fi
