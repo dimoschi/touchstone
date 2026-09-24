@@ -73,8 +73,10 @@ check "pipeline_version: pipelineVersion appears in halted()'s payload and the f
 
 echo "== static: the probe resolves its own base rather than trusting wt.base"
 PROBE_BLOCK="$(awk '/const versionProbe = await treeAgent/,/label: .plugin:version./' "$SCRIPT")"
-check "the probe prompt never names wt.base directly" \
+check "the probe prompt literal never interpolates wt.base" \
   "$(printf '%s' "$PROBE_BLOCK" | grep -Fc 'wt.base' || true)" 0
+check "the probe opts out of the envelope's base line" \
+  "$(printf '%s' "$PROBE_BLOCK" | grep -Fc 'omitBase: true' || true)" 1
 check "the probe resolves the base itself off the remote HEAD" \
   "$(printf '%s' "$PROBE_BLOCK" | grep -Fc 'symbolic-ref' || true)" 1
 check "the probe fetches the resolved base before reading it" \
@@ -244,7 +246,9 @@ async function scenarioDefaultProbeCompletesNormally() {
 
 async function scenarioMismatchLogsAndContinues() {
   console.log('\n== scenario: a version drift is reported and logged, but never halts')
-  const drifted = `${SCRIPT_PIPELINE_VERSION}-newer`
+  // No ordering word in the fixture itself: the direction assertion below
+  // greps the log line, and a version string carrying one would fake it.
+  const drifted = '9.9.9'
   const { result, captured } = await run({
     versionProbe: { found: true, name: SCRIPT_PLUGIN_NAME, version: drifted, detail: 'stub' },
   })
@@ -255,6 +259,10 @@ async function scenarioMismatchLogsAndContinues() {
   check('executed is unchanged', result.pipeline_version?.executed, SCRIPT_PIPELINE_VERSION)
   check('a log line names both versions', captured.logs.some(
     m => m.includes(SCRIPT_PIPELINE_VERSION) && m.includes(drifted)), true)
+  // The executed snapshot can legitimately be the newer of the two, so the
+  // line may not imply the base moved ahead of it.
+  check('no log line claims which version is ahead', captured.logs.some(
+    m => /is now at|newer|older|ahead|behind|stale snapshot/i.test(m)), false)
 }
 
 async function scenarioExactMatchIsFalseNotNull() {
@@ -293,6 +301,39 @@ async function scenarioNoManifestFoundIsNull() {
     captured.logs.some(m => /no comparable manifest/i.test(m)), true)
 }
 
+// Asserts the prompt the runtime actually receives, envelope included. The
+// static grep above can only see the prompt literal, so it stays green while
+// treeAgent's own envelope hands the probe the very ref it must not read.
+async function scenarioProbeNeverSeesTheStackedBase() {
+  console.log('\n== scenario: the composed probe prompt never carries the stacked base')
+  const stacked = 'feat/gh-100-a-stacked-branch'
+  const { captured } = await run({
+    branchResult: { created: true, branch: 'feat/gh-101-stub', base: stacked,
+                    path: '/stub-worktree', ticket: '101', detail: 'stub' },
+  })
+  const probe = captured.calls.find(c => c.label === 'plugin:version')?.prompt ?? ''
+  check('the probe was prompted at all', probe.length > 0, true)
+  check('the composed prompt never names the stacked base', probe.includes(stacked), false)
+}
+
+// The fetch exists so a stale remote-tracking ref cannot pass as an agreement.
+// Reading an unrefreshed ref anyway is the right call, but only if the run says
+// it did: otherwise this is the silent mismatch:false the fetch was added for.
+async function scenarioUnrefreshedBaseIsReportedNotSilent() {
+  console.log('\n== scenario: a base read from an unrefreshed ref is reported, even when the versions agree')
+  const { result, captured } = await run({
+    versionProbe: { found: true, name: SCRIPT_PLUGIN_NAME, version: SCRIPT_PIPELINE_VERSION,
+                    refreshed: false, detail: 'fetch failed: no network' },
+  })
+  check('no halt', result.halted_at, undefined)
+  check('mismatch is still false', result.pipeline_version?.mismatch, false)
+  check('the result records that the base was never refreshed',
+    result.pipeline_version?.base_refreshed, false)
+  check('a log line says the comparison may be stale',
+    captured.logs.some(m => /could not refresh|unrefreshed|stale/i.test(m)
+      && /may predate|stale/i.test(m)), true)
+}
+
 async function scenarioProbeReturningNothingIsNull() {
   console.log('\n== scenario: the probe returning nothing at all reports null, not a crash, but logs that the comparison did not run')
   const { result, captured } = await run({ versionProbe: null })
@@ -311,6 +352,8 @@ async function main() {
   await scenarioOtherPluginIsNullNotFalse()
   await scenarioNoManifestFoundIsNull()
   await scenarioProbeReturningNothingIsNull()
+  await scenarioProbeNeverSeesTheStackedBase()
+  await scenarioUnrefreshedBaseIsReportedNotSilent()
   if (failures) { console.log(`\nFAILED: ${failures} assertion(s)`); process.exit(1) }
   console.log('\nOK (pipeline-version harness)')
 }

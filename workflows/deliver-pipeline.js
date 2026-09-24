@@ -490,9 +490,10 @@ const TICKET = {
 
 const MANIFEST_PROBE = {
   type: 'object', additionalProperties: false,
-  required: ['found', 'name', 'version', 'detail'],
+  required: ['found', 'refreshed', 'name', 'version', 'detail'],
   properties: {
     found: { type: 'boolean' },
+    refreshed: { type: 'boolean' },
     name: { type: 'string' },
     version: { type: 'string' },
     detail: { type: 'string' },
@@ -885,9 +886,12 @@ log(args?.existingBranch
 // Handing it to every phase made the devil's advocate a critic of the ticket's
 // own reasoning and burned a whole plan-and-challenge cycle without changing a
 // line of code.
-const envelope = () =>
+// withBase is off for the version probe alone. On a stacked run wt.base is the
+// branch under review, and naming it here handed the probe the exact ref its
+// prompt spends a paragraph telling it to ignore.
+const envelope = (withBase = true) =>
   `Ticket ${ticket}${ticketDetail.found ? `: ${ticketDetail.summary}` : ' (details unavailable)'}\n` +
-  `Repo worktree: ${wt.path}\nBranch: ${wt.branch} (base ${wt.base})\n`
+  `Repo worktree: ${wt.path}\nBranch: ${wt.branch}${withBase ? ` (base ${wt.base})` : ''}\n`
 
 // Never clamped: brief() once cut a ticket mid-acceptance-criterion and three
 // phases planned against a spec whose second half they could not see.
@@ -897,7 +901,7 @@ const ticketSpec = () => ticketDetail.found
       ? `Ticket comments:\n${ticketDetail.comments}\n` : '')
   : `Ticket ${ticket} could not be read; work from the task text alone.\n`
 
-const treeAgent = (prompt, opts) =>
+const treeAgent = (prompt, { omitBase = false, ...opts }) =>
   agent(
     `[touchstone: ${opts.label}]\n` +
     `Work in the git worktree at ${wt.path}. Every command, git included, acts ` +
@@ -932,7 +936,7 @@ const treeAgent = (prompt, opts) =>
     `GIT_AUTHOR_NAME=test GIT_AUTHOR_EMAIL=t@t GIT_COMMITTER_NAME=test ` +
     `GIT_COMMITTER_EMAIL=t@t git -C <scratch path> -c commit.gpgsign=false ` +
     `-c gpg.format=openpgp commit -q -m scratch.\n\n` +
-    envelope() + `\n` + prompt + RECORD(opts.label),
+    envelope(!omitBase) + `\n` + prompt + RECORD(opts.label),
     opts)
 
 const headOf = (range) => range.includes('..') ? range.split('..')[1].trim() : range.trim()
@@ -975,8 +979,12 @@ const versionProbe = await treeAgent(
   `resolved, the ref still cannot be resolved even after attempting the read, ` +
   `or the file is missing, unreadable, or has no such fields. A failed fetch ` +
   `does not force found=false on its own. Do not invent either value. Set ` +
-  `detail to one line saying which case applied.`,
-  { label: 'plugin:version', schema: MANIFEST_PROBE, model: 'haiku', effort: 'low' })
+  `refreshed=true only if that fetch actually succeeded, and false if it ` +
+  `failed, was refused, or you did not run it: false says the version you ` +
+  `read may predate the base branch's real state, so it must be reported ` +
+  `rather than assumed. Set detail to one line saying which case applied.`,
+  { label: 'plugin:version', omitBase: true, schema: MANIFEST_PROBE,
+    model: 'haiku', effort: 'low' })
 if (versionProbe == null) {
   // Distinct from the found:false/wrong-name case below: this means the
   // probe never answered at all, so pipeline_version's null/null does not
@@ -987,10 +995,20 @@ if (versionProbe == null) {
   const drift = versionProbe.version !== PIPELINE_VERSION
   pipelineVersion = {
     executed: PIPELINE_VERSION, base_branch: versionProbe.version, mismatch: drift,
+    base_refreshed: versionProbe.refreshed !== false,
   }
   if (drift) {
-    log(`this run is executing pipeline ${PIPELINE_VERSION}, but the ` +
-        `repository's base branch's plugin.json is now at ${versionProbe.version}`)
+    // Names both and orders neither: the executed snapshot is the newer one
+    // whenever the base was reverted or the plugin was built locally.
+    log(`this run is executing pipeline ${PIPELINE_VERSION}; the repository's ` +
+        `base branch's plugin.json names ${versionProbe.version}`)
+  }
+  if (versionProbe.refreshed === false) {
+    // Without this the fetch failing produces mismatch:false and silence,
+    // which is the stale agreement the fetch was added to rule out.
+    log(`the base branch's manifest was read from a remote-tracking ref this ` +
+        `run could not refresh, so its version may predate the base branch's ` +
+        `real state (${versionProbe.detail})`)
   }
 } else {
   // The probe answered but did not confirm a comparable manifest -- the

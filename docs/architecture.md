@@ -234,6 +234,10 @@ included:
   before the probe has run.
 - `base_branch` -- the version the probe read off the repository's base branch, or
   `null` if it found no manifest naming this plugin there.
+- `base_refreshed` -- `false` when the probe could not fetch the base before
+  reading it, so `base_branch` came from a remote-tracking ref that may predate
+  the base branch's real state. A `mismatch: false` alongside it is an agreement
+  with a possibly stale ref, not with the base branch, and is logged as such.
 - `mismatch` -- `true` when the base branch names this plugin at a different
   version, `false` when it names this plugin at the same version, `null` when the
   probe found no comparable manifest at all (not found, or a different plugin's

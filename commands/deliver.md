@@ -147,7 +147,10 @@ the repository's base branch, not from the caller's own checkout, so word it tha
 rather than implying it was read from anything the caller has locally. `mismatch`
 only means the two differ, never which one is ahead. Compare the two version strings
 yourself before describing a direction; do not assume the executed snapshot is
-the older one. A `mismatch` of `false` or `null` needs no mention.
+the older one. A `mismatch` of `false` or `null` needs no mention, unless
+`pipeline_version.base_refreshed` is `false`: then say the comparison could not
+refresh the base first, so an agreement may be with a stale ref rather than with
+the base branch as it stands.
 
 ### Add the run id to the run record
 
