@@ -445,6 +445,7 @@ const EXECUTE_RESULT = {
     },
     dirty: { type: 'boolean' },
     porcelain: { type: 'string' },
+    porcelain_before: { type: 'string' },
     diff_lines: { type: 'array', items: { type: 'string' } },
   },
 }
@@ -1929,12 +1930,16 @@ const classify = (f, ctx) => {
 // diff hunks, verbatim, for classify()'s out-of-range rule.
 const executeAtHead = async (items, label, diffRange) => {
   // unmet-criterion's evidence can be the quote alone (classify() no longer
-  // requires a reproducer for it), so a candidate here may carry none: skip
-  // it rather than reading .command off nothing. It reaches disposeCandidates
-  // with no row, the same as an executor that dropped it -- pending, not a
-  // note.
+  // requires a reproducer for it): a candidate here may carry none, so it is
+  // judged by reading the worktree against the quote instead of running a
+  // command, and reported in the same exit_code shape a reproducer takes.
   const runnable = items.filter(it => it.reproducer?.command)
+  const criterionOnly = items.filter(it =>
+    !it.reproducer?.command && it.category === 'unmet-criterion' && it.criterion_quote)
   const out = await treeAgent(
+    `First run git -C ${wt.path} status --porcelain and report its output in ` +
+    `porcelain_before, even when empty: dirt already there before anything ` +
+    `below runs must never be blamed on what runs next.\n` +
     (runnable.length
       ? `Run each reproducer below in this worktree, then STOP. Do not fix, ` +
         `edit, or investigate a failure; a later phase does that.\n` +
@@ -1946,16 +1951,23 @@ const executeAtHead = async (items, label, diffRange) => {
         `whether it passed; combine stdout and stderr into output.\n` +
         runnable.map(it => `[${it.id}] ${it.reproducer.command}`).join('\n') + `\n`
       : '') +
+    (criterionOnly.length
+      ? `Each acceptance criterion below has no reproducer by design (its own ` +
+        `evidence is the quote, not a command): read the worktree's current ` +
+        `code and decide whether it is met now. Report it in the same shape a ` +
+        `reproducer's result takes: exit_code 0 when met, 1 when still unmet.\n` +
+        criterionOnly.map(it => `[${it.id}] ${it.criterion_quote}`).join('\n') + `\n`
+      : '') +
     (diffRange
       ? `Run git -C ${wt.path} diff --unified=0 --no-color ${diffRange} and return, ` +
         `in diff_lines, every line of its output that starts with "+++ " or ` +
         `"@@ ", verbatim and in order, with nothing else: no other line of the ` +
         `diff, no summary, no comment of your own.\n`
       : '') +
-    `Then run git -C ${wt.path} status --porcelain and report whether it printed ` +
-    `anything (dirty) and, if so, its output (porcelain): a reproducer that ` +
-    `writes to the tree must be visible, not silently carried into whatever ` +
-    `commits next.`,
+    `Then run git -C ${wt.path} status --porcelain again and report whether it ` +
+    `printed anything (dirty) and, if so, its output (porcelain): a reproducer ` +
+    `that writes to the tree must be visible, not silently carried into ` +
+    `whatever commits next.`,
     { label, schema: EXECUTE_RESULT, model: 'haiku', effort: 'low' })
   // Pairs, not a Map: this crosses parallel() at the round's own call site,
   // which serializes each thunk's result and strips a Map down to a plain
@@ -1973,6 +1985,14 @@ const executeAtHead = async (items, label, diffRange) => {
     hunks: diffRange && Array.isArray(out?.diff_lines) ? parseHunks(out.diff_lines) : null,
     dirty: out?.dirty === true,
     porcelain: out?.porcelain ?? '',
+    // True when nothing this call could have dirtied: either it ran no
+    // reproducer at all (the mutation-hunk fetch calls with an empty items
+    // list), or the tree was already dirty before anything below ran. Without
+    // this, a fixer whose crap-commit.sh was refused -- the wrapper leaves the
+    // staged changes in place, with no reset/stash/restore -- gets a halt
+    // blaming "a reproducer execution" for dirt that predates it.
+    preexisting: !runnable.length ||
+      (typeof out?.porcelain_before === 'string' && out.porcelain_before.trim() !== ''),
   }
 }
 
@@ -1982,9 +2002,13 @@ const executeAtHead = async (items, label, diffRange) => {
 // runChecks already applies to the repo's own discovered checks.
 const dirtyReproducerHalt = async (phaseName, exec) => halted(phaseName, {
   plan: plan.plan, implemented: impl.summary, gates: gatesPayload(),
-  note: `A reproducer execution left the working tree dirty: ` +
-    `${exec.porcelain || '(no detail returned)'}. Nothing further ran; find ` +
-    `which reproducer writes to the tree, then re-run.`,
+  note: exec.preexisting
+    ? `The working tree was already dirty before this check ran, so nothing ` +
+      `it did caused it: ${exec.porcelain || '(no detail returned)'}. Find ` +
+      `what left it dirty earlier in this round, then re-run.`
+    : `A reproducer execution left the working tree dirty: ` +
+      `${exec.porcelain || '(no detail returned)'}. Nothing further ran; find ` +
+      `which reproducer writes to the tree, then re-run.`,
 })
 
 // Every note is a finding the run does not block on: raised, but not
@@ -2095,6 +2119,65 @@ const markStale = async (findings) => {
       .map(r => stripBrackets(r.id)))
   return findings.map(f =>
     staleIds.has(f.id) ? { ...f, code_changed_since_recorded: true } : f)
+}
+
+// A residual note references a settled finding's id: a later round reported
+// what may be the same defect back, or a variant of it. Checked at the end of
+// every round, not once after the loop has already exited: a variant reopened
+// only there halted the run right past the loop even when a round was still
+// available, since the while condition had already gone false before the
+// reopen happened. Checked again after the mutation gate's own commits, the
+// only other place a residual note gets added. duplicate_of cannot tell "the
+// same bug re-reported" apart from "a defect that finding's fix introduced",
+// so two things run, independently: the settled target's own reproducer (did
+// the fix regress?), and, when the residual note carries a complete
+// reproducer of its own, that command too (does the note's own claim hold up,
+// whatever the target's fate?).
+// checkedResidualIds keeps a note already rechecked once from being rerun for
+// nothing on a later round or at the second call site below. Unlike the rest
+// of the loop, not gated on budget: silently trusting a fix nobody re-checked
+// is worse than spending one more cheap dispatch.
+const checkedResidualIds = new Set()
+const recheckResiduals = async (label, hunks = null) => {
+  const pending = notes.filter(n => n.reason === 'residual' && !checkedResidualIds.has(n.id))
+  for (const n of pending) checkedResidualIds.add(n.id)
+  const targets = [...new Map(pending.map(n => [n.residual_of, n])).keys()]
+    .map(id => settled.find(f => f.id === id)).filter(Boolean)
+  // Mirrors classify()'s own gate for a fresh candidate: a residual's own
+  // claim must be a blocking category and carry a complete reproducer, and
+  // (when this round's hunks are known) sit inside them, or it is not
+  // something that can hold the run either.
+  const ownClaims = pending.filter(n =>
+    BLOCKING_CATEGORIES.has(n.category) && hasCompleteReproducer(n) &&
+    (!hunks || overlapsHunk(n, hunks)))
+  const toRun = [...targets, ...ownClaims]
+  if (!toRun.length) return { dirty: false, reopened: [] }
+  const exec = await executeAtHead(toRun, label)
+  if (exec.dirty) return { dirty: true, exec, reopened: [] }
+  const byId = new Map(exec.pairs)
+  const regressedTargets = targets.filter(t => byId.get(t.id) !== 0)
+  // Mirrors disposeCandidates' own rule for a fresh candidate: 126/127 (could
+  // not run) is not a demonstrated defect; a missing row (could not measure)
+  // still opens it rather than being dismissed as noise.
+  const confirmedOwn = ownClaims.filter(n => {
+    const code = byId.get(n.id)
+    return code !== 0 && code !== 126 && code !== 127
+  })
+  if (regressedTargets.length) {
+    const ids = new Set(regressedTargets.map(f => f.id))
+    settled = settled.filter(f => !ids.has(f.id))
+    log(`${regressedTargets.length} settled finding(s) reproduce again at the ` +
+        `final head, referenced by a residual note; reopened rather than treated as noise`)
+  }
+  if (targets.length > regressedTargets.length) {
+    log(`${targets.length - regressedTargets.length} residual-referenced ` +
+        `finding(s) still do not reproduce; staying settled`)
+  }
+  if (confirmedOwn.length) {
+    log(`${confirmedOwn.length} residual finding(s) still reproduce on their ` +
+        `own claim; opened rather than dismissed for referencing a fixed id`)
+  }
+  return { dirty: false, reopened: [...regressedTargets, ...confirmedOwn] }
 }
 
 while ((open.length || blockingChecksOpen()) && round < MAX_REVIEW_ROUNDS && !outOfBudget() && !sFix.over()) {
@@ -2232,59 +2315,15 @@ while ((open.length || blockingChecksOpen()) && round < MAX_REVIEW_ROUNDS && !ou
     redChecks = await runChecks()
     lastCheckedHead = head
   }
+
+  const residual = await recheckResiduals('reproduce:residual', execOld?.hunks ?? null)
+  if (residual.dirty) { sFix.close(); return await dirtyReproducerHalt('Fix', residual.exec) }
+  if (residual.reopened.length) open = open.concat(residual.reopened)
+
   log(`round ${round}: ${open.length} finding(s) still open` +
       (discoveredChecks.length ? `, ${redChecks.length} check(s) still red` : ''))
 }
 
-// A residual note references a settled finding's id: a later round reported
-// what may be the same defect back, or a variant of it. Not reopened mid-loop,
-// which would send the fixer to undo its own work -- rechecked here, at the
-// final head after the fix loop has otherwise converged, and again after the
-// mutation gate's own commits (the only other place a residual note gets
-// added). duplicate_of cannot tell "the same bug re-reported" apart from "a
-// defect that finding's fix introduced", so two things run, independently:
-// the settled target's own reproducer (did the fix regress?), and, when the
-// residual note carries a complete reproducer of its own, that command too
-// (does the note's own claim hold up, whatever the target's fate?).
-// checkedResidualIds keeps a note already rechecked once from being rerun for
-// nothing at the second call site below. Unlike the rest of the loop, not
-// gated on budget: silently trusting a fix nobody re-checked is worse than
-// spending one more cheap dispatch.
-const checkedResidualIds = new Set()
-const recheckResiduals = async (label) => {
-  const pending = notes.filter(n => n.reason === 'residual' && !checkedResidualIds.has(n.id))
-  for (const n of pending) checkedResidualIds.add(n.id)
-  const targets = [...new Map(pending.map(n => [n.residual_of, n])).keys()]
-    .map(id => settled.find(f => f.id === id)).filter(Boolean)
-  const ownClaims = pending.filter(hasCompleteReproducer)
-  const toRun = [...targets, ...ownClaims]
-  if (!toRun.length) return { dirty: false, reopened: [] }
-  const exec = await executeAtHead(toRun, label)
-  if (exec.dirty) return { dirty: true, exec, reopened: [] }
-  const byId = new Map(exec.pairs)
-  const regressedTargets = targets.filter(t => byId.get(t.id) !== 0)
-  const confirmedOwn = ownClaims.filter(n => byId.get(n.id) !== 0)
-  if (regressedTargets.length) {
-    const ids = new Set(regressedTargets.map(f => f.id))
-    settled = settled.filter(f => !ids.has(f.id))
-    log(`${regressedTargets.length} settled finding(s) reproduce again at the ` +
-        `final head, referenced by a residual note; reopened rather than treated as noise`)
-  }
-  if (targets.length > regressedTargets.length) {
-    log(`${targets.length - regressedTargets.length} residual-referenced ` +
-        `finding(s) still do not reproduce; staying settled`)
-  }
-  if (confirmedOwn.length) {
-    log(`${confirmedOwn.length} residual finding(s) still reproduce on their ` +
-        `own claim; opened rather than dismissed for referencing a fixed id`)
-  }
-  return { dirty: false, reopened: [...regressedTargets, ...confirmedOwn] }
-}
-{
-  const residual = await recheckResiduals('reproduce:residual')
-  if (residual.dirty) { sFix.close(); return await dirtyReproducerHalt('Fix', residual.exec) }
-  if (residual.reopened.length) open = open.concat(residual.reopened)
-}
 sFix.close()
 
 // A function, not a value computed once here: `scored` and the two notes keep
@@ -2522,7 +2561,7 @@ if (reviewerCount && mutHead && mutHead !== reviewedThrough && !outOfBudget()) {
   // recheck: a mutation-review reference to an already-settled fix has to be
   // rechecked here too, or a gate that undoes a verified fix opens the PR
   // exactly the way the pre-gh-106 code never let it.
-  const residualMut = await recheckResiduals('reproduce:residual:mutation')
+  const residualMut = await recheckResiduals('reproduce:residual:mutation', execHunks.hunks ?? null)
   if (residualMut.dirty) return await dirtyReproducerHalt('Review', residualMut.exec)
   freshOpen = freshOpen.concat(residualMut.reopened)
   if (freshOpen.length) {

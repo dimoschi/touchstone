@@ -456,6 +456,7 @@ function reproduceResponse(prompt, scenario, exitFn, hunkLines) {
     results,
     dirty: scenario.reproducerDirty === true,
     porcelain: scenario.reproducerDirty ? (scenario.reproducerPorcelain ?? 'M some-file.txt') : '',
+    porcelain_before: scenario.porcelainBefore ?? '',
     ...(hunkLines !== undefined ? { diff_lines: hunkLines } : {}),
   }
 }
@@ -3121,6 +3122,149 @@ async function scenarioDH() {
     result.unresolved_findings?.some(f => f.title === 'Missing retry path'), true)
 }
 
+// Scenario DI -- gh-106: an unmet-criterion finding with no reproducer of its
+// own used to have no way out of `open` (executeAtHead never sent it to the
+// executor, so no exit code could ever settle it), so it survived every round
+// unfixed regardless of what the fixer did.
+async function scenarioDI() {
+  console.log('\n== scenario DI: an open unmet-criterion finding with no reproducer of its own settles once its criterion is judged met')
+  const { result } = await run({
+    ticketResult: { found: true, summary: 'stub', comments: '',
+      description: 'Acceptance: the client must retry on a 503 with backoff.' },
+    args: { maxReviewRounds: 2 },
+    initialReview: {
+      correctness: [
+        { category: 'unmet-criterion', title: 'Missing retry path', file: 'a.js',
+          claim: 'the retry path was never implemented', evidence: 'a.js:1',
+          criterion_quote: 'the client must retry on a 503 with backoff',
+          reproducer: undefined },
+      ],
+      advocate: [],
+    },
+    verify: (id) => id === 'f1' ? true : undefined,
+    fixHead: () => 'fix00000000000000000000000000000000000001',
+    staleness: () => [],
+  })
+  check('the run finished rather than halting at Fix', result.halted_at, undefined)
+  check('the criterion-only finding is not left unresolved', result.unresolved_findings, [])
+}
+
+// Scenario DJ -- gh-106: the mutation-hunk fetch runs zero reproducers
+// (`executeAtHead([], ...)`), so dirt found there can never be a reproducer's
+// fault; the halt used to say "a reproducer execution" regardless.
+async function scenarioDJ() {
+  console.log('\n== scenario DJ: dirt found by the zero-reproducer mutation-hunk fetch is not blamed on a reproducer')
+  const { result } = await run({
+    initialReview: {
+      correctness: [{ category: 'docs', title: 'Stale doc', file: 'a.js', claim: 'c', evidence: 'e' }],
+      advocate: [],
+    },
+    mutationGated: true,
+    mutationResult: () => ({ green: true, head_sha: 'mut0000000000000000000000000000000000001',
+      detail: 'stub green', scored: true }),
+    reproducerDirty: true,
+    reproducerPorcelain: '?? stray-mutation-file.txt',
+  })
+  check('halted at Review', result.halted_at, 'Review')
+  check('the note does not blame a reproducer for dirt nothing here ran',
+    (result.note ?? '').includes('reproducer execution'), false)
+  check('the note still names the porcelain output',
+    (result.note ?? '').includes('stray-mutation-file.txt'), true)
+}
+
+// Scenario DK -- gh-106: a residual variant reopened after a round converges
+// used to be checked only once, after the while loop had already exited, so
+// it halted immediately even with rounds still available -- the fixer never
+// saw it.
+async function scenarioDK() {
+  console.log('\n== scenario DK: a residual variant reopened after a round still gets a fix round when rounds remain')
+  const { result } = await run({
+    args: { maxReviewRounds: 2 },
+    initialReview: {
+      correctness: [{ title: 'Off-by-one in parser', file: 'src/parser.js',
+        claim: 'boundary is wrong', evidence: 'parser.js:12' }],
+      advocate: [],
+    },
+    verify: (id, round) => {
+      if (id === 'f1') return true
+      if (id === 'f2') return round === 2 ? true : (round === 'residual' ? false : undefined)
+      return undefined
+    },
+    fixHead: (round) => `fix0000000000000000000000000000000000000${round}`,
+    tailReview: [{ title: 'A variant the fix missed', file: 'src/parser.js',
+      claim: 'edge case at the far end', evidence: 'parser.js:22', duplicate_of: 'f1' }],
+    staleness: () => [],
+  })
+  check('the run finished rather than halting right after the loop', result.halted_at, undefined)
+  check('it took the second round to settle the reopened variant', result.fix_rounds, 2)
+}
+
+// Scenario DL -- gh-106: the residual own-claim recheck used to select by
+// hasCompleteReproducer alone, so a non-blocking category (docs, design,
+// wording) could still reopen the run on its own claim.
+async function scenarioDL() {
+  console.log('\n== scenario DL: a residual note in a non-blocking category never reopens on its own claim')
+  const { result } = await run({
+    args: { maxReviewRounds: 1 },
+    initialReview: {
+      correctness: [{ title: 'Off-by-one in parser', file: 'src/parser.js',
+        claim: 'boundary is wrong', evidence: 'parser.js:12' }],
+      advocate: [],
+    },
+    verify: (id) => id === 'f1' ? true : (id === 'f2' ? false : undefined),
+    fixHead: () => 'fix00000000000000000000000000000000000001',
+    tailReview: [{ category: 'docs', title: 'Stale comment nearby', file: 'src/parser.js',
+      claim: 'a variant the fix missed', evidence: 'parser.js:20', duplicate_of: 'f1' }],
+    staleness: () => [],
+  })
+  check('the run finished rather than halting on a non-blocking residual', result.halted_at, undefined)
+  check('the residual note stays recorded', result.notes?.some(n => n.reason === 'residual'), true)
+}
+
+// Scenario DM -- gh-106: the residual own-claim recheck used to treat a
+// missing row or exit 126/127 (could not run) the same as a genuine failure,
+// unlike disposeCandidates' identical rule for a fresh candidate.
+async function scenarioDM() {
+  console.log('\n== scenario DM: a residual note whose own reproducer could not run does not reopen either')
+  const { result } = await run({
+    args: { maxReviewRounds: 1 },
+    initialReview: {
+      correctness: [{ title: 'Off-by-one in parser', file: 'src/parser.js',
+        claim: 'boundary is wrong', evidence: 'parser.js:12' }],
+      advocate: [],
+    },
+    verify: (id, round) => id === 'f1' ? true : (id === 'f2' && round === 'residual' ? 127 : undefined),
+    fixHead: () => 'fix00000000000000000000000000000000000001',
+    tailReview: [{ title: 'A variant the fix missed', file: 'src/parser.js',
+      claim: 'edge case at the far end', evidence: 'parser.js:22', duplicate_of: 'f1' }],
+    staleness: () => [],
+  })
+  check('the run finished rather than halting on a could-not-run residual claim', result.halted_at, undefined)
+}
+
+// Scenario DN -- gh-106: the residual own-claim recheck had no hunks to
+// apply classify()'s out-of-range rule against, so a claim far outside the
+// fix's own hunks could still reopen the run.
+async function scenarioDN() {
+  console.log('\n== scenario DN: a residual note whose own claim sits outside this round\'s hunks does not reopen either')
+  const { result } = await run({
+    args: { maxReviewRounds: 1 },
+    initialReview: {
+      correctness: [{ title: 'Off-by-one in parser', file: 'src/parser.js',
+        claim: 'boundary is wrong', evidence: 'parser.js:12' }],
+      advocate: [],
+    },
+    verify: (id) => id === 'f1' ? true : (id === 'f2' ? false : undefined),
+    fixHead: () => 'fix00000000000000000000000000000000000001',
+    hunks: () => ['+++ b/src/parser.js', '@@ -100,5 +100,5 @@'],
+    tailReview: [{ title: 'A variant the fix missed', file: 'src/parser.js',
+      claim: 'edge case at the far end', evidence: 'parser.js:500', line_start: 500,
+      duplicate_of: 'f1' }],
+    staleness: () => [],
+  })
+  check('the run finished rather than halting on an out-of-range residual claim', result.halted_at, undefined)
+}
+
 for (const scenario of [scenarioA, scenarioB, scenarioG, scenarioC, scenarioD, scenarioE, scenarioH,
                         scenarioI, scenarioJ, scenarioK, scenarioL, scenarioM, scenarioN,
                         scenarioO, scenarioP, scenarioQ, scenarioR, scenarioS, scenarioT,
@@ -3140,7 +3284,8 @@ for (const scenario of [scenarioA, scenarioB, scenarioG, scenarioC, scenarioD, s
                         scenarioCH, scenarioCI, scenarioCJ, scenarioCK, scenarioCL, scenarioCM, scenarioCN, scenarioCO,
                         scenarioCP, scenarioCQ, scenarioCR, scenarioCS, scenarioCT, scenarioCU, scenarioCV,
                         scenarioCW, scenarioCX, scenarioCY, scenarioCZ, scenarioDA, scenarioDB,
-                        scenarioDC, scenarioDD, scenarioDE, scenarioDF, scenarioDG, scenarioDH]) {
+                        scenarioDC, scenarioDD, scenarioDE, scenarioDF, scenarioDG, scenarioDH,
+                        scenarioDI, scenarioDJ, scenarioDK, scenarioDL, scenarioDM, scenarioDN]) {
   await scenario()
 }
 
