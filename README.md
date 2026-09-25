@@ -164,8 +164,8 @@ hooks/                           seven policy gates, with a manifest per host
 3. **Plan** — a planner with no write tools produces a plan, acceptance criteria and risk areas.
 4. **Implement** — TDD via the skill, committing through `crap-commit.sh`, which runs both commit-time gates and refuses while either is red.
 5. **Draft PR** — pushes the branch and opens a draft, so the work is visible and any later halt has somewhere durable to be reported.
-6. **Review** — adversarial reviewers on distinct lenses, chosen by diff size. Re-runs on commits any later phase adds.
-7. **Fix** — confirmed findings only, bounded rounds. A verifier and an adversary then read the fix's own commits in parallel: independent questions, one turn.
+6. **Review** — adversarial reviewers on distinct lenses, chosen by diff size. A finding only holds the run if its category is one of a closed blocking set (wrong result, crash, gate bypass, unmet criterion) and it carries a reproducer that actually fails; everything else reaches the PR as a non-blocking note. Re-runs on commits any later phase adds, and from that point on a finding also has to fall inside what the new commits actually changed.
+7. **Fix** — confirmed findings only, bounded rounds. A finding counts as fixed when its own reproducer exits 0 against the new commits, never by a model's judgement of the diff.
 8. **Mutation** — kill every survivor with a test. Its own commits get reviewed too.
 9. **PR** — fills in the PR against the repo's template and marks the draft ready, only once every gate is green.
 
