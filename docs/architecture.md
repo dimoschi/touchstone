@@ -248,10 +248,11 @@ strips comments, and assigns each an id (`check:1`, `check:2`, ...) in declared 
 Every downstream consumer -- the runner, the baseline drop, the red list, the fix
 brief -- keys on that id, never on the command text or a name a model invented.
 
-A discovered check runs twice on a blocking run: once as the environmental baseline
-before Implement, once after. `## Checks` must therefore list only read-only,
-deterministic commands, never one that mutates the repo or depends on state the second
-run cannot repeat.
+A discovered check runs repeatedly on a blocking run: once as the environmental
+baseline before Implement, then again after Implement, after the pre-review check fix,
+and after every fix round. `## Checks` must therefore list only read-only, deterministic
+commands, never one that mutates the repo or depends on state a later run cannot
+repeat.
 
 The runner is handed each check's exact Bash invocation
 (`` bash -c 'cd <worktree> && <command>' ``) and must report `command` back verbatim;

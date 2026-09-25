@@ -3653,6 +3653,23 @@ async function scenarioEK() {
   }
 }
 
+// Scenario EL -- every check invocation is `bash -c 'cd <worktree> && ...'`,
+// while treeAgent's own preamble tells every agent never to cd into the
+// worktree, not even as `cd <path> && <cmd>`. Without an explicit exception
+// the runner is told both to run the invocation exactly and never to run it,
+// and a runner that obeys the preamble reports a different command, which the
+// exact-match rule then counts as not measured.
+async function scenarioEL() {
+  console.log('\n== scenario EL: the check runner is told its bash -c cd is the one exception to never-cd')
+  const { captured } = await run({
+    discovery: { file: '/repo/AGENTS.md', sections: [{ heading: '## Checks', fence: 'make test' }], detail: 'stub' },
+  })
+  const runPrompt = captured.calls.find(c => c.label === 'checks:run:1')?.prompt ?? ''
+  check('the preamble forbids cd into the worktree', /Never cd there/.test(runPrompt), true)
+  check('the runner is told this call is the exception, in the bash -c form only',
+    /exception to the rule above about never running cd/.test(runPrompt) && runPrompt.includes('bash -c'), true)
+}
+
 // Scenarios EG-EI -- executeAtHead() judges a reproducer by the worktree's
 // porcelain before and after its own commands, so nothing else may run in that
 // worktree meanwhile. A tail review running beside it once had its own test
@@ -3748,7 +3765,7 @@ for (const scenario of [scenarioA, scenarioB, scenarioG, scenarioC, scenarioD, s
                         scenarioDQ, scenarioDR, scenarioDS, scenarioDT, scenarioDU, scenarioDV,
                         scenarioDW, scenarioDX, scenarioDY, scenarioDZ,
                         scenarioEA, scenarioEB, scenarioEC, scenarioED, scenarioEE, scenarioEF,
-                        scenarioEG, scenarioEH, scenarioEI, scenarioEJ, scenarioEK]) {
+                        scenarioEG, scenarioEH, scenarioEI, scenarioEJ, scenarioEK, scenarioEL]) {
   await scenario()
 }
 

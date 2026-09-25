@@ -283,8 +283,9 @@ const MARKERS = {
 // heading and the first fenced block under it verbatim, marker lines
 // included, choosing and interpreting nothing. Selecting the check heading,
 // dropping the fence's own marker lines, splitting the rest and assigning
-// ids is script code (checksFrom below): a check list runs twice a run, so
-// what runs must come from parsing, never a model's account of it.
+// ids is script code (checksFrom below): a check list runs again after every
+// step that commits, so what runs must come from parsing, never a model's
+// account of it.
 const CHECKS = {
   type: 'object', additionalProperties: false, required: ['file', 'sections', 'detail'],
   properties: {
@@ -328,9 +329,9 @@ const CHECK_RUN = {
 // The only heading that is a check list. Only trailing whitespace is
 // ignored: '## checks', '### Checks', '##Checks', '## Checks ##' and
 // '## Commands' all name something else and must never match, because a
-// check here runs twice on every branch -- before Implement to classify the
-// baseline and again after -- so listing it must be a deliberate, exact
-// choice, not a heading that merely resembles it.
+// check here runs as a baseline before Implement and again after every step
+// that commits, so listing it must be a deliberate, exact choice, not a
+// heading that merely resembles it.
 const CHECKS_HEADING = '## Checks'
 
 // Strips an unquoted '#' at the start of a line or after whitespace, and
@@ -1456,6 +1457,11 @@ const executeChecks = async () => {
     `[touchstone: checks:run]\n` +
     `Run each Bash invocation below exactly as given, then STOP. Do not fix, ` +
     `edit, or investigate a failure; a later phase does that.\n` +
+    `This one call is the exception to the rule above about never running ` +
+    `cd, and only in the bash -c form each invocation already takes: its cd ` +
+    `runs inside a child shell, which does not move this session's own ` +
+    `working directory. Never split one into a bare cd ${wt.path} && ` +
+    `<command>, which does.\n` +
     `Report each check's id, its exit code, and its combined stdout and ` +
     `stderr verbatim -- do not summarise, truncate, or interpret what it ` +
     `printed. Report command as the exact invocation you ran, copied back ` +
