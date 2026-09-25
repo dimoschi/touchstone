@@ -355,7 +355,10 @@ echo "== fix loop: running the real script under stubbed globals"
 
 cat > "$WORK/harness.mjs" <<'JS_EOF'
 import fs from 'node:fs'
+import os from 'node:os'
+import path from 'node:path'
 import vm from 'node:vm'
+import { execFileSync } from 'node:child_process'
 
 const SCRIPT_PATH = process.argv[2]
 const src = fs.readFileSync(SCRIPT_PATH, 'utf8')
@@ -404,8 +407,11 @@ const STUB_WT_PATH = '/tmp/stub-worktree'
 // for a check. A checkRuns stub uses this so a scenario testing the happy
 // path does not have to duplicate the string, and a scenario testing the
 // command-mismatch path can diverge from it on purpose.
+function shQuote(s) {
+  return `'${String(s).replace(/'/g, `'\\''`)}'`
+}
 function checkInvocation(command, path = STUB_WT_PATH) {
-  return `bash -c 'cd ${path} && ${command}'`
+  return `bash -c ${shQuote(`cd ${shQuote(path)} && ${command}`)}`
 }
 
 // Every finding literal in this file predates category and reproducer; both
@@ -3557,6 +3563,35 @@ async function scenarioEE() {
     captured.logs.some(l => l.includes('no repo-advertised checks found') && l.includes('no fence, or no command lines')), true)
 }
 
+// Scenario EF -- #109: invocationFor splices the worktree path and the
+// declared command into single quotes by plain interpolation. A quote in
+// either ends the outer -c string early, so the invocation the runner is
+// told to execute is not the command the repo declared. Proven by actually
+// running the built invocation, not by predicting its string: a worktree
+// path holding a space and a quote, and a declared command holding a quoted
+// '#', both have to survive into the real run untouched.
+async function scenarioEF() {
+  console.log('\n== scenario EF: #109 -- the built invocation actually runs the declared command, worktree-path quote and all')
+  const wtPath = fs.mkdtempSync(path.join(os.tmpdir(), "touchstone o'clock -"))
+  const declared = "echo 'a # b'"
+  try {
+    const { captured } = await run({
+      branchResult: { created: true, branch: 'feat/gh-21-stub', base: 'main',
+        path: wtPath, ticket: '21', detail: 'stub', dirty: false },
+      discovery: { file: '/repo/AGENTS.md',
+        sections: [{ heading: '## Checks', fence: declared }], detail: 'stub' },
+    })
+    const runPrompt = captured.calls.find(c => c.label === 'checks:run:1')?.prompt ?? ''
+    const line = runPrompt.split('\n').find(l => l.startsWith('check:1: '))
+    const invocation = line ? line.slice('check:1: '.length) : ''
+    const want = execFileSync('bash', ['-c', declared]).toString()
+    const got = invocation ? execFileSync('bash', ['-c', invocation]).toString() : `<no invocation: ${runPrompt}>`
+    check('the declared command\'s output survives byte for byte', got, want)
+  } finally {
+    fs.rmSync(wtPath, { recursive: true, force: true })
+  }
+}
+
 for (const scenario of [scenarioA, scenarioB, scenarioG, scenarioC, scenarioD, scenarioE, scenarioH,
                         scenarioI, scenarioJ, scenarioK, scenarioL, scenarioM, scenarioN,
                         scenarioO, scenarioP, scenarioQ, scenarioR, scenarioS, scenarioT,
@@ -3581,7 +3616,7 @@ for (const scenario of [scenarioA, scenarioB, scenarioG, scenarioC, scenarioD, s
                         scenarioDO, scenarioDP,
                         scenarioDQ, scenarioDR, scenarioDS, scenarioDT, scenarioDU, scenarioDV,
                         scenarioDW, scenarioDX, scenarioDY, scenarioDZ,
-                        scenarioEA, scenarioEB, scenarioEC, scenarioED, scenarioEE]) {
+                        scenarioEA, scenarioEB, scenarioEC, scenarioED, scenarioEE, scenarioEF]) {
   await scenario()
 }
 

@@ -1417,12 +1417,21 @@ log(discoveredChecks.length
 // block: after #87 resuming is the normal path, not an edge case.
 const checksBlocking = !args?.existingBranch
 let checkAttempt = 0
+// Turns an arbitrary string into one POSIX shell word that expands back to
+// exactly that string: close the quote, splice in a backslash-escaped
+// literal quote, reopen it. Needed because a declared check's own command
+// (`pytest -k 'not slow'`) or the worktree path can carry a single quote,
+// and naive interpolation into a bare pair of quotes lets that quote end
+// the string early.
+const shQuote = (s) => `'${String(s).replace(/'/g, `'\\''`)}'`
 // The exact Bash invocation for a check, built once by the script and never
 // by the model: a fixer or a baseline that trusted a model-reported command
 // could be handed a result for something that only resembles what was asked
 // (an extra `timeout`, a different flag) and never know it ran the wrong
-// thing.
-const invocationFor = (c) => `bash -c 'cd ${wt.path} && ${c.command}'`
+// thing. c.command itself is spliced in unquoted -- it is the -c script's
+// source, not a single argument -- so only the cd target and the outer -c
+// argument need quoting.
+const invocationFor = (c) => `bash -c ${shQuote(`cd ${shQuote(wt.path)} && ${c.command}`)}`
 const executeChecks = async () => {
   checkAttempt++
   return await treeAgent(
