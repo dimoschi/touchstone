@@ -349,9 +349,55 @@ run_check "$REPO" >/tmp/out.t 2>&1
 check "exit code" "$?" 2
 check "names the ordering problem" "$(grep -c 'dotted integers' /tmp/out.t)" "1"
 
+echo "case U: workflows/deliver-pipeline.js's PLUGIN_NAME/PIPELINE_VERSION match the manifest -> ok"
+REPO="$WORK/u"
+new_fixture "$REPO" 0.1.0
+write_file "$REPO" "workflows/deliver-pipeline.js" "const PLUGIN_NAME = 'fixture'
+const PIPELINE_VERSION = '0.1.0'" "workflows: add deliver-pipeline.js"
+fork_pr "$REPO"
+write_file "$REPO" "README.md" "docs" "docs: readme, nothing gated"
+run_check "$REPO" >/tmp/out.u 2>&1
+check "exit code" "$?" 0
+
+echo "case V: workflows/deliver-pipeline.js's PLUGIN_NAME differs from the manifest name -> fail"
+REPO="$WORK/v"
+new_fixture "$REPO" 0.1.0
+write_file "$REPO" "workflows/deliver-pipeline.js" "const PLUGIN_NAME = 'wrong'
+const PIPELINE_VERSION = '0.1.0'" "workflows: add deliver-pipeline.js"
+fork_pr "$REPO"
+write_file "$REPO" "README.md" "docs" "docs: readme, nothing gated"
+run_check "$REPO" >/tmp/out.v 2>&1
+check "exit code" "$?" 1
+check "names the file" "$(grep -c 'workflows/deliver-pipeline.js' /tmp/out.v)" "2"
+check "names the manifest's name" "$(grep -c 'fixture' /tmp/out.v)" "1"
+check "names the script's name literal" "$(grep -c 'wrong' /tmp/out.v)" "1"
+
+echo "case W: workflows/deliver-pipeline.js's PIPELINE_VERSION differs from the manifest version -> fail, independent of whether the PR's own diff touched anything gated"
+REPO="$WORK/w"
+new_fixture "$REPO" 0.1.0
+write_file "$REPO" "workflows/deliver-pipeline.js" "const PLUGIN_NAME = 'fixture'
+const PIPELINE_VERSION = '0.2.0'" "workflows: add deliver-pipeline.js"
+fork_pr "$REPO"
+write_file "$REPO" "README.md" "docs" "docs: readme, nothing gated"
+run_check "$REPO" >/tmp/out.w 2>&1
+check "exit code" "$?" 1
+check "names the file" "$(grep -c 'workflows/deliver-pipeline.js' /tmp/out.w)" "2"
+check "names the manifest's version" "$(grep -c '0.1.0' /tmp/out.w)" "1"
+check "names the script's version literal" "$(grep -c '0.2.0' /tmp/out.w)" "1"
+
+echo "case X: workflows/deliver-pipeline.js has no PIPELINE_VERSION line at all -> fail (missing, not merely wrong)"
+REPO="$WORK/x"
+new_fixture "$REPO" 0.1.0
+write_file "$REPO" "workflows/deliver-pipeline.js" "const PLUGIN_NAME = 'fixture'" "workflows: add deliver-pipeline.js, no version literal"
+fork_pr "$REPO"
+write_file "$REPO" "README.md" "docs" "docs: readme, nothing gated"
+run_check "$REPO" >/tmp/out.x 2>&1
+check "exit code" "$?" 1
+check "names the file" "$(grep -c 'workflows/deliver-pipeline.js' /tmp/out.x)" "2"
+
 echo ""
 if [ "$failures" -eq 0 ]; then
-  echo "OK (22 cases)"
+  echo "OK (26 cases)"
 else
   echo "FAILED: $failures assertion(s)"
   exit 1

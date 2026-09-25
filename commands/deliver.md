@@ -140,6 +140,18 @@ Report the branch it cut, the base it came from, the gate results, and the PR UR
 one was opened. If it halted, report the phase and the halt note verbatim: the halts
 are diagnostic, and paraphrasing them loses the reason.
 
+Report `pipeline_version.executed`, the version of `deliver-pipeline.js` this run
+actually ran. If `pipeline_version.mismatch` is `true`, say so and name both
+`pipeline_version.executed` and `pipeline_version.base_branch`: the latter came from
+the repository's base branch, not from the caller's own checkout, so word it that way
+rather than implying it was read from anything the caller has locally. `mismatch`
+only means the two differ, never which one is ahead. Compare the two version strings
+yourself before describing a direction; do not assume the executed snapshot is
+the older one. A `mismatch` of `false` or `null` needs no mention, unless
+`pipeline_version.base_refreshed` is `false`: then say the comparison could not
+refresh the base first, so an agreement may be with a stale ref rather than with
+the base branch as it stands.
+
 ### Add the run id to the run record
 
 The workflow writes its own record to `.claude/touchstone-runs/<ticket>.json` in the

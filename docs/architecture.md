@@ -200,3 +200,57 @@ Two invariants the script exists to hold:
 
 `workflows/test-fix-loop-join.sh` drives the real script with stubbed globals, which is
 how the loop logic is tested without spending tokens.
+
+### Pipeline version transparency
+
+A host can persist a snapshot of this script and keep executing it after `main`
+moves on, so the running code and the checkout it operates on can silently disagree.
+The script has no `fs` and no imports, so it cannot read `.claude-plugin/plugin.json`
+at runtime to find out -- any such read would report whatever the *current* file
+holds, which is exactly wrong when the point is to name what this *running*
+snapshot is. `PLUGIN_NAME` and `PIPELINE_VERSION`, near the top of the script, are
+literals for that reason: they travel with the executed bytes, and
+`scripts/check-version-bump.sh` checks them against the manifest at HEAD
+(`scripts/test-version-bump.sh` covers that half).
+
+A single `treeAgent` call labelled `plugin:version`, placed after the worktree exists
+and before Triage, resolves the repository's actual base branch itself and reads its
+manifest exactly once, neither the branch's own working tree nor `wt.base`: a resumed
+branch already carries this run's own earlier version-bump commit as often as not
+(`check-version-bump.sh` forces one onto every `workflows/` change), and reading the
+working tree back would report that bump as drift against itself, while `wt.base`
+becomes the branch under review whenever this run is stacked (`args.base`), whose own
+unmerged version bump would revive the same self-accusation through the base instead.
+The probe also fetches that base fresh before reading it, since neither reuse path in
+Worktree ever runs `git fetch` and a stale remote-tracking ref would let a stale base
+pass as `mismatch: false`. A failed fetch (no network, no auth, a remote needing a
+hardware key) does not by itself count as a missing manifest: `origin/<base>` can
+already hold it from an earlier fetch or the initial clone, so the probe reads it
+anyway rather than reporting the fetch failure as if the manifest were absent. The
+result is a `pipeline_version` object carried on every exit path, a halt at any phase
+included:
+
+- `executed` -- `PIPELINE_VERSION`, always present, even on a halt at Worktree
+  before the probe has run.
+- `base_branch` -- the version the probe read off the repository's base branch, or
+  `null` if it found no manifest naming this plugin there.
+- `base_refreshed` -- `false` when the probe could not fetch the base before
+  reading it, so `base_branch` came from a remote-tracking ref that may predate
+  the base branch's real state. A `mismatch: false` alongside it is an agreement
+  with a possibly stale ref, not with the base branch, and is logged as such.
+- `mismatch` -- `true` when the base branch names this plugin at a different
+  version, `false` when it names this plugin at the same version, `null` when the
+  probe found no comparable manifest at all (not found, or a different plugin's
+  name). `null` is the ordinary case: it is what every repo this pipeline delivers
+  into other than touchstone's own reports, since their manifest is never named
+  `touchstone`; that case is still logged, distinct in wording from an actual
+  mismatch, so it never reads as silence. A probe that returns no response at all
+  also leaves `null`, but is logged separately again, since that means the
+  comparison did not run rather than that there was nothing to compare.
+
+A mismatch is informational, never a halt: `log()` names both versions and the run
+continues to completion. `mismatch: true` says only that the two differ, not which
+one is ahead; a reader has to compare the two strings to say which. Refusing to
+proceed would make the messenger the failure; the gate above is where drift is
+actually enforced. Refreshing the host's snapshot so it executes the newer code is
+host behaviour, out of scope for this script.

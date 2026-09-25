@@ -238,6 +238,10 @@ the check having to decide which versions `main` ever really served. A push
 straight to `main` compares main against itself and is a no-op: the check
 gates PRs, not a bypass of the PR process.
 
+`workflows/deliver-pipeline.js` carries its own name and version as literals, since
+it cannot read the manifest at runtime; how that reports a version mismatch during
+a run is in [docs/architecture.md](docs/architecture.md#pipeline-version-transparency).
+
 `check-no-private-refs.sh` looks for classes of leak (absolute home paths,
 personal config paths, stray tracker keys) rather than a list of specific names,
 since a committed list would publish exactly what it exists to exclude. Point

@@ -20,10 +20,13 @@
 # main compares main against itself and is a deliberate no-op: it exists to
 # gate PRs, not to catch a bypass of the PR process.
 #
-# Exit 0 clean, 1 a gated file changed without the version advancing past the
-# base's, 2 usage (missing manifest, no version key, a version that is not
-# dotted integers, no origin/main or main to compare against, or a shallow
-# clone).
+# Exit 0 clean. Exit 1: either a gated file changed without the version
+# advancing past the base's, or workflows/deliver-pipeline.js's
+# PLUGIN_NAME/PIPELINE_VERSION literals disagree with the manifest at HEAD --
+# the latter is checked whenever that script exists at HEAD, whether or not
+# this PR touched anything gated. Exit 2: usage (missing manifest, no
+# readable "version" or "name", a version that is not dotted integers, no
+# origin/main or main to compare against, or a shallow clone).
 
 set -euo pipefail
 
@@ -38,8 +41,13 @@ version_at() {
   git show "$1:$MANIFEST" 2>/dev/null | python3 -c 'import json,sys; print(json.load(sys.stdin)["version"])' 2>/dev/null
 }
 
+name_at() {
+  git show "$1:$MANIFEST" 2>/dev/null | python3 -c 'import json,sys; print(json.load(sys.stdin)["name"])' 2>/dev/null
+}
+
 file_exists_at() {
-  git cat-file -e "$1:$MANIFEST" 2>/dev/null
+  local path="${2:-$MANIFEST}"
+  git cat-file -e "$1:$path" 2>/dev/null
 }
 
 is_gated() {
@@ -67,6 +75,36 @@ CURRENT_VERSION="$(version_at HEAD)" || {
   echo "check-version-bump: $MANIFEST at HEAD has no readable \"version\"" >&2
   exit 2
 }
+
+# The workflow script has no fs and no imports, so it cannot read $MANIFEST at
+# runtime to report which snapshot of itself is executing; it carries its own
+# name and version as literals instead (docs/architecture.md). That pair can
+# drift from the manifest independently of whatever this PR's own diff
+# touches, so it is checked against HEAD directly rather than folded into the
+# gated-diff logic below.
+PIPELINE_SCRIPT="workflows/deliver-pipeline.js"
+if file_exists_at HEAD "$PIPELINE_SCRIPT"; then
+  MANIFEST_NAME="$(name_at HEAD)" || {
+    echo "check-version-bump: $MANIFEST at HEAD has no readable \"name\"" >&2
+    exit 2
+  }
+  pipeline_literal() {
+    # A literal that is simply absent is a legitimate outcome here (case X:
+    # PIPELINE_VERSION missing), not a script error, so grep finding no match
+    # must not exit this function non-zero: under pipefail that would abort
+    # the whole check via -e before the mismatch below is ever reported.
+    git show "HEAD:$PIPELINE_SCRIPT" 2>/dev/null \
+      | grep -m1 -E "^const $1 = '" | sed -E "s/^const $1 = '([^']*)'.*/\\1/"
+    true
+  }
+  SCRIPT_NAME="$(pipeline_literal PLUGIN_NAME)"
+  SCRIPT_VERSION="$(pipeline_literal PIPELINE_VERSION)"
+  if [ "$SCRIPT_NAME" != "$MANIFEST_NAME" ] || [ "$SCRIPT_VERSION" != "$CURRENT_VERSION" ]; then
+    echo "check-version-bump: $PIPELINE_SCRIPT carries PLUGIN_NAME='${SCRIPT_NAME:-<missing>}' PIPELINE_VERSION='${SCRIPT_VERSION:-<missing>}', which does not match $MANIFEST's name='$MANIFEST_NAME' version='$CURRENT_VERSION' at HEAD." >&2
+    echo "Update the two literals near the top of $PIPELINE_SCRIPT to match." >&2
+    exit 1
+  fi
+fi
 
 # A shallow clone can put the merge base below the graft point, so `git
 # merge-base` silently returns a later commit and the diff range narrows to
