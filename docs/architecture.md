@@ -226,12 +226,21 @@ own, and `errored` otherwise. A command that fails for its own reasons -- a miss
 environment variable, a wrong path, a syntax error -- exits nonzero same as a real
 demonstration, and used to read the same way; a reproducer now has to prove it observed
 the defect, not merely that it did not exit 0. `disposeCandidates()` opens a candidate
-only on `reproduced`; everything else, `not-executed` included, becomes a note with its
-own reason (`reproducer-errored`, `reproducer-not-executed`, ...) and its
+only on `reproduced`; `passed`, `could-not-run` and `errored` become a note with its own
+reason (`did-not-reproduce`, `reproducer-could-not-run`, `reproducer-errored`) and its
 `reproducer_run` (the outcome, the exit code, and the truncated output) attached so the
-note keeps what actually happened. A missing row is even less evidence than an errored
-one, so it must not open a candidate either, or a finding can hold the run on a
-reproducer nobody ever ran (gh-113).
+note keeps what actually happened.
+
+`not-executed` is neither: a missing row is even less evidence than an errored one, so
+it must not open a candidate on nothing, and it is no verdict at all, so it must not
+become a note either -- the same rule #116 applies to a discovered check the runner
+never measured. `executeAndDispose()` retries whatever comes back `not-executed` exactly
+once, at the same head, as its own `executeAtHead()` call restricted to just those
+candidates and labelled with the original label plus `:retry` -- run alone in the
+worktree like every such call, so a dirty result there halts the same way. Whatever is
+still `not-executed` after that halts the run (at Review for the initial review and the
+post-mutation review, at Fix for a fix round's fresh candidates), naming each finding by
+id and title and saying the halt is about measurement, not the code (gh-113).
 
 `unmet-criterion` needs a reproducer too. The verbatim quote proves the criterion
 exists; only an executed command shows the change misses it, and the alternative, a

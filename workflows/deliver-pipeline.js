@@ -2368,19 +2368,69 @@ const classifyBatch = (raised, hunks, round) => {
 // the marker, both actually observed -- opens the candidate. A missing row
 // (not-executed, the executor dropped it or the whole call failed schema) is
 // even less evidence than an errored run and must not open one either, or a
-// finding can hold the run on a reproducer nobody ever ran (gh-113).
+// finding can hold the run on a reproducer nobody ever ran (gh-113). Unlike
+// passed/could-not-run/errored, not-executed is no verdict at all, so it is
+// returned apart from asNotes for executeAndDispose below to retry.
 const disposeCandidates = (candidates, runs, round) => {
-  const opened = [], asNotes = []
+  const opened = [], asNotes = [], notExecuted = []
   for (const f of candidates) {
     const row = runs?.get(f.id)
     const reproducer_run = reproducerRunOf(row, round)
     if (reproducer_run.outcome === 'passed') asNotes.push({ ...f, reason: 'did-not-reproduce', round, reproducer_run })
     else if (reproducer_run.outcome === 'could-not-run') asNotes.push({ ...f, reason: 'reproducer-could-not-run', round, reproducer_run })
     else if (reproducer_run.outcome === 'errored') asNotes.push({ ...f, reason: 'reproducer-errored', round, reproducer_run })
-    else if (reproducer_run.outcome === 'not-executed') asNotes.push({ ...f, reason: 'reproducer-not-executed', round, reproducer_run })
+    else if (reproducer_run.outcome === 'not-executed') notExecuted.push({ ...f, reproducer_run })
     else opened.push({ ...f, reproducer_run })
   }
-  return { opened, asNotes }
+  return { opened, asNotes, notExecuted }
+}
+
+// Runs `candidates` through executeAtHead under `label`; whatever comes back
+// with no row is retried exactly once, at the same head, as its own
+// executeAtHead call restricted to just those candidates and labelled
+// `${label}:retry` -- the retry-once rule runChecks already applies to a
+// discovered check (#116), extended here to a reproducer nobody measured
+// (gh-113). The retry runs only after the first call fully resolves, so it
+// can never overlap another agent in the worktree, same as every
+// executeAtHead call. Its rows are merged into the first call's before
+// reclassifying the whole batch, so a candidate the retry did measure counts
+// on that verdict and one still missing surfaces in notExecuted for the
+// caller to halt on; a dirty result from either call is returned as-is for
+// the caller to turn into a dirtyReproducerHalt at its own phase.
+const executeAndDispose = async (candidates, label, round) => {
+  const exec = await executeAtHead(candidates, label)
+  if (exec.dirty) return { dirty: true, exec }
+  const first = disposeCandidates(candidates, exec.runs, round)
+  if (!first.notExecuted.length) return { dirty: false, ...first }
+  const retryIds = new Set(first.notExecuted.map(f => f.id))
+  const retryCandidates = candidates.filter(f => retryIds.has(f.id))
+  const retryExec = await executeAtHead(retryCandidates, `${label}:retry`)
+  if (retryExec.dirty) return { dirty: true, exec: retryExec }
+  const merged = new Map(exec.runs)
+  for (const [id, row] of retryExec.runs) merged.set(id, row)
+  return { dirty: false, ...disposeCandidates(candidates, merged, round) }
+}
+
+// Reports whatever executeAndDispose still could not measure after its
+// retry. Never handed to a fixer: like unmeasuredChecksHalt above, this is
+// about measurement, not the code, so no fix round should be spent guessing
+// at a reproducer nobody ran. Defined here, before open/notes/round/
+// fixRoundSpend, for the same reason unmeasuredChecksHalt is: it reads only
+// plan, impl and gatesPayload by closure, and every call site passes
+// unresolved_findings, notes, fix_rounds and (once it exists) fix_round_output
+// through extra instead, so calling this from the initial review -- before
+// fixRoundSpend is declared -- is not the TDZ failure the comment above
+// unmeasuredChecksHalt describes.
+const notExecutedHalt = (at, notExecuted, extra) => {
+  const note = `${notExecuted.length} finding(s) could not be measured after ` +
+    `a retry. This halt is about measurement, not the code: the executor did ` +
+    `not run ${notExecuted.length === 1 ? 'this reproducer' : 'these reproducers'}, ` +
+    `so no verdict exists either way.\n` +
+    notExecuted.map(f => `- ${f.id}: ${f.title}`).join('\n')
+  return halted(at, {
+    plan: plan.plan, implemented: impl.summary, gates: gatesPayload(),
+    ...extra, note,
+  })
 }
 
 let settled = []
@@ -2391,11 +2441,16 @@ if (reviewerCount) {
   const { candidates, freshNotes } = classifyBatch(raised, null, 0)
   notes.push(...freshNotes)
   if (candidates.length) {
-    const exec = await executeAtHead(candidates, 'reproduce:review')
-    if (exec.dirty) { sReview.close(); return await dirtyReproducerHalt('Review', exec) }
-    const { opened, asNotes } = disposeCandidates(candidates, exec.runs, 0)
-    open.push(...opened)
-    notes.push(...asNotes)
+    const disposed = await executeAndDispose(candidates, 'reproduce:review', 0)
+    if (disposed.dirty) { sReview.close(); return await dirtyReproducerHalt('Review', disposed.exec) }
+    open.push(...disposed.opened)
+    notes.push(...disposed.asNotes)
+    if (disposed.notExecuted.length) {
+      sReview.close()
+      return await notExecutedHalt('Review', disposed.notExecuted, {
+        unresolved_findings: [...open, ...disposed.notExecuted], notes, fix_rounds: round,
+      })
+    }
   }
 }
 sReview.close()
@@ -2628,12 +2683,18 @@ while ((open.length || blockingChecksOpen()) && round < MAX_REVIEW_ROUNDS && !ou
     const { candidates, freshNotes } = classifyBatch(freshRaw ?? [], execOld?.hunks ?? null, round)
     notes.push(...freshNotes)
     if (candidates.length) {
-      const execFresh = await executeAtHead(candidates, `reproduce:fix:${round}:fresh`)
-      if (execFresh.dirty) { sFix.close(); return await dirtyReproducerHalt('Fix', execFresh) }
-      const { opened, asNotes } = disposeCandidates(candidates, execFresh.runs, round)
-      if (opened.length) log(`round ${round}: the fix itself introduced ${opened.length} new finding(s)`)
-      open = open.concat(opened)
-      notes.push(...asNotes)
+      const disposed = await executeAndDispose(candidates, `reproduce:fix:${round}:fresh`, round)
+      if (disposed.dirty) { sFix.close(); return await dirtyReproducerHalt('Fix', disposed.exec) }
+      if (disposed.opened.length) log(`round ${round}: the fix itself introduced ${disposed.opened.length} new finding(s)`)
+      open = open.concat(disposed.opened)
+      notes.push(...disposed.asNotes)
+      if (disposed.notExecuted.length) {
+        sFix.close()
+        return await notExecutedHalt('Fix', disposed.notExecuted, {
+          unresolved_findings: [...open, ...disposed.notExecuted], notes,
+          fix_rounds: round, fix_round_output: fixRoundSpend,
+        })
+      }
     }
     reviewedThrough = head
   } else if (head) {
@@ -2904,11 +2965,16 @@ if (reviewerCount && mutHead && mutHead !== reviewedThrough && !outOfBudget()) {
   notes.push(...freshNotes)
   let freshOpen = []
   if (candidates.length) {
-    const execFresh = await executeAtHead(candidates, 'reproduce:mutation:fresh')
-    if (execFresh.dirty) return await dirtyReproducerHalt('Review', execFresh)
-    const disposed = disposeCandidates(candidates, execFresh.runs, 'mutation')
+    const disposed = await executeAndDispose(candidates, 'reproduce:mutation:fresh', 'mutation')
+    if (disposed.dirty) return await dirtyReproducerHalt('Review', disposed.exec)
     freshOpen = disposed.opened
     notes.push(...disposed.asNotes)
+    if (disposed.notExecuted.length) {
+      return await notExecutedHalt('Review', disposed.notExecuted, {
+        mutation, unresolved_findings: [...freshOpen, ...disposed.notExecuted],
+        fix_rounds: round, fix_round_output: fixRoundSpend, notes,
+      })
+    }
   }
   if (freshOpen.length) {
     return await halted('Review', {
