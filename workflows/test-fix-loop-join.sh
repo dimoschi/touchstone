@@ -558,6 +558,9 @@ function makeAgent(scenario, captured) {
     if (label === 'reproduce:residual') {
       return reproduceResponse(prompt, scenario, (id) => exitFor(scenario, id, 'residual'))
     }
+    if (label === 'reproduce:residual:mutation') {
+      return reproduceResponse(prompt, scenario, (id) => exitFor(scenario, id, 'residual:mutation'))
+    }
     if (label === 'gate:opt-in') {
       if (scenario.gateProbeFails) return null
       return { crap_gated: scenario.crapGated ?? true,
@@ -1063,9 +1066,12 @@ async function scenarioT() {
     staleness: () => [],
     mutationGated: true,
     mutationResult: () => ({ green: true, head_sha: 'mut0000000000000000000000000000000000001', detail: 'stub green', scored: true }),
+    // No reproducer of its own: this scenario is about the reference alone
+    // becoming a residual note, not about gh-106's separate check of a
+    // residual's own claim (scenario DD), which needs one.
     postMutationReview: [{ title: 'Boundary check excludes the last element', file: 'parser.js',
       claim: 'the mutation commits reverted the guard', evidence: 'parser.js:14',
-      duplicate_of: 'f1' }],
+      duplicate_of: 'f1', reproducer: undefined }],
   })
   check('halted_at is absent (a reference at post-mutation is a residual note, not a halt)',
     result.halted_at, undefined)
@@ -1126,7 +1132,7 @@ async function scenarioV() {
     fixHead: () => 'fix00000000000000000000000000000000000001',
     tailReview: [{ title: 'Boundary check excludes the last element', file: 'parser.js',
       claim: 'off-by-one at the array end', evidence: 'see loop condition',
-      duplicate_of: 'f1' }],
+      duplicate_of: 'f1', reproducer: undefined }],
     staleness: () => [],
   })
   check('halted at Fix (the leak was never fixed)', result.halted_at, 'Fix')
@@ -1157,7 +1163,7 @@ async function scenarioW() {
     fixHead: () => 'fix00000000000000000000000000000000000001',
     tailReview: [{ title: 'Boundary check excludes the last element', file: 'parser.js',
       claim: 'off-by-one at the array end', evidence: 'see loop condition',
-      duplicate_of: 'f1' }],
+      duplicate_of: 'f1', reproducer: undefined }],
     staleness: () => [],
   })
   check('halted_at is absent (every finding cleared)', result.halted_at, undefined)
@@ -1184,7 +1190,7 @@ function convergedWithSuspect(overrides) {
     fixHead: () => 'fix00000000000000000000000000000000000001',
     tailReview: [{ title: 'Boundary check excludes the last element', file: 'parser.js',
       claim: 'off-by-one at the array end', evidence: 'see loop condition',
-      duplicate_of: 'f1' }],
+      duplicate_of: 'f1', reproducer: undefined }],
     staleness: () => [],
     mutationGated: true,
     ...overrides,
@@ -2199,7 +2205,7 @@ async function scenarioAZ() {
     fixHead: () => 'fix00000000000000000000000000000000000001',
     tailReview: [{ title: 'Same route bug, worded differently',
       file: 'src/route.js', claim: 'gate is skipped entirely',
-      evidence: 'route.js:20', duplicate_of: 'f1' }],
+      evidence: 'route.js:20', duplicate_of: 'f1', reproducer: undefined }],
     staleness: () => [],
   })
   check('halted at Fix rather than readying the PR', result.halted_at, 'Fix')
@@ -2226,7 +2232,8 @@ async function scenarioBA() {
     verify: (id) => { roundRan = true; return id === 'f1' ? true : undefined },
     fixHead: () => 'fix00000000000000000000000000000000000001',
     tailReview: [{ title: 'The fix fails open', file: 'src/route.js',
-      claim: 'gate is skipped', evidence: 'route.js:20', duplicate_of: 'f1' }],
+      claim: 'gate is skipped', evidence: 'route.js:20', duplicate_of: 'f1',
+      reproducer: undefined }],
     staleness: () => [],
   })
   check('the residual recheck still ran', callCount(captured, 'reproduce:residual'), 1)
@@ -2746,8 +2753,9 @@ async function scenarioCQ() {
 }
 
 // Scenario CR -- gh-106: the initial-classification exit-code rule, every
-// disposition in one run. Only an integer exit code outside {0, 126, 127}
-// opens a candidate; everything else is a note with its own reason.
+// disposition in one run. Only 0, 126 and 127 are notes; a missing row (could
+// not measure) and any other exit code both open a candidate, since "could
+// not measure" must not read as "did not reproduce".
 async function scenarioCR() {
   console.log('\n== scenario CR: initial classification dispositions by exit code')
   const { result } = await run({
@@ -2767,10 +2775,12 @@ async function scenarioCR() {
   check('exit 0 is a note: did-not-reproduce', notesByTitle['Exits 0'], 'did-not-reproduce')
   check('exit 126 is a note: reproducer-could-not-run', notesByTitle['Exits 126'], 'reproducer-could-not-run')
   check('exit 127 is a note: reproducer-could-not-run', notesByTitle['Exits 127'], 'reproducer-could-not-run')
-  check('no executor row is a note: not-executed', notesByTitle['No row'], 'not-executed')
+  check('no executor row stays pending rather than being dismissed as a note',
+    result.unresolved_findings?.some(f => f.title === 'No row'), true)
   check('any other exit code opens the finding',
     result.unresolved_findings?.some(f => f.title === 'Exits 2'), true)
-  check('exactly one finding opened', result.unresolved_findings?.length, 1)
+  check('exactly two findings opened (the unmeasured one and the genuine failure)',
+    result.unresolved_findings?.length, 2)
 }
 
 // Scenario CS -- gh-106: an unmet-criterion finding blocks only when its
@@ -2923,6 +2933,194 @@ async function scenarioCY() {
     result.unresolved_findings?.some(f => f.title === 'In this fix\'s own hunk'), true)
 }
 
+async function scenarioCZ() {
+  console.log('\n== scenario CZ: a finding against a pure-deletion hunk is not out-of-range')
+  const { result } = await run({
+    args: { maxReviewRounds: 1 },
+    initialReview: {
+      correctness: [{ title: 'Needs a fix', file: 'x.js', claim: 'c', evidence: 'e' }],
+      advocate: [],
+    },
+    verify: (id) => id === 'f1' ? true : undefined,
+    fixHead: () => 'fix00000000000000000000000000000000000001',
+    hunks: () => ['+++ b/x.js', '@@ -3 +2,0 @@'],
+    tailReview: [{ title: 'Guard removed here', file: 'x.js', claim: 'c2', evidence: 'e2',
+      line_start: 2 }],
+    staleness: () => [],
+  })
+  check('halted at Fix (the deletion-hunk finding is in range and blocks)', result.halted_at, 'Fix')
+  check('the finding against the deletion is reported as unresolved',
+    result.unresolved_findings?.some(f => f.title === 'Guard removed here'), true)
+}
+
+async function scenarioDA() {
+  console.log('\n== scenario DA: an absolute, ./-prefixed, or :line-suffixed file path still matches its hunk')
+  const { result } = await run({
+    args: { maxReviewRounds: 1 },
+    initialReview: {
+      correctness: [{ title: 'Needs a fix', file: 'x.js', claim: 'c', evidence: 'e' }],
+      advocate: [],
+    },
+    verify: (id) => id === 'f1' ? true : undefined,
+    fixHead: () => 'fix00000000000000000000000000000000000001',
+    hunks: () => ['+++ b/x.js', '@@ -100,5 +100,5 @@'],
+    tailReview: [
+      { title: 'Absolute path', file: '/tmp/stub-worktree/x.js', claim: 'c2', evidence: 'e2', line_start: 102 },
+      { title: 'Dot-slash path', file: './x.js', claim: 'c3', evidence: 'e3', line_start: 102 },
+      { title: 'Path with line suffix', file: 'x.js:102-104', claim: 'c4', evidence: 'e4', line_start: 102 },
+    ],
+    staleness: () => [],
+  })
+  check('halted at Fix (none of the three spellings is waved through as out-of-range)', result.halted_at, 'Fix')
+  const titles = new Set((result.unresolved_findings ?? []).map(f => f.title))
+  check('the absolute-path finding opened', titles.has('Absolute path'), true)
+  check('the dot-slash finding opened', titles.has('Dot-slash path'), true)
+  check('the :line-suffixed finding opened', titles.has('Path with line suffix'), true)
+}
+
+async function scenarioDB() {
+  console.log('\n== scenario DB: cross-lens dedup keeps the blocking survivor, not just the first id')
+  const { result } = await run({
+    args: { maxReviewRounds: 1 },
+    initialReview: {
+      correctness: [{ title: 'Nil deref in Load', file: 'src/p.js',
+        claim: 'derefs before the guard', evidence: 'p.js:12' }],
+      advocate: [{ category: 'design', title: 'Load can panic on a missing key', file: 'src/p.js',
+        claim: 'no guard before the dereference', evidence: 'p.js:12-14', reproducer: undefined }],
+    },
+    dedupGroups: [{ ids: ['f2', 'f1'], why: 'same dereference' }],
+    staleness: () => [],
+  })
+  check('halted at Fix (the blocking finding survived dedup)', result.halted_at, 'Fix')
+  check('the blocking correctness finding is the one that opened',
+    result.unresolved_findings?.some(f => f.title === 'Nil deref in Load'), true)
+  check('the non-blocking advocate finding did not absorb it into a note',
+    result.notes?.every(n => n.title !== 'Nil deref in Load'), true)
+}
+
+async function scenarioDC() {
+  console.log('\n== scenario DC: a post-mutation residual reference is rechecked, and reopens if the gate undid the fix')
+  const { result } = await run(convergedWithSuspect({
+    tailReview: [],
+    postMutationReview: [{ title: 'Boundary check excludes the last element', file: 'parser.js',
+      claim: 'the mutation commits reverted the guard', evidence: 'parser.js:14',
+      duplicate_of: 'f1', reproducer: undefined }],
+    mutationResult: () => ({ green: true, head_sha: 'mut0000000000000000000000000000000000001', detail: 'stub green', scored: true }),
+    verify: (id, round) => id === 'f1' ? round !== 'residual:mutation' : undefined,
+  }))
+  check('halted at Review (the mutation gate undid the fix)', result.halted_at, 'Review')
+  check('the reopened finding is reported as unresolved',
+    result.unresolved_findings?.some(f => f.file === 'src/parser.js'), true)
+  check('a residual note is still recorded',
+    result.notes?.some(n => n.reason === 'residual'), true)
+}
+
+async function scenarioDD() {
+  console.log('\n== scenario DD: a residual note with its own failing reproducer opens, even when the settled target still holds')
+  const { result } = await run({
+    args: { maxReviewRounds: 1 },
+    draftPr: { opened: true, number: 31, url: 'https://example.invalid/pr/31', detail: 'stub draft' },
+    initialReview: {
+      correctness: [{ title: 'Off-by-one in parser', file: 'src/parser.js',
+        claim: 'boundary is wrong', evidence: 'parser.js:12' }],
+      advocate: [],
+    },
+    verify: (id) => id === 'f1' ? true : (id === 'f2' ? false : undefined),
+    fixHead: () => 'fix00000000000000000000000000000000000001',
+    tailReview: [{ title: 'The fix introduced a null deref', file: 'src/parser.js',
+      claim: 'the added guard derefs before checking', evidence: 'parser.js:20',
+      duplicate_of: 'f1' }],
+    staleness: () => [],
+  })
+  check('halted at Fix (the residual\'s own reproducer still fails)', result.halted_at, 'Fix')
+  check('the finding that opened is the one the fix introduced',
+    result.unresolved_findings?.some(f => f.title === 'The fix introduced a null deref'), true)
+  check('the original settled finding is not re-reported as unresolved',
+    result.unresolved_findings?.every(f => f.title !== 'Off-by-one in parser'), true)
+}
+
+async function scenarioDE() {
+  console.log('\n== scenario DE: a finding referencing a note is classified on its own merits, not dropped')
+  const { result } = await run({
+    args: { maxReviewRounds: 1 },
+    initialReview: {
+      correctness: [{ title: 'Needs a fix', file: 'x.js', claim: 'c', evidence: 'e' }],
+      advocate: [{ category: 'docs', title: 'Stale comment', file: 'x.js',
+        claim: 'comment names the wrong caller', evidence: 'x.js:3', reproducer: undefined }],
+    },
+    verify: (id) => id === 'f1' ? true : (id === 'f3' ? false : undefined),
+    fixHead: () => 'fix00000000000000000000000000000000000001',
+    tailReview: [{ title: 'Actually a live bug', file: 'x.js', claim: 'c3', evidence: 'e3',
+      duplicate_of: 'f2' }],
+    staleness: () => [],
+  })
+  check('halted at Fix (the reference to a note did not silently drop the new defect)', result.halted_at, 'Fix')
+  check('the finding referencing a note still opened',
+    result.unresolved_findings?.some(f => f.title === 'Actually a live bug'), true)
+  check('the note it referenced is unaffected',
+    result.notes?.some(n => n.title === 'Stale comment' && n.reason === 'category'), true)
+}
+
+async function scenarioDF() {
+  console.log('\n== scenario DF: the known-findings prompt also asks for duplicate_of on a variant of an already-fixed defect')
+  const { captured } = await run({
+    args: { maxReviewRounds: 1 },
+    initialReview: {
+      correctness: [{ title: 'Needs a fix', file: 'x.js', claim: 'c', evidence: 'e' }],
+      advocate: [],
+    },
+    verify: (id) => id === 'f1' ? true : undefined,
+    fixHead: () => 'fix00000000000000000000000000000000000001',
+    staleness: () => [],
+  })
+  const tailPrompt = captured.calls.find(c => c.label.startsWith('review:fix:1:'))?.prompt ?? ''
+  check('the prompt also asks for a variant of an already-fixed defect',
+    tailPrompt.includes('variant'), true)
+}
+
+async function scenarioDG() {
+  console.log('\n== scenario DG: a failed hunk fetch is unmeasured, not read as an empty, in-range-nowhere diff')
+  const { result } = await run({
+    args: { maxReviewRounds: 1 },
+    initialReview: {
+      correctness: [{ title: 'Needs a fix', file: 'x.js', claim: 'c', evidence: 'e' }],
+      advocate: [],
+    },
+    verify: (id) => id === 'f1' ? true : undefined,
+    fixHead: () => 'fix00000000000000000000000000000000000001',
+    hunks: () => undefined,
+    tailReview: [{ title: 'Fresh defect', file: 'x.js', claim: 'c2', evidence: 'e2', line_start: 500 }],
+    staleness: () => [],
+  })
+  check('halted at Fix (an unmeasured range does not classify as out-of-range)', result.halted_at, 'Fix')
+  check('the fresh finding opened rather than being dismissed as out-of-range',
+    result.unresolved_findings?.some(f => f.title === 'Fresh defect'), true)
+}
+
+// Scenario DH -- gh-106: unmet-criterion's evidence is the quote alone, so a
+// lens that follows the prompt and omits a reproducer must not crash the
+// executor or the fix brief, both of which used to read reproducer.command
+// unconditionally.
+async function scenarioDH() {
+  console.log('\n== scenario DH: an unmet-criterion finding with a verbatim quote and no reproducer of its own still opens')
+  const { result } = await run({
+    ticketResult: { found: true, summary: 'stub', comments: '',
+      description: 'Acceptance: the client must retry on a 503 with backoff.' },
+    initialReview: {
+      correctness: [
+        { category: 'unmet-criterion', title: 'Missing retry path', file: 'a.js',
+          claim: 'the retry path was never implemented', evidence: 'a.js:1',
+          criterion_quote: 'the client must retry on a 503 with backoff',
+          reproducer: undefined },
+      ],
+      advocate: [],
+    },
+  })
+  check('halted at Fix (an unmet-criterion finding needs only its quote)', result.halted_at, 'Fix')
+  check('the finding opened without a reproducer of its own',
+    result.unresolved_findings?.some(f => f.title === 'Missing retry path'), true)
+}
+
 for (const scenario of [scenarioA, scenarioB, scenarioG, scenarioC, scenarioD, scenarioE, scenarioH,
                         scenarioI, scenarioJ, scenarioK, scenarioL, scenarioM, scenarioN,
                         scenarioO, scenarioP, scenarioQ, scenarioR, scenarioS, scenarioT,
@@ -2941,7 +3139,8 @@ for (const scenario of [scenarioA, scenarioB, scenarioG, scenarioC, scenarioD, s
                         scenarioCC, scenarioCD, scenarioCE, scenarioCG,
                         scenarioCH, scenarioCI, scenarioCJ, scenarioCK, scenarioCL, scenarioCM, scenarioCN, scenarioCO,
                         scenarioCP, scenarioCQ, scenarioCR, scenarioCS, scenarioCT, scenarioCU, scenarioCV,
-                        scenarioCW, scenarioCX, scenarioCY]) {
+                        scenarioCW, scenarioCX, scenarioCY, scenarioCZ, scenarioDA, scenarioDB,
+                        scenarioDC, scenarioDD, scenarioDE, scenarioDF, scenarioDG, scenarioDH]) {
   await scenario()
 }
 
