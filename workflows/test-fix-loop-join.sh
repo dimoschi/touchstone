@@ -4251,6 +4251,83 @@ async function scenarioFK() {
     result.notes?.filter(n => n.reason === 'residual').length, 1)
 }
 
+// Scenarios FL-FN -- gh-113: a dirty retry must not throw away what the
+// first call (clean, at the same head) already measured. Each covers one of
+// executeAndDispose's three callers: the retry here only ever covers the
+// notExecuted subset, so the other candidates' verdicts from the first call
+// have to reach the halt.
+async function scenarioFL() {
+  console.log('\n== scenario FL: gh-113 -- a dirty retry at the initial review still carries the first call\'s reproduced finding and note')
+  const { result } = await run({
+    initialReview: {
+      correctness: [
+        { title: 'Reproduced on the first call', file: 'a.js', claim: 'c1', evidence: 'e1' },
+        { title: 'Dropped on the first call', file: 'b.js', claim: 'c2', evidence: 'e2' },
+        { title: 'Passed on the first call', file: 'c.js', claim: 'c3', evidence: 'e3' },
+      ],
+      advocate: [],
+    },
+    initialExit: (id) => ({ f1: 1, f2: undefined, f3: 0 })[id],
+    dirtyAt: 'reproduce:review:retry',
+  })
+  check('halted at Review', result.halted_at, 'Review')
+  check('the dirty halt still carries the finding the first call reproduced',
+    result.unresolved_findings?.some(f => f.title === 'Reproduced on the first call'), true)
+  check('the dirty halt still carries the first call\'s did-not-reproduce note',
+    result.notes?.some(n => n.title === 'Passed on the first call' && n.reason === 'did-not-reproduce'), true)
+}
+
+async function scenarioFM() {
+  console.log('\n== scenario FM: gh-113 -- a dirty retry on a fresh fix-round candidate still carries the first call\'s reproduced finding and note')
+  const { result } = await run({
+    args: { maxReviewRounds: 3 },
+    initialReview: {
+      correctness: [{ title: 'Off-by-one in parser', file: 'src/parser.js',
+        claim: 'boundary is wrong', evidence: 'parser.js:12' }],
+      advocate: [],
+    },
+    verify: (id) => id === 'f1' ? false : ({ f2: 1, f3: 'norow', f4: 0 })[id],
+    fixHead: () => 'fix00000000000000000000000000000000000001',
+    tailReview: [
+      { title: 'Reproduced in the fix', file: 'src/guard.js', claim: 'c2', evidence: 'e2' },
+      { title: 'Dropped in the fix', file: 'src/guard2.js', claim: 'c3', evidence: 'e3' },
+      { title: 'Passed in the fix', file: 'src/guard3.js', claim: 'c4', evidence: 'e4' },
+    ],
+    dirtyAt: 'reproduce:fix:1:fresh:retry',
+    staleness: () => [],
+  })
+  check('halted at Fix', result.halted_at, 'Fix')
+  check('the original finding stays open',
+    result.unresolved_findings?.some(f => f.title === 'Off-by-one in parser'), true)
+  check('the dirty halt still carries the fresh finding the first call reproduced',
+    result.unresolved_findings?.some(f => f.title === 'Reproduced in the fix'), true)
+  check('the dirty halt still carries the first call\'s did-not-reproduce note',
+    result.notes?.some(n => n.title === 'Passed in the fix' && n.reason === 'did-not-reproduce'), true)
+  check('fix_rounds is 1', result.fix_rounds, 1)
+}
+
+async function scenarioFN() {
+  console.log('\n== scenario FN: gh-113 -- a dirty retry on a fresh post-mutation candidate still carries the first call\'s reproduced finding and note')
+  const { result } = await run({
+    initialReview: { correctness: [], advocate: [] },
+    mutationGated: true,
+    mutationResult: () => ({ green: true, head_sha: 'mut0000000000000000000000000000000000001',
+      detail: 'stub green', scored: true }),
+    postMutationReview: [
+      { title: 'Reproduced post-mutation', file: 'a.js', claim: 'c1', evidence: 'e1' },
+      { title: 'Dropped post-mutation', file: 'b.js', claim: 'c2', evidence: 'e2' },
+      { title: 'Passed post-mutation', file: 'c.js', claim: 'c3', evidence: 'e3' },
+    ],
+    verify: (id, round) => round === 'mutation' ? ({ f1: 1, f2: 'norow', f3: 0 })[id] : undefined,
+    dirtyAt: 'reproduce:mutation:fresh:retry',
+  })
+  check('halted at Review', result.halted_at, 'Review')
+  check('the dirty halt still carries the finding the first call reproduced',
+    result.unresolved_findings?.some(f => f.title === 'Reproduced post-mutation'), true)
+  check('the dirty halt still carries the first call\'s did-not-reproduce note',
+    result.notes?.some(n => n.title === 'Passed post-mutation' && n.reason === 'did-not-reproduce'), true)
+}
+
 for (const scenario of [scenarioA, scenarioB, scenarioG, scenarioC, scenarioD, scenarioE, scenarioH,
                         scenarioI, scenarioJ, scenarioK, scenarioL, scenarioM, scenarioN,
                         scenarioO, scenarioP, scenarioQ, scenarioR, scenarioS, scenarioT,
@@ -4279,7 +4356,7 @@ for (const scenario of [scenarioA, scenarioB, scenarioG, scenarioC, scenarioD, s
                         scenarioEG, scenarioEH, scenarioEI, scenarioEJ, scenarioEK, scenarioEL,
                         scenarioEM, scenarioEN, scenarioEO,
                         scenarioFA, scenarioFB, scenarioFC, scenarioFD, scenarioFE, scenarioFF, scenarioFG,
-                        scenarioFH, scenarioFI, scenarioFJ, scenarioFK]) {
+                        scenarioFH, scenarioFI, scenarioFJ, scenarioFK, scenarioFL, scenarioFM, scenarioFN]) {
   await scenario()
 }
 

@@ -2329,10 +2329,13 @@ const executeAtHead = async (items, label, diffRange) => {
 // A reproducer run that leaves the tree dirty halts outright: a check that
 // writes to the tree (a ledger, a generated file, a mutated fixture) must not
 // be silently carried into whatever commits next, the same principle
-// runChecks already applies to the repo's own discovered checks.
-const dirtyReproducerHalt = async (phaseName, exec) => halted(phaseName, {
+// runChecks already applies to the repo's own discovered checks. extraOpen is
+// for a caller (the post-mutation site) whose first-call verdicts live in a
+// local variable rather than the closed-over `open`, so they still reach the
+// halt instead of being silently dropped alongside it.
+const dirtyReproducerHalt = async (phaseName, exec, extraOpen = []) => halted(phaseName, {
   plan: plan.plan, implemented: impl.summary, gates: gatesPayload(),
-  unresolved_findings: open, notes, fix_rounds: round,
+  unresolved_findings: [...open, ...extraOpen], notes, fix_rounds: round,
   note: exec.preexisting
     ? `The working tree was already dirty before this check ran, so nothing ` +
       `it did caused it: ${exec.porcelain || '(no detail returned)'}. Find ` +
@@ -2395,17 +2398,21 @@ const disposeCandidates = (candidates, runs, round) => {
 // executeAtHead call. Its rows are merged into the first call's before
 // reclassifying the whole batch, so a candidate the retry did measure counts
 // on that verdict and one still missing surfaces in notExecuted for the
-// caller to halt on; a dirty result from either call is returned as-is for
-// the caller to turn into a dirtyReproducerHalt at its own phase.
+// caller to halt on. A dirty result from the first call has no verdicts to
+// carry (disposeCandidates never ran). A dirty retry is narrower -- the retry
+// only ever covers the notExecuted subset -- so the first call's opened and
+// asNotes, already measured clean at this same head, ride along on the dirty
+// result instead of being dropped; the caller folds them in before turning
+// the result into a dirtyReproducerHalt at its own phase.
 const executeAndDispose = async (candidates, label, round) => {
   const exec = await executeAtHead(candidates, label)
-  if (exec.dirty) return { dirty: true, exec }
+  if (exec.dirty) return { dirty: true, exec, opened: [], asNotes: [] }
   const first = disposeCandidates(candidates, exec.runs, round)
   if (!first.notExecuted.length) return { dirty: false, ...first }
   const retryIds = new Set(first.notExecuted.map(f => f.id))
   const retryCandidates = candidates.filter(f => retryIds.has(f.id))
   const retryExec = await executeAtHead(retryCandidates, `${label}:retry`)
-  if (retryExec.dirty) return { dirty: true, exec: retryExec }
+  if (retryExec.dirty) return { dirty: true, exec: retryExec, opened: first.opened, asNotes: first.asNotes }
   const merged = new Map(exec.runs)
   for (const [id, row] of retryExec.runs) merged.set(id, row)
   return { dirty: false, ...disposeCandidates(candidates, merged, round) }
@@ -2442,9 +2449,9 @@ if (reviewerCount) {
   notes.push(...freshNotes)
   if (candidates.length) {
     const disposed = await executeAndDispose(candidates, 'reproduce:review', 0)
-    if (disposed.dirty) { sReview.close(); return await dirtyReproducerHalt('Review', disposed.exec) }
     open.push(...disposed.opened)
     notes.push(...disposed.asNotes)
+    if (disposed.dirty) { sReview.close(); return await dirtyReproducerHalt('Review', disposed.exec) }
     if (disposed.notExecuted.length) {
       sReview.close()
       return await notExecutedHalt('Review', disposed.notExecuted, {
@@ -2684,10 +2691,10 @@ while ((open.length || blockingChecksOpen()) && round < MAX_REVIEW_ROUNDS && !ou
     notes.push(...freshNotes)
     if (candidates.length) {
       const disposed = await executeAndDispose(candidates, `reproduce:fix:${round}:fresh`, round)
-      if (disposed.dirty) { sFix.close(); return await dirtyReproducerHalt('Fix', disposed.exec) }
       if (disposed.opened.length) log(`round ${round}: the fix itself introduced ${disposed.opened.length} new finding(s)`)
       open = open.concat(disposed.opened)
       notes.push(...disposed.asNotes)
+      if (disposed.dirty) { sFix.close(); return await dirtyReproducerHalt('Fix', disposed.exec) }
       if (disposed.notExecuted.length) {
         sFix.close()
         return await notExecutedHalt('Fix', disposed.notExecuted, {
@@ -2966,9 +2973,9 @@ if (reviewerCount && mutHead && mutHead !== reviewedThrough && !outOfBudget()) {
   let freshOpen = []
   if (candidates.length) {
     const disposed = await executeAndDispose(candidates, 'reproduce:mutation:fresh', 'mutation')
-    if (disposed.dirty) return await dirtyReproducerHalt('Review', disposed.exec)
     freshOpen = disposed.opened
     notes.push(...disposed.asNotes)
+    if (disposed.dirty) return await dirtyReproducerHalt('Review', disposed.exec, freshOpen)
     if (disposed.notExecuted.length) {
       return await notExecutedHalt('Review', disposed.notExecuted, {
         mutation, unresolved_findings: [...freshOpen, ...disposed.notExecuted],
