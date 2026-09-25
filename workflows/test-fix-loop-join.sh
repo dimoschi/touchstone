@@ -397,6 +397,17 @@ function idsIn(prompt) {
   return [...prompt.matchAll(/\[(f\d+)\]/g)].map(m => m[1])
 }
 
+// baseArgs()'s branch/branch:existing defaults both put the worktree here.
+const STUB_WT_PATH = '/tmp/stub-worktree'
+
+// The exact Bash invocation deliver-pipeline.js's own invocationFor builds
+// for a check. A checkRuns stub uses this so a scenario testing the happy
+// path does not have to duplicate the string, and a scenario testing the
+// command-mismatch path can diverge from it on purpose.
+function checkInvocation(command, path = STUB_WT_PATH) {
+  return `bash -c 'cd ${path} && ${command}'`
+}
+
 // Every finding literal in this file predates category and reproducer; both
 // are now required for a finding to ever open. Filling in a default here
 // (overridable per finding, since a scenario testing the category or
@@ -574,7 +585,8 @@ function makeAgent(scenario, captured) {
         mutation_gated: scenario.mutationGated ?? false, detail: 'stub' }
     }
     if (label === 'checks:discover') {
-      return scenario.discovery ?? { checks: [], detail: 'stub: no repo checks' }
+      if (scenario.discoveryFails) return null
+      return scenario.discovery ?? { file: '', sections: [], detail: 'stub: no repo checks' }
     }
     if (label.startsWith('checks:run:')) {
       const attempt = Number(label.slice('checks:run:'.length))
@@ -2258,15 +2270,15 @@ async function scenarioBU() {
   console.log('\n== scenario BU: a check green at baseline and red after Implement is fixed before Review, with no reviewer finding')
   const { result, captured } = await run({
     args: { openPr: true },
-    discovery: { checks: [{ name: 'run-tests.sh', command: 'bash scripts/run-tests.sh' }],
-      detail: 'stub: found in AGENTS.md Commands' },
+    discovery: { file: '/repo/AGENTS.md',
+      sections: [{ heading: '## Checks', fence: 'bash scripts/run-tests.sh' }], detail: 'stub' },
     checkRuns: (attempt) => attempt === 1
-      ? { results: [{ name: 'run-tests.sh', command: 'bash scripts/run-tests.sh',
+      ? { results: [{ id: 'check:1', command: checkInvocation('bash scripts/run-tests.sh'),
           exit_code: 0, output: 'ok' }], dirty: false }
       : attempt === 2
-      ? { results: [{ name: 'run-tests.sh', command: 'bash scripts/run-tests.sh',
+      ? { results: [{ id: 'check:1', command: checkInvocation('bash scripts/run-tests.sh'),
           exit_code: 1, output: 'FAILURE: workflows/ changed with no version bump' }], dirty: false }
-      : { results: [{ name: 'run-tests.sh', command: 'bash scripts/run-tests.sh',
+      : { results: [{ id: 'check:1', command: checkInvocation('bash scripts/run-tests.sh'),
           exit_code: 0, output: 'OK' }], dirty: false },
     checksFixResult: { head_sha: 'checksfix00000000000000000000000000000002',
       note: 'bumped the version', scored: true },
@@ -2303,9 +2315,9 @@ async function scenarioBV() {
   console.log('\n== scenario BV: a check red at baseline is dropped as environmental and never reaches a fixer')
   const { result, captured } = await run({
     args: { maxReviewRounds: 1 },
-    discovery: { checks: [{ name: 'run-go-tests.sh', command: 'bash scripts/run-go-tests.sh' }],
-      detail: 'stub' },
-    checkRuns: () => ({ results: [{ name: 'run-go-tests.sh', command: 'bash scripts/run-go-tests.sh',
+    discovery: { file: '/repo/AGENTS.md',
+      sections: [{ heading: '## Checks', fence: 'bash scripts/run-go-tests.sh' }], detail: 'stub' },
+    checkRuns: () => ({ results: [{ id: 'check:1', command: checkInvocation('bash scripts/run-go-tests.sh'),
       exit_code: 1, output: 'go: command not found' }], dirty: false }),
     initialReview: {
       correctness: [{ title: 'Off-by-one', file: 'src/parser.js',
@@ -2336,8 +2348,9 @@ async function scenarioBV() {
 async function scenarioCA() {
   console.log('\n== scenario CA: a check that dirties the tree during the baseline halts before Implement')
   const { result, captured } = await run({
-    discovery: { checks: [{ name: 'gen.sh', command: 'bash gen.sh' }], detail: 'stub' },
-    checkRuns: () => ({ results: [{ name: 'gen.sh', command: 'bash gen.sh', exit_code: 0, output: 'ok' }],
+    discovery: { file: '/repo/AGENTS.md',
+      sections: [{ heading: '## Checks', fence: 'bash gen.sh' }], detail: 'stub' },
+    checkRuns: () => ({ results: [{ id: 'check:1', command: checkInvocation('bash gen.sh'), exit_code: 0, output: 'ok' }],
       dirty: true, porcelain: '?? generated.txt' }),
   })
   check('halted before any implementation ran', result.halted_at, 'Implement')
@@ -2357,20 +2370,20 @@ async function scenarioCA() {
 async function scenarioCB() {
   console.log('\n== scenario CB: a check the runner never reported on is red, not green')
   const { result, captured } = await run({
-    discovery: { checks: [{ name: 'a.sh', command: 'bash a.sh' },
-                          { name: 'b.sh', command: 'bash b.sh' }], detail: 'stub' },
+    discovery: { file: '/repo/AGENTS.md',
+      sections: [{ heading: '## Checks', fence: 'bash a.sh\nbash b.sh' }], detail: 'stub' },
     checkRuns: (attempt) => attempt === 1
-      ? ({ results: [{ name: 'a.sh', command: 'bash a.sh', exit_code: 0, output: 'ok' },
-                     { name: 'b.sh', command: 'bash b.sh', exit_code: 0, output: 'ok' }] })
-      : ({ results: [{ name: 'a.sh', command: 'bash a.sh', exit_code: 0, output: 'ok' }] }),
+      ? ({ results: [{ id: 'check:1', command: checkInvocation('bash a.sh'), exit_code: 0, output: 'ok' },
+                     { id: 'check:2', command: checkInvocation('bash b.sh'), exit_code: 0, output: 'ok' }] })
+      : ({ results: [{ id: 'check:1', command: checkInvocation('bash a.sh'), exit_code: 0, output: 'ok' }] }),
     initialReview: { correctness: [], advocate: [] },
     verify: () => undefined,
     staleness: () => [],
   })
   const fix = captured.calls.find(c => c.label === 'checks:fix')?.prompt ?? ''
   check('the checks-only fix ran rather than the run reaching PR', fix.length > 0, true)
-  check('the unreported check is the one raised', fix.includes('b.sh'), true)
-  check('the reported green one is not', fix.includes('a.sh'), false)
+  check('the unreported check is the one raised', fix.includes('bash b.sh'), true)
+  check('the reported green one is not', fix.includes('bash a.sh'), false)
   check('it says no result came back, rather than inventing an exit code',
     fix.includes('no result was reported for this check'), true)
   check('the run did not reach PR reporting everything green',
@@ -2398,8 +2411,9 @@ async function scenarioBX() {
   console.log('\n== scenario BX: existingBranch skips the baseline and never blocks on a discovered check')
   const { result, captured } = await run({
     args: { existingBranch: true, openPr: true },
-    discovery: { checks: [{ name: 'lint.sh', command: 'bash scripts/lint.sh' }], detail: 'stub' },
-    checkRuns: () => ({ results: [{ name: 'lint.sh', command: 'bash scripts/lint.sh',
+    discovery: { file: '/repo/AGENTS.md',
+      sections: [{ heading: '## Checks', fence: 'bash scripts/lint.sh' }], detail: 'stub' },
+    checkRuns: () => ({ results: [{ id: 'check:1', command: checkInvocation('bash scripts/lint.sh'),
       exit_code: 1, output: 'lint: 3 problems' }], dirty: false }),
     prResult: { opened: true, url: 'https://example.invalid/pr/38x', note: 'stub ready' },
   })
@@ -2420,10 +2434,11 @@ async function scenarioBY() {
   console.log('\n== scenario BY: oversized check output is truncated with head and tail kept, middle marked')
   const bigOutput = 'HEAD_MARKER' + 'x'.repeat(5000) + 'MIDDLE_MARKER_XYZ' + 'y'.repeat(15000) + 'TAIL_MARKER'
   const { captured } = await run({
-    discovery: { checks: [{ name: 'run-tests.sh', command: 'bash scripts/run-tests.sh' }], detail: 'stub' },
+    discovery: { file: '/repo/AGENTS.md',
+      sections: [{ heading: '## Checks', fence: 'bash scripts/run-tests.sh' }], detail: 'stub' },
     checkRuns: (attempt) => attempt === 1
-      ? { results: [{ name: 'run-tests.sh', command: 'bash scripts/run-tests.sh', exit_code: 0, output: 'ok' }], dirty: false }
-      : { results: [{ name: 'run-tests.sh', command: 'bash scripts/run-tests.sh', exit_code: 1, output: bigOutput }], dirty: false },
+      ? { results: [{ id: 'check:1', command: checkInvocation('bash scripts/run-tests.sh'), exit_code: 0, output: 'ok' }], dirty: false }
+      : { results: [{ id: 'check:1', command: checkInvocation('bash scripts/run-tests.sh'), exit_code: 1, output: bigOutput }], dirty: false },
   })
   const checksFix = captured.calls.find(c => c.label === 'checks:fix')?.prompt ?? ''
   check('the pre-review fix ran', checksFix.length > 0, true)
@@ -2440,10 +2455,11 @@ async function scenarioBY() {
 async function scenarioBZ() {
   console.log('\n== scenario BZ: a non-zero exit code (4, could-not-measure) is treated as red')
   const { captured } = await run({
-    discovery: { checks: [{ name: 'coverage-gate.sh', command: 'bash scripts/coverage-gate.sh' }], detail: 'stub' },
+    discovery: { file: '/repo/AGENTS.md',
+      sections: [{ heading: '## Checks', fence: 'bash scripts/coverage-gate.sh' }], detail: 'stub' },
     checkRuns: (attempt) => attempt === 1
-      ? { results: [{ name: 'coverage-gate.sh', command: 'bash scripts/coverage-gate.sh', exit_code: 0, output: 'ok' }], dirty: false }
-      : { results: [{ name: 'coverage-gate.sh', command: 'bash scripts/coverage-gate.sh', exit_code: 4, output: 'could not measure' }], dirty: false },
+      ? { results: [{ id: 'check:1', command: checkInvocation('bash scripts/coverage-gate.sh'), exit_code: 0, output: 'ok' }], dirty: false }
+      : { results: [{ id: 'check:1', command: checkInvocation('bash scripts/coverage-gate.sh'), exit_code: 4, output: 'could not measure' }], dirty: false },
   })
   check('a check that merely ran, exit 4, still triggers the pre-review fix', callCount(captured, 'checks:fix'), 1)
   const checksFix = captured.calls.find(c => c.label === 'checks:fix')?.prompt ?? ''
@@ -3287,6 +3303,260 @@ async function scenarioDP() {
   check('the settled recheck ran at the mutation head', callCount(captured, 'reproduce:settled:mutation'), 1)
 }
 
+// Scenarios DQ-DV -- #109: only a heading that equals '## Checks', trailing
+// whitespace aside, is ever read as a check list. Each of these resembles it
+// closely enough that a looser match would have caught it.
+async function scenarioDQ() {
+  console.log('\n== scenario DQ: a "## Commands" heading is not read as checks')
+  const { result, captured } = await run({
+    discovery: { file: '/repo/AGENTS.md',
+      sections: [{ heading: '## Commands', fence: 'bash scripts/run-tests.sh' }], detail: 'stub' },
+  })
+  check('no check-run call was made', callCount(captured, 'checks:run:1'), 0)
+  check('zero checks discovered', result.checks?.discovered, 0)
+  check('the run does not halt', result.halted_at, undefined)
+  check('a log line explains the ## Commands heading is no longer read as checks',
+    captured.logs.some(l => l.includes('## Commands') && l.includes('no longer read as checks')), true)
+}
+
+async function scenarioDR() {
+  console.log('\n== scenario DR: a "## Build & Development Commands" heading is not read as checks')
+  const { result, captured } = await run({
+    discovery: { file: '/repo/AGENTS.md',
+      sections: [{ heading: '## Build & Development Commands', fence: 'bash scripts/run-tests.sh' }], detail: 'stub' },
+  })
+  check('no check-run call was made', callCount(captured, 'checks:run:1'), 0)
+  check('zero checks discovered', result.checks?.discovered, 0)
+  check('the run does not halt', result.halted_at, undefined)
+}
+
+async function scenarioDS() {
+  console.log('\n== scenario DS: a "### Checks" heading (wrong level) is not read as checks')
+  const { result, captured } = await run({
+    discovery: { file: '/repo/AGENTS.md',
+      sections: [{ heading: '### Checks', fence: 'bash scripts/run-tests.sh' }], detail: 'stub' },
+  })
+  check('no check-run call was made', callCount(captured, 'checks:run:1'), 0)
+  check('zero checks discovered', result.checks?.discovered, 0)
+  check('the run does not halt', result.halted_at, undefined)
+}
+
+async function scenarioDT() {
+  console.log('\n== scenario DT: a "## checks" heading (wrong case) is not read as checks')
+  const { result, captured } = await run({
+    discovery: { file: '/repo/AGENTS.md',
+      sections: [{ heading: '## checks', fence: 'bash scripts/run-tests.sh' }], detail: 'stub' },
+  })
+  check('no check-run call was made', callCount(captured, 'checks:run:1'), 0)
+  check('zero checks discovered', result.checks?.discovered, 0)
+  check('the run does not halt', result.halted_at, undefined)
+}
+
+async function scenarioDU() {
+  console.log('\n== scenario DU: a "##Checks" heading (no space) is not read as checks')
+  const { result, captured } = await run({
+    discovery: { file: '/repo/AGENTS.md',
+      sections: [{ heading: '##Checks', fence: 'bash scripts/run-tests.sh' }], detail: 'stub' },
+  })
+  check('no check-run call was made', callCount(captured, 'checks:run:1'), 0)
+  check('zero checks discovered', result.checks?.discovered, 0)
+  check('the run does not halt', result.halted_at, undefined)
+}
+
+async function scenarioDV() {
+  console.log('\n== scenario DV: a "# Checks" heading (wrong level) is not read as checks')
+  const { result, captured } = await run({
+    discovery: { file: '/repo/AGENTS.md',
+      sections: [{ heading: '# Checks', fence: 'bash scripts/run-tests.sh' }], detail: 'stub' },
+  })
+  check('no check-run call was made', callCount(captured, 'checks:run:1'), 0)
+  check('zero checks discovered', result.checks?.discovered, 0)
+  check('the run does not halt', result.halted_at, undefined)
+}
+
+// Scenario DW -- #109: when both headings exist, '## Commands' is simply
+// irrelevant, not a second source and not a notice: only the '## Checks'
+// section's own fence ever runs.
+async function scenarioDW() {
+  console.log('\n== scenario DW: a "## Commands" heading alongside "## Checks" is ignored, with no notice logged')
+  const { result, captured } = await run({
+    discovery: { file: '/repo/AGENTS.md',
+      sections: [
+        { heading: '## Commands', fence: 'bash scripts/should-not-run.sh' },
+        { heading: '## Checks', fence: 'bash scripts/run-tests.sh' },
+      ], detail: 'stub' },
+    checkRuns: () => ({ results: [{ id: 'check:1', command: checkInvocation('bash scripts/run-tests.sh'),
+      exit_code: 0, output: 'ok' }], dirty: false }),
+  })
+  check('one check discovered, from ## Checks only', result.checks?.discovered, 1)
+  check('the ## Commands notice is not logged when ## Checks is present',
+    captured.logs.some(l => l.includes('no longer read as checks')), false)
+  check('the baseline ran the ## Checks command', callCount(captured, 'checks:run:1'), 1)
+}
+
+// Scenario DX -- #109: splitting a fence into commands is script code, not
+// the model's account of it. Blank lines, a full-line comment, a trailing
+// comment, surrounding whitespace, CRLF line endings and a quoted '#' are
+// all exercised in one fence, and the ordered result must reflect exactly
+// three real commands.
+async function scenarioDX() {
+  console.log('\n== scenario DX: fence parsing keeps only real commands, in order, past comments, blanks, whitespace and CRLF')
+  const fence = '  bash scripts/run-tests.sh  \r\n' +
+    '\r\n' +
+    '# full line comment\r\n' +
+    'bash scripts/lint.sh # trailing comment\r\n' +
+    '\r\n' +
+    "bash scripts/echo.sh 'a # b'\r\n"
+  const { captured } = await run({
+    discovery: { file: '/repo/AGENTS.md', sections: [{ heading: '## Checks', fence }], detail: 'stub' },
+    checkRuns: () => ({ results: [
+      { id: 'check:1', command: checkInvocation('bash scripts/run-tests.sh'), exit_code: 0, output: 'ok' },
+      { id: 'check:2', command: checkInvocation('bash scripts/lint.sh'), exit_code: 0, output: 'ok' },
+      { id: 'check:3', command: checkInvocation("bash scripts/echo.sh 'a # b'"), exit_code: 0, output: 'ok' },
+    ], dirty: false }),
+  })
+  const runPrompt = captured.calls.find(c => c.label === 'checks:run:1')?.prompt ?? ''
+  const expectedOrder = [
+    'check:1: ' + checkInvocation('bash scripts/run-tests.sh'),
+    'check:2: ' + checkInvocation('bash scripts/lint.sh'),
+    'check:3: ' + checkInvocation("bash scripts/echo.sh 'a # b'"),
+  ]
+  check('exactly three checks, each with the expected trimmed command',
+    expectedOrder.every(line => runPrompt.includes(line)), true)
+  check('the ordered command list is preserved',
+    expectedOrder.every((line, i) => i === 0 || runPrompt.indexOf(expectedOrder[i - 1]) < runPrompt.indexOf(line)), true)
+  check('the full-line comment and blank lines produced no fourth check',
+    runPrompt.includes('check:4'), false)
+}
+
+// Scenario DY -- #109: the discover prompt names the worktree's own AGENTS.md
+// and CLAUDE.md by absolute path, never the --git-common-dir root the gate
+// markers use.
+async function scenarioDY() {
+  console.log('\n== scenario DY: the checks:discover prompt names the worktree path, never git-common-dir')
+  const { captured } = await run({
+    discovery: { file: '', sections: [], detail: 'stub' },
+  })
+  const discoverPrompt = captured.calls.find(c => c.label === 'checks:discover')?.prompt ?? ''
+  check('it names the worktree AGENTS.md by absolute path', discoverPrompt.includes(`${STUB_WT_PATH}/AGENTS.md`), true)
+  check('it names the worktree CLAUDE.md by absolute path', discoverPrompt.includes(`${STUB_WT_PATH}/CLAUDE.md`), true)
+  check('it never mentions git-common-dir', discoverPrompt.includes('git-common-dir'), false)
+  const gateOptInPrompt = captured.calls.find(c => c.label === 'gate:opt-in')?.prompt ?? ''
+  check('the gate opt-in probe still resolves from git-common-dir', gateOptInPrompt.includes('git-common-dir'), true)
+}
+
+// Scenario DZ -- #109: existingBranch resumes a worktree at a path distinct
+// from the default stub path; the discover prompt must name that path, not
+// a hardcoded one.
+async function scenarioDZ() {
+  console.log('\n== scenario DZ: existingBranch at a distinct worktree path is named in the discover prompt')
+  const { captured } = await run({
+    args: { existingBranch: true },
+    existingBranchResult: { created: true, branch: 'feat/gh-21-stub', base: 'main',
+      path: '/tmp/distinct-worktree', ticket: '21', detail: 'stub' },
+    discovery: { file: '', sections: [], detail: 'stub' },
+  })
+  const discoverPrompt = captured.calls.find(c => c.label === 'checks:discover')?.prompt ?? ''
+  check('it names the distinct worktree\'s AGENTS.md path', discoverPrompt.includes('/tmp/distinct-worktree/AGENTS.md'), true)
+  check('it never mentions git-common-dir', discoverPrompt.includes('git-common-dir'), false)
+}
+
+// Scenario EA -- #109: two identical command lines are two distinct checks,
+// each with its own id. Baseline drop is by id, so dropping the one that is
+// genuinely red at baseline must never sweep away its identical twin, and
+// both must get a real, separate result afterwards.
+async function scenarioEA() {
+  console.log('\n== scenario EA: a repeated full command stays two distinct checks; only the one red at baseline drops')
+  const { result, captured } = await run({
+    discovery: { file: '/repo/AGENTS.md',
+      sections: [{ heading: '## Checks', fence: 'make test\nmake lint\nmake test' }], detail: 'stub' },
+    checkRuns: (attempt) => attempt === 1
+      ? { results: [
+          { id: 'check:1', command: checkInvocation('make test'), exit_code: 0, output: 'ok' },
+          { id: 'check:2', command: checkInvocation('make lint'), exit_code: 1, output: 'lint failed' },
+          { id: 'check:3', command: checkInvocation('make test'), exit_code: 0, output: 'ok' },
+        ], dirty: false }
+      : { results: [
+          { id: 'check:1', command: checkInvocation('make test'), exit_code: 0, output: 'ok again' },
+          { id: 'check:3', command: checkInvocation('make test'), exit_code: 0, output: 'ok again' },
+        ], dirty: false },
+  })
+  check('two checks remain after the baseline drops the failing lint check', result.checks?.discovered, 2)
+  check('the drop is reported as environmental',
+    (result.checks?.detail ?? '').includes('dropped 1 as environmental'), true)
+  check('the dropped id is check:2', (result.checks?.detail ?? '').includes('check:2'), true)
+  check('no red check remains: both duplicate test entries passed', result.checks?.red?.length, 0)
+  const secondRun = captured.calls.find(c => c.label === 'checks:run:2')?.prompt ?? ''
+  check('the second run asks for both surviving duplicate ids separately',
+    secondRun.includes('check:1:') && secondRun.includes('check:3:'), true)
+  check('the run does not halt', result.halted_at, undefined)
+}
+
+// Scenario EB -- #109: the script builds each check's exact Bash invocation
+// itself; a reported command that merely resembles it (an extra `timeout`)
+// is not measured, is never a pass, and is never dropped as the repo's own
+// environment -- an unmeasured row is not evidence either way.
+async function scenarioEB() {
+  console.log('\n== scenario EB: a mismatched reported command is not measured, never a pass, and never dropped at baseline')
+  const { result, captured } = await run({
+    discovery: { file: '/repo/AGENTS.md',
+      sections: [{ heading: '## Checks', fence: 'make run' }], detail: 'stub' },
+    checkRuns: () => ({ results: [{ id: 'check:1', command: 'timeout 10 make run', exit_code: 0, output: 'ok' }], dirty: false }),
+    initialReview: { correctness: [], advocate: [] },
+    verify: () => undefined,
+    staleness: () => [],
+  })
+  check('the check was not dropped at baseline: still discovered', result.checks?.discovered, 1)
+  check('the baseline detail does not claim anything was dropped',
+    (result.checks?.detail ?? '').includes('dropped'), false)
+  const fix = captured.calls.find(c => c.label === 'checks:fix')?.prompt ?? ''
+  check('the mismatch blocks like a red check: the pre-review fixer ran', fix.length > 0, true)
+  check('the fix prompt states the invocation that was expected',
+    fix.includes(checkInvocation('make run')), true)
+  check('the fix prompt carries the mismatched command actually reported',
+    fix.includes('timeout 10 make run'), true)
+  check('it is reported as not measured, never as a pass', fix.includes('not measured'), true)
+}
+
+// Scenarios EC-EE -- #109: the three remaining zero-checks cases, each
+// logged and none a halt.
+async function scenarioEC() {
+  console.log('\n== scenario EC: neither AGENTS.md nor CLAUDE.md exists gives zero checks, logged, no halt')
+  const { result, captured } = await run({
+    discovery: { file: '', sections: [], detail: 'stub' },
+  })
+  check('no check-run call was made', callCount(captured, 'checks:run:1'), 0)
+  check('zero checks discovered', result.checks?.discovered, 0)
+  check('the run does not halt', result.halted_at, undefined)
+  check('a log line gives the reason',
+    captured.logs.some(l => l.includes('no repo-advertised checks found') && l.includes('neither AGENTS.md nor CLAUDE.md exists')), true)
+}
+
+async function scenarioED() {
+  console.log('\n== scenario ED: a null checks:discover response gives zero checks, logged, no halt')
+  const { result, captured } = await run({
+    discoveryFails: true,
+  })
+  check('no check-run call was made', callCount(captured, 'checks:run:1'), 0)
+  check('zero checks discovered', result.checks?.discovered, 0)
+  check('the run does not halt', result.halted_at, undefined)
+  check('a log line gives the reason',
+    captured.logs.some(l => l.includes('no repo-advertised checks found') && l.includes('discovery returned nothing')), true)
+}
+
+async function scenarioEE() {
+  console.log('\n== scenario EE: a "## Checks" heading with no command lines gives zero checks, logged, no halt')
+  const { result, captured } = await run({
+    discovery: { file: '/repo/AGENTS.md',
+      sections: [{ heading: '## Checks', fence: '# just a comment\n\n' }], detail: 'stub' },
+  })
+  check('no check-run call was made', callCount(captured, 'checks:run:1'), 0)
+  check('zero checks discovered', result.checks?.discovered, 0)
+  check('the run does not halt', result.halted_at, undefined)
+  check('a log line gives the reason',
+    captured.logs.some(l => l.includes('no repo-advertised checks found') && l.includes('no fence, or no command lines')), true)
+}
+
 for (const scenario of [scenarioA, scenarioB, scenarioG, scenarioC, scenarioD, scenarioE, scenarioH,
                         scenarioI, scenarioJ, scenarioK, scenarioL, scenarioM, scenarioN,
                         scenarioO, scenarioP, scenarioQ, scenarioR, scenarioS, scenarioT,
@@ -3308,7 +3578,10 @@ for (const scenario of [scenarioA, scenarioB, scenarioG, scenarioC, scenarioD, s
                         scenarioCW, scenarioCX, scenarioCY, scenarioCZ, scenarioDA, scenarioDB,
                         scenarioDC, scenarioDD, scenarioDE, scenarioDF, scenarioDG, scenarioDH,
                         scenarioDJ, scenarioDK, scenarioDL, scenarioDM, scenarioDN,
-                        scenarioDO, scenarioDP]) {
+                        scenarioDO, scenarioDP,
+                        scenarioDQ, scenarioDR, scenarioDS, scenarioDT, scenarioDU, scenarioDV,
+                        scenarioDW, scenarioDX, scenarioDY, scenarioDZ,
+                        scenarioEA, scenarioEB, scenarioEC, scenarioED, scenarioEE]) {
   await scenario()
 }
 

@@ -236,6 +236,27 @@ is a *variant* of a fixed one is decided by the lens setting `duplicate_of`, whi
 judgement no exit code can make, and the cost of that judgement being wrong is a line in
 the PR body rather than another round.
 
+### Check discovery
+
+`checks:discover` reads only `${wt.path}/AGENTS.md` (or `CLAUDE.md`) and transcribes
+every `##` heading and the fenced block that follows it verbatim; it chooses, filters
+and interprets nothing. `checksFrom()` then selects the section whose heading is
+exactly `## Checks` (only trailing whitespace ignored -- `## Commands`, `### Checks`
+and `## checks` all name something else), splits its fence into commands, strips
+comments, and assigns each an id (`check:1`, `check:2`, ...) in declared order. Every
+downstream consumer -- the runner, the baseline drop, the red list, the fix brief --
+keys on that id, never on the command text or a name a model invented.
+
+A discovered check runs twice on a blocking run: once as the environmental baseline
+before Implement, once after. `## Checks` must therefore list only read-only,
+deterministic commands, never one that mutates the repo or depends on state the second
+run cannot repeat.
+
+The runner is handed each check's exact Bash invocation
+(`` bash -c 'cd <worktree> && <command>' ``) and must report `command` back verbatim;
+a row whose command does not match is not measured, and an unmeasured row is treated
+as red, never as a pass or as evidence of the repo's own environment.
+
 ### Pipeline version transparency
 
 A host can persist a snapshot of this script and keep executing it after `main`

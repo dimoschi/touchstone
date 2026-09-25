@@ -2,7 +2,7 @@
   "$schema": "https://json.schemastore.org/claude-code-plugin-manifest.json",
   "name": "touchstone",
   "displayName": "Touchstone",
-  "version": "0.20.0",
+  "version": "0.21.0",
   "description": "Ticket-driven delivery pipeline that refuses to pass unmeasured code: triage, plan, TDD implement, adversarial review, then CRAP, dead-code and mutation gates before a PR can open.",
   "author": {
     "name": "Dimosthenis Schizas",
