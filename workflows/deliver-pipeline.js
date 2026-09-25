@@ -15,6 +15,19 @@ export const meta = {
   ],
 }
 
+// A snapshot of this script can keep running after main moves past it: the
+// host that persists a copy under its own session directory, the plugin
+// cache, and this checkout can all disagree on which version actually
+// executed. The script has no fs and no imports (see docs/architecture.md),
+// so it cannot read .claude-plugin/plugin.json to find out -- any runtime
+// read would report whatever the *current* file holds, which is exactly
+// wrong when the point is to say what this *running* snapshot is. A literal
+// is the only value that travels with the executed bytes; a regex checks it
+// against the manifest in scripts/check-version-bump.sh, so drift is a
+// gate's job rather than something this script verifies about itself.
+const PLUGIN_NAME = 'touchstone'
+const PIPELINE_VERSION = '0.20.0'
+
 // Boundaries. Wall-clock deadlines are not expressible here (no Date.now, by
 // design); the bounds are rounds, counts, and token budget instead.
 // The ticket is the specification: its description and comments are fetched
@@ -137,6 +150,18 @@ const stage = (name) => {
 // phase that opens it.
 let draftPr = null
 
+// executed never changes; base_branch and mismatch stay null until the
+// plugin:version probe (before Triage) has something to report, which is why
+// a halt at Worktree carries the executed value with the other two still
+// null. mismatch is null rather than false when the probe found no comparable
+// manifest (found:false, or a different plugin's name) -- the ordinary case
+// for every repo this runs against except touchstone's own, but it is logged
+// too, distinct from a real mismatch. A probe that returns nothing at all
+// leaves the same null/null pair, but is logged separately again, since that
+// case means the comparison did not run, not that there was nothing to
+// compare.
+let pipelineVersion = { executed: PIPELINE_VERSION, base_branch: null, mismatch: null }
+
 // Opening the draft is allowed to fail without ending the run, so a note that
 // states either outcome flatly is wrong half the time. Every halt note that
 // mentions the PR reads this instead of asserting one.
@@ -177,7 +202,8 @@ const recordRun = async (record) => {
 // `return await`.
 const halted = async (at, extra) => {
   const payload = {
-    task, halted_at: at, stage_spend: stageSpend, needs_user: true, ...extra,
+    task, halted_at: at, pipeline_version: pipelineVersion, stage_spend: stageSpend,
+    needs_user: true, ...extra,
   }
   if (draftPr?.number) {
     log(`halt at ${at}: draft PR ${draftPr.url} left as it is; the reason is in ` +
@@ -493,6 +519,18 @@ const TICKET = {
     summary: { type: 'string' },
     description: { type: 'string' },
     comments: { type: 'string' },
+  },
+}
+
+const MANIFEST_PROBE = {
+  type: 'object', additionalProperties: false,
+  required: ['found', 'refreshed', 'name', 'version', 'detail'],
+  properties: {
+    found: { type: 'boolean' },
+    refreshed: { type: 'boolean' },
+    name: { type: 'string' },
+    version: { type: 'string' },
+    detail: { type: 'string' },
   },
 }
 
@@ -882,9 +920,12 @@ log(args?.existingBranch
 // Handing it to every phase made the devil's advocate a critic of the ticket's
 // own reasoning and burned a whole plan-and-challenge cycle without changing a
 // line of code.
-const envelope = () =>
+// withBase is off for the version probe alone. On a stacked run wt.base is the
+// branch under review, and naming it here handed the probe the exact ref its
+// prompt spends a paragraph telling it to ignore.
+const envelope = (withBase = true) =>
   `Ticket ${ticket}${ticketDetail.found ? `: ${ticketDetail.summary}` : ' (details unavailable)'}\n` +
-  `Repo worktree: ${wt.path}\nBranch: ${wt.branch} (base ${wt.base})\n`
+  `Repo worktree: ${wt.path}\nBranch: ${wt.branch}${withBase ? ` (base ${wt.base})` : ''}\n`
 
 // Never clamped: brief() once cut a ticket mid-acceptance-criterion and three
 // phases planned against a spec whose second half they could not see.
@@ -894,7 +935,7 @@ const ticketSpec = () => ticketDetail.found
       ? `Ticket comments:\n${ticketDetail.comments}\n` : '')
   : `Ticket ${ticket} could not be read; work from the task text alone.\n`
 
-const treeAgent = (prompt, opts) =>
+const treeAgent = (prompt, { omitBase = false, ...opts }) =>
   agent(
     `[touchstone: ${opts.label}]\n` +
     `Work in the git worktree at ${wt.path}. Every command, git included, acts ` +
@@ -929,10 +970,90 @@ const treeAgent = (prompt, opts) =>
     `GIT_AUTHOR_NAME=test GIT_AUTHOR_EMAIL=t@t GIT_COMMITTER_NAME=test ` +
     `GIT_COMMITTER_EMAIL=t@t git -C <scratch path> -c commit.gpgsign=false ` +
     `-c gpg.format=openpgp commit -q -m scratch.\n\n` +
-    envelope() + `\n` + prompt + RECORD(opts.label),
+    envelope(!omitBase) + `\n` + prompt + RECORD(opts.label),
     opts)
 
 const headOf = (range) => range.includes('..') ? range.split('..')[1].trim() : range.trim()
+
+// Read once, here, rather than folded into gate:opt-in below: comparing
+// against the repository's actual base branch rather than this worktree is
+// what makes the comparison safe on a resumed branch. The worktree's own
+// manifest already carries this run's own version-bump commit whenever one
+// landed in an earlier session -- the ordinary case on touchstone itself,
+// since check-version-bump.sh forces every workflows/ change to carry one --
+// and reading that back would report the run's own progress as drift against
+// itself. The probe must not just read origin/wt.base either: wt.base
+// becomes the branch under review whenever this run is stacked (baseOverride,
+// set above from args.base), and that branch's own manifest can carry its own
+// unmerged version bump, reviving the same self-accusation against a version
+// that never shipped. The probe resolves the real base itself instead, then
+// fetches it fresh -- nothing else in this workflow is guaranteed to have
+// refreshed that remote-tracking ref on a resumed run, so a stale fetch could
+// let a stale base pass as mismatch=false.
+const versionProbe = await treeAgent(
+  `[touchstone: plugin:version]\n` +
+  `Read .claude-plugin/plugin.json off the repository's actual base branch, ` +
+  `never this run's own working tree and never any stacked branch this work ` +
+  `sits on. Resolve that base yourself, the same way branch creation does: ` +
+  `git -C ${wt.path} symbolic-ref --short refs/remotes/origin/HEAD, which ` +
+  `prints an origin/-prefixed name; strip that prefix, falling back to ` +
+  `whichever of main or master exists when there is no remote-tracking HEAD. ` +
+  `This is not necessarily ${wt.branch}'s own base: ignore what branch ${wt.branch} ` +
+  `was actually cut from. Then run ` +
+  `git -C ${wt.path} fetch origin <that base> to refresh the remote-tracking ` +
+  `ref before reading it -- this worktree can be sessions old. If that fetch ` +
+  `fails (no network, no auth, a remote needing a hardware key), that is not ` +
+  `by itself a missing manifest: origin/<that base> can already hold it from ` +
+  `an earlier fetch or the initial clone, so read it anyway. Then read ` +
+  `git -C ${wt.path} show origin/<that base>:.claude-plugin/plugin.json. ` +
+  `Then STOP: the fetch is the only change to make; do not touch the working ` +
+  `tree, commit, or push.\n` +
+  `Return found=true with name and version set from that file's "name" and ` +
+  `"version" fields, or found=false with empty strings if the base cannot be ` +
+  `resolved, the ref still cannot be resolved even after attempting the read, ` +
+  `or the file is missing, unreadable, or has no such fields. A failed fetch ` +
+  `does not force found=false on its own. Do not invent either value. Set ` +
+  `refreshed=true only if that fetch actually succeeded, and false if it ` +
+  `failed, was refused, or you did not run it: false says the version you ` +
+  `read may predate the base branch's real state, so it must be reported ` +
+  `rather than assumed. Set detail to one line saying which case applied.`,
+  { label: 'plugin:version', omitBase: true, schema: MANIFEST_PROBE,
+    model: 'haiku', effort: 'low' })
+if (versionProbe == null) {
+  // Distinct from the found:false/wrong-name case below: this means the
+  // probe never answered at all, so pipeline_version's null/null does not
+  // mean "nothing to compare" here, it means the comparison did not run.
+  log(`the plugin:version probe returned nothing, so pipeline_version could ` +
+      `not be compared against the repository's base branch`)
+} else if (versionProbe.found && versionProbe.name === PLUGIN_NAME) {
+  const drift = versionProbe.version !== PIPELINE_VERSION
+  pipelineVersion = {
+    executed: PIPELINE_VERSION, base_branch: versionProbe.version, mismatch: drift,
+    base_refreshed: versionProbe.refreshed !== false,
+  }
+  if (drift) {
+    // Names both and orders neither: the executed snapshot is the newer one
+    // whenever the base was reverted or the plugin was built locally.
+    log(`this run is executing pipeline ${PIPELINE_VERSION}; the repository's ` +
+        `base branch's plugin.json names ${versionProbe.version}`)
+  }
+  if (versionProbe.refreshed === false) {
+    // Without this the fetch failing produces mismatch:false and silence,
+    // which is the stale agreement the fetch was added to rule out.
+    log(`the base branch's manifest was read from a remote-tracking ref this ` +
+        `run could not refresh, so its version may predate the base branch's ` +
+        `real state (${versionProbe.detail})`)
+  }
+} else {
+  // The probe answered but did not confirm a comparable manifest -- the
+  // ordinary case for every repo this pipeline delivers into other than
+  // touchstone's own, but logged regardless: an answer that came back
+  // uncomparable must not collapse into the same silence as a comparison
+  // that never ran at all (the branch above).
+  log(`the plugin:version probe found no comparable manifest on the ` +
+      `repository's base branch (${versionProbe.detail}), so pipeline_version ` +
+      `stays uncompared`)
+}
 
 // Latch 1. The premise checks that matter most are usually one grep, and a task
 // whose stated facts are wrong must not be planned around. Buying that check
@@ -2618,6 +2739,7 @@ const result = {
   ticket: wt.ticket,
   worktree: wt.path,
   plan: plan.plan,
+  pipeline_version: pipelineVersion,
   stage_spend: stageSpend,
   implemented: impl.summary,
   gates: gatesPayload(),

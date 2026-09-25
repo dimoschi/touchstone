@@ -113,6 +113,9 @@ function makeAgent(scenario, captured) {
       return { created: true, branch: 'feat/gh-9-stub', base: 'main',
         path: '/tmp/stub-worktree', ticket: '9', detail: 'stub' }
     }
+    if (label === 'plugin:version') {
+      return scenario.versionProbe ?? { found: false, name: '', version: '', detail: 'stub' }
+    }
     if (label === 'triage') {
       return { scope: 'inline', complexity: 'trivial', complexity_note: 'stub',
         premise_ok: true, estimated_loc: 5, evidence: [], premise_note: 'stub' }
