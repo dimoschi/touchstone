@@ -55,7 +55,7 @@ check "the 'left as a draft' wording appears only in prNote" \
 check "no text claims the work cannot open a PR, which the draft already did" \
   "$(grep -Fc 'cannot open a PR' "$SCRIPT" || true)" 0
 check "every note that reports the PR's fate reads the helper" \
-  "$(grep -Fc '${prNote()}' "$SCRIPT" || true)" 4
+  "$(grep -Fc '${prNote()}' "$SCRIPT" || true)" 5
 
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
@@ -145,6 +145,14 @@ function makeAgent(scenario, captured) {
     if (label.startsWith('fix:')) { captured.fixCalled = true; throw new Error('Fix must not run') }
     if (label.startsWith('mutation:')) { captured.mutationCalled = true; throw new Error('Mutation must not run') }
     if (label.startsWith('review:')) { captured.reviewCalled = true; return { findings: [] } }
+    // reproduce:review runs once, right after the initial review, to decide
+    // open-vs-note for whatever candidates it raised; this file's one scenario
+    // that reaches Review needs its finding to reproduce (nonzero) so it is
+    // still open when the fixer halts on it.
+    if (label === 'reproduce:review') {
+      const ids = [...prompt.matchAll(/\[(f\d+)\]/g)].map(m => m[1])
+      return { results: ids.map(id => ({ id, exit_code: 1, output: 'stub: still reproduces' })), dirty: false }
+    }
     throw new Error(`unstubbed agent label in test scenario: ${label}`)
   }
 }
@@ -218,8 +226,10 @@ async function scenarioFixHalts() {
     },
     responses: {
       'review:correctness': { findings: [
-        { title: 'off-by-one', file: 'a.go', claim: 'loop skips the last element',
-          evidence: 'a.go:12' },
+        { category: 'wrong-result', title: 'off-by-one', file: 'a.go',
+          claim: 'loop skips the last element', evidence: 'a.go:12',
+          reproducer: { kind: 'command', command: 'go test ./... -run TestLoop',
+            expected: 'exit 0', actual: 'exit 1' } },
       ] },
       'fix:1': {
         head_sha: 'impl0000000000000000000000000000000000000',
@@ -245,8 +255,8 @@ async function scenarioFixHalts() {
   check('the fix round count reaches the halt payload', result.fix_rounds, 1)
   check('the halt says why the loop stopped',
     /UNSUPPORTED_LANGUAGE/.test(result.stopped_because ?? ''), true)
-  check('regression suspects reach the halt payload',
-    Array.isArray(result.regression_suspects), true)
+  check('notes reach the halt payload',
+    Array.isArray(result.notes), true)
   // Closing the stage is what records its spend, so an early return that skips
   // it reports a Fix halt whose fix phase apparently cost nothing.
   check('the fix stage spend is recorded',

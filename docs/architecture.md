@@ -201,6 +201,41 @@ Two invariants the script exists to hold:
 `workflows/test-fix-loop-join.sh` drives the real script with stubbed globals, which is
 how the loop logic is tested without spending tokens.
 
+### What can hold a run: `classify()` and reproducers
+
+A lens can raise up to `MAX_FINDINGS_PER_LENS` findings, and every one carries a
+`category` from a closed enum. Only `BLOCKING_CATEGORIES` (`wrong-result`, `crash`,
+`gate-bypass`, `unmet-criterion`) can stop the run, and only when the finding also
+carries a complete `reproducer`: one command, run from the worktree root, that exits 0
+when the code is correct and nonzero while the defect is present. `classify(f, ctx)` is
+the pure function that turns a lens's fields into a candidate (blocking, pending
+execution) or a note (reaching the PR body, never the run), in this order: a
+content-identical or referenced re-report of something already tracked drops; a
+reference to a *settled* finding becomes a `residual` note instead; a non-blocking
+category, a missing reproducer, an `unmet-criterion` quote that is not a verbatim
+substring of the ticket text, or (from the first re-review on) a line span outside what
+the preceding fix or mutation range actually touched, each becomes a note with its own
+`reason`. What survives is a candidate, and `executeAtHead()` is what runs it: one haiku
+dispatch per batch, against the worktree's current HEAD, deciding open-vs-note (or
+fixed-vs-still-open, on a later round) from `exit_code` alone, never from a model's
+account of the diff. This is what replaced the old LLM verifier: a finding is fixed when
+its own reproducer exits 0, not when a verifier says so.
+
+`unmet-criterion` needs a reproducer too. The verbatim quote proves the criterion
+exists; only an executed command shows the change misses it, and the alternative, a
+model reading the code and declaring the criterion met, is the judgement blocking must
+not rest on.
+
+A settled finding is re-run at every head the code moves to after it settled: in every
+later fix round (`reproduce:settled:<round>`) and at the mutation gate's head
+(`reproduce:settled:mutation`), budget or not. One that no longer exits 0 reopens, and
+gets the next round if one is left; at the mutation head, where no round follows, the
+run halts at Review before spending a review on it. Nothing here waits for a lens to
+report the regression, so a `residual` note is only ever a note: whether a new finding
+is a *variant* of a fixed one is decided by the lens setting `duplicate_of`, which is a
+judgement no exit code can make, and the cost of that judgement being wrong is a line in
+the PR body rather than another round.
+
 ### Pipeline version transparency
 
 A host can persist a snapshot of this script and keep executing it after `main`

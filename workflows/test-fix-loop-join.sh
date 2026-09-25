@@ -21,6 +21,14 @@
 #      just enough shape to drive the script through Review -> Fix -> the
 #      loop's exits.
 #
+# gh-106 replaced that verifier with classify() and executeAtHead(): whether a
+# finding can hold the run is now a script rule over category and a
+# reproducer's exit code, never a model's verdict. The scenarios below
+# (labelled CP on) drive that: a non-blocking category, an incomplete
+# reproducer, each exit-code disposition, the unmet-criterion quote check, the
+# out-of-range rule from the first re-review on, the per-lens cap, and the
+# residual/reopen path for a duplicate_of reference to a settled finding.
+#
 # Needs git and node. Exit 0 all green, 1 any assertion failed.
 
 set -uo pipefail
@@ -44,9 +52,28 @@ echo "== static: the join reads only v.id, never v.title"
 check "no v.title reference remains" \
   "$(grep -c 'v\.title' "$SCRIPT" || true)" 0
 
-echo "== static: VERDICTS requires id, title is optional"
-check "VERDICTS lists id in its required array" \
-  "$(grep -c "required: \['id', 'fixed', 'widened', 'note'\]" "$SCRIPT" || true)" 1
+echo "== static: EXECUTE_RESULT requires id, exit_code and output per row"
+check "EXECUTE_RESULT lists id, exit_code, output in its required array" \
+  "$(grep -c "required: \['id', 'exit_code', 'output'\]" "$SCRIPT" || true)" 1
+check "no LLM verifier schema (VERDICTS) remains" \
+  "$(grep -c '^const VERDICTS' "$SCRIPT" || true)" 0
+
+echo ""
+echo "== static: gh-106 -- FINDINGS requires category from the closed enum, first among its properties"
+check "category is required" \
+  "$(grep -c "required: \['category', 'title', 'file', 'claim', 'evidence'\]" "$SCRIPT" || true)" 1
+check "the closed category enum lists all nine" \
+  "$(grep -Fc "['wrong-result', 'crash', 'gate-bypass', 'unmet-criterion'," "$SCRIPT" || true)" 1
+check "BLOCKING_CATEGORIES names exactly the four blocking categories" \
+  "$(grep -Fc "new Set(['wrong-result', 'crash', 'gate-bypass', 'unmet-criterion'])" "$SCRIPT" || true)" 1
+check "MAX_FINDINGS_PER_LENS is 5" \
+  "$(grep -Fc 'const MAX_FINDINGS_PER_LENS = 5' "$SCRIPT" || true)" 1
+check "every lens is told an empty list is the expected result for a correct change" \
+  "$(grep -Fc 'empty list is the expected result for a correct change' "$SCRIPT" || true)" 1
+check "the requirements lens carries needsTicket, so ticketSpec() reaches only it" \
+  "$(grep -Fc 'needsTicket: true' "$SCRIPT" || true)" 1
+check "classify() is a pure script function, never a prompt's own judgement" \
+  "$(grep -Fc 'const classify = (f, ctx) =>' "$SCRIPT" || true)" 1
 
 echo ""
 echo "== static: BRANCH requires dirty on every response"
@@ -100,7 +127,7 @@ check "the old 'one verdict per finding ... in the same order' instruction is go
 # brief that lists findings renders the id, because every one of them is joined
 # back on it.
 check "each brief that lists findings renders its id in brackets" \
-  "$(grep -c '\[\${f\.id}\]' "$SCRIPT" || true)" 3
+  "$(grep -c '\[\${f\.id}\]' "$SCRIPT" || true)" 2
 
 echo ""
 echo "== static: the staleness probe checks evidence, not merely the file"
@@ -364,10 +391,74 @@ function baseArgs(overrides) {
 }
 
 // Pulls every [fN] token out of a prompt, in the order they appear -- how the
-// verify and staleness stubs learn which ids the script actually assigned,
+// reproduce and staleness stubs learn which ids the script actually assigned,
 // without the scenario needing to predict them.
 function idsIn(prompt) {
   return [...prompt.matchAll(/\[(f\d+)\]/g)].map(m => m[1])
+}
+
+// Every finding literal in this file predates category and reproducer; both
+// are now required for a finding to ever open. Filling in a default here
+// (overridable per finding, since a scenario testing the category or
+// no-reproducer note sets its own) is what lets the other ~50 scenarios,
+// about unrelated behaviour, stay unchanged.
+function defaultFinding(f) {
+  return {
+    category: 'wrong-result',
+    // Permissive by default: the out-of-range rule is new behaviour, and a
+    // scenario not testing it should still open, the same as before this
+    // ticket. defaultHunkLines' giant hunk covers line 1 in every file.
+    line_start: 1,
+    reproducer: { kind: 'command', command: `stub-reproduce:${f.title ?? 'finding'}`,
+      expected: 'exit 0', actual: 'exit 1' },
+    ...f,
+  }
+}
+
+// Maps the old boolean-or-undefined verdict shape a scenario's verify()
+// returns onto an exit code: true is fixed / does-not-reproduce (0), false or
+// no answer at all is still-fails (1) -- exactly what "stays open" meant
+// under the old verifier join. A scenario exercising an exact exit code (126,
+// 127) or the genuine no-executor-row path returns a number, or the sentinel
+// 'norow', instead.
+function exitFor(scenario, id, round) {
+  if (!scenario.verify) return 1
+  const v = scenario.verify(id, round)
+  if (v === 'norow') return undefined
+  if (typeof v === 'number') return v
+  return v === true ? 0 : 1
+}
+
+function filesOf(arr) {
+  return [...new Set((arr ?? []).map(f => f?.file).filter(Boolean))]
+}
+// A hunk covering essentially any line number, for every file a scenario's
+// tail/post-mutation findings name, unless the scenario supplies its own via
+// hunks(round) -- the out-of-range rule is new behaviour this ticket adds,
+// so the default has to stay permissive for every scenario that predates it.
+function defaultHunkLines(files) {
+  return files.flatMap(f => [`+++ b/${f}`, `@@ -1,100000 +1,100000 @@`])
+}
+
+function reproduceResponse(prompt, scenario, exitFn, hunkLines) {
+  const ids = idsIn(prompt)
+  const results = []
+  for (const id of ids) {
+    const code = exitFn(id)
+    if (code === undefined) continue // no executor row: not-executed / stays open
+    const returnedId = scenario.verifyBracketed ? `[${id}]` : id
+    results.push({ id: returnedId, exit_code: code, output: `stub reproduce output for ${id} (${code})` })
+  }
+  if (scenario.injectBogusVerdict) {
+    results.push({ id: 'f999-not-a-real-finding', exit_code: 0, output: 'bogus' })
+  }
+  return {
+    results,
+    dirty: scenario.reproducerDirty === true,
+    porcelain: scenario.reproducerDirty ? (scenario.reproducerPorcelain ?? 'M some-file.txt') : '',
+    porcelain_before: scenario.porcelainBefore ?? '',
+    ...(hunkLines !== undefined ? { diff_lines: hunkLines } : {}),
+  }
 }
 
 function makeAgent(scenario, captured) {
@@ -376,7 +467,7 @@ function makeAgent(scenario, captured) {
     captured.calls.push({ label, prompt, schema: opts.schema })
 
     if (label === 'ticket') {
-      return { found: true, summary: 'stub ticket', description: 'd', comments: '' }
+      return scenario.ticketResult ?? { found: true, summary: 'stub ticket', description: 'd', comments: '' }
     }
     if (label === 'branch') {
       return scenario.branchResult ?? { created: true, branch: 'feat/gh-21-stub', base: 'main',
@@ -401,8 +492,8 @@ function makeAgent(scenario, captured) {
         risky_areas: [], task_demands_implementation: false }
     }
     if (label === 'implementer') {
-      return { summary: 'stub implementation', files_changed: ['a.js', 'b.js'],
-        commit_range: COMMIT_RANGE, insertions: 20, scored: scenario.implScored ?? true,
+      return { summary: 'stub implementation', files_changed: scenario.implFilesChanged ?? ['a.js', 'b.js'],
+        commit_range: COMMIT_RANGE, insertions: scenario.implInsertions ?? 20, scored: scenario.implScored ?? true,
         ...(scenario.implGateNote ? { gate_note: scenario.implGateNote } : {}) }
     }
     if (label === 'draft-pr') {
@@ -424,15 +515,15 @@ function makeAgent(scenario, captured) {
       captured.dedupPrompt = prompt
       return { groups: scenario.dedupGroups ?? [] }
     }
-    if (label.startsWith('review:fix:')) {
-      return { findings: scenario.tailReview ?? [] }
+    if (/^review:fix:\d+:/.test(label)) {
+      return { findings: (scenario.tailReview ?? []).map(defaultFinding) }
     }
     if (label.startsWith('review:mutation:')) {
-      return { findings: scenario.postMutationReview ?? [] }
+      return { findings: (scenario.postMutationReview ?? []).map(defaultFinding) }
     }
     if (label.startsWith('review:')) {
       const lens = label.slice('review:'.length)
-      return { findings: (scenario.initialReview ?? {})[lens] ?? [] }
+      return { findings: ((scenario.initialReview ?? {})[lens] ?? []).map(defaultFinding) }
     }
     if (label.startsWith('fix:')) {
       const round = Number(label.slice('fix:'.length))
@@ -441,29 +532,41 @@ function makeAgent(scenario, captured) {
       return { head_sha: head, note: `stub fix round ${round}`, scored,
         ...(scenario.gateNote ? { gate_note: scenario.gateNote } : {}) }
     }
-    if (label.startsWith('verify:')) {
-      // The late pass is labelled verify:final, not by round: it runs after the
-      // loop, on findings no round ever checked.
-      const suffix = label.slice('verify:'.length)
-      const round = suffix === 'final' ? 'final' : Number(suffix)
-      const ids = idsIn(prompt)
-      const verdicts = []
-      for (const id of ids) {
-        const decision = scenario.verify(id, round)
-        if (decision === undefined) continue
-        // A different title every time: the whole point is that this is
-        // never read for matching. verifyBracketed copies the id exactly as
-        // the prompt renders it, brackets included -- the near-miss a plain
-        // trim was not enough to strip.
-        const returnedId = scenario.verifyBracketed ? `[${id}]` : id
-        verdicts.push({ id: returnedId, fixed: decision === true, title: `reworded-${id}-r${round}`,
-          widened: scenario.verifyWidened ? scenario.verifyWidened(id, round) === true : false,
-          note: `stub verdict for ${id}` })
-      }
-      if (scenario.injectBogusVerdict) {
-        verdicts.push({ id: 'f999-not-a-real-finding', fixed: true, title: 'bogus', note: 'should be discarded' })
-      }
-      return { verdicts }
+    // Replaces the old verify:* / VERDICTS join: whether a finding is fixed,
+    // or a fresh candidate opens, now comes from an exit code, never a
+    // model's verdict. reproduce:review is the initial classification, one
+    // per fix round re-checks what was open and (via hunkLines) hands back
+    // that round's diff hunks, :fresh classifies that round's newly raised
+    // candidates, and reproduce:mutation / reproduce:residual are the
+    // post-mutation and final-head passes.
+    if (label === 'reproduce:review') {
+      return reproduceResponse(prompt, scenario,
+        (id) => scenario.initialExit ? scenario.initialExit(id) : 1)
+    }
+    if (/^reproduce:fix:\d+:fresh$/.test(label)) {
+      const round = Number(label.slice('reproduce:fix:'.length, -':fresh'.length))
+      return reproduceResponse(prompt, scenario, (id) => exitFor(scenario, id, round))
+    }
+    if (/^reproduce:fix:\d+$/.test(label)) {
+      const round = Number(label.slice('reproduce:fix:'.length))
+      const hunkLines = scenario.hunks ? scenario.hunks(round) : defaultHunkLines(filesOf(scenario.tailReview))
+      return reproduceResponse(prompt, scenario, (id) => exitFor(scenario, id, round), hunkLines)
+    }
+    // Settled findings are re-run at every head the code moves to after they
+    // settled. Still fixed (0) unless a scenario says otherwise, so a scenario
+    // that never considered settled ids is unaffected by the recheck.
+    if (/^reproduce:settled:/.test(label)) {
+      const at = label.slice('reproduce:settled:'.length)
+      const round = /^\d+$/.test(at) ? Number(at) : at
+      return reproduceResponse(prompt, scenario,
+        (id) => scenario.settledExit ? scenario.settledExit(id, round) : 0)
+    }
+    if (label === 'reproduce:mutation') {
+      const hunkLines = scenario.hunks ? scenario.hunks('mutation') : defaultHunkLines(filesOf(scenario.postMutationReview))
+      return reproduceResponse(prompt, scenario, () => undefined, hunkLines)
+    }
+    if (label === 'reproduce:mutation:fresh') {
+      return reproduceResponse(prompt, scenario, (id) => exitFor(scenario, id, 'mutation'))
     }
     if (label === 'gate:opt-in') {
       if (scenario.gateProbeFails) return null
@@ -573,9 +676,9 @@ async function scenarioB() {
     verify: (id) => id === 'f1' ? true : (id === 'f2' ? false : undefined),
     staleness: () => [],
   })
-  const verifyPrompt = captured.calls.find(c => c.label === 'verify:1')?.prompt ?? ''
-  check('the verifier saw both f1 and f2 for the identical title',
-    idsIn(verifyPrompt).sort(), ['f1', 'f2'])
+  const reproducePrompt = captured.calls.find(c => c.label === 'reproduce:fix:1')?.prompt ?? ''
+  check('the reproducer step ran both f1 and f2 for the identical title',
+    idsIn(reproducePrompt).sort(), ['f1', 'f2'])
   check('halted at Fix', result.halted_at, 'Fix')
   check('only the unresolved finding remains open', result.unresolved_findings.length, 1)
   check('the surviving finding is the advocate\'s, not the correctness one',
@@ -917,10 +1020,10 @@ async function scenarioR() {
   check('halted_at is absent (the run finished, the reworded re-report was recognized)',
     result.halted_at, undefined)
   check('unresolved_findings is empty', result.unresolved_findings, [])
-  check('the re-report is recorded as a regression suspect, not dropped in silence',
-    result.regression_suspects?.length, 1)
-  check('the suspect names the settled finding it was pointed at',
-    result.regression_suspects?.[0]?.duplicate_of, 'f1')
+  check('the re-report is recorded as a residual note, not dropped in silence',
+    result.notes?.filter(n => n.reason === 'residual').length, 1)
+  check('the note names the settled finding it was pointed at',
+    result.notes?.find(n => n.reason === 'residual')?.residual_of, 'f1')
 }
 
 // Scenario S -- a finding that stays open gets re-reported each round with
@@ -937,51 +1040,53 @@ async function scenarioS() {
       advocate: [],
     },
     // Anything that is not f1 is the round-2 suspect, which this scenario
-    // means as the same bug, now fixed.
-    verify: (id, round) => id === 'f1' ? (round === 2 ? true : false) : true,
+    // means as the same bug, now fixed; the residual recheck asks about f1
+    // again at the final head, so f1 has to stay fixed there too, not just
+    // at round 2.
+    verify: (id, round) => id === 'f1' ? (round === 1 ? false : true) : true,
     fixHead: (round) => `fix0000000000000000000000000000000000000${round}`,
     tailReview: [{ title: 'Different wording of foo bug', file: 'f.js',
       claim: 'reworded claim', evidence: 'reworded evidence', duplicate_of: 'f1' }],
     staleness: () => [],
   })
-  const verify2Prompt = captured.calls.find(c => c.label === 'verify:2')?.prompt ?? ''
-  check('round 2 verifies exactly one finding, not two',
-    idsIn(verify2Prompt).length, 1)
+  const reproduce2Prompt = captured.calls.find(c => c.label === 'reproduce:fix:2')?.prompt ?? ''
+  check('round 2 checks exactly one finding, not two',
+    idsIn(reproduce2Prompt).length, 1)
   check('halted_at is absent (the run finished, both rounds resolved the one bug)',
     result.halted_at, undefined)
 }
 
 // Scenario T -- the mirror of P, one word different in kind: the post-mutation
 // lens does not restate a settled finding, it *references* it against the
-// mutation gate's own commits. That is a claim the gate undid a verified fix,
-// and there are no fix rounds left to absorb it, so it must halt rather than
-// be filtered away like P's byte-identical restatement.
+// mutation gate's own commits. Under classify()'s uniform dedup rule that is
+// a residual note, not a halt: a reference alone, with no reproducer of its
+// own confirmed failing, is exactly the noise this ticket stops blocking on.
 async function scenarioT() {
-  console.log('\n== scenario T: a referenced re-report at the post-mutation stage halts')
+  console.log('\n== scenario T: a referenced re-report at the post-mutation stage becomes a residual note, not a halt')
   const { result, captured } = await run({
     initialReview: {
       correctness: [{ title: 'Off-by-one in parser', file: 'src/parser.js',
         claim: 'boundary is wrong', evidence: 'parser.js:12' }],
       advocate: [],
     },
-    // f2 is the suspect: this scenario's re-report is genuine noise, so the
-    // verifier confirms it does not reproduce.
-    verify: (id) => (id === 'f1' || id === 'f2') ? true : undefined,
+    verify: (id) => id === 'f1' ? true : undefined,
     staleness: () => [],
     mutationGated: true,
     mutationResult: () => ({ green: true, head_sha: 'mut0000000000000000000000000000000000001', detail: 'stub green', scored: true }),
+    // No reproducer of its own: this scenario is about the reference alone
+    // becoming a residual note, not about gh-106's separate check of a
+    // residual's own claim (scenario DD), which needs one.
     postMutationReview: [{ title: 'Boundary check excludes the last element', file: 'parser.js',
       claim: 'the mutation commits reverted the guard', evidence: 'parser.js:14',
-      duplicate_of: 'f1' }],
+      duplicate_of: 'f1', reproducer: undefined }],
   })
-  check('halted at Review', result.halted_at, 'Review')
-  check('the finding reaches the halt rather than being filtered',
-    result.unresolved_findings?.length, 1)
+  check('halted_at is absent (a reference at post-mutation is a residual note, not a halt)',
+    result.halted_at, undefined)
+  check('the residual note references the settled finding',
+    result.notes?.some(n => n.reason === 'residual' && n.residual_of === 'f1'), true)
   const lensPrompt = captured.calls.find(c => c.label.startsWith('review:mutation:'))?.prompt ?? ''
-  check('the lens is told a reference means these commits undid a fix',
-    lensPrompt.includes('undid one of those fixes'), true)
-  check('the lens is told what referencing costs',
-    lensPrompt.includes('without the PR being marked ready'), true)
+  check('the lens is told settled fixes were already re-run, not to report them again',
+    lensPrompt.includes('already been re-run at their head'), true)
   check('the lens is told a defect outside this range is not a finding here',
     lensPrompt.includes('commits do not touch is not a finding'), true)
 }
@@ -1008,15 +1113,15 @@ async function scenarioU() {
   })
   check('halted_at is absent (the run finished)', result.halted_at, undefined)
   check('unresolved_findings is empty', result.unresolved_findings, [])
-  check('it is dropped as a restatement, not recorded as a suspect',
-    result.regression_suspects?.length, 0)
+  check('it is dropped as a restatement, not recorded as a note',
+    result.notes?.length ?? 0, 0)
 }
 
-// Scenario V -- the halt note says "see regression_suspects", so the comment
-// that outlives the session has to contain them. The payload does not survive
-// the run; the PR comment is the whole point of halted() being async.
+// Scenario V -- the halt payload carries the residual note as well as the
+// finding that is genuinely still open, so a human reading the halt sees
+// both: what has to be fixed, and what is just a re-report to sanity-check.
 async function scenarioV() {
-  console.log('\n== scenario V: the halt comment is handed the regression suspects')
+  console.log('\n== scenario V: the halt payload carries the residual note alongside the still-open finding')
   const { result, captured } = await run({
     args: { maxReviewRounds: 1 },
     draftPr: { opened: true, number: 23, url: 'https://example.invalid/pr/23', detail: 'stub draft' },
@@ -1029,32 +1134,29 @@ async function scenarioV() {
       ],
       advocate: [],
     },
-    // f2 is the leak that must stay open; f3 is the suspect, which this
-    // scenario means as genuine noise.
-    verify: (id) => (id === 'f1' || id === 'f3') ? true : undefined,
+    // The leak (f2) is never confirmed fixed and must stay open.
+    verify: (id) => id === 'f1' ? true : undefined,
     fixHead: () => 'fix00000000000000000000000000000000000001',
     tailReview: [{ title: 'Boundary check excludes the last element', file: 'parser.js',
       claim: 'off-by-one at the array end', evidence: 'see loop condition',
-      duplicate_of: 'f1' }],
+      duplicate_of: 'f1', reproducer: undefined }],
     staleness: () => [],
   })
   check('halted at Fix (the leak was never fixed)', result.halted_at, 'Fix')
-  check('a suspect was recorded', result.regression_suspects?.length, 1)
-  check('the halt note says the fixes need checking, without naming a JSON field',
-    (result.note ?? '').includes('check by hand that those fixes held'), true)
-  check('the halt note does not leak the field name into prose',
-    (result.note ?? '').includes('regression_suspects'), false)
-  check('the suspect claim is in the result, not on the PR',
-    result.regression_suspects[0].claim, 'off-by-one at the array end')
+  check('the still-open finding is the leak, not the settled parser bug',
+    result.unresolved_findings?.[0]?.file, 'src/pool.js')
+  check('a residual note was recorded', result.notes?.filter(n => n.reason === 'residual').length, 1)
+  check('it references the settled parser finding',
+    result.notes?.find(n => n.reason === 'residual')?.residual_of, 'f1')
   check('no halt comment is posted to the PR',
     callCount(captured, 'halt-notice:Fix'), 0)
 }
 
-// Scenario W -- a green run that recorded a suspect. The findings all cleared,
-// so nothing halts and the PR goes ready; without a comment the suspect exists
-// only in a return value nobody reads.
+// Scenario W -- a green run that recorded a residual note. The findings all
+// cleared, so nothing halts and the PR goes ready; the note reaches the PR
+// body itself, not a separate comment nobody reads.
 async function scenarioW() {
-  console.log('\n== scenario W: a green run reports its regression suspects on the PR')
+  console.log('\n== scenario W: a green run reports its residual note in the PR body')
   const { result, captured } = await run({
     args: { openPr: true },
     draftPr: { opened: true, number: 23, url: 'https://example.invalid/pr/23', detail: 'stub draft' },
@@ -1064,25 +1166,25 @@ async function scenarioW() {
         claim: 'boundary is wrong', evidence: 'parser.js:12' }],
       advocate: [],
     },
-    // f2 is the suspect: this scenario's re-report is genuine noise, so the
-    // verifier confirms it does not reproduce.
-    verify: (id) => (id === 'f1' || id === 'f2') ? true : undefined,
+    verify: (id) => id === 'f1' ? true : undefined,
     fixHead: () => 'fix00000000000000000000000000000000000001',
     tailReview: [{ title: 'Boundary check excludes the last element', file: 'parser.js',
       claim: 'off-by-one at the array end', evidence: 'see loop condition',
-      duplicate_of: 'f1' }],
+      duplicate_of: 'f1', reproducer: undefined }],
     staleness: () => [],
   })
   check('halted_at is absent (every finding cleared)', result.halted_at, undefined)
-  check('the suspect is in the result', result.regression_suspects?.length, 1)
-  check('no comment is posted for it',
+  check('the residual note is in the result', result.notes?.filter(n => n.reason === 'residual').length, 1)
+  check('no separate comment is posted for it',
     callCount(captured, 'regression-notice'), 0)
-  check('the suspect claim is in the result instead',
-    result.regression_suspects[0].claim, 'off-by-one at the array end')
+  const prPrompt = captured.calls.find(c => c.label === 'pr')?.prompt ?? ''
+  check('the PR prompt carries the note\'s title and claim',
+    prPrompt.includes('Boundary check excludes the last element') &&
+    prPrompt.includes('off-by-one at the array end'), true)
 }
 
-// Scenarios X and Y -- the two exits past the fix loop, where a suspect from a
-// round that converged is still live and must reach the comment.
+// Scenarios X and Y -- the two exits past the fix loop, where a residual note
+// from a round that converged is still carried in the payload.
 function convergedWithSuspect(overrides) {
   return {
     draftPr: { opened: true, number: 23, url: 'https://example.invalid/pr/23', detail: 'stub draft' },
@@ -1091,13 +1193,11 @@ function convergedWithSuspect(overrides) {
         claim: 'boundary is wrong', evidence: 'parser.js:12' }],
       advocate: [],
     },
-    // f2 is the suspect: this scenario's re-report is genuine noise, so the
-    // verifier confirms it does not reproduce.
-    verify: (id) => (id === 'f1' || id === 'f2') ? true : undefined,
+    verify: (id) => id === 'f1' ? true : undefined,
     fixHead: () => 'fix00000000000000000000000000000000000001',
     tailReview: [{ title: 'Boundary check excludes the last element', file: 'parser.js',
       claim: 'off-by-one at the array end', evidence: 'see loop condition',
-      duplicate_of: 'f1' }],
+      duplicate_of: 'f1', reproducer: undefined }],
     staleness: () => [],
     mutationGated: true,
     ...overrides,
@@ -1105,13 +1205,13 @@ function convergedWithSuspect(overrides) {
 }
 
 async function scenarioX() {
-  console.log('\n== scenario X: the Mutation halt carries the regression suspects')
+  console.log('\n== scenario X: the Mutation halt carries the residual note')
   const { result, captured } = await run(convergedWithSuspect({
     mutationResult: () => ({ green: false, head_sha: 'mut0000000000000000000000000000000000001',
       detail: 'stub red', survivors: 1, scored: true }),
   }))
   check('halted at Mutation', result.halted_at, 'Mutation')
-  check('the suspect is in the payload', result.regression_suspects?.length, 1)
+  check('the residual note is in the payload', result.notes?.filter(n => n.reason === 'residual').length, 1)
   check('no halt comment is posted to the PR',
     callCount(captured, 'halt-notice:Mutation'), 0)
   // A mutation agent that omits scored is indistinguishable from one that
@@ -1127,14 +1227,14 @@ async function scenarioX() {
 }
 
 async function scenarioY() {
-  console.log('\n== scenario Y: the post-mutation Review halt carries the regression suspects')
+  console.log('\n== scenario Y: the post-mutation Review halt carries the residual note plus the fresh finding')
   const { result, captured } = await run(convergedWithSuspect({
     mutationResult: () => ({ green: true, head_sha: 'mut0000000000000000000000000000000000001', detail: 'stub green', scored: true }),
     postMutationReview: [{ title: 'New nil deref in the added test helper',
       file: 'src/helper.js', claim: 'deref before the guard', evidence: 'helper.js:8' }],
   }))
   check('halted at Review', result.halted_at, 'Review')
-  check('the suspect is in the payload', result.regression_suspects?.length, 1)
+  check('the residual note is in the payload', result.notes?.filter(n => n.reason === 'residual').length, 1)
   check('no halt comment is posted to the PR',
     callCount(captured, 'halt-notice:Review'), 0)
   check('the genuinely new finding is still reported',
@@ -1256,6 +1356,10 @@ async function scenarioAE() {
 // Scenarios AF and AG -- a finding the last round's tail review appended, which
 // no round could have verified. AF: it was in fact fixed, so the run must not
 // halt on it. AG: it was not, so the halt stands and says it was checked.
+// The old "late pass" scenario: a finding a round's own tail review raises is
+// now classified and executed in that same round (reproduce:fix:N:fresh),
+// never left to a separate pass after the loop exits, so a fresh finding from
+// the very last round still gets its reproducer run before the halt decision.
 function lateFinding(fixedAtFinal) {
   return {
     args: { maxReviewRounds: 1 },
@@ -1263,10 +1367,7 @@ function lateFinding(fixedAtFinal) {
       correctness: [{ title: 'Off-by-one', file: 'src/p.js', claim: 'c1', evidence: 'e1' }],
       advocate: [],
     },
-    verify: (id, round) => {
-      if (round === 'final') return fixedAtFinal
-      return id === 'f1' ? true : undefined
-    },
+    verify: (id) => id === 'f1' ? true : fixedAtFinal,
     fixHead: () => 'fix00000000000000000000000000000000000001',
     tailReview: [{ title: 'Unrelated nil deref', file: 'src/q.js',
       claim: 'deref before guard', evidence: 'q.js:9' }],
@@ -1275,17 +1376,17 @@ function lateFinding(fixedAtFinal) {
 }
 
 async function scenarioAF() {
-  console.log('\n== scenario AF: a late finding that was already fixed does not halt the run')
+  console.log('\n== scenario AF: a fresh finding from the last round that does not reproduce does not halt the run')
   const { result, captured } = await run(lateFinding(true))
-  check('the late pass ran once', callCount(captured, 'verify:final'), 1)
+  check('the fresh finding was executed in the same round', callCount(captured, 'reproduce:fix:1:fresh'), 1)
   check('halted_at is absent', result.halted_at, undefined)
   check('nothing is left open', result.unresolved_findings, [])
 }
 
 async function scenarioAG() {
-  console.log('\n== scenario AG: a late finding that is real still halts, and says it was checked')
+  console.log('\n== scenario AG: a fresh finding from the last round that still reproduces halts, and says it was checked')
   const { result, captured } = await run(lateFinding(false))
-  check('the late pass ran once', callCount(captured, 'verify:final'), 1)
+  check('the fresh finding was executed in the same round', callCount(captured, 'reproduce:fix:1:fresh'), 1)
   check('halted at Fix', result.halted_at, 'Fix')
   check('the finding is reported', result.unresolved_findings?.length, 1)
   check('the stop reason no longer claims it survived every round',
@@ -1313,9 +1414,9 @@ async function scenarioAH() {
   })
   check('the dedup brief was handed both ids',
     idsIn(captured.dedupPrompt ?? '').length, 2)
-  const verify1 = captured.calls.find(c => c.label === 'verify:1')?.prompt ?? ''
-  check('the fix round is asked about one finding, not two', idsIn(verify1).length, 1)
-  check('the survivor is the first of the group', idsIn(verify1)[0], 'f1')
+  const reproduce1 = captured.calls.find(c => c.label === 'reproduce:fix:1')?.prompt ?? ''
+  check('the fix round is asked about one finding, not two', idsIn(reproduce1).length, 1)
+  check('the survivor is the first of the group', idsIn(reproduce1)[0], 'f1')
 }
 
 // Scenario AI -- the dedup agent returning nothing must keep both findings.
@@ -1333,8 +1434,8 @@ async function scenarioAI() {
     fixHead: () => 'fix00000000000000000000000000000000000001',
     staleness: () => [],
   })
-  const verify1 = captured.calls.find(c => c.label === 'verify:1')?.prompt ?? ''
-  check('both findings reach the fix round', idsIn(verify1).length, 2)
+  const reproduce1 = captured.calls.find(c => c.label === 'reproduce:fix:1')?.prompt ?? ''
+  check('both findings reach the fix round', idsIn(reproduce1).length, 2)
 }
 
 // Scenario AJ -- a gated repo's Fix halt reports the CRAP gate as confirmed:
@@ -2090,54 +2191,63 @@ async function scenarioBT() {
 // it was a re-report readied a PR carrying a real regression, under
 // unresolved_findings: []. The verifier decides now, and a suspect that still
 // reproduces blocks like any other finding.
+// Scenario AZ -- a later round that breaks an earlier round's fix is caught by
+// re-running every settled reproducer at that round's own head, whatever any
+// lens reported. With no round left the run halts on the reopened finding, and
+// says it hit the round limit: every reopen happens inside the loop, so the
+// "should not happen" fallback in fixStopReason stays unreachable.
 async function scenarioAZ() {
-  console.log('\n== scenario AZ: a suspect that still reproduces becomes open and halts')
-  const { result } = await run({
-    args: { maxReviewRounds: 1 },
+  console.log('\n== scenario AZ: a fix a later round breaks reopens and halts at Fix')
+  const { result, captured } = await run({
+    args: { maxReviewRounds: 2 },
     draftPr: { opened: true, number: 24, url: 'https://example.invalid/pr/24', detail: 'stub draft' },
     initialReview: {
-      correctness: [{ title: 'Route resolves from cwd', file: 'src/route.js',
-        claim: 'wrong repo', evidence: 'route.js:12' }],
+      correctness: [
+        { title: 'Route resolves from cwd', file: 'src/route.js', claim: 'wrong repo', evidence: 'route.js:12' },
+        { title: 'Missing guard', file: 'src/guard.js', claim: 'no guard', evidence: 'guard.js:3' },
+      ],
       advocate: [],
     },
-    // f1 is fixed; f2, the suspect, is the hole that fix opened, so it is not.
-    verify: (id) => id === 'f1' ? true : false,
-    fixHead: () => 'fix00000000000000000000000000000000000001',
-    tailReview: [{ title: 'The fix fails open when the path is unprovable',
-      file: 'src/route.js', claim: 'gate is skipped entirely',
-      evidence: 'route.js:20', duplicate_of: 'f1' }],
+    verify: (id, round) => id === 'f1' ? round === 1 : (id === 'f2' ? round === 2 : undefined),
+    settledExit: (id, round) => (id === 'f1' && round === 2 ? 1 : 0),
+    fixHead: (round) => `fix0000000000000000000000000000000000000${round}`,
+    tailReview: [],
     staleness: () => [],
   })
   check('halted at Fix rather than readying the PR', result.halted_at, 'Fix')
-  check('the suspect is reported as unresolved, not as noise',
-    result.unresolved_findings?.length, 1)
-  check('it is the suspect that is open',
-    result.unresolved_findings?.[0]?.claim, 'gate is skipped entirely')
-  check('it is no longer filed as an advisory suspect',
-    result.regression_suspects?.length, 0)
+  check('only the regressed finding is unresolved', result.unresolved_findings?.length, 1)
+  check('it is the finding round 1 fixed', result.unresolved_findings?.[0]?.file, 'src/route.js')
+  check('the stop reason is the round limit, not the "should not happen" fallback',
+    /2-round limit/.test(result.stopped_because ?? ''), true)
+  check('nothing was settled before round 1, so no settled recheck ran there',
+    callCount(captured, 'reproduce:settled:1'), 0)
+  check('round 2 re-ran what round 1 settled', callCount(captured, 'reproduce:settled:2'), 1)
 }
 
-// Scenario BA -- the budget case. Skipping verification must not silently
-// downgrade a suspect to noise, so the run says it could not tell.
+// Scenario BA -- the settled recheck is not gated on budget: silently trusting
+// a fix nobody re-checked is worse than one more cheap dispatch, so it runs
+// even in a round where the rest of the run reads as out of budget.
 async function scenarioBA() {
-  console.log('\n== scenario BA: an unverifiable suspect is reported unverified, not as noise')
-  const { result } = await run({
-    args: { maxReviewRounds: 1, tokenCeilings: { fix: 1 } },
+  console.log('\n== scenario BA: the settled recheck still runs once the run is otherwise out of budget')
+  let exhausted = false
+  const { captured } = await run({
+    args: { maxReviewRounds: 2 },
+    budget: { total: 200000, spent: () => 0, remaining: () => (exhausted ? 100 : 999999) },
     draftPr: { opened: true, number: 25, url: 'https://example.invalid/pr/25', detail: 'stub draft' },
     initialReview: {
-      correctness: [{ title: 'Route resolves from cwd', file: 'src/route.js',
-        claim: 'wrong repo', evidence: 'route.js:12' }],
+      correctness: [
+        { title: 'Route resolves from cwd', file: 'src/route.js', claim: 'wrong repo', evidence: 'route.js:12' },
+        { title: 'Missing guard', file: 'src/guard.js', claim: 'no guard', evidence: 'guard.js:3' },
+      ],
       advocate: [],
     },
-    verify: (id) => id === 'f1' ? true : undefined,
-    fixHead: () => 'fix00000000000000000000000000000000000001',
-    tailReview: [{ title: 'The fix fails open', file: 'src/route.js',
-      claim: 'gate is skipped', evidence: 'route.js:20', duplicate_of: 'f1' }],
+    verify: (id, round) => id === 'f1' ? round === 1 : (id === 'f2' ? round === 2 : undefined),
+    fixHead: (round) => { if (round === 2) exhausted = true; return `fix0000000000000000000000000000000000000${round}` },
+    tailReview: [],
     staleness: () => [],
   })
-  check('the run does not claim the suspect was judged',
-    result.suspects_unverified === true || (result.unresolved_findings?.length ?? 0) > 0,
-    true)
+  check('the budget really was out: round 2 got no tail review', callCount(captured, 'review:fix:2'), 0)
+  check('the settled recheck still ran in round 2', callCount(captured, 'reproduce:settled:2'), 1)
 }
 
 // Scenario BU -- #38: a check green at the base commit and red after
@@ -2389,7 +2499,7 @@ async function scenarioCD() {
 // unbounded read of the whole tree). It is now judged against exactly the
 // diff the fix round it follows produced.
 async function scenarioCE() {
-  console.log('\n== scenario CE: verify is judged against the fix round\'s own commit range')
+  console.log('\n== scenario CE: the reproduce step fetches exactly the fix round\'s own diff')
   const { captured } = await run({
     initialReview: {
       correctness: [{ title: 'Needs a fix', file: 'a.js', claim: 'c', evidence: 'e',
@@ -2399,10 +2509,10 @@ async function scenarioCE() {
     verify: (id) => id === 'f1' ? true : undefined,
     fixHead: () => 'fix00000000000000000000000000000000000001',
   })
-  const verify1 = captured.calls.find(c => c.label === 'verify:1')?.prompt ?? ''
-  check('verify ran', verify1.length > 0, true)
-  check('verify is handed exactly this round\'s diff',
-    verify1.includes(`${REVIEWED_THROUGH}..fix00000000000000000000000000000000000001`), true)
+  const reproduce1 = captured.calls.find(c => c.label === 'reproduce:fix:1')?.prompt ?? ''
+  check('the reproduce step ran', reproduce1.length > 0, true)
+  check('it is handed exactly this round\'s diff',
+    reproduce1.includes(`--no-color ${REVIEWED_THROUGH}..fix00000000000000000000000000000000000001`), true)
 }
 
 // Scenario CJ -- a fix round that commits nothing leaves HEAD where it was,
@@ -2420,12 +2530,12 @@ async function scenarioCJ() {
     verify: (id) => id === 'f1' ? true : undefined,
     fixHead: () => REVIEWED_THROUGH,
   })
-  const verify1 = captured.calls.find(c => c.label === 'verify:1')?.prompt ?? ''
-  check('verify ran', verify1.length > 0, true)
+  const reproduce1 = captured.calls.find(c => c.label === 'reproduce:fix:1')?.prompt ?? ''
+  check('the reproduce step ran', reproduce1.length > 0, true)
   check('the range is not an empty self-comparison',
-    verify1.includes(`${REVIEWED_THROUGH}..${REVIEWED_THROUGH}`), false)
-  check('it is the bare commit, which diffs against the working tree',
-    verify1.includes(`range is ${REVIEWED_THROUGH}. Read git diff ${REVIEWED_THROUGH} and`), true)
+    reproduce1.includes(`${REVIEWED_THROUGH}..${REVIEWED_THROUGH}`), false)
+  check('it diffs the bare commit against the working tree instead',
+    reproduce1.includes(`--no-color ${REVIEWED_THROUGH} and return`), true)
 }
 
 // Scenario CK -- the per-round figure is this ticket's measurement
@@ -2488,7 +2598,8 @@ async function scenarioCM() {
   const { captured } = await run({
     args: { maxReviewRounds: 1 },
     initialReview: {
-      correctness: [{ title: 'No span', file: 'noloc.js', claim: 'c', evidence: 'e' },
+      correctness: [{ title: 'No span', file: 'noloc.js', claim: 'c', evidence: 'e',
+                      line_start: undefined },
                     { title: 'Has one', file: 'b.js', claim: 'c2', evidence: 'e2',
                       line_start: 7, line_end: 9 }],
       advocate: [],
@@ -2506,28 +2617,25 @@ async function scenarioCM() {
     spanLog.includes('b.js'), false)
 }
 
-// Scenario CN -- the late pass runs on findings no round ever checked, which
-// includes a run whose loop executed no rounds at all. Telling that verifier
-// it is looking at "the fix's own commit range" names a diff that does not
-// exist, and the range it gets is the implementation, not a fix.
+// Scenario CN -- a run whose loop executes no rounds at all (maxReviewRounds
+// 0) still classifies and executes the initial finding's reproducer before
+// halting; the round-0 classification is not something only a fix round
+// triggers.
 async function scenarioCN() {
-  console.log('\n== scenario CN: with no fix round, the late verifier is not told it has a fix diff')
-  const { captured } = await run({
+  console.log('\n== scenario CN: with maxReviewRounds 0, the initial finding is still classified and halts without any fix round')
+  const { result, captured } = await run({
     args: { maxReviewRounds: 0 },
     initialReview: {
       correctness: [{ title: 'Never fixed', file: 'a.js', claim: 'c', evidence: 'e',
         line_start: 3 }],
       advocate: [],
     },
-    verify: () => undefined,
     staleness: () => [],
   })
   check('no fix round ran', captured.calls.filter(c => c.label.startsWith('fix:')).length, 0)
-  const late = captured.calls.find(c => c.label === 'verify:final')?.prompt ?? ''
-  check('the late verifier ran', late.length > 0, true)
-  check('it is told there is no fix diff', late.includes('No fix round ran'), true)
-  check('it does not claim a fix range that never existed',
-    late.includes("The fix's own commit range"), false)
+  check('the initial classification still ran', callCount(captured, 'reproduce:review'), 1)
+  check('halted at Fix', result.halted_at, 'Fix')
+  check('the finding is reported', result.unresolved_findings?.length, 1)
 }
 
 // Scenario CO -- the scratch rule lives in the prompt builder every phase
@@ -2556,44 +2664,17 @@ async function scenarioCO() {
   }
 }
 
-// Scenario CF -- #44: silent re-ranging must not be possible. Verify may look
-// past its given range, but only when that range cannot answer the question,
-// and only while saying so in the finding's own note.
-async function scenarioCF() {
-  console.log('\n== scenario CF: verify may widen past its range only while disclosing it in the note')
-  const { captured } = await run({
-    initialReview: {
-      correctness: [{ title: 'Needs a fix', file: 'a.js', claim: 'c', evidence: 'e' },
-                    { title: 'Also needs one', file: 'b.js', claim: 'c2', evidence: 'e2' }],
-      advocate: [],
-    },
-    verify: () => true,
-    verifyWidened: (id) => id === 'f1',
-  })
-  const verify1 = captured.calls.find(c => c.label === 'verify:1')?.prompt ?? ''
-  check('verify ran', verify1.length > 0, true)
-  check('widening is allowed only when the range cannot answer the question',
-    verify1.includes('Widen beyond this range only when the diff itself cannot answer the question'), true)
-  const widenLog = captured.logs.find(l => l.includes('read past')) ?? ''
-  check('the widened verdict is surfaced, not discarded with the rest of it',
-    widenLog.length > 0, true)
-  check('the log names which call widened, so verify:final does not read like a round',
-    widenLog.includes('verify:1'), true)
-  check('it names the finding and carries its stated reason',
-    widenLog.includes('f1') && widenLog.includes('stub verdict for f1'), true)
-  check('only the verdict that widened is named, not every verdict',
-    widenLog.includes('f2'), false)
-  check('the count is of widened verdicts, not of all of them',
-    widenLog.includes('1 verdict(s)'), true)
-}
-
 // Scenario CG -- #44: a lens that cannot name a clean span (a deletion, a
 // repo-wide pattern) must not break the run; the schema field is optional.
 async function scenarioCG() {
   console.log('\n== scenario CG: a finding without a line span still flows through the fix loop unbroken')
   const { result, captured } = await run({
     initialReview: {
-      correctness: [{ title: 'No span reported', file: 'noloc.js', claim: 'c', evidence: 'e' }],
+      // line_start explicitly absent (undefined defeats defaultFinding's
+      // permissive default of 1): a deletion or a repo-wide pattern has no
+      // single span, and that must not break the run.
+      correctness: [{ title: 'No span reported', file: 'noloc.js', claim: 'c', evidence: 'e',
+        line_start: undefined }],
       advocate: [],
     },
     verify: (id) => id === 'f1' ? true : undefined,
@@ -2643,6 +2724,569 @@ async function scenarioCI() {
   check('fix_round_output carries that one round', result.fix_round_output?.length, 1)
 }
 
+// Scenario CP -- gh-106: a non-blocking category (docs) never becomes a
+// candidate at all, regardless of what its reproducer would report: the
+// script's rule fires before any reproducer for it is ever run.
+async function scenarioCP() {
+  console.log('\n== scenario CP: a docs-category finding is a note, never a candidate, and never reaches Fix')
+  const { result, captured } = await run({
+    initialReview: {
+      correctness: [{ category: 'docs', title: 'Stale comment', file: 'a.js',
+        claim: 'comment names the wrong caller', evidence: 'a.js:3',
+        reproducer: { kind: 'command', command: 'true', expected: 'exit 0', actual: 'exit 1' } }],
+      advocate: [],
+    },
+  })
+  check('halted_at is absent', result.halted_at, undefined)
+  check('no fix round ran', callCount(captured, 'fix:1'), 0)
+  check('no reproducer was ever run for it', callCount(captured, 'reproduce:review'), 0)
+  check('the finding is a note with reason category',
+    result.notes?.some(n => n.reason === 'category' && n.title === 'Stale comment'), true)
+}
+
+// Scenario CQ -- gh-106: a blocking category with an incomplete reproducer
+// (explicitly absent here) is a note, not a candidate.
+async function scenarioCQ() {
+  console.log('\n== scenario CQ: a blocking-category finding with no complete reproducer is a note, never entering the fix loop')
+  const { result, captured } = await run({
+    initialReview: {
+      correctness: [{ category: 'wrong-result', title: 'Looks wrong', file: 'a.js',
+        claim: 'c', evidence: 'e', reproducer: undefined }],
+      advocate: [],
+    },
+  })
+  check('halted_at is absent', result.halted_at, undefined)
+  check('no fix round ran', callCount(captured, 'fix:1'), 0)
+  check('no reproducer was ever run for it', callCount(captured, 'reproduce:review'), 0)
+  check('the finding is a note with reason no-reproducer',
+    result.notes?.some(n => n.reason === 'no-reproducer' && n.title === 'Looks wrong'), true)
+}
+
+// Scenario CR -- gh-106: the initial-classification exit-code rule, every
+// disposition in one run. Only 0, 126 and 127 are notes; a missing row (could
+// not measure) and any other exit code both open a candidate, since "could
+// not measure" must not read as "did not reproduce".
+async function scenarioCR() {
+  console.log('\n== scenario CR: initial classification dispositions by exit code')
+  const { result } = await run({
+    initialReview: {
+      correctness: [
+        { title: 'Exits 0', file: 'a.js', claim: 'c0', evidence: 'e0' },
+        { title: 'Exits 126', file: 'b.js', claim: 'c126', evidence: 'e126' },
+        { title: 'Exits 127', file: 'c.js', claim: 'c127', evidence: 'e127' },
+        { title: 'No row', file: 'd.js', claim: 'cnone', evidence: 'enone' },
+        { title: 'Exits 2', file: 'e.js', claim: 'c2', evidence: 'e2' },
+      ],
+      advocate: [],
+    },
+    initialExit: (id) => ({ f1: 0, f2: 126, f3: 127, f4: undefined, f5: 2 })[id],
+  })
+  const notesByTitle = Object.fromEntries((result.notes ?? []).map(n => [n.title, n.reason]))
+  check('exit 0 is a note: did-not-reproduce', notesByTitle['Exits 0'], 'did-not-reproduce')
+  check('exit 126 is a note: reproducer-could-not-run', notesByTitle['Exits 126'], 'reproducer-could-not-run')
+  check('exit 127 is a note: reproducer-could-not-run', notesByTitle['Exits 127'], 'reproducer-could-not-run')
+  check('no executor row stays pending rather than being dismissed as a note',
+    result.unresolved_findings?.some(f => f.title === 'No row'), true)
+  check('any other exit code opens the finding',
+    result.unresolved_findings?.some(f => f.title === 'Exits 2'), true)
+  check('exactly two findings opened (the unmeasured one and the genuine failure)',
+    result.unresolved_findings?.length, 2)
+}
+
+// Scenario CS -- gh-106: an unmet-criterion finding blocks only when its
+// quote is a verbatim substring of the ticket text; a reworded quote is a
+// note instead, never a silent pass for the reviewer's paraphrase.
+async function scenarioCS() {
+  console.log('\n== scenario CS: an unmet-criterion finding blocks only when its quote is verbatim in the ticket text')
+  const { result } = await run({
+    ticketResult: { found: true, summary: 'stub', comments: '',
+      description: 'Acceptance: the client must retry on a 503 with backoff.' },
+    initialReview: {
+      correctness: [
+        { category: 'unmet-criterion', title: 'Missing retry path', file: 'a.js',
+          claim: 'the retry path was never implemented', evidence: 'a.js:1',
+          criterion_quote: 'the client must retry on a 503 with backoff',
+          reproducer: { kind: 'command', command: 'true', expected: 'exit 0', actual: 'exit 1' } },
+        { category: 'unmet-criterion', title: 'Reworded criterion', file: 'b.js',
+          claim: 'paraphrased, not verbatim', evidence: 'b.js:1',
+          criterion_quote: 'clients should retry on server errors eventually',
+          reproducer: { kind: 'command', command: 'true', expected: 'exit 0', actual: 'exit 1' } },
+      ],
+      advocate: [],
+    },
+    initialExit: () => 1,
+  })
+  check('the verbatim quote opens the finding',
+    result.unresolved_findings?.some(f => f.title === 'Missing retry path'), true)
+  check('the reworded quote is a note with reason quote-not-found',
+    result.notes?.some(n => n.title === 'Reworded criterion' && n.reason === 'quote-not-found'), true)
+}
+
+// Scenario CT -- gh-106: the per-lens cap. The script slices to
+// MAX_FINDINGS_PER_LENS itself rather than trusting a maxItems schema
+// failure, and logs what it dropped.
+async function scenarioCT() {
+  console.log('\n== scenario CT: reviewOf slices a lens\'s findings to the per-lens cap and logs the drop')
+  const many = Array.from({ length: 7 }, (_, i) => ({
+    title: `Bug ${i + 1}`, file: `f${i + 1}.js`, claim: `c${i + 1}`, evidence: `e${i + 1}`,
+  }))
+  const { result, captured } = await run({
+    initialReview: { correctness: many, advocate: [] },
+    initialExit: () => 1,
+  })
+  const total = (result.notes?.length ?? 0) + (result.unresolved_findings?.length ?? 0)
+  check('at most 5 of the 7 raised findings survive the per-lens cap', total <= 5, true)
+  check('the drop is logged', captured.logs.some(l => l.includes('keeping the first 5, dropping 2')), true)
+}
+
+// Scenario CU -- gh-106: ticketSpec() reaches only the requirements lens,
+// via the needsTicket flag on its LENS entry; correctness and advocate never
+// see the ticket text, per the envelope rule.
+async function scenarioCU() {
+  console.log('\n== scenario CU: only the requirements lens is shown the ticket text')
+  const { captured } = await run({
+    implInsertions: 300, // forces big=true, which adds the requirements lens
+    ticketResult: { found: true, summary: 'stub', comments: '', description: 'ACCEPTANCE_TEXT_MARKER' },
+    initialReview: { correctness: [], advocate: [], requirements: [] },
+  })
+  const correctnessPrompt = captured.calls.find(c => c.label === 'review:correctness')?.prompt ?? ''
+  const advocatePrompt = captured.calls.find(c => c.label === 'review:advocate')?.prompt ?? ''
+  const requirementsPrompt = captured.calls.find(c => c.label === 'review:requirements')?.prompt ?? ''
+  check('the requirements lens ran', requirementsPrompt.length > 0, true)
+  check('only the requirements lens sees the ticket text',
+    requirementsPrompt.includes('ACCEPTANCE_TEXT_MARKER'), true)
+  check('the correctness lens does not', correctnessPrompt.includes('ACCEPTANCE_TEXT_MARKER'), false)
+  check('the advocate lens does not', advocatePrompt.includes('ACCEPTANCE_TEXT_MARKER'), false)
+}
+
+// Scenario CV -- gh-106: a reproducer that writes to the tree halts outright
+// and names the porcelain output, the same principle runChecks already
+// applies to the repo's own discovered checks.
+async function scenarioCV() {
+  console.log('\n== scenario CV: a reproducer execution that dirties the tree halts and names the porcelain output')
+  const { result } = await run({
+    initialReview: {
+      correctness: [{ title: 'Needs a look', file: 'a.js', claim: 'c', evidence: 'e' }],
+      advocate: [],
+    },
+    initialExit: () => 1,
+    reproducerDirty: true,
+    reproducerPorcelain: ' M fixture.txt',
+  })
+  check('halted at Review', result.halted_at, 'Review')
+  check('the note names the porcelain output', (result.note ?? '').includes('fixture.txt'), true)
+}
+
+// Scenario CW -- gh-106: the expected outcome this ticket exists for. A run
+// whose only finding is a note (never blocking) proceeds through Mutation to
+// the PR, exactly as if no finding had been raised at all.
+async function scenarioCW() {
+  console.log('\n== scenario CW: a run whose findings are all notes continues through Mutation to the PR phase')
+  const { result, captured } = await run({
+    args: { openPr: true },
+    prResult: { opened: true, url: 'https://example.invalid/pr/30', note: 'stub ready' },
+    initialReview: {
+      correctness: [{ category: 'docs', title: 'Stale doc', file: 'a.js', claim: 'c', evidence: 'e' }],
+      advocate: [],
+    },
+    mutationGated: true,
+  })
+  check('halted_at is absent', result.halted_at, undefined)
+  check('the finding is recorded as a note', result.notes?.some(n => n.reason === 'category'), true)
+  check('mutation actually ran', callCount(captured, 'mutation:1'), 1)
+  check('the PR opened', result.pr?.opened, true)
+}
+
+// Scenario CX -- gh-106: from the first tail review on, a finding blocks only
+// if its line span overlaps a new-side hunk of the preceding fix range. Out
+// of range is a note, not a silent pass and not a block.
+async function scenarioCX() {
+  console.log('\n== scenario CX: a tail-review finding outside the round\'s own diff hunk is a note, not open')
+  const { result } = await run({
+    args: { maxReviewRounds: 1 },
+    initialReview: {
+      correctness: [{ title: 'Needs a fix', file: 'x.js', claim: 'c', evidence: 'e' }],
+      advocate: [],
+    },
+    verify: (id) => id === 'f1' ? true : undefined,
+    fixHead: () => 'fix00000000000000000000000000000000000001',
+    hunks: () => ['+++ b/x.js', '@@ -100,5 +100,5 @@'],
+    tailReview: [{ title: 'Unrelated to this fix', file: 'x.js', claim: 'c2', evidence: 'e2',
+      line_start: 500 }],
+    staleness: () => [],
+  })
+  check('halted_at is absent (the run finished; the out-of-range finding did not block)',
+    result.halted_at, undefined)
+  check('the out-of-range finding is a note with reason out-of-range',
+    result.notes?.some(n => n.reason === 'out-of-range' && n.title === 'Unrelated to this fix'), true)
+}
+
+// Scenario CY -- the control for CX: the same shape, but the finding's line
+// does sit inside the round's own hunk, and it opens as usual.
+async function scenarioCY() {
+  console.log('\n== scenario CY: an in-range tail-review finding still opens and halts')
+  const { result } = await run({
+    args: { maxReviewRounds: 1 },
+    initialReview: {
+      correctness: [{ title: 'Needs a fix', file: 'x.js', claim: 'c', evidence: 'e' }],
+      advocate: [],
+    },
+    verify: (id) => id === 'f1' ? true : undefined,
+    fixHead: () => 'fix00000000000000000000000000000000000001',
+    hunks: () => ['+++ b/x.js', '@@ -100,5 +100,5 @@'],
+    tailReview: [{ title: 'In this fix\'s own hunk', file: 'x.js', claim: 'c2', evidence: 'e2',
+      line_start: 102 }],
+    staleness: () => [],
+  })
+  check('halted at Fix (the in-range finding blocks)', result.halted_at, 'Fix')
+  check('the in-range finding is reported as unresolved',
+    result.unresolved_findings?.some(f => f.title === 'In this fix\'s own hunk'), true)
+}
+
+async function scenarioCZ() {
+  console.log('\n== scenario CZ: a finding against a pure-deletion hunk is not out-of-range')
+  const { result } = await run({
+    args: { maxReviewRounds: 1 },
+    initialReview: {
+      correctness: [{ title: 'Needs a fix', file: 'x.js', claim: 'c', evidence: 'e' }],
+      advocate: [],
+    },
+    verify: (id) => id === 'f1' ? true : undefined,
+    fixHead: () => 'fix00000000000000000000000000000000000001',
+    hunks: () => ['+++ b/x.js', '@@ -3 +2,0 @@'],
+    tailReview: [{ title: 'Guard removed here', file: 'x.js', claim: 'c2', evidence: 'e2',
+      line_start: 2 }],
+    staleness: () => [],
+  })
+  check('halted at Fix (the deletion-hunk finding is in range and blocks)', result.halted_at, 'Fix')
+  check('the finding against the deletion is reported as unresolved',
+    result.unresolved_findings?.some(f => f.title === 'Guard removed here'), true)
+}
+
+async function scenarioDA() {
+  console.log('\n== scenario DA: an absolute, ./-prefixed, or :line-suffixed file path still matches its hunk')
+  const { result } = await run({
+    args: { maxReviewRounds: 1 },
+    initialReview: {
+      correctness: [{ title: 'Needs a fix', file: 'x.js', claim: 'c', evidence: 'e' }],
+      advocate: [],
+    },
+    verify: (id) => id === 'f1' ? true : undefined,
+    fixHead: () => 'fix00000000000000000000000000000000000001',
+    hunks: () => ['+++ b/x.js', '@@ -100,5 +100,5 @@'],
+    tailReview: [
+      { title: 'Absolute path', file: '/tmp/stub-worktree/x.js', claim: 'c2', evidence: 'e2', line_start: 102 },
+      { title: 'Dot-slash path', file: './x.js', claim: 'c3', evidence: 'e3', line_start: 102 },
+      { title: 'Path with line suffix', file: 'x.js:102-104', claim: 'c4', evidence: 'e4', line_start: 102 },
+    ],
+    staleness: () => [],
+  })
+  check('halted at Fix (none of the three spellings is waved through as out-of-range)', result.halted_at, 'Fix')
+  const titles = new Set((result.unresolved_findings ?? []).map(f => f.title))
+  check('the absolute-path finding opened', titles.has('Absolute path'), true)
+  check('the dot-slash finding opened', titles.has('Dot-slash path'), true)
+  check('the :line-suffixed finding opened', titles.has('Path with line suffix'), true)
+}
+
+async function scenarioDB() {
+  console.log('\n== scenario DB: cross-lens dedup keeps the blocking survivor, not just the first id')
+  const { result } = await run({
+    args: { maxReviewRounds: 1 },
+    initialReview: {
+      correctness: [{ title: 'Nil deref in Load', file: 'src/p.js',
+        claim: 'derefs before the guard', evidence: 'p.js:12' }],
+      advocate: [{ category: 'design', title: 'Load can panic on a missing key', file: 'src/p.js',
+        claim: 'no guard before the dereference', evidence: 'p.js:12-14', reproducer: undefined }],
+    },
+    dedupGroups: [{ ids: ['f2', 'f1'], why: 'same dereference' }],
+    staleness: () => [],
+  })
+  check('halted at Fix (the blocking finding survived dedup)', result.halted_at, 'Fix')
+  check('the blocking correctness finding is the one that opened',
+    result.unresolved_findings?.some(f => f.title === 'Nil deref in Load'), true)
+  check('the non-blocking advocate finding did not absorb it into a note',
+    result.notes?.every(n => n.title !== 'Nil deref in Load'), true)
+}
+
+async function scenarioDC() {
+  console.log('\n== scenario DC: a fix the mutation commits undo halts at Review before the mutation review is spent')
+  const { result, captured } = await run(convergedWithSuspect({
+    tailReview: [],
+    postMutationReview: [{ title: 'Boundary check excludes the last element', file: 'parser.js',
+      claim: 'the mutation commits reverted the guard', evidence: 'parser.js:14',
+      duplicate_of: 'f1', reproducer: undefined }],
+    mutationResult: () => ({ green: true, head_sha: 'mut0000000000000000000000000000000000001', detail: 'stub green', scored: true }),
+    settledExit: (id, round) => (id === 'f1' && round === 'mutation' ? 1 : 0),
+  }))
+  check('halted at Review (the mutation gate undid the fix)', result.halted_at, 'Review')
+  check('the reopened finding is reported as unresolved',
+    result.unresolved_findings?.some(f => f.file === 'src/parser.js'), true)
+  check('the mutation review did not run: the halt was already certain',
+    callCount(captured, 'review:mutation:correctness'), 0)
+}
+
+async function scenarioDD() {
+  console.log('\n== scenario DD: a residual note never blocks, even with its own failing reproducer')
+  const { result } = await run({
+    args: { maxReviewRounds: 1 },
+    draftPr: { opened: true, number: 31, url: 'https://example.invalid/pr/31', detail: 'stub draft' },
+    initialReview: {
+      correctness: [{ title: 'Off-by-one in parser', file: 'src/parser.js',
+        claim: 'boundary is wrong', evidence: 'parser.js:12' }],
+      advocate: [],
+    },
+    verify: (id) => id === 'f1' ? true : false,
+    fixHead: () => 'fix00000000000000000000000000000000000001',
+    tailReview: [{ title: 'The fix introduced a null deref', file: 'src/parser.js',
+      claim: 'the added guard derefs before checking', evidence: 'parser.js:20',
+      duplicate_of: 'f1' }],
+    staleness: () => [],
+  })
+  check('the run did not halt on the residual', result.halted_at, undefined)
+  check('nothing is left unresolved', (result.unresolved_findings ?? []).length, 0)
+  check('the variant is recorded as a residual note',
+    result.notes?.some(n => n.title === 'The fix introduced a null deref' && n.reason === 'residual'), true)
+}
+
+async function scenarioDE() {
+  console.log('\n== scenario DE: a finding referencing a note is classified on its own merits, not dropped')
+  const { result } = await run({
+    args: { maxReviewRounds: 1 },
+    initialReview: {
+      correctness: [{ title: 'Needs a fix', file: 'x.js', claim: 'c', evidence: 'e' }],
+      advocate: [{ category: 'docs', title: 'Stale comment', file: 'x.js',
+        claim: 'comment names the wrong caller', evidence: 'x.js:3', reproducer: undefined }],
+    },
+    verify: (id) => id === 'f1' ? true : (id === 'f3' ? false : undefined),
+    fixHead: () => 'fix00000000000000000000000000000000000001',
+    tailReview: [{ title: 'Actually a live bug', file: 'x.js', claim: 'c3', evidence: 'e3',
+      duplicate_of: 'f2' }],
+    staleness: () => [],
+  })
+  check('halted at Fix (the reference to a note did not silently drop the new defect)', result.halted_at, 'Fix')
+  check('the finding referencing a note still opened',
+    result.unresolved_findings?.some(f => f.title === 'Actually a live bug'), true)
+  check('the note it referenced is unaffected',
+    result.notes?.some(n => n.title === 'Stale comment' && n.reason === 'category'), true)
+}
+
+async function scenarioDF() {
+  console.log('\n== scenario DF: the known-findings prompt also asks for duplicate_of on a variant of an already-fixed defect')
+  const { captured } = await run({
+    args: { maxReviewRounds: 1 },
+    initialReview: {
+      correctness: [{ title: 'Needs a fix', file: 'x.js', claim: 'c', evidence: 'e' }],
+      advocate: [],
+    },
+    verify: (id) => id === 'f1' ? true : undefined,
+    fixHead: () => 'fix00000000000000000000000000000000000001',
+    staleness: () => [],
+  })
+  const tailPrompt = captured.calls.find(c => c.label.startsWith('review:fix:1:'))?.prompt ?? ''
+  check('the prompt also asks for a variant of an already-fixed defect',
+    tailPrompt.includes('variant'), true)
+}
+
+async function scenarioDG() {
+  console.log('\n== scenario DG: a failed hunk fetch is unmeasured, not read as an empty, in-range-nowhere diff')
+  const { result } = await run({
+    args: { maxReviewRounds: 1 },
+    initialReview: {
+      correctness: [{ title: 'Needs a fix', file: 'x.js', claim: 'c', evidence: 'e' }],
+      advocate: [],
+    },
+    verify: (id) => id === 'f1' ? true : undefined,
+    fixHead: () => 'fix00000000000000000000000000000000000001',
+    hunks: () => undefined,
+    tailReview: [{ title: 'Fresh defect', file: 'x.js', claim: 'c2', evidence: 'e2', line_start: 500 }],
+    staleness: () => [],
+  })
+  check('halted at Fix (an unmeasured range does not classify as out-of-range)', result.halted_at, 'Fix')
+  check('the fresh finding opened rather than being dismissed as out-of-range',
+    result.unresolved_findings?.some(f => f.title === 'Fresh defect'), true)
+}
+
+// Scenario DH -- a verbatim quote proves the criterion exists, not that the
+// change misses it. Blocking rests on something executed, so without a
+// reproducer the finding is a note, and no model is ever asked to judge the
+// criterion met in place of an exit code.
+async function scenarioDH() {
+  console.log('\n== scenario DH: an unmet-criterion finding with a verbatim quote but no reproducer is a note, not a halt')
+  const { result, captured } = await run({
+    ticketResult: { found: true, summary: 'stub', comments: '',
+      description: 'Acceptance: the client must retry on a 503 with backoff.' },
+    initialReview: {
+      correctness: [
+        { category: 'unmet-criterion', title: 'Missing retry path', file: 'a.js',
+          claim: 'the retry path was never implemented', evidence: 'a.js:1',
+          criterion_quote: 'the client must retry on a 503 with backoff',
+          reproducer: undefined },
+      ],
+      advocate: [],
+    },
+  })
+  check('the run did not halt', result.halted_at, undefined)
+  check('it is a note for lack of a reproducer',
+    result.notes?.some(n => n.title === 'Missing retry path' && n.reason === 'no-reproducer'), true)
+  check('no agent was asked to judge whether a criterion is met',
+    captured.calls.some(c => /decide whether it is met/i.test(c.prompt ?? '')), false)
+}
+
+
+// Scenario DJ -- gh-106: the mutation-hunk fetch runs zero reproducers
+// (`executeAtHead([], ...)`), so dirt found there can never be a reproducer's
+// fault; the halt used to say "a reproducer execution" regardless.
+async function scenarioDJ() {
+  console.log('\n== scenario DJ: dirt found by the zero-reproducer mutation-hunk fetch is not blamed on a reproducer')
+  const { result } = await run({
+    initialReview: {
+      correctness: [{ category: 'docs', title: 'Stale doc', file: 'a.js', claim: 'c', evidence: 'e' }],
+      advocate: [],
+    },
+    mutationGated: true,
+    mutationResult: () => ({ green: true, head_sha: 'mut0000000000000000000000000000000000001',
+      detail: 'stub green', scored: true }),
+    reproducerDirty: true,
+    reproducerPorcelain: '?? stray-mutation-file.txt',
+  })
+  check('halted at Review', result.halted_at, 'Review')
+  check('the note does not blame a reproducer for dirt nothing here ran',
+    (result.note ?? '').includes('reproducer execution'), false)
+  check('the note still names the porcelain output',
+    (result.note ?? '').includes('stray-mutation-file.txt'), true)
+}
+
+// Scenario DK -- a fix that a later round breaks is reopened inside the loop,
+// so it gets the next round like any other open finding instead of halting
+// the run right past the loop.
+async function scenarioDK() {
+  console.log('\n== scenario DK: a fix a later round breaks still gets a fix round when rounds remain')
+  const { result } = await run({
+    args: { maxReviewRounds: 3 },
+    initialReview: {
+      correctness: [
+        { title: 'Off-by-one in parser', file: 'src/parser.js', claim: 'boundary is wrong', evidence: 'parser.js:12' },
+        { title: 'Missing guard', file: 'src/guard.js', claim: 'no guard', evidence: 'guard.js:3' },
+      ],
+      advocate: [],
+    },
+    verify: (id, round) => id === 'f1' ? (round === 1 || round === 3) : (id === 'f2' ? round === 2 : undefined),
+    settledExit: (id, round) => (id === 'f1' && round === 2 ? 1 : 0),
+    fixHead: (round) => `fix0000000000000000000000000000000000000${round}`,
+    tailReview: [],
+    staleness: () => [],
+  })
+  check('the run finished rather than halting', result.halted_at, undefined)
+  check('a third round settled the reopened fix', result.fix_rounds, 3)
+}
+
+// Scenario DL -- gh-106: the residual own-claim recheck used to select by
+// hasCompleteReproducer alone, so a non-blocking category (docs, design,
+// wording) could still reopen the run on its own claim.
+async function scenarioDL() {
+  console.log('\n== scenario DL: a residual note in a non-blocking category never reopens on its own claim')
+  const { result } = await run({
+    args: { maxReviewRounds: 1 },
+    initialReview: {
+      correctness: [{ title: 'Off-by-one in parser', file: 'src/parser.js',
+        claim: 'boundary is wrong', evidence: 'parser.js:12' }],
+      advocate: [],
+    },
+    verify: (id) => id === 'f1' ? true : (id === 'f2' ? false : undefined),
+    fixHead: () => 'fix00000000000000000000000000000000000001',
+    tailReview: [{ category: 'docs', title: 'Stale comment nearby', file: 'src/parser.js',
+      claim: 'a variant the fix missed', evidence: 'parser.js:20', duplicate_of: 'f1' }],
+    staleness: () => [],
+  })
+  check('the run finished rather than halting on a non-blocking residual', result.halted_at, undefined)
+  check('the residual note stays recorded', result.notes?.some(n => n.reason === 'residual'), true)
+}
+
+// Scenario DM -- gh-106: the residual own-claim recheck used to treat a
+// missing row or exit 126/127 (could not run) the same as a genuine failure,
+// unlike disposeCandidates' identical rule for a fresh candidate.
+async function scenarioDM() {
+  console.log('\n== scenario DM: a residual note whose own reproducer could not run does not reopen either')
+  const { result } = await run({
+    args: { maxReviewRounds: 1 },
+    initialReview: {
+      correctness: [{ title: 'Off-by-one in parser', file: 'src/parser.js',
+        claim: 'boundary is wrong', evidence: 'parser.js:12' }],
+      advocate: [],
+    },
+    verify: (id, round) => id === 'f1' ? true : (id === 'f2' && round === 'residual' ? 127 : undefined),
+    fixHead: () => 'fix00000000000000000000000000000000000001',
+    tailReview: [{ title: 'A variant the fix missed', file: 'src/parser.js',
+      claim: 'edge case at the far end', evidence: 'parser.js:22', duplicate_of: 'f1' }],
+    staleness: () => [],
+  })
+  check('the run finished rather than halting on a could-not-run residual claim', result.halted_at, undefined)
+}
+
+// Scenario DN -- gh-106: the residual own-claim recheck had no hunks to
+// apply classify()'s out-of-range rule against, so a claim far outside the
+// fix's own hunks could still reopen the run.
+async function scenarioDN() {
+  console.log('\n== scenario DN: a residual note whose own claim sits outside this round\'s hunks does not reopen either')
+  const { result } = await run({
+    args: { maxReviewRounds: 1 },
+    initialReview: {
+      correctness: [{ title: 'Off-by-one in parser', file: 'src/parser.js',
+        claim: 'boundary is wrong', evidence: 'parser.js:12' }],
+      advocate: [],
+    },
+    verify: (id) => id === 'f1' ? true : (id === 'f2' ? false : undefined),
+    fixHead: () => 'fix00000000000000000000000000000000000001',
+    hunks: () => ['+++ b/src/parser.js', '@@ -100,5 +100,5 @@'],
+    tailReview: [{ title: 'A variant the fix missed', file: 'src/parser.js',
+      claim: 'edge case at the far end', evidence: 'parser.js:500', line_start: 500,
+      duplicate_of: 'f1' }],
+    staleness: () => [],
+  })
+  check('the run finished rather than halting on an out-of-range residual claim', result.halted_at, undefined)
+}
+
+// Scenario DO -- a residual never blocks, whatever its own fields claim. An
+// unmet-criterion residual with an invented quote and a failing reproducer is
+// the case where a second, hand-copied gate once disagreed with classify().
+async function scenarioDO() {
+  console.log('\n== scenario DO: a residual with an invented criterion quote and a failing reproducer is still only a note')
+  const { result } = await run({
+    args: { maxReviewRounds: 1 },
+    ticketResult: { found: true, summary: 'stub', comments: '',
+      description: 'Acceptance: the parser rejects an index past the end.' },
+    initialReview: {
+      correctness: [{ title: 'Off-by-one in parser', file: 'src/parser.js',
+        claim: 'boundary is wrong', evidence: 'parser.js:12' }],
+      advocate: [],
+    },
+    verify: (id) => id === 'f1' ? true : false,
+    fixHead: () => 'fix00000000000000000000000000000000000001',
+    tailReview: [{ category: 'unmet-criterion', title: 'Negative index accepted', file: 'src/parser.js',
+      claim: 'negative indexes pass', evidence: 'parser.js:20', duplicate_of: 'f1',
+      criterion_quote: 'the parser must reject every negative index outright' }],
+    staleness: () => [],
+  })
+  check('the run did not halt', result.halted_at, undefined)
+  check('the residual is a note',
+    result.notes?.some(n => n.title === 'Negative index accepted' && n.reason === 'residual'), true)
+}
+
+// Scenario DP -- a fix the mutation commits undo is caught by re-running the
+// settled reproducer at the mutation head, even when no lens reports it.
+async function scenarioDP() {
+  console.log('\n== scenario DP: a fix the mutation commits undo halts even when no lens reports it')
+  const { result, captured } = await run(convergedWithSuspect({
+    tailReview: [],
+    postMutationReview: [],
+    mutationResult: () => ({ green: true, head_sha: 'mut0000000000000000000000000000000000001', detail: 'stub green', scored: true }),
+    settledExit: (id, round) => (id === 'f1' && round === 'mutation' ? 1 : 0),
+  }))
+  check('halted at Review', result.halted_at, 'Review')
+  check('the undone fix is unresolved', result.unresolved_findings?.some(f => f.file === 'src/parser.js'), true)
+  check('the settled recheck ran at the mutation head', callCount(captured, 'reproduce:settled:mutation'), 1)
+}
+
 for (const scenario of [scenarioA, scenarioB, scenarioG, scenarioC, scenarioD, scenarioE, scenarioH,
                         scenarioI, scenarioJ, scenarioK, scenarioL, scenarioM, scenarioN,
                         scenarioO, scenarioP, scenarioQ, scenarioR, scenarioS, scenarioT,
@@ -2658,8 +3302,13 @@ for (const scenario of [scenarioA, scenarioB, scenarioG, scenarioC, scenarioD, s
                         scenarioBM, scenarioBN, scenarioBO, scenarioBP, scenarioBQ,
                         scenarioBR, scenarioBS, scenarioBT, scenarioBU, scenarioBV, scenarioBW,
                         scenarioBX, scenarioBY, scenarioBZ, scenarioCA, scenarioCB,
-                        scenarioCC, scenarioCD, scenarioCE, scenarioCF, scenarioCG,
-                        scenarioCH, scenarioCI, scenarioCJ, scenarioCK, scenarioCL, scenarioCM, scenarioCN, scenarioCO]) {
+                        scenarioCC, scenarioCD, scenarioCE, scenarioCG,
+                        scenarioCH, scenarioCI, scenarioCJ, scenarioCK, scenarioCL, scenarioCM, scenarioCN, scenarioCO,
+                        scenarioCP, scenarioCQ, scenarioCR, scenarioCS, scenarioCT, scenarioCU, scenarioCV,
+                        scenarioCW, scenarioCX, scenarioCY, scenarioCZ, scenarioDA, scenarioDB,
+                        scenarioDC, scenarioDD, scenarioDE, scenarioDF, scenarioDG, scenarioDH,
+                        scenarioDJ, scenarioDK, scenarioDL, scenarioDM, scenarioDN,
+                        scenarioDO, scenarioDP]) {
   await scenario()
 }
 
