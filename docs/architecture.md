@@ -207,34 +207,53 @@ A lens can raise up to `MAX_FINDINGS_PER_LENS` findings, and every one carries a
 `category` from a closed enum. Only `BLOCKING_CATEGORIES` (`wrong-result`, `crash`,
 `gate-bypass`, `unmet-criterion`) can stop the run, and only when the finding also
 carries a complete `reproducer`: one command, run from the worktree root, that exits 0
-when the code is correct and nonzero while the defect is present. `classify(f, ctx)` is
-the pure function that turns a lens's fields into a candidate (blocking, pending
-execution) or a note (reaching the PR body, never the run), in this order: a
-content-identical or referenced re-report of something already tracked drops; a
-reference to a *settled* finding becomes a `residual` note instead; a non-blocking
-category, a missing reproducer, an `unmet-criterion` quote that is not a verbatim
-substring of the ticket text, or (from the first re-review on) a line span outside what
-the preceding fix or mutation range actually touched, each becomes a note with its own
-`reason`. What survives is a candidate, and `executeAtHead()` is what runs it: one haiku
-dispatch per batch, against the worktree's current HEAD, deciding open-vs-note (or
-fixed-vs-still-open, on a later round) from `exit_code` alone, never from a model's
-account of the diff. This is what replaced the old LLM verifier: a finding is fixed when
-its own reproducer exits 0, not when a verifier says so.
+when the code is correct. `classify(f, ctx)` is the pure function that turns a lens's
+fields into a candidate (blocking, pending execution) or a note (reaching the PR body,
+never the run), in this order: a content-identical or referenced re-report of something
+already tracked drops; a reference to a *settled* finding becomes a `residual` note
+instead; a non-blocking category, a missing reproducer, an `unmet-criterion` quote that
+is not a verbatim substring of the ticket text, or (from the first re-review on) a line
+span outside what the preceding fix or mutation range actually touched, each becomes a
+note with its own `reason`. What survives is a candidate, and `executeAtHead()` is what
+runs it: one haiku dispatch per batch, against the worktree's current HEAD, reporting
+each row's raw, combined stdout and stderr verbatim alongside its exit code.
+
+`outcomeOf(row)` is what turns that row into a disposition, and it is the only place
+that does: no row is `not-executed`; exit 0 is `passed`, marker or not; 126 or 127 is
+`could-not-run`; any other nonzero is `reproduced` only when the row's raw output (read
+before `truncateOutput` ever runs on it) carries `REPRODUCED_MARKER` on a line of its
+own, and `errored` otherwise. A command that fails for its own reasons -- a missing
+environment variable, a wrong path, a syntax error -- exits nonzero same as a real
+demonstration, and used to read the same way; a reproducer now has to prove it observed
+the defect, not merely that it did not exit 0. `disposeCandidates()` opens a candidate on
+`reproduced` or `not-executed` (the same "could not measure is not a pass" reasoning as
+below) and notes everything else, `errored` included, with its own reason
+(`reproducer-errored`) and its `reproducer_run` (the outcome, the exit code, and the
+truncated output) attached so the note keeps what actually happened.
 
 `unmet-criterion` needs a reproducer too. The verbatim quote proves the criterion
 exists; only an executed command shows the change misses it, and the alternative, a
 model reading the code and declaring the criterion met, is the judgement blocking must
 not rest on.
 
+An open finding carries its latest `reproducer_run` into every fix brief, replaced each
+round rather than accumulated. Exit 0 settles it regardless of the marker; nonzero with
+the marker keeps it open as `reproduced`; nonzero without it keeps it open as `errored`,
+and the brief says the reproducer itself failed to run, with its exit code and output, so
+the fixer is not sent chasing a defect nobody demonstrated.
+
 A settled finding is re-run at every head the code moves to after it settled: in every
 later fix round (`reproduce:settled:<round>`) and at the mutation gate's head
-(`reproduce:settled:mutation`), budget or not. One that no longer exits 0 reopens, and
-gets the next round if one is left; at the mutation head, where no round follows, the
-run halts at Review before spending a review on it. Nothing here waits for a lens to
-report the regression, so a `residual` note is only ever a note: whether a new finding
-is a *variant* of a fixed one is decided by the lens setting `duplicate_of`, which is a
-judgement no exit code can make, and the cost of that judgement being wrong is a line in
-the PR body rather than another round.
+(`reproduce:settled:mutation`), budget or not. `regressedOf()` splits what comes back into
+`regressed` (still fails, `reproduced`/`could-not-run`/`not-executed`) and `errored`
+(reproducer itself failed) and reopens both, logged separately: a fix nobody could
+re-measure is not the same claim as one whose reproducer ran clean and still shows the
+defect. Reopened findings get the next round if one is left; at the mutation head, where
+no round follows, the run halts at Review with a note that counts undone and errored
+fixes separately. Nothing here waits for a lens to report the regression, so a `residual`
+note is only ever a note: whether a new finding is a *variant* of a fixed one is decided
+by the lens setting `duplicate_of`, which is a judgement no exit code can make, and the
+cost of that judgement being wrong is a line in the PR body rather than another round.
 
 ### Check discovery
 
