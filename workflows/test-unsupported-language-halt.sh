@@ -147,11 +147,11 @@ function makeAgent(scenario, captured) {
     if (label.startsWith('review:')) { captured.reviewCalled = true; return { findings: [] } }
     // reproduce:review runs once, right after the initial review, to decide
     // open-vs-note for whatever candidates it raised; this file's one scenario
-    // that reaches Review needs its finding to reproduce (nonzero) so it is
-    // still open when the fixer halts on it.
+    // that reaches Review needs its finding to reproduce (nonzero, with the
+    // gh-113 marker) so it is still open when the fixer halts on it.
     if (label === 'reproduce:review') {
       const ids = [...prompt.matchAll(/\[(f\d+)\]/g)].map(m => m[1])
-      return { results: ids.map(id => ({ id, exit_code: 1, output: 'stub: still reproduces' })), dirty: false }
+      return { results: ids.map(id => ({ id, exit_code: 1, output: 'stub: still reproduces\nTOUCHSTONE_DEFECT_REPRODUCED' })), dirty: false }
     }
     throw new Error(`unstubbed agent label in test scenario: ${label}`)
   }

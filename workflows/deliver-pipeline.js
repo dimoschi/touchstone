@@ -26,7 +26,7 @@ export const meta = {
 // against the manifest in scripts/check-version-bump.sh, so drift is a
 // gate's job rather than something this script verifies about itself.
 const PLUGIN_NAME = 'touchstone'
-const PIPELINE_VERSION = '0.22.1'
+const PIPELINE_VERSION = '0.23.0'
 
 // Boundaries. Wall-clock deadlines are not expressible here (no Date.now, by
 // design); the bounds are rounds, counts, and token budget instead.
@@ -477,10 +477,13 @@ const BLOCKING_CATEGORIES = new Set(['wrong-result', 'crash', 'gate-bypass', 'un
 // maxItems failure; reviewOf slices to this many itself instead, most
 // serious first, and logs what it dropped.
 const MAX_FINDINGS_PER_LENS = 5
-// One command, run from the worktree root: exits 0 when the code is correct,
-// nonzero while the defect is present. expected/actual hold what it prints.
-// The script decides only on exit_code, never on a model's account of it --
-// the same principle as CHECK_RUN below.
+// One command, run from the worktree root: exits 0 when the code is correct.
+// A nonzero exit only counts as a demonstration when the executor's raw
+// output also carries REPRODUCED_MARKER on a line of its own; nonzero without
+// it means the command itself failed to run, not that it showed the defect.
+// expected/actual hold what it prints. The script decides on exit_code plus
+// the marker, never on a model's account of it -- the same principle as
+// CHECK_RUN below.
 const REPRODUCER = {
   type: 'object', additionalProperties: false,
   required: ['kind', 'command', 'expected', 'actual'],
@@ -488,6 +491,25 @@ const REPRODUCER = {
     kind: { type: 'string', enum: ['test', 'command'] },
     command: { type: 'string' }, expected: { type: 'string' }, actual: { type: 'string' },
   },
+}
+// Printed by a reproducer on a line of its own when, and only when, it has
+// observed the defect. Matched whole-line (split, trim, ===) against the
+// executor's raw output, never as a substring: a `set -x` echo of this same
+// text, or a stack-trace source line that happens to mention it, must not
+// pass as a demonstration.
+const REPRODUCED_MARKER = 'TOUCHSTONE_DEFECT_REPRODUCED'
+const hasMarkerLine = (output) =>
+  String(output ?? '').split(/\r?\n/).some((line) => line.trim() === REPRODUCED_MARKER)
+// The one place that turns an executor row into what it actually showed.
+// Read against the row's raw, untruncated output -- truncateOutput below
+// runs only on the copy that gets stored, never on the copy this reads -- so
+// a long log can never cut the marker off and turn a real demonstration into
+// an error.
+const outcomeOf = (row) => {
+  if (!row) return 'not-executed'
+  if (row.exit_code === 0) return 'passed'
+  if (row.exit_code === 126 || row.exit_code === 127) return 'could-not-run'
+  return hasMarkerLine(row.output) ? 'reproduced' : 'errored'
 }
 const FINDINGS = {
   type: 'object', additionalProperties: false, required: ['findings'],
@@ -1495,6 +1517,12 @@ const truncateOutput = (s) => {
     `\n[touchstone: truncated, ${omitted} bytes omitted]\n` +
     t.slice(t.length - CHECK_TAIL_BYTES)
 }
+// The one record kept of what a reproducer actually did at a given round.
+// outcomeOf reads row.output raw, before this ever truncates the copy that
+// gets stored, so truncation can never hide the marker from the decision.
+const reproducerRunOf = (row, round) =>
+  ({ outcome: outcomeOf(row), exit_code: row?.exit_code ?? null,
+     output: truncateOutput(row?.output), round })
 // Splits a run's raw results into a real red list (ran, command matched,
 // non-zero exit) and an unmeasured one (nobody reported the id, or reported
 // it against a different command). Unmeasured is never a pass, but it is
@@ -2010,10 +2038,16 @@ const duplicateTargetOf = (f, known) => {
 // no other way to learn the script judges exit_code alone.
 const REPRODUCER_CONTRACT =
   `A reproducer is one command, run from the worktree root (${wt.path}). It ` +
-  `exits 0 when the code is correct and nonzero while the defect is present; ` +
-  `expected and actual hold what it prints. Any helper file it needs goes ` +
-  `under the scratch path already given above, never in the tracked tree. ` +
-  `The script decides only on exit_code, never on your account of it.`
+  `exits 0 when the code is correct. Print ${REPRODUCED_MARKER} on a line of ` +
+  `its own when, and only when, you have observed the defect, and exit ` +
+  `nonzero; never print it unconditionally, from a ||-style fallback, or ` +
+  `from a trap. A nonzero exit without that line counts as the reproducer ` +
+  `failing to run, never as a demonstration. expected and actual hold what ` +
+  `it prints. The command must be self-contained: set any environment ` +
+  `variable it reads yourself, never rely on your own shell's exports, and ` +
+  `keep its output short. Any helper file it needs goes under the scratch ` +
+  `path already given above, never in the tracked tree. The script decides ` +
+  `on exit_code plus that marker line, never on your account of it.`
 
 const reviewOf = async (range, tag, picked, known = [], knownCharge = '') => {
   const out = await parallel(picked.map((lens) => () =>
@@ -2250,7 +2284,9 @@ const executeAtHead = async (items, label, diffRange) => {
         `bash -c 'cd ${wt.path} && <command>'. Never a bare ` +
         `cd ${wt.path} && <command>, which does move this session.\n` +
         `Report each command's exit code verbatim, never your own judgement of ` +
-        `whether it passed; combine stdout and stderr into output.\n` +
+        `whether it passed. Report output as its combined stdout and stderr, ` +
+        `verbatim and complete -- do not summarise, truncate, or interpret ` +
+        `what it printed, since the script reads it.\n` +
         runnable.map(it => `[${it.id}] ${it.reproducer.command}`).join('\n') + `\n`
       : '') +
     (diffRange
@@ -2264,11 +2300,13 @@ const executeAtHead = async (items, label, diffRange) => {
     `that writes to the tree must be visible, not silently carried into ` +
     `whatever commits next.`,
     { label, schema: EXECUTE_RESULT, model: 'haiku', effort: 'low' })
-  const pairs = (Array.isArray(out?.results) ? out.results : [])
+  // A Map, not the old [id, exit_code] pairs: outcomeOf needs each row's raw
+  // output too, to check the marker before truncateOutput ever runs on it.
+  const runs = new Map((Array.isArray(out?.results) ? out.results : [])
     .filter(r => typeof r?.id === 'string')
-    .map(r => [stripBrackets(r.id), r.exit_code])
+    .map(r => [stripBrackets(r.id), { exit_code: r.exit_code, output: r.output }]))
   return {
-    pairs,
+    runs,
     // null (not {}) when the fetch itself failed -- the executor returned
     // nothing, failed schema, or omitted diff_lines -- so classify()'s
     // ctx.hunks guard reads "could not measure" as unknown, never as "this
@@ -2291,10 +2329,13 @@ const executeAtHead = async (items, label, diffRange) => {
 // A reproducer run that leaves the tree dirty halts outright: a check that
 // writes to the tree (a ledger, a generated file, a mutated fixture) must not
 // be silently carried into whatever commits next, the same principle
-// runChecks already applies to the repo's own discovered checks.
-const dirtyReproducerHalt = async (phaseName, exec) => halted(phaseName, {
+// runChecks already applies to the repo's own discovered checks. extraOpen is
+// for a caller (the post-mutation site) whose first-call verdicts live in a
+// local variable rather than the closed-over `open`, so they still reach the
+// halt instead of being silently dropped alongside it.
+const dirtyReproducerHalt = async (phaseName, exec, extraOpen = []) => halted(phaseName, {
   plan: plan.plan, implemented: impl.summary, gates: gatesPayload(),
-  unresolved_findings: open, notes, fix_rounds: round,
+  unresolved_findings: [...open, ...extraOpen], notes, fix_rounds: round,
   note: exec.preexisting
     ? `The working tree was already dirty before this check ran, so nothing ` +
       `it did caused it: ${exec.porcelain || '(no detail returned)'}. Find ` +
@@ -2324,22 +2365,79 @@ const classifyBatch = (raised, hunks, round) => {
   }
   return { candidates, freshNotes }
 }
-// The initial-classification exit-code rule, shared by the initial review,
-// each round's fresh tail-review candidates, and the post-mutation review.
-// A missing row -- the executor dropped it rather than reporting an exit
-// code -- opens the candidate rather than dismissing it as a note: the same
-// "could not measure is not the same as did not reproduce" rule the open
-// list's own re-check already gets (a missing row there also stays open).
-const disposeCandidates = (candidates, pairs, round) => {
-  const byId = new Map(pairs ?? [])
-  const opened = [], asNotes = []
+// The initial-classification rule, shared by the initial review, each
+// round's fresh tail-review candidates, and the post-mutation review. Keyed
+// on outcomeOf, not the bare exit code: only 'reproduced' -- nonzero exit and
+// the marker, both actually observed -- opens the candidate. A missing row
+// (not-executed, the executor dropped it or the whole call failed schema) is
+// even less evidence than an errored run and must not open one either, or a
+// finding can hold the run on a reproducer nobody ever ran (gh-113). Unlike
+// passed/could-not-run/errored, not-executed is no verdict at all, so it is
+// returned apart from asNotes for executeAndDispose below to retry.
+const disposeCandidates = (candidates, runs, round) => {
+  const opened = [], asNotes = [], notExecuted = []
   for (const f of candidates) {
-    const code = byId.get(f.id)
-    if (code === 0) asNotes.push({ ...f, reason: 'did-not-reproduce', round })
-    else if (code === 126 || code === 127) asNotes.push({ ...f, reason: 'reproducer-could-not-run', round })
-    else opened.push(f)
+    const row = runs?.get(f.id)
+    const reproducer_run = reproducerRunOf(row, round)
+    if (reproducer_run.outcome === 'passed') asNotes.push({ ...f, reason: 'did-not-reproduce', round, reproducer_run })
+    else if (reproducer_run.outcome === 'could-not-run') asNotes.push({ ...f, reason: 'reproducer-could-not-run', round, reproducer_run })
+    else if (reproducer_run.outcome === 'errored') asNotes.push({ ...f, reason: 'reproducer-errored', round, reproducer_run })
+    else if (reproducer_run.outcome === 'not-executed') notExecuted.push({ ...f, reproducer_run })
+    else opened.push({ ...f, reproducer_run })
   }
-  return { opened, asNotes }
+  return { opened, asNotes, notExecuted }
+}
+
+// Runs `candidates` through executeAtHead under `label`; whatever comes back
+// with no row is retried exactly once, at the same head, as its own
+// executeAtHead call restricted to just those candidates and labelled
+// `${label}:retry` -- the retry-once rule runChecks already applies to a
+// discovered check (#116), extended here to a reproducer nobody measured
+// (gh-113). The retry runs only after the first call fully resolves, so it
+// can never overlap another agent in the worktree, same as every
+// executeAtHead call. Its rows are merged into the first call's before
+// reclassifying the whole batch, so a candidate the retry did measure counts
+// on that verdict and one still missing surfaces in notExecuted for the
+// caller to halt on. A dirty result from the first call has no verdicts to
+// carry (disposeCandidates never ran). A dirty retry is narrower -- the retry
+// only ever covers the notExecuted subset -- so the first call's opened and
+// asNotes, already measured clean at this same head, ride along on the dirty
+// result instead of being dropped; the caller folds them in before turning
+// the result into a dirtyReproducerHalt at its own phase.
+const executeAndDispose = async (candidates, label, round) => {
+  const exec = await executeAtHead(candidates, label)
+  if (exec.dirty) return { dirty: true, exec, opened: [], asNotes: [] }
+  const first = disposeCandidates(candidates, exec.runs, round)
+  if (!first.notExecuted.length) return { dirty: false, ...first }
+  const retryIds = new Set(first.notExecuted.map(f => f.id))
+  const retryCandidates = candidates.filter(f => retryIds.has(f.id))
+  const retryExec = await executeAtHead(retryCandidates, `${label}:retry`)
+  if (retryExec.dirty) return { dirty: true, exec: retryExec, opened: first.opened, asNotes: first.asNotes }
+  const merged = new Map(exec.runs)
+  for (const [id, row] of retryExec.runs) merged.set(id, row)
+  return { dirty: false, ...disposeCandidates(candidates, merged, round) }
+}
+
+// Reports whatever executeAndDispose still could not measure after its
+// retry. Never handed to a fixer: like unmeasuredChecksHalt above, this is
+// about measurement, not the code, so no fix round should be spent guessing
+// at a reproducer nobody ran. Defined here, before open/notes/round/
+// fixRoundSpend, for the same reason unmeasuredChecksHalt is: it reads only
+// plan, impl and gatesPayload by closure, and every call site passes
+// unresolved_findings, notes, fix_rounds and (once it exists) fix_round_output
+// through extra instead, so calling this from the initial review -- before
+// fixRoundSpend is declared -- is not the TDZ failure the comment above
+// unmeasuredChecksHalt describes.
+const notExecutedHalt = (at, notExecuted, extra) => {
+  const note = `${notExecuted.length} finding(s) could not be measured after ` +
+    `a retry. This halt is about measurement, not the code: the executor did ` +
+    `not run ${notExecuted.length === 1 ? 'this reproducer' : 'these reproducers'}, ` +
+    `so no verdict exists either way.\n` +
+    notExecuted.map(f => `- ${f.id}: ${f.title}`).join('\n')
+  return halted(at, {
+    plan: plan.plan, implemented: impl.summary, gates: gatesPayload(),
+    ...extra, note,
+  })
 }
 
 let settled = []
@@ -2350,11 +2448,16 @@ if (reviewerCount) {
   const { candidates, freshNotes } = classifyBatch(raised, null, 0)
   notes.push(...freshNotes)
   if (candidates.length) {
-    const exec = await executeAtHead(candidates, 'reproduce:review')
-    if (exec.dirty) { sReview.close(); return await dirtyReproducerHalt('Review', exec) }
-    const { opened, asNotes } = disposeCandidates(candidates, exec.pairs, 0)
-    open.push(...opened)
-    notes.push(...asNotes)
+    const disposed = await executeAndDispose(candidates, 'reproduce:review', 0)
+    open.push(...disposed.opened)
+    notes.push(...disposed.asNotes)
+    if (disposed.dirty) { sReview.close(); return await dirtyReproducerHalt('Review', disposed.exec) }
+    if (disposed.notExecuted.length) {
+      sReview.close()
+      return await notExecutedHalt('Review', disposed.notExecuted, {
+        unresolved_findings: [...open, ...disposed.notExecuted], notes, fix_rounds: round,
+      })
+    }
   }
 }
 sReview.close()
@@ -2422,9 +2525,18 @@ const markStale = async (findings) => {
 // therefore only ever a note. A missing row counts as regressed, the same
 // "could not measure is not a pass" rule the open list gets. Not gated on
 // budget: trusting a fix nobody re-checked is worse than one cheap dispatch.
-const regressedOf = (items, exec) => {
-  const byId = new Map(exec?.pairs ?? [])
-  return items.filter(f => byId.get(f.id) !== 0)
+// errored is split out from regressed: a fix nobody could re-measure (the
+// reproducer itself crashed) is not the same claim as one whose reproducer
+// ran clean and still shows the defect, and the two are reported separately.
+const regressedOf = (items, exec, round) => {
+  const regressed = [], errored = []
+  for (const f of items) {
+    const row = exec?.runs?.get(f.id)
+    const reproducer_run = reproducerRunOf(row, round)
+    if (reproducer_run.outcome === 'passed') continue
+    ;(reproducer_run.outcome === 'errored' ? errored : regressed).push({ ...f, reproducer_run })
+  }
+  return { regressed, errored }
 }
 
 while ((open.length || blockingChecksOpen()) && round < MAX_REVIEW_ROUNDS && !outOfBudget() && !sFix.over()) {
@@ -2474,7 +2586,13 @@ while ((open.length || blockingChecksOpen()) && round < MAX_REVIEW_ROUNDS && !ou
         `you consider that one fixed; an unmet-criterion finding with none is ` +
         `judged by the criterion it names instead.\n` +
         open.map(f => `- ${f.title} (${locusOf(f)}): ${f.claim}` +
-          (f.reproducer?.command ? ` [reproduce: ${f.reproducer.command}]` : '')).join('\n') + `\n`
+          (f.reproducer?.command ? ` [reproduce: ${f.reproducer.command}]` : '') +
+          (f.reproducer_run?.outcome === 'errored'
+            ? `\n  Its reproducer itself failed to run last round: exit ` +
+              `${f.reproducer_run.exit_code}, no marker line. This is not a ` +
+              `demonstration of the defect; find out why the command failed. ` +
+              `Output:\n${f.reproducer_run.output}`
+            : '')).join('\n') + `\n`
       : '') +
     (blockingChecksOpen()
       ? `The repo's own checks below are failing. Each is a script the repo ` +
@@ -2533,36 +2651,57 @@ while ((open.length || blockingChecksOpen()) && round < MAX_REVIEW_ROUNDS && !ou
     ? await reviewOf(roundRange, `review:fix:${round}`, [LENS.correctness], knownForRound())
     : []
 
-  const execOldById = new Map(execOld?.pairs ?? [])
-
   // For an open finding, fixed means its reproducer exits 0 at this round's
-  // head; a missing row (the agent dropped it) leaves it open rather than
-  // guessing it was resolved.
+  // head; anything else stays open, carrying the latest reproducer_run
+  // (never accumulated) so the next fix brief can render it. A missing row
+  // (the agent dropped it) still leaves it open rather than guessing it was
+  // resolved.
   const stillOpen = []
+  let erroredOpen = 0
   for (const f of open) {
-    if (execOldById.get(f.id) === 0) settled.push(f)
-    else stillOpen.push(f)
+    const row = execOld?.runs?.get(f.id)
+    const outcome = outcomeOf(row)
+    if (outcome === 'passed') { settled.push(f); continue }
+    if (outcome === 'errored') erroredOpen++
+    stillOpen.push({ ...f, reproducer_run: reproducerRunOf(row, round) })
   }
   open = stillOpen
+  if (erroredOpen) {
+    log(`round ${round}: ${erroredOpen} open finding(s) whose reproducer errored (nonzero, no marker)`)
+  }
 
-  const regressed = execSettled ? regressedOf(settledBefore, execSettled) : []
+  const { regressed, errored: erroredSettled } =
+    execSettled ? regressedOf(settledBefore, execSettled, round) : { regressed: [], errored: [] }
   if (regressed.length) {
     const ids = new Set(regressed.map(f => f.id))
     settled = settled.filter(f => !ids.has(f.id))
     open = open.concat(regressed)
     log(`round ${round}: ${regressed.length} earlier fix(es) no longer hold at this head; reopened`)
   }
+  if (erroredSettled.length) {
+    const ids = new Set(erroredSettled.map(f => f.id))
+    settled = settled.filter(f => !ids.has(f.id))
+    open = open.concat(erroredSettled)
+    log(`round ${round}: ${erroredSettled.length} earlier fix(es) could not be re-measured this ` +
+        `round (reproducer errored, nonzero, no marker); reopened`)
+  }
 
   if (tailReviewable) {
     const { candidates, freshNotes } = classifyBatch(freshRaw ?? [], execOld?.hunks ?? null, round)
     notes.push(...freshNotes)
     if (candidates.length) {
-      const execFresh = await executeAtHead(candidates, `reproduce:fix:${round}:fresh`)
-      if (execFresh.dirty) { sFix.close(); return await dirtyReproducerHalt('Fix', execFresh) }
-      const { opened, asNotes } = disposeCandidates(candidates, execFresh.pairs, round)
-      if (opened.length) log(`round ${round}: the fix itself introduced ${opened.length} new finding(s)`)
-      open = open.concat(opened)
-      notes.push(...asNotes)
+      const disposed = await executeAndDispose(candidates, `reproduce:fix:${round}:fresh`, round)
+      if (disposed.opened.length) log(`round ${round}: the fix itself introduced ${disposed.opened.length} new finding(s)`)
+      open = open.concat(disposed.opened)
+      notes.push(...disposed.asNotes)
+      if (disposed.dirty) { sFix.close(); return await dirtyReproducerHalt('Fix', disposed.exec) }
+      if (disposed.notExecuted.length) {
+        sFix.close()
+        return await notExecutedHalt('Fix', disposed.notExecuted, {
+          unresolved_findings: [...open, ...disposed.notExecuted], notes,
+          fix_rounds: round, fix_round_output: fixRoundSpend,
+        })
+      }
     }
     reviewedThrough = head
   } else if (head) {
@@ -2791,17 +2930,25 @@ const mutHead = mutation.head_sha?.trim()
 if (mutHead && mutHead !== reviewedThrough && settled.length) {
   const execSettledMut = await executeAtHead(settled, 'reproduce:settled:mutation')
   if (execSettledMut.dirty) return await dirtyReproducerHalt('Review', execSettledMut)
-  const undone = regressedOf(settled, execSettledMut)
-  if (undone.length) {
+  const { regressed: undone, errored: erroredMut } = regressedOf(settled, execSettledMut, 'mutation')
+  if (undone.length || erroredMut.length) {
     return await halted('Review', {
       plan: plan.plan, implemented: impl.summary, mutation,
       gates: gatesPayload(),
-      unresolved_findings: undone, fix_rounds: round, fix_round_output: fixRoundSpend,
+      unresolved_findings: [...undone, ...erroredMut], fix_rounds: round, fix_round_output: fixRoundSpend,
       notes,
-      note: `The mutation gate's own commits (${reviewedThrough}..${mutHead}) undid ` +
-            `${undone.length} verified fix(es): their reproducers fail again at ` +
-            `that head, and no fix round runs after the gate. ${prNote()}. Judge ` +
-            `each: fix it, or reject it as wrong.`,
+      note: `The mutation gate's own commits (${reviewedThrough}..${mutHead}) ` +
+            (undone.length
+              ? `undid ${undone.length} verified fix(es): their reproducers fail ` +
+                `again at that head. `
+              : '') +
+            (erroredMut.length
+              ? `left ${erroredMut.length} verified fix(es) unmeasured: their ` +
+                `reproducer errored (nonzero, no marker) rather than confirming ` +
+                `or failing. `
+              : '') +
+            `No fix round runs after the gate. ${prNote()}. Judge each: fix it, ` +
+            `or reject it as wrong.`,
     })
   }
 }
@@ -2825,11 +2972,16 @@ if (reviewerCount && mutHead && mutHead !== reviewedThrough && !outOfBudget()) {
   notes.push(...freshNotes)
   let freshOpen = []
   if (candidates.length) {
-    const execFresh = await executeAtHead(candidates, 'reproduce:mutation:fresh')
-    if (execFresh.dirty) return await dirtyReproducerHalt('Review', execFresh)
-    const disposed = disposeCandidates(candidates, execFresh.pairs, 'mutation')
+    const disposed = await executeAndDispose(candidates, 'reproduce:mutation:fresh', 'mutation')
     freshOpen = disposed.opened
     notes.push(...disposed.asNotes)
+    if (disposed.dirty) return await dirtyReproducerHalt('Review', disposed.exec, freshOpen)
+    if (disposed.notExecuted.length) {
+      return await notExecutedHalt('Review', disposed.notExecuted, {
+        mutation, unresolved_findings: [...freshOpen, ...disposed.notExecuted],
+        fix_rounds: round, fix_round_output: fixRoundSpend, notes,
+      })
+    }
   }
   if (freshOpen.length) {
     return await halted('Review', {
