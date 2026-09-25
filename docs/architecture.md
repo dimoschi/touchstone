@@ -239,13 +239,14 @@ the PR body rather than another round.
 ### Check discovery
 
 `checks:discover` reads only `${wt.path}/AGENTS.md` (or `CLAUDE.md`) and transcribes
-every `##` heading and the fenced block that follows it verbatim; it chooses, filters
-and interprets nothing. `checksFrom()` then selects the section whose heading is
-exactly `## Checks` (only trailing whitespace ignored -- `## Commands`, `### Checks`
-and `## checks` all name something else), splits its fence into commands, strips
-comments, and assigns each an id (`check:1`, `check:2`, ...) in declared order. Every
-downstream consumer -- the runner, the baseline drop, the red list, the fix brief --
-keys on that id, never on the command text or a name a model invented.
+every `##` heading and the fenced block that follows it verbatim, including its own
+opening and closing marker lines; it chooses, filters and interprets nothing.
+`checksFrom()` then selects the section whose heading is exactly `## Checks` (only
+trailing whitespace ignored -- `## Commands`, `### Checks` and `## checks` all name
+something else), drops the fence's marker lines, splits what remains into commands,
+strips comments, and assigns each an id (`check:1`, `check:2`, ...) in declared order.
+Every downstream consumer -- the runner, the baseline drop, the red list, the fix
+brief -- keys on that id, never on the command text or a name a model invented.
 
 A discovered check runs twice on a blocking run: once as the environmental baseline
 before Implement, once after. `## Checks` must therefore list only read-only,

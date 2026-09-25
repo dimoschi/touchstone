@@ -280,10 +280,11 @@ const MARKERS = {
 // the --git-common-dir root the gate:opt-in probe resolves -- a check list is
 // branch content the ticket can change, while the gate markers are repo-wide
 // policy no phase of this run writes. The agent transcribes every "##"
-// heading and the first fenced block under it verbatim, choosing and
-// interpreting nothing. Selecting the check heading, splitting its fence and
-// assigning ids is script code (checksFrom below): a check list runs twice a
-// run, so what runs must come from parsing, never a model's account of it.
+// heading and the first fenced block under it verbatim, marker lines
+// included, choosing and interpreting nothing. Selecting the check heading,
+// dropping the fence's own marker lines, splitting the rest and assigning
+// ids is script code (checksFrom below): a check list runs twice a run, so
+// what runs must come from parsing, never a model's account of it.
 const CHECKS = {
   type: 'object', additionalProperties: false, required: ['file', 'sections', 'detail'],
   properties: {
@@ -379,7 +380,19 @@ function checksFrom(source) {
           : '.'),
     }
   }
-  const commands = (section.fence ?? '').split(/\r?\n/)
+  // The agent transcribes the fence with its own opening and closing marker
+  // lines (``` or ~~~, info string included), because "the contents between
+  // the markers" is ambiguous about whether an info string like `bash` on
+  // the opening line counts -- a literal reading would surface it as a
+  // spurious first command. Drop it here, where the marker regex is one
+  // rule applied once, rather than in the prompt. A fence transcribed
+  // without markers (or with only one) is unaffected: dropping is
+  // conditional on the line actually being a marker.
+  const fenceLines = (section.fence ?? '').split(/\r?\n/)
+  const isFenceMarker = (l) => /^\s*(`{3,}|~{3,})/.test(l)
+  if (fenceLines.length && isFenceMarker(fenceLines[0])) fenceLines.shift()
+  if (fenceLines.length && isFenceMarker(fenceLines[fenceLines.length - 1])) fenceLines.pop()
+  const commands = fenceLines
     .map(stripComment).map(l => l.trim()).filter(l => l.length > 0)
   if (!commands.length) {
     return { checks: [], note: `${file}'s '${CHECKS_HEADING}' section has no fence, or no command lines in it` }
@@ -1399,11 +1412,12 @@ const discovery = await treeAgent(
   `exists.\n` +
   `2. If a file was read, find every line starting with "##" that sits ` +
   `outside a fenced code block. For each, return heading as that full line ` +
-  `verbatim, "#" characters included, and fence as the verbatim contents ` +
-  `between the opening and closing markers (\`\`\` or ~~~) of the first ` +
-  `fenced code block that follows it and precedes the next such heading ` +
-  `line -- '' if there is none before the next heading or the file's end. ` +
-  `Return sections in the file's own order.`,
+  `verbatim, "#" characters included, and fence as the first fenced code ` +
+  `block that follows it and precedes the next such heading line, verbatim ` +
+  `and whole -- its opening marker line (\`\`\` or ~~~, with any info ` +
+  `string after it) and its closing marker line included -- or '' if there ` +
+  `is none before the next heading or the file's end. Return sections in ` +
+  `the file's own order.`,
   { label: 'checks:discover', schema: CHECKS, model: 'haiku', effort: 'low' })
 const { checks: sourceChecks, note: discoveryNote } = checksFrom(discovery)
 let discoveredChecks = sourceChecks

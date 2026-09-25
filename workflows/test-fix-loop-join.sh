@@ -3606,6 +3606,31 @@ async function scenarioEF() {
   }
 }
 
+// Scenario EJ -- #109: "the verbatim contents between the opening and
+// closing markers" is ambiguous about whether the info string on the
+// opening marker line (` ```bash `) counts as content. The agent now
+// transcribes the fence including its marker lines, so checksFrom() must
+// drop exactly the first and last lines when they are markers, never
+// letting the info string surface as a spurious check:1 that shifts every
+// id after it.
+async function scenarioEJ() {
+  console.log('\n== scenario EJ: a fence transcribed with its ```bash marker lines strips them, not just the plain contents')
+  const { result, captured } = await run({
+    discovery: { file: '/repo/AGENTS.md',
+      sections: [{ heading: '## Checks', fence: '```bash\nmake test\nmake lint\n```' }], detail: 'stub' },
+    checkRuns: () => ({ results: [
+      { id: 'check:1', command: checkInvocation('make test'), exit_code: 0, output: 'ok' },
+      { id: 'check:2', command: checkInvocation('make lint'), exit_code: 0, output: 'ok' },
+    ], dirty: false }),
+  })
+  check('exactly two checks discovered', result.checks?.discovered, 2)
+  const runPrompt = captured.calls.find(c => c.label === 'checks:run:1')?.prompt ?? ''
+  check('check:1 is make test, not the bash info string',
+    runPrompt.includes('check:1: ' + checkInvocation('make test')), true)
+  check('check:2 is make lint', runPrompt.includes('check:2: ' + checkInvocation('make lint')), true)
+  check('there is no check:3', runPrompt.includes('check:3'), false)
+}
+
 // Scenarios EG-EI -- executeAtHead() judges a reproducer by the worktree's
 // porcelain before and after its own commands, so nothing else may run in that
 // worktree meanwhile. A tail review running beside it once had its own test
@@ -3701,7 +3726,7 @@ for (const scenario of [scenarioA, scenarioB, scenarioG, scenarioC, scenarioD, s
                         scenarioDQ, scenarioDR, scenarioDS, scenarioDT, scenarioDU, scenarioDV,
                         scenarioDW, scenarioDX, scenarioDY, scenarioDZ,
                         scenarioEA, scenarioEB, scenarioEC, scenarioED, scenarioEE, scenarioEF,
-                        scenarioEG, scenarioEH, scenarioEI]) {
+                        scenarioEG, scenarioEH, scenarioEI, scenarioEJ]) {
   await scenario()
 }
 
