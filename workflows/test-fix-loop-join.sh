@@ -3631,6 +3631,28 @@ async function scenarioEJ() {
   check('there is no check:3', runPrompt.includes('check:3'), false)
 }
 
+// Only a marker at fenceLines[0] or the last slot gets dropped. A newline
+// outside the fence occupies that slot first, so the marker survives untouched.
+async function scenarioEK() {
+  console.log('\n== scenario EK: a fence transcribed with a leading or trailing newline still strips only its marker lines')
+  for (const fence of ['```bash\nmake test\nmake lint\n```\n', '\n```bash\nmake test\nmake lint\n```']) {
+    const { result, captured } = await run({
+      discovery: { file: '/repo/AGENTS.md',
+        sections: [{ heading: '## Checks', fence }], detail: 'stub' },
+      checkRuns: () => ({ results: [
+        { id: 'check:1', command: checkInvocation('make test'), exit_code: 0, output: 'ok' },
+        { id: 'check:2', command: checkInvocation('make lint'), exit_code: 0, output: 'ok' },
+      ], dirty: false }),
+    })
+    check(`exactly two checks discovered (${JSON.stringify(fence)})`, result.checks?.discovered, 2)
+    const runPrompt = captured.calls.find(c => c.label === 'checks:run:1')?.prompt ?? ''
+    check('check:1 is make test, not a marker line',
+      runPrompt.includes('check:1: ' + checkInvocation('make test')), true)
+    check('check:2 is make lint', runPrompt.includes('check:2: ' + checkInvocation('make lint')), true)
+    check('there is no check:3', runPrompt.includes('check:3'), false)
+  }
+}
+
 // Scenarios EG-EI -- executeAtHead() judges a reproducer by the worktree's
 // porcelain before and after its own commands, so nothing else may run in that
 // worktree meanwhile. A tail review running beside it once had its own test
@@ -3726,7 +3748,7 @@ for (const scenario of [scenarioA, scenarioB, scenarioG, scenarioC, scenarioD, s
                         scenarioDQ, scenarioDR, scenarioDS, scenarioDT, scenarioDU, scenarioDV,
                         scenarioDW, scenarioDX, scenarioDY, scenarioDZ,
                         scenarioEA, scenarioEB, scenarioEC, scenarioED, scenarioEE, scenarioEF,
-                        scenarioEG, scenarioEH, scenarioEI, scenarioEJ]) {
+                        scenarioEG, scenarioEH, scenarioEI, scenarioEJ, scenarioEK]) {
   await scenario()
 }
 

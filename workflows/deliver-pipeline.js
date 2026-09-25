@@ -389,6 +389,10 @@ function checksFrom(source) {
   // without markers (or with only one) is unaffected: dropping is
   // conditional on the line actually being a marker.
   const fenceLines = (section.fence ?? '').split(/\r?\n/)
+  // A newline outside the fence, before the opening marker or after the
+  // closing one, fills the exact slot the marker check below looks at.
+  while (fenceLines.length && fenceLines[0].trim() === '') fenceLines.shift()
+  while (fenceLines.length && fenceLines[fenceLines.length - 1].trim() === '') fenceLines.pop()
   const isFenceMarker = (l) => /^\s*(`{3,}|~{3,})/.test(l)
   if (fenceLines.length && isFenceMarker(fenceLines[0])) fenceLines.shift()
   if (fenceLines.length && isFenceMarker(fenceLines[fenceLines.length - 1])) fenceLines.pop()
