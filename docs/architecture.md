@@ -225,11 +225,13 @@ before `truncateOutput` ever runs on it) carries `REPRODUCED_MARKER` on a line o
 own, and `errored` otherwise. A command that fails for its own reasons -- a missing
 environment variable, a wrong path, a syntax error -- exits nonzero same as a real
 demonstration, and used to read the same way; a reproducer now has to prove it observed
-the defect, not merely that it did not exit 0. `disposeCandidates()` opens a candidate on
-`reproduced` or `not-executed` (the same "could not measure is not a pass" reasoning as
-below) and notes everything else, `errored` included, with its own reason
-(`reproducer-errored`) and its `reproducer_run` (the outcome, the exit code, and the
-truncated output) attached so the note keeps what actually happened.
+the defect, not merely that it did not exit 0. `disposeCandidates()` opens a candidate
+only on `reproduced`; everything else, `not-executed` included, becomes a note with its
+own reason (`reproducer-errored`, `reproducer-not-executed`, ...) and its
+`reproducer_run` (the outcome, the exit code, and the truncated output) attached so the
+note keeps what actually happened. A missing row is even less evidence than an errored
+one, so it must not open a candidate either, or a finding can hold the run on a
+reproducer nobody ever ran (gh-113).
 
 `unmet-criterion` needs a reproducer too. The verbatim quote proves the criterion
 exists; only an executed command shows the change misses it, and the alternative, a

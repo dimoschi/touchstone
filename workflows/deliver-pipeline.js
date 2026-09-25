@@ -2299,12 +2299,11 @@ const classifyBatch = (raised, hunks, round) => {
 }
 // The initial-classification rule, shared by the initial review, each
 // round's fresh tail-review candidates, and the post-mutation review. Keyed
-// on outcomeOf, not the bare exit code: a missing row (not-executed) or a
-// demonstrated reproduction (reproduced) both open the candidate, the same
-// "could not measure is not the same as did not reproduce" rule the open
-// list's own re-check already gets; only passed and could-not-run are notes,
-// and errored (nonzero, no marker) is now its own note rather than opening on
-// nothing.
+// on outcomeOf, not the bare exit code: only 'reproduced' -- nonzero exit and
+// the marker, both actually observed -- opens the candidate. A missing row
+// (not-executed, the executor dropped it or the whole call failed schema) is
+// even less evidence than an errored run and must not open one either, or a
+// finding can hold the run on a reproducer nobody ever ran (gh-113).
 const disposeCandidates = (candidates, runs, round) => {
   const opened = [], asNotes = []
   for (const f of candidates) {
@@ -2313,6 +2312,7 @@ const disposeCandidates = (candidates, runs, round) => {
     if (reproducer_run.outcome === 'passed') asNotes.push({ ...f, reason: 'did-not-reproduce', round, reproducer_run })
     else if (reproducer_run.outcome === 'could-not-run') asNotes.push({ ...f, reason: 'reproducer-could-not-run', round, reproducer_run })
     else if (reproducer_run.outcome === 'errored') asNotes.push({ ...f, reason: 'reproducer-errored', round, reproducer_run })
+    else if (reproducer_run.outcome === 'not-executed') asNotes.push({ ...f, reason: 'reproducer-not-executed', round, reproducer_run })
     else opened.push({ ...f, reproducer_run })
   }
   return { opened, asNotes }

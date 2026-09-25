@@ -2848,12 +2848,12 @@ async function scenarioCR() {
   check('exit 0 is a note: did-not-reproduce', notesByTitle['Exits 0'], 'did-not-reproduce')
   check('exit 126 is a note: reproducer-could-not-run', notesByTitle['Exits 126'], 'reproducer-could-not-run')
   check('exit 127 is a note: reproducer-could-not-run', notesByTitle['Exits 127'], 'reproducer-could-not-run')
-  check('no executor row stays pending rather than being dismissed as a note',
-    result.unresolved_findings?.some(f => f.title === 'No row'), true)
+  check('no executor row is a note: reproducer-not-executed, not opened on nothing (gh-113)',
+    notesByTitle['No row'], 'reproducer-not-executed')
   check('any other exit code opens the finding',
     result.unresolved_findings?.some(f => f.title === 'Exits 2'), true)
-  check('exactly two findings opened (the unmeasured one and the genuine failure)',
-    result.unresolved_findings?.length, 2)
+  check('exactly one finding opened (the genuine failure; the unmeasured one is a note)',
+    result.unresolved_findings?.length, 1)
 }
 
 // Scenario CS -- gh-106: an unmet-criterion finding blocks only when its
@@ -4041,6 +4041,28 @@ async function scenarioFG() {
   }
 }
 
+// Scenario FH -- gh-113: the executor dropping a row (or the whole call
+// failing schema, which nulls every row) must not open a candidate either.
+// Only 'reproduced' -- nonzero exit and the marker, both actually observed --
+// opens; a row that was never executed at all is even less evidence than an
+// errored one, and the fix brief has nothing to point a fixer at.
+async function scenarioFH() {
+  console.log('\n== scenario FH: gh-113 -- a candidate the executor never ran is a note (reproducer-not-executed), never a candidate that opens on nothing and never a finding the round limit has to give up on')
+  const { result, captured } = await run({
+    initialReview: {
+      correctness: [{ title: 'Never demonstrated', file: 'a.js', claim: 'c', evidence: 'e' }],
+      advocate: [],
+    },
+    initialExit: () => undefined,
+  })
+  check('nothing opens', result.unresolved_findings?.length ?? 0, 0)
+  const note = result.notes?.find(n => n.title === 'Never demonstrated')
+  check('the finding is a note with reason reproducer-not-executed', note?.reason, 'reproducer-not-executed')
+  check('the note keeps the not-executed outcome', note?.reproducer_run?.outcome, 'not-executed')
+  check('no fix round ran', callCount(captured, 'fix:1'), 0)
+  check('the run finishes rather than looping to the round limit on nothing', result.halted_at, undefined)
+}
+
 for (const scenario of [scenarioA, scenarioB, scenarioG, scenarioC, scenarioD, scenarioE, scenarioH,
                         scenarioI, scenarioJ, scenarioK, scenarioL, scenarioM, scenarioN,
                         scenarioO, scenarioP, scenarioQ, scenarioR, scenarioS, scenarioT,
@@ -4067,7 +4089,8 @@ for (const scenario of [scenarioA, scenarioB, scenarioG, scenarioC, scenarioD, s
                         scenarioDW, scenarioDX, scenarioDY, scenarioDZ,
                         scenarioEA, scenarioEB, scenarioEC, scenarioED, scenarioEE, scenarioEF,
                         scenarioEG, scenarioEH, scenarioEI, scenarioEJ, scenarioEK, scenarioEL,
-                        scenarioFA, scenarioFB, scenarioFC, scenarioFD, scenarioFE, scenarioFF, scenarioFG]) {
+                        scenarioFA, scenarioFB, scenarioFC, scenarioFD, scenarioFE, scenarioFF, scenarioFG,
+                        scenarioFH]) {
   await scenario()
 }
 
