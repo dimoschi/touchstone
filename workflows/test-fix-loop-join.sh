@@ -556,6 +556,9 @@ function makeAgent(scenario, captured) {
     // that round's diff hunks, :fresh classifies that round's newly raised
     // candidates, and reproduce:mutation / reproduce:residual are the
     // post-mutation and final-head passes.
+    if (scenario.dirtyAt === label) {
+      return { results: [], dirty: true, porcelain: '?? stray-file', porcelain_before: '' }
+    }
     if (label === 'reproduce:review') {
       return reproduceResponse(prompt, scenario,
         (id) => scenario.initialExit ? scenario.initialExit(id) : 1)
@@ -626,15 +629,26 @@ function makeAgent(scenario, captured) {
 }
 
 async function run(scenario) {
-  const captured = { calls: [], runRecordPrompt: null, dedupPrompt: null, logs: [] }
+  const captured = { calls: [], runRecordPrompt: null, dedupPrompt: null, logs: [], spans: [] }
   // Charged per agent call, not per read, so a spend assertion states "one
   // agent ran inside this window" rather than "the script read the budget
   // twice"; an added outOfBudget() check would otherwise break it silently.
   let agentCalls = 0
+  let clock = 0
   const stubAgent = makeAgent(scenario, captured)
   const sandbox = {
     args: baseArgs(scenario.args),
-    agent: async (prompt, opts) => { agentCalls++; return stubAgent(prompt, opts) },
+    // Each call records a start and end tick. parallel() below is Promise.all,
+    // so calls it starts together get interleaved ticks while calls awaited one
+    // after another do not: that is what makes an overlap observable here.
+    agent: async (prompt, opts) => {
+      agentCalls++
+      const span = { label: opts.label, start: clock++ }
+      captured.spans.push(span)
+      const r = await stubAgent(prompt, opts)
+      span.end = clock++
+      return r
+    },
     // JSON round-tripped, not returned as-is: the real parallel() serializes
     // each thunk's result to hand it back across the boundary, and a class
     // instance (a Map, for instance) does not survive that. Promise.all alone
@@ -3592,6 +3606,76 @@ async function scenarioEF() {
   }
 }
 
+// Scenarios EG-EI -- executeAtHead() judges a reproducer by the worktree's
+// porcelain before and after its own commands, so nothing else may run in that
+// worktree meanwhile. A tail review running beside it once had its own test
+// log blamed on a reproducer and halted a clean run.
+function overlapsWithExecutor(captured) {
+  const done = captured.spans.filter(s => s.end !== undefined)
+  return done.filter(e => e.label.startsWith('reproduce:')).flatMap(e =>
+    done.filter(o => o !== e && o.start < e.end && e.start < o.end)
+      .map(o => `${e.label} overlaps ${o.label}`))
+}
+
+async function scenarioEG() {
+  console.log('\n== scenario EG: no reproducer execution overlaps another agent in the worktree')
+  const { captured } = await run({
+    args: { maxReviewRounds: 2 },
+    initialReview: {
+      correctness: [
+        { title: 'Route resolves from cwd', file: 'src/route.js', claim: 'wrong repo', evidence: 'route.js:12' },
+        { title: 'Missing guard', file: 'src/guard.js', claim: 'no guard', evidence: 'guard.js:3' },
+      ],
+      advocate: [],
+    },
+    verify: (id, round) => id === 'f1' ? round === 1 : (id === 'f2' ? round === 2 : undefined),
+    fixHead: (round) => `fix0000000000000000000000000000000000000${round}`,
+    tailReview: [{ category: 'docs', title: 'A stale comment', file: 'src/route.js',
+      claim: 'says cwd', evidence: 'route.js:1', reproducer: undefined }],
+    staleness: () => [],
+  })
+  check('round 2 re-ran the settled finding, the open one and a tail review',
+    ['reproduce:settled:2', 'reproduce:fix:2', 'review:fix:2:correctness']
+      .every(l => callCount(captured, l) === 1), true)
+  check('no executor call overlapped another agent', overlapsWithExecutor(captured), [])
+}
+
+async function scenarioEH() {
+  console.log('\n== scenario EH: a dirty-tree halt in a fix round keeps the open findings, notes and round')
+  const { result } = await run({
+    args: { maxReviewRounds: 2 },
+    dirtyAt: 'reproduce:fix:1',
+    initialReview: {
+      correctness: [{ title: 'Route resolves from cwd', file: 'src/route.js',
+        claim: 'wrong repo', evidence: 'route.js:12' }],
+      advocate: [{ category: 'docs', title: 'Stale README line', file: 'README.md',
+        claim: 'mentions the old flag', evidence: 'README.md:3', reproducer: undefined }],
+    },
+    fixHead: () => 'fix00000000000000000000000000000000000001',
+    staleness: () => [],
+  })
+  check('halted at Fix', result.halted_at, 'Fix')
+  check('the open finding is carried', result.unresolved_findings?.some(f => f.file === 'src/route.js'), true)
+  check('the note is carried', result.notes?.some(n => n.title === 'Stale README line'), true)
+  check('the round is carried', result.fix_rounds, 1)
+}
+
+async function scenarioEI() {
+  console.log('\n== scenario EI: a dirty-tree halt at the initial review keeps its notes, before any round exists')
+  const { result } = await run({
+    dirtyAt: 'reproduce:review',
+    initialReview: {
+      correctness: [{ title: 'Route resolves from cwd', file: 'src/route.js',
+        claim: 'wrong repo', evidence: 'route.js:12' }],
+      advocate: [{ category: 'docs', title: 'Stale README line', file: 'README.md',
+        claim: 'mentions the old flag', evidence: 'README.md:3', reproducer: undefined }],
+    },
+  })
+  check('halted at Review', result.halted_at, 'Review')
+  check('the note is carried', result.notes?.some(n => n.title === 'Stale README line'), true)
+  check('no fix round has run', result.fix_rounds, 0)
+}
+
 for (const scenario of [scenarioA, scenarioB, scenarioG, scenarioC, scenarioD, scenarioE, scenarioH,
                         scenarioI, scenarioJ, scenarioK, scenarioL, scenarioM, scenarioN,
                         scenarioO, scenarioP, scenarioQ, scenarioR, scenarioS, scenarioT,
@@ -3616,7 +3700,8 @@ for (const scenario of [scenarioA, scenarioB, scenarioG, scenarioC, scenarioD, s
                         scenarioDO, scenarioDP,
                         scenarioDQ, scenarioDR, scenarioDS, scenarioDT, scenarioDU, scenarioDV,
                         scenarioDW, scenarioDX, scenarioDY, scenarioDZ,
-                        scenarioEA, scenarioEB, scenarioEC, scenarioED, scenarioEE, scenarioEF]) {
+                        scenarioEA, scenarioEB, scenarioEC, scenarioED, scenarioEE, scenarioEF,
+                        scenarioEG, scenarioEH, scenarioEI]) {
   await scenario()
 }
 
