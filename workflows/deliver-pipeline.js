@@ -1986,9 +1986,6 @@ let round = 0
 // targets), separate from stageSpend.fix which also carries the executor and
 // tail review.
 const fixRoundSpend = []
-// The diff the most recent fix round actually produced. Nothing outside the
-// loop reads it now that reopening a residual checks the final head instead.
-let lastFixRange = null
 
 const fixStopReason = () =>
   !open.length && !blockingChecksOpen() ? 'every finding and check was resolved'
@@ -2125,7 +2122,6 @@ while ((open.length || blockingChecksOpen()) && round < MAX_REVIEW_ROUNDS && !ou
     reviewerCount && head && head !== reviewedThrough && !outOfBudget()
   const roundRange = head && head !== reviewedThrough
     ? `${reviewedThrough}..${head}` : reviewedThrough
-  lastFixRange = roundRange
 
   // executeAtHead re-checks every previously open finding's reproducer against
   // this round's own head, and fetches that same range's diff hunks in the
