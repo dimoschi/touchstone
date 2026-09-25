@@ -140,11 +140,14 @@ Report the branch it cut, the base it came from, the gate results, and the PR UR
 one was opened. If it halted, report the phase and the halt note verbatim: the halts
 are diagnostic, and paraphrasing them loses the reason.
 
-Report `checks.discovered` and any still `checks.red`. These come from the target
-repo's own `## Checks` heading (in `AGENTS.md` or `CLAUDE.md`), and every line there is
-executed before Implement and again after every step that commits, so it must list
-only read-only, deterministic checks -- never suggest adding one that writes to the tree
-or depends on network state a later run cannot repeat.
+Report `checks.discovered`, any still `checks.red`, and any `checks.unmeasured`. These
+come from the target repo's own `## Checks` heading (in `AGENTS.md` or `CLAUDE.md`), and
+every line there is executed before Implement and again after every step that commits,
+so it must list only read-only, deterministic checks -- never suggest adding one that
+writes to the tree or depends on network state a later run cannot repeat. A blocking run
+halts instead of returning while a check is unmeasured, but an `--existing` run does
+not, so `checks.unmeasured` can still be non-empty when the run returns: report it the
+same as `checks.red`, since it is not evidence the check passed.
 
 Report `pipeline_version.executed`, the version of `deliver-pipeline.js` this run
 actually ran. If `pipeline_version.mismatch` is `true`, say so and name both
