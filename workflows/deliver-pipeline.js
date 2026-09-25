@@ -26,7 +26,7 @@ export const meta = {
 // against the manifest in scripts/check-version-bump.sh, so drift is a
 // gate's job rather than something this script verifies about itself.
 const PLUGIN_NAME = 'touchstone'
-const PIPELINE_VERSION = '0.20.0'
+const PIPELINE_VERSION = '0.20.1'
 
 // Boundaries. Wall-clock deadlines are not expressible here (no Date.now, by
 // design); the bounds are rounds, counts, and token budget instead.
@@ -2076,9 +2076,6 @@ const executeAtHead = async (items, label, diffRange) => {
     `that writes to the tree must be visible, not silently carried into ` +
     `whatever commits next.`,
     { label, schema: EXECUTE_RESULT, model: 'haiku', effort: 'low' })
-  // Pairs, not a Map: this crosses parallel() at the round's own call site,
-  // which serializes each thunk's result and strips a Map down to a plain
-  // object with no .get. Rebuilt into a Map at each caller instead.
   const pairs = (Array.isArray(out?.results) ? out.results : [])
     .filter(r => typeof r?.id === 'string')
     .map(r => [stripBrackets(r.id), r.exit_code])
@@ -2109,6 +2106,7 @@ const executeAtHead = async (items, label, diffRange) => {
 // runChecks already applies to the repo's own discovered checks.
 const dirtyReproducerHalt = async (phaseName, exec) => halted(phaseName, {
   plan: plan.plan, implemented: impl.summary, gates: gatesPayload(),
+  unresolved_findings: open, notes, fix_rounds: round,
   note: exec.preexisting
     ? `The working tree was already dirty before this check ran, so nothing ` +
       `it did caused it: ${exec.porcelain || '(no detail returned)'}. Find ` +
@@ -2158,6 +2156,7 @@ const disposeCandidates = (candidates, pairs, round) => {
 
 let settled = []
 let open = []
+let round = 0
 if (reviewerCount) {
   const raised = await collapseDuplicates(await reviewOf(impl.commit_range, 'review', lenses))
   const { candidates, freshNotes } = classifyBatch(raised, null, 0)
@@ -2173,7 +2172,6 @@ if (reviewerCount) {
 sReview.close()
 
 const sFix = stage('fix')
-let round = 0
 // Per round, just the fix agent's own output tokens (the cost this ticket
 // targets), separate from stageSpend.fix which also carries the executor and
 // tail review.
@@ -2330,25 +2328,23 @@ while ((open.length || blockingChecksOpen()) && round < MAX_REVIEW_ROUNDS && !ou
   const roundRange = head && head !== reviewedThrough
     ? `${reviewedThrough}..${head}` : reviewedThrough
 
-  // executeAtHead re-checks every previously open finding's reproducer against
-  // this round's own head, and fetches that same range's diff hunks in the
-  // same dispatch: the tail-review lens's fresh findings are classified
-  // against them below, so both are needed before the round can finish.
+  // One at a time, never beside another agent in this worktree. executeAtHead
+  // judges a reproducer by the tree's porcelain before and after its own
+  // commands, so a file anything else writes meanwhile is blamed on a
+  // reproducer: a tail review's own test log once halted a clean run this way.
+  // The open list's call also fetches this round's diff hunks, which the tail
+  // review's fresh findings are classified against below.
   const settledBefore = [...settled]
-  const [execOld, freshRaw, execSettled] = await parallel([
-    () => executeAtHead(open, `reproduce:fix:${round}`, roundRange),
-    async () => tailReviewable
-      ? reviewOf(roundRange, `review:fix:${round}`, [LENS.correctness], knownForRound())
-      : [],
-    async () => settledBefore.length
-      ? executeAtHead(settledBefore, `reproduce:settled:${round}`)
-      : null,
-  ])
-
+  const execOld = await executeAtHead(open, `reproduce:fix:${round}`, roundRange)
   if (execOld?.dirty) { sFix.close(); return await dirtyReproducerHalt('Fix', execOld) }
+  const execSettled = settledBefore.length
+    ? await executeAtHead(settledBefore, `reproduce:settled:${round}`)
+    : null
   if (execSettled?.dirty) { sFix.close(); return await dirtyReproducerHalt('Fix', execSettled) }
+  const freshRaw = tailReviewable
+    ? await reviewOf(roundRange, `review:fix:${round}`, [LENS.correctness], knownForRound())
+    : []
 
-  // Rebuilt from pairs, not read as a Map: execOld crossed parallel() above.
   const execOldById = new Map(execOld?.pairs ?? [])
 
   // For an open finding, fixed means its reproducer exits 0 at this round's
