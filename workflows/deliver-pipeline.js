@@ -26,7 +26,7 @@ export const meta = {
 // against the manifest in scripts/check-version-bump.sh, so drift is a
 // gate's job rather than something this script verifies about itself.
 const PLUGIN_NAME = 'touchstone'
-const PIPELINE_VERSION = '0.21.0'
+const PIPELINE_VERSION = '0.22.1'
 
 // Boundaries. Wall-clock deadlines are not expressible here (no Date.now, by
 // design); the bounds are rounds, counts, and token budget instead.
@@ -1436,22 +1436,31 @@ log(discoveredChecks.length
 // block: after #87 resuming is the normal path, not an edge case.
 const checksBlocking = !args?.existingBranch
 let checkAttempt = 0
-// Turns an arbitrary string into one POSIX shell word that expands back to
-// exactly that string: close the quote, splice in a backslash-escaped
-// literal quote, reopen it. Needed because a declared check's own command
-// (`pytest -k 'not slow'`) or the worktree path can carry a single quote,
-// and naive interpolation into a bare pair of quotes lets that quote end
-// the string early.
-const shQuote = (s) => `'${String(s).replace(/'/g, `'\\''`)}'`
+// A row is only measured when the runner echoes `command` back exactly
+// (classifyResults below), so the string built here is also the string an
+// agent has to copy verbatim. A path made only of characters no shell ever
+// treats specially is left bare for that reason: on the pipeline 0.21.0 run
+// that #116 is about, the runner miscopied the nested `'\''` escaping on
+// every one of 8 rows, and no check was ever measured again. Quoting still
+// closes the quote, splices in a backslash-escaped literal quote, and
+// reopens it, for the one case that still needs it: a declared check's own
+// command (`pytest -k 'not slow'`) or a worktree path carrying a character a
+// bare word cannot hold as-is.
+const shQuote = (s) => {
+  const str = String(s)
+  return /^[A-Za-z0-9/._+:@%=,-]+$/.test(str) ? str : `'${str.replace(/'/g, `'\\''`)}'`
+}
 // The exact Bash invocation for a check, built once by the script and never
 // by the model: a fixer or a baseline that trusted a model-reported command
 // could be handed a result for something that only resembles what was asked
 // (an extra `timeout`, a different flag) and never know it ran the wrong
 // thing. c.command itself is spliced in unquoted -- it is the -c script's
 // source, not a single argument -- so only the cd target and the outer -c
-// argument need quoting.
+// argument need quoting. The outer argument always contains a space (`cd
+// ... && ...`), so it is quoted regardless; only the cd target can come out
+// bare.
 const invocationFor = (c) => `bash -c ${shQuote(`cd ${shQuote(wt.path)} && ${c.command}`)}`
-const executeChecks = async () => {
+const executeChecks = async (checks = discoveredChecks) => {
   checkAttempt++
   return await treeAgent(
     `[touchstone: checks:run]\n` +
@@ -1470,7 +1479,7 @@ const executeChecks = async () => {
     `printed anything (dirty) and, if so, its output (porcelain): a check ` +
     `that writes to the tree (a ledger, a generated file) must be visible, ` +
     `not silently carried into whatever commits next.\n` +
-    discoveredChecks.map(c => `${c.id}: ${invocationFor(c)}`).join('\n'),
+    checks.map(c => `${c.id}: ${invocationFor(c)}`).join('\n'),
     { label: `checks:run:${checkAttempt}`, schema: CHECK_RUN, model: 'haiku', effort: 'low' })
 }
 const CHECK_HEAD_BYTES = 1024
@@ -1488,10 +1497,10 @@ const truncateOutput = (s) => {
 }
 // Splits a run's raw results into a real red list (ran, command matched,
 // non-zero exit) and an unmeasured one (nobody reported the id, or reported
-// it against a different command). Unmeasured never becomes a pass and
-// never counts as the repo's own environment: a row this phase cannot trust
-// is not evidence either way, so it is carried forward as red rather than
-// dropped or waved through.
+// it against a different command). Unmeasured is never a pass, but it is
+// also never red: a row this phase cannot trust is not evidence either way,
+// so it stays apart from red and is handed to runChecks below to retry, not
+// to a fixer that cannot change what a runner echoes back.
 const classifyResults = (checks, results) => {
   const byId = new Map((Array.isArray(results) ? results : [])
     .filter(r => r?.id).map(r => [r.id, r]))
@@ -1499,15 +1508,17 @@ const classifyResults = (checks, results) => {
   const unmeasured = []
   for (const c of checks) {
     const row = byId.get(c.id)
+    const expected = invocationFor(c)
     if (!row) {
       unmeasured.push({ id: c.id, command: c.command, exit_code: null,
-        output: 'no result was reported for this check' })
+        output: 'no result was reported for this check',
+        expected, reported: null })
       continue
     }
-    const expected = invocationFor(c)
     if (row.command !== expected) {
       unmeasured.push({ id: c.id, command: c.command, exit_code: null,
-        output: `not measured: expected \`${expected}\`, got \`${row.command}\`` })
+        output: `not measured: expected \`${expected}\`, got \`${row.command}\``,
+        expected, reported: row.command })
       continue
     }
     if (row.exit_code !== 0) {
@@ -1517,14 +1528,55 @@ const classifyResults = (checks, results) => {
   }
   return { red, unmeasured }
 }
+// Runs every discovered check once, then -- only for whatever came back
+// unmeasured -- runs those again exactly one more time, rather than
+// re-running minute-long suites the first pass already measured at this
+// head. A runner that miscopies once can copy correctly on a second try; one
+// that miscopies twice is not fixed by a code change, so nothing past this
+// point retries again -- it halts instead (unmeasuredChecksHalt).
 const runChecks = async () => {
-  if (!discoveredChecks.length) return []
-  const outcome = await executeChecks()
-  const { red, unmeasured } = classifyResults(discoveredChecks, outcome?.results)
-  return [...red, ...unmeasured]
+  if (!discoveredChecks.length) return { red: [], unmeasured: [] }
+  const first = await executeChecks(discoveredChecks)
+  const { red: red1, unmeasured: unmeasured1 } = classifyResults(discoveredChecks, first?.results)
+  if (!unmeasured1.length) return { red: red1, unmeasured: [] }
+  log(`checks: ${unmeasured1.length} check(s) unmeasured, retrying once: ` +
+      unmeasured1.map(c => c.id).join(', '))
+  const retryList = discoveredChecks.filter(c => unmeasured1.some(u => u.id === c.id))
+  const second = await executeChecks(retryList)
+  const { red: red2, unmeasured: unmeasured2 } = classifyResults(retryList, second?.results)
+  const firstReportedById = new Map(unmeasured1.map(u => [u.id, u.reported]))
+  const unmeasured = unmeasured2.map(u =>
+    ({ ...u, reported: firstReportedById.get(u.id) ?? null, reported_again: u.reported }))
+  return { red: [...red1, ...red2], unmeasured }
 }
 
 const renderCheck = (c) => `Check ${c.id} (${c.command}) exited ${c.exit_code}:\n${c.output}`
+
+// Reports a check the runner never measured, after runChecks already
+// retried it once. Never sent to a fixer: a fixer cannot change what a
+// runner echoes back, and three fix rounds were burned on exactly that
+// before #116. plan, impl, gatesPayload and checksPayload are read here only
+// by closure -- this halts solely from a call site after impl exists (the
+// three sites below), never from above it, so none of open/notes/round/
+// fixRoundSpend can be read here: those are `let` bindings this file
+// declares only inside the fix loop, and reading them from a call site
+// before that loop starts would be the same TDZ failure the comment above
+// `scored` records. The fix-loop call site passes them through extra.
+const unmeasuredChecksHalt = (at, extra) => {
+  const note = `${unmeasuredChecks.length} discovered check(s) could not be ` +
+    `measured after a retry. This halt is about measurement, not the code: ` +
+    `the runner did not report them as asked, so no verdict exists either ` +
+    `way, and no fix round has been spent on them.\n` +
+    unmeasuredChecks.map(c =>
+      `- ${c.id}: expected \`${c.expected}\`; first run reported ` +
+      `${c.reported ? `\`${c.reported}\`` : 'no result reported'}, second run ` +
+      `reported ${c.reported_again ? `\`${c.reported_again}\`` : 'no result reported'}.`
+    ).join('\n')
+  return halted(at, {
+    plan: plan.plan, implemented: impl.summary, gates: gatesPayload(), checks: checksPayload(),
+    ...extra, note,
+  })
+}
 
 // A check red before any work started is the repo's own environment, not
 // this run's doing, and there is no way to tell the two apart other than
@@ -1563,11 +1615,14 @@ if (discoveredChecks.length && checksBlocking) {
 sChecksPre.close()
 const checksPreSpend = stageSpend.checks ?? 0
 
+let redChecks = []
+let unmeasuredChecks = []
 function checksPayload() {
   return {
     discovered: discoveredChecks.length,
     blocking: checksBlocking,
     red: redChecks,
+    unmeasured: unmeasuredChecks,
     detail: (checksBlocking
       ? (droppedAtBaseline.length
           ? `dropped ${droppedAtBaseline.length} as environmental at the base ` +
@@ -1677,10 +1732,15 @@ if (sImpl.over()) {
 // answers with an exit code.
 const sChecksPost = stage('checks')
 let lastCheckedHead = headOf(impl.commit_range)
-let redChecks = await runChecks()
+;({ red: redChecks, unmeasured: unmeasuredChecks } = await runChecks())
 if (redChecks.length) {
   log(`checks: ${redChecks.length} discovered check(s) red after Implement: ` +
       redChecks.map(c => c.id).join(', '))
+}
+if (checksBlocking && unmeasuredChecks.length) {
+  sChecksPost.close()
+  stageSpend.checks = checksPreSpend + (stageSpend.checks ?? 0)
+  return await unmeasuredChecksHalt('Implement')
 }
 
 // One checks-only fix round before Review, so a purely mechanical defect
@@ -1735,10 +1795,15 @@ if (blockingChecksOpen() && !sChecksPost.over()) {
     impl.commit_range = `${implBase}..${preReviewHead}`
     preReviewFixCommitted = true
     lastCheckedHead = preReviewHead
-    redChecks = await runChecks()
+    ;({ red: redChecks, unmeasured: unmeasuredChecks } = await runChecks())
     log(redChecks.length
       ? `checks: ${redChecks.length} still red after the pre-review fix round`
       : `checks: all clear after the pre-review fix round`)
+    if (unmeasuredChecks.length) {
+      sChecksPost.close()
+      stageSpend.checks = checksPreSpend + (stageSpend.checks ?? 0)
+      return await unmeasuredChecksHalt('Implement')
+    }
   }
 }
 sChecksPost.close()
@@ -2505,8 +2570,14 @@ while ((open.length || blockingChecksOpen()) && round < MAX_REVIEW_ROUNDS && !ou
   }
 
   if (checksBlocking && discoveredChecks.length && head && head !== lastCheckedHead && !outOfBudget()) {
-    redChecks = await runChecks()
+    ;({ red: redChecks, unmeasured: unmeasuredChecks } = await runChecks())
     lastCheckedHead = head
+    if (unmeasuredChecks.length) {
+      sFix.close()
+      return await unmeasuredChecksHalt('Fix', {
+        unresolved_findings: open, notes, fix_rounds: round, fix_round_output: fixRoundSpend,
+      })
+    }
   }
 
   log(`round ${round}: ${open.length} finding(s) still open` +

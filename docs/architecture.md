@@ -256,8 +256,27 @@ repeat.
 
 The runner is handed each check's exact Bash invocation
 (`` bash -c 'cd <worktree> && <command>' ``) and must report `command` back verbatim;
-a row whose command does not match is not measured, and an unmeasured row is treated
-as red, never as a pass or as evidence of the repo's own environment.
+a row whose command does not match is not measured, and an unmeasured row is never
+read as a pass or as evidence of the repo's own environment. The `cd` target is
+quoted only when it needs to be: a worktree path made only of letters, digits and
+`/ . _ - + : @ % = ,` is spliced in bare, so the ordinary invocation has no nested
+quoting for the runner to copy. A path (or a declared check's own command) carrying
+any other character is still single-quoted the old way. This matters because the
+match is exact and the runner has to reproduce it byte for byte: on the pipeline
+0.21.0 run that #116 is about, the runner miscopied the nested `'\''` escaping on
+every row, and no check was measured for the rest of that run.
+
+An unmeasured check is kept apart from red rather than merged into it, and gets one
+retry: after any check run that follows a commit, `runChecks()` runs the checks that
+came back unmeasured a second time, at the same head, before anything else happens.
+A row still unmeasured after that halts the run (`unmeasuredChecksHalt`, at Implement
+for the two pre-review sites and at Fix for the fix loop) rather than reaching a
+fixer -- a fixer cannot change what a runner echoes back, and #116 is three fix
+rounds spent finding that out the slow way. The halt names each check, its expected
+invocation, and what the runner reported on each of the two attempts. On a
+non-blocking (`existingBranch`) run nothing here ever halts; an unmeasured check is
+only reported under `checks.unmeasured`, the same as a red one is reported under
+`checks.red` without blocking.
 
 ### Pipeline version transparency
 
