@@ -421,9 +421,14 @@ const STUB_WT_PATH = '/tmp/stub-worktree'
 // The exact Bash invocation deliver-pipeline.js's own invocationFor builds
 // for a check. A checkRuns stub uses this so a scenario testing the happy
 // path does not have to duplicate the string, and a scenario testing the
-// command-mismatch path can diverge from it on purpose.
+// command-mismatch path can diverge from it on purpose. Mirrors the
+// production shQuote's bare-vs-quoted split so the ~50 scenarios that use
+// this for an unrelated behaviour (the fix-loop join, not quoting) keep
+// matching STUB_WT_PATH, which is itself bare; scenario EM below asserts the
+// literal production output directly instead of trusting this copy.
 function shQuote(s) {
-  return `'${String(s).replace(/'/g, `'\\''`)}'`
+  const str = String(s)
+  return /^[A-Za-z0-9/._+:@%=,-]+$/.test(str) ? str : `'${str.replace(/'/g, `'\\''`)}'`
 }
 function checkInvocation(command, path = STUB_WT_PATH) {
   return `bash -c ${shQuote(`cd ${shQuote(path)} && ${command}`)}`
@@ -2410,12 +2415,13 @@ async function scenarioCA() {
     result.checks?.red?.length, 0)
 }
 
-// Scenario CB -- asked to run several commands and report every byte of their
-// output, a cheap agent dropping a row is the expected failure, not a remote
-// one. Treating a row nobody reported as a pass would hand the verdict back to
-// the shape of the model's answer.
+// Scenario CB -- #116: asked to run several commands and report every byte of
+// their output, a cheap agent dropping a row is the expected failure, not a
+// rare one. A row nobody reported is not evidence either way -- runChecks
+// retries it once, and a check still unreported after that halts, since a
+// fixer cannot change what the runner echoes back.
 async function scenarioCB() {
-  console.log('\n== scenario CB: a check the runner never reported on is red, not green')
+  console.log('\n== scenario CB: a check the runner never reports on halts after a retry, never reaches a fixer')
   const { result, captured } = await run({
     discovery: { file: '/repo/AGENTS.md',
       sections: [{ heading: '## Checks', fence: 'bash a.sh\nbash b.sh' }], detail: 'stub' },
@@ -2427,14 +2433,22 @@ async function scenarioCB() {
     verify: () => undefined,
     staleness: () => [],
   })
-  const fix = captured.calls.find(c => c.label === 'checks:fix')?.prompt ?? ''
-  check('the checks-only fix ran rather than the run reaching PR', fix.length > 0, true)
-  check('the unreported check is the one raised', fix.includes('bash b.sh'), true)
-  check('the reported green one is not', fix.includes('bash a.sh'), false)
-  check('it says no result came back, rather than inventing an exit code',
-    fix.includes('no result was reported for this check'), true)
-  check('the run did not reach PR reporting everything green',
-    result.halted_at !== undefined || (result.checks?.red ?? []).length > 0, true)
+  check('halted at Implement: measurement, not the code', result.halted_at, 'Implement')
+  check('the post-Implement run happened', callCount(captured, 'checks:run:2'), 1)
+  check('the retry happened once', callCount(captured, 'checks:run:3'), 1)
+  check('no third attempt was made', callCount(captured, 'checks:run:4'), 0)
+  check('the checks-only fixer never ran', callCount(captured, 'checks:fix'), 0)
+  check('no fix round ever ran', callCount(captured, 'fix:1'), 0)
+  check('the unreported check is the one named', result.checks?.unmeasured?.[0]?.id, 'check:2')
+  check('its expected invocation is named',
+    (result.note ?? '').includes(checkInvocation('bash b.sh')), true)
+  check('it says no result was reported, on either attempt',
+    (result.note ?? '').includes('no result reported'), true)
+  check('the halt says it is about measurement, not the code',
+    (result.note ?? '').includes('not the code'), true)
+  check('the reported green check is never in the unmeasured list',
+    (result.checks?.unmeasured ?? []).some(c => c.id === 'check:1'), false)
+  check('no check is reported red', result.checks?.red?.length, 0)
 }
 
 // Scenario BW -- #38: most repos have never heard of any of this. Discovery
@@ -3539,12 +3553,14 @@ async function scenarioEA() {
   check('the run does not halt', result.halted_at, undefined)
 }
 
-// Scenario EB -- #109: the script builds each check's exact Bash invocation
-// itself; a reported command that merely resembles it (an extra `timeout`)
-// is not measured, is never a pass, and is never dropped as the repo's own
-// environment -- an unmeasured row is not evidence either way.
+// Scenario EB -- #109, #116: the script builds each check's exact Bash
+// invocation itself; a reported command that merely resembles it (an extra
+// `timeout`) is not measured, is never a pass, and is never dropped as the
+// repo's own environment at baseline. An unmeasured row gets one retry after
+// Implement; still mismatched on the retry, it halts rather than reaching a
+// fixer that cannot change what the runner echoes back.
 async function scenarioEB() {
-  console.log('\n== scenario EB: a mismatched reported command is not measured, never a pass, and never dropped at baseline')
+  console.log('\n== scenario EB: a mismatched reported command is never dropped at baseline, and halts after a retry rather than reaching a fixer')
   const { result, captured } = await run({
     discovery: { file: '/repo/AGENTS.md',
       sections: [{ heading: '## Checks', fence: 'make run' }], detail: 'stub' },
@@ -3556,13 +3572,18 @@ async function scenarioEB() {
   check('the check was not dropped at baseline: still discovered', result.checks?.discovered, 1)
   check('the baseline detail does not claim anything was dropped',
     (result.checks?.detail ?? '').includes('dropped'), false)
-  const fix = captured.calls.find(c => c.label === 'checks:fix')?.prompt ?? ''
-  check('the mismatch blocks like a red check: the pre-review fixer ran', fix.length > 0, true)
-  check('the fix prompt states the invocation that was expected',
-    fix.includes(checkInvocation('make run')), true)
-  check('the fix prompt carries the mismatched command actually reported',
-    fix.includes('timeout 10 make run'), true)
-  check('it is reported as not measured, never as a pass', fix.includes('not measured'), true)
+  check('halted at Implement: measurement, not the code', result.halted_at, 'Implement')
+  check('the retry happened once', callCount(captured, 'checks:run:3'), 1)
+  check('no third attempt was made', callCount(captured, 'checks:run:4'), 0)
+  check('the checks-only fixer never ran', callCount(captured, 'checks:fix'), 0)
+  check('no fix round ever ran', callCount(captured, 'fix:1'), 0)
+  check('the mismatched check is the one named', result.checks?.unmeasured?.[0]?.id, 'check:1')
+  check('the note states the invocation that was expected',
+    (result.note ?? '').includes(checkInvocation('make run')), true)
+  check('the note carries the mismatched command actually reported',
+    (result.note ?? '').includes('timeout 10 make run'), true)
+  check('the halt says it is about measurement, not the code',
+    (result.note ?? '').includes('not the code'), true)
 }
 
 // Scenarios EC-EE -- #109: the three remaining zero-checks cases, each
@@ -3695,6 +3716,72 @@ async function scenarioEL() {
   check('the preamble forbids cd into the worktree', /Never cd there/.test(runPrompt), true)
   check('the runner is told this call is the exception, in the bash -c form only',
     /exception to the rule above about never running cd/.test(runPrompt) && runPrompt.includes('bash -c'), true)
+}
+
+// Scenario EM -- #116: a worktree path made only of characters no shell
+// treats specially is spliced into the invocation bare, with no nested
+// quoting for the runner to copy. Asserted against a literal string, not
+// against this file's own (necessarily identical) shQuote copy: the point is
+// to prove what invocationFor actually outputs, not to restate its logic.
+async function scenarioEM() {
+  console.log('\n== scenario EM: a bare-safe worktree path has no nested quoting to copy')
+  const { captured } = await run({
+    discovery: { file: '/repo/AGENTS.md', sections: [{ heading: '## Checks', fence: 'make test' }], detail: 'stub' },
+  })
+  const runPrompt = captured.calls.find(c => c.label === 'checks:run:1')?.prompt ?? ''
+  check('the invocation is exactly bash -c \'cd <path> && <command>\', no \\\'\\\' near the path',
+    runPrompt.includes("check:1: bash -c 'cd /tmp/stub-worktree && make test'"), true)
+}
+
+// Scenario EN -- #116: a worktree path that does need quoting (a space, a
+// single quote) still lands the `cd` in the real directory when the built
+// invocation actually runs, not merely that a command indifferent to its cwd
+// still produces the right output (scenario EF).
+async function scenarioEN() {
+  console.log('\n== scenario EN: a worktree path needing quoting still cds to the real directory')
+  const wtPath = fs.mkdtempSync(path.join(os.tmpdir(), "touchstone o'clock -"))
+  const realPath = fs.realpathSync(wtPath)
+  try {
+    const { captured } = await run({
+      branchResult: { created: true, branch: 'feat/gh-21-stub', base: 'main',
+        path: wtPath, ticket: '21', detail: 'stub', dirty: false },
+      discovery: { file: '/repo/AGENTS.md',
+        sections: [{ heading: '## Checks', fence: 'pwd -P' }], detail: 'stub' },
+    })
+    const runPrompt = captured.calls.find(c => c.label === 'checks:run:1')?.prompt ?? ''
+    const line = runPrompt.split('\n').find(l => l.startsWith('check:1: '))
+    const invocation = line ? line.slice('check:1: '.length) : ''
+    check('this path is one the bare-word regex rejects, so it stays quoted',
+      /^[A-Za-z0-9/._+:@%=,-]+$/.test(wtPath), false)
+    const got = invocation
+      ? execFileSync('bash', ['-c', invocation]).toString().trim()
+      : `<no invocation: ${runPrompt}>`
+    check('cd actually lands in the real worktree directory', got, realPath)
+  } finally {
+    fs.rmSync(wtPath, { recursive: true, force: true })
+  }
+}
+
+// Scenario EO -- #116: existingBranch has no clean base tree to block on
+// (:1433-1437), so the retry-then-halt rule applies to measurement itself,
+// never to blocking. A check still unmeasured after the retry is reported,
+// not halted.
+async function scenarioEO() {
+  console.log('\n== scenario EO: existingBranch never halts on an unmeasured check, even after the retry')
+  const { result, captured } = await run({
+    args: { existingBranch: true, openPr: true },
+    discovery: { file: '/repo/AGENTS.md',
+      sections: [{ heading: '## Checks', fence: 'bash scripts/lint.sh' }], detail: 'stub' },
+    checkRuns: () => ({ results: [] }),
+    prResult: { opened: true, url: 'https://example.invalid/pr/38o', note: 'stub ready' },
+  })
+  check('the first run happened', callCount(captured, 'checks:run:1'), 1)
+  check('the retry happened once', callCount(captured, 'checks:run:2'), 1)
+  check('no third attempt was made', callCount(captured, 'checks:run:3'), 0)
+  check('the run does not halt', result.halted_at, undefined)
+  check('the check is reported as unmeasured', result.checks?.unmeasured?.length, 1)
+  check('it is never counted as red', result.checks?.red?.length, 0)
+  check('the run reaches the PR phase', result.pr?.opened, true)
 }
 
 // Scenarios EG-EI -- executeAtHead() judges a reproducer by the worktree's
@@ -4089,6 +4176,7 @@ for (const scenario of [scenarioA, scenarioB, scenarioG, scenarioC, scenarioD, s
                         scenarioDW, scenarioDX, scenarioDY, scenarioDZ,
                         scenarioEA, scenarioEB, scenarioEC, scenarioED, scenarioEE, scenarioEF,
                         scenarioEG, scenarioEH, scenarioEI, scenarioEJ, scenarioEK, scenarioEL,
+                        scenarioEM, scenarioEN, scenarioEO,
                         scenarioFA, scenarioFB, scenarioFC, scenarioFD, scenarioFE, scenarioFF, scenarioFG,
                         scenarioFH]) {
   await scenario()
