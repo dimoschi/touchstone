@@ -1734,7 +1734,7 @@ const reviewOf = async (range, tag, picked, known = [], knownCharge = '') => {
       `carries a category: wrong-result, crash, gate-bypass, unmet-criterion, ` +
       `docs, wording, design, scope, or other. Only wrong-result, crash, ` +
       `gate-bypass and unmet-criterion can hold this run, and only when they ` +
-      `also carry a reproducer (unmet-criterion instead needs criterion_quote). ` +
+      `also carry a reproducer (unmet-criterion additionally needs criterion_quote). ` +
       `Everything else is still worth raising and reaches the pull request as a ` +
       `note for a human to judge, but it never blocks. ${REPRODUCER_CONTRACT}` +
       (known.length
@@ -1907,15 +1907,14 @@ const classify = (f, ctx) => {
   if (!BLOCKING_CATEGORIES.has(f.category)) {
     return { note: { ...f, reason: 'category', round: ctx.round } }
   }
-  // unmet-criterion's evidence is the quote, which replaces a reproducer
-  // rather than needing one alongside it -- the prompt says so, so a
-  // reproducer-less finding here must not be turned away for lacking one.
-  if (f.category === 'unmet-criterion') {
-    if (!criterionQuoteFound(f)) {
-      return { note: { ...f, reason: 'quote-not-found', round: ctx.round } }
-    }
-  } else if (!hasCompleteReproducer(f)) {
+  if (!hasCompleteReproducer(f)) {
     return { note: { ...f, reason: 'no-reproducer', round: ctx.round } }
+  }
+  // The quote proves the criterion exists; the reproducer is what shows the
+  // change misses it. Without the second, the only way to decide "unmet" is a
+  // model reading the code, which is exactly what blocking must not rest on.
+  if (f.category === 'unmet-criterion' && !criterionQuoteFound(f)) {
+    return { note: { ...f, reason: 'quote-not-found', round: ctx.round } }
   }
   if (ctx.hunks && !overlapsHunk(f, ctx.hunks)) {
     return { note: { ...f, reason: 'out-of-range', round: ctx.round } }
@@ -1929,13 +1928,7 @@ const classify = (f, ctx) => {
 // diffRange is given, the same call also fetches that range's own new-side
 // diff hunks, verbatim, for classify()'s out-of-range rule.
 const executeAtHead = async (items, label, diffRange) => {
-  // unmet-criterion's evidence can be the quote alone (classify() no longer
-  // requires a reproducer for it): a candidate here may carry none, so it is
-  // judged by reading the worktree against the quote instead of running a
-  // command, and reported in the same exit_code shape a reproducer takes.
   const runnable = items.filter(it => it.reproducer?.command)
-  const criterionOnly = items.filter(it =>
-    !it.reproducer?.command && it.category === 'unmet-criterion' && it.criterion_quote)
   const out = await treeAgent(
     `First run git -C ${wt.path} status --porcelain and report its output in ` +
     `porcelain_before, even when empty: dirt already there before anything ` +
@@ -1950,13 +1943,6 @@ const executeAtHead = async (items, label, diffRange) => {
         `Report each command's exit code verbatim, never your own judgement of ` +
         `whether it passed; combine stdout and stderr into output.\n` +
         runnable.map(it => `[${it.id}] ${it.reproducer.command}`).join('\n') + `\n`
-      : '') +
-    (criterionOnly.length
-      ? `Each acceptance criterion below has no reproducer by design (its own ` +
-        `evidence is the quote, not a command): read the worktree's current ` +
-        `code and decide whether it is met now. Report it in the same shape a ` +
-        `reproducer's result takes: exit_code 0 when met, 1 when still unmet.\n` +
-        criterionOnly.map(it => `[${it.id}] ${it.criterion_quote}`).join('\n') + `\n`
       : '') +
     (diffRange
       ? `Run git -C ${wt.path} diff --unified=0 --no-color ${diffRange} and return, ` +
@@ -2121,63 +2107,17 @@ const markStale = async (findings) => {
     staleIds.has(f.id) ? { ...f, code_changed_since_recorded: true } : f)
 }
 
-// A residual note references a settled finding's id: a later round reported
-// what may be the same defect back, or a variant of it. Checked at the end of
-// every round, not once after the loop has already exited: a variant reopened
-// only there halted the run right past the loop even when a round was still
-// available, since the while condition had already gone false before the
-// reopen happened. Checked again after the mutation gate's own commits, the
-// only other place a residual note gets added. duplicate_of cannot tell "the
-// same bug re-reported" apart from "a defect that finding's fix introduced",
-// so two things run, independently: the settled target's own reproducer (did
-// the fix regress?), and, when the residual note carries a complete
-// reproducer of its own, that command too (does the note's own claim hold up,
-// whatever the target's fate?).
-// checkedResidualIds keeps a note already rechecked once from being rerun for
-// nothing on a later round or at the second call site below. Unlike the rest
-// of the loop, not gated on budget: silently trusting a fix nobody re-checked
-// is worse than spending one more cheap dispatch.
-const checkedResidualIds = new Set()
-const recheckResiduals = async (label, hunks = null) => {
-  const pending = notes.filter(n => n.reason === 'residual' && !checkedResidualIds.has(n.id))
-  for (const n of pending) checkedResidualIds.add(n.id)
-  const targets = [...new Map(pending.map(n => [n.residual_of, n])).keys()]
-    .map(id => settled.find(f => f.id === id)).filter(Boolean)
-  // Mirrors classify()'s own gate for a fresh candidate: a residual's own
-  // claim must be a blocking category and carry a complete reproducer, and
-  // (when this round's hunks are known) sit inside them, or it is not
-  // something that can hold the run either.
-  const ownClaims = pending.filter(n =>
-    BLOCKING_CATEGORIES.has(n.category) && hasCompleteReproducer(n) &&
-    (!hunks || overlapsHunk(n, hunks)))
-  const toRun = [...targets, ...ownClaims]
-  if (!toRun.length) return { dirty: false, reopened: [] }
-  const exec = await executeAtHead(toRun, label)
-  if (exec.dirty) return { dirty: true, exec, reopened: [] }
-  const byId = new Map(exec.pairs)
-  const regressedTargets = targets.filter(t => byId.get(t.id) !== 0)
-  // Mirrors disposeCandidates' own rule for a fresh candidate: 126/127 (could
-  // not run) is not a demonstrated defect; a missing row (could not measure)
-  // still opens it rather than being dismissed as noise.
-  const confirmedOwn = ownClaims.filter(n => {
-    const code = byId.get(n.id)
-    return code !== 0 && code !== 126 && code !== 127
-  })
-  if (regressedTargets.length) {
-    const ids = new Set(regressedTargets.map(f => f.id))
-    settled = settled.filter(f => !ids.has(f.id))
-    log(`${regressedTargets.length} settled finding(s) reproduce again at the ` +
-        `final head, referenced by a residual note; reopened rather than treated as noise`)
-  }
-  if (targets.length > regressedTargets.length) {
-    log(`${targets.length - regressedTargets.length} residual-referenced ` +
-        `finding(s) still do not reproduce; staying settled`)
-  }
-  if (confirmedOwn.length) {
-    log(`${confirmedOwn.length} residual finding(s) still reproduce on their ` +
-        `own claim; opened rather than dismissed for referencing a fixed id`)
-  }
-  return { dirty: false, reopened: [...regressedTargets, ...confirmedOwn] }
+// A settled finding stays settled only while its reproducer keeps passing.
+// Every head the code moves to after a finding settled re-runs that
+// reproducer, whatever any lens reported: a later round's fix, or the mutation
+// gate's own commits, can undo an earlier fix, and a lens happening to set
+// duplicate_of is not something that check can depend on. A residual note is
+// therefore only ever a note. A missing row counts as regressed, the same
+// "could not measure is not a pass" rule the open list gets. Not gated on
+// budget: trusting a fix nobody re-checked is worse than one cheap dispatch.
+const regressedOf = (items, exec) => {
+  const byId = new Map(exec?.pairs ?? [])
+  return items.filter(f => byId.get(f.id) !== 0)
 }
 
 while ((open.length || blockingChecksOpen()) && round < MAX_REVIEW_ROUNDS && !outOfBudget() && !sFix.over()) {
@@ -2273,14 +2213,19 @@ while ((open.length || blockingChecksOpen()) && round < MAX_REVIEW_ROUNDS && !ou
   // this round's own head, and fetches that same range's diff hunks in the
   // same dispatch: the tail-review lens's fresh findings are classified
   // against them below, so both are needed before the round can finish.
-  const [execOld, freshRaw] = await parallel([
+  const settledBefore = [...settled]
+  const [execOld, freshRaw, execSettled] = await parallel([
     () => executeAtHead(open, `reproduce:fix:${round}`, roundRange),
     async () => tailReviewable
       ? reviewOf(roundRange, `review:fix:${round}`, [LENS.correctness], knownForRound())
       : [],
+    async () => settledBefore.length
+      ? executeAtHead(settledBefore, `reproduce:settled:${round}`)
+      : null,
   ])
 
   if (execOld?.dirty) { sFix.close(); return await dirtyReproducerHalt('Fix', execOld) }
+  if (execSettled?.dirty) { sFix.close(); return await dirtyReproducerHalt('Fix', execSettled) }
 
   // Rebuilt from pairs, not read as a Map: execOld crossed parallel() above.
   const execOldById = new Map(execOld?.pairs ?? [])
@@ -2294,6 +2239,14 @@ while ((open.length || blockingChecksOpen()) && round < MAX_REVIEW_ROUNDS && !ou
     else stillOpen.push(f)
   }
   open = stillOpen
+
+  const regressed = execSettled ? regressedOf(settledBefore, execSettled) : []
+  if (regressed.length) {
+    const ids = new Set(regressed.map(f => f.id))
+    settled = settled.filter(f => !ids.has(f.id))
+    open = open.concat(regressed)
+    log(`round ${round}: ${regressed.length} earlier fix(es) no longer hold at this head; reopened`)
+  }
 
   if (tailReviewable) {
     const { candidates, freshNotes } = classifyBatch(freshRaw ?? [], execOld?.hunks ?? null, round)
@@ -2315,10 +2268,6 @@ while ((open.length || blockingChecksOpen()) && round < MAX_REVIEW_ROUNDS && !ou
     redChecks = await runChecks()
     lastCheckedHead = head
   }
-
-  const residual = await recheckResiduals('reproduce:residual', execOld?.hunks ?? null)
-  if (residual.dirty) { sFix.close(); return await dirtyReproducerHalt('Fix', residual.exec) }
-  if (residual.reopened.length) open = open.concat(residual.reopened)
 
   log(`round ${round}: ${open.length} finding(s) still open` +
       (discoveredChecks.length ? `, ${redChecks.length} check(s) still red` : ''))
@@ -2528,6 +2477,23 @@ if (!mutation.green) {
 // The mutation gate commits: new tests, and real fixes when a survivor exposes
 // a genuine defect. Those are production changes nobody has read yet.
 const mutHead = mutation.head_sha?.trim()
+if (mutHead && mutHead !== reviewedThrough && settled.length) {
+  const execSettledMut = await executeAtHead(settled, 'reproduce:settled:mutation')
+  if (execSettledMut.dirty) return await dirtyReproducerHalt('Review', execSettledMut)
+  const undone = regressedOf(settled, execSettledMut)
+  if (undone.length) {
+    return await halted('Review', {
+      plan: plan.plan, implemented: impl.summary, mutation,
+      gates: gatesPayload(),
+      unresolved_findings: undone, fix_rounds: round, fix_round_output: fixRoundSpend,
+      notes,
+      note: `The mutation gate's own commits (${reviewedThrough}..${mutHead}) undid ` +
+            `${undone.length} verified fix(es): their reproducers fail again at ` +
+            `that head, and no fix round runs after the gate. ${prNote()}. Judge ` +
+            `each: fix it, or reject it as wrong.`,
+    })
+  }
+}
 if (reviewerCount && mutHead && mutHead !== reviewedThrough && !outOfBudget()) {
   phase('Review')
   const mutRange = `${reviewedThrough}..${mutHead}`
@@ -2537,16 +2503,13 @@ if (reviewerCount && mutHead && mutHead !== reviewedThrough && !outOfBudget()) {
   // this range.
   const execHunks = await executeAtHead([], 'reproduce:mutation', mutRange)
   if (execHunks.dirty) return await dirtyReproducerHalt('Review', execHunks)
-  // A reference here means the gate undid a verified fix; the charge narrows
-  // duplicate_of to that specific claim, never to any bug a lens still
-  // perceives, so a genuinely unrelated defect elsewhere in this range is not
-  // read as one.
+  // An undone fix is already caught above by executing its reproducer, so the
+  // lens is not asked to report one.
   const raisedMut = await reviewOf(mutRange, 'review:mutation', [LENS.correctness], knownForRound(),
-    `\nEach of those was fixed and its reproducer confirmed passing, all of it ` +
-    `before the commits you are reviewing. So set duplicate_of ONLY to report ` +
-    `that these commits undid one of those fixes, and say in the evidence ` +
-    `which line here does it. A defect you still perceive in code these ` +
-    `commits do not touch is not a finding against this range: leave it out.`)
+    `\nEach of those was fixed before the commits you are reviewing, and its ` +
+    `reproducer has already been re-run at their head, so do not report one ` +
+    `of them again. A defect you still perceive in code these commits do not ` +
+    `touch is not a finding against this range: leave it out.`)
   const { candidates, freshNotes } = classifyBatch(raisedMut, execHunks.hunks ?? null, 'mutation')
   notes.push(...freshNotes)
   let freshOpen = []
@@ -2557,13 +2520,6 @@ if (reviewerCount && mutHead && mutHead !== reviewedThrough && !outOfBudget()) {
     freshOpen = disposed.opened
     notes.push(...disposed.asNotes)
   }
-  // The only other place a residual note can be added past the fix loop's own
-  // recheck: a mutation-review reference to an already-settled fix has to be
-  // rechecked here too, or a gate that undoes a verified fix opens the PR
-  // exactly the way the pre-gh-106 code never let it.
-  const residualMut = await recheckResiduals('reproduce:residual:mutation', execHunks.hunks ?? null)
-  if (residualMut.dirty) return await dirtyReproducerHalt('Review', residualMut.exec)
-  freshOpen = freshOpen.concat(residualMut.reopened)
   if (freshOpen.length) {
     return await halted('Review', {
       plan: plan.plan, implemented: impl.summary, mutation,

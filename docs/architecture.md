@@ -220,3 +220,18 @@ dispatch per batch, against the worktree's current HEAD, deciding open-vs-note (
 fixed-vs-still-open, on a later round) from `exit_code` alone, never from a model's
 account of the diff. This is what replaced the old LLM verifier: a finding is fixed when
 its own reproducer exits 0, not when a verifier says so.
+
+`unmet-criterion` needs a reproducer too. The verbatim quote proves the criterion
+exists; only an executed command shows the change misses it, and the alternative, a
+model reading the code and declaring the criterion met, is the judgement blocking must
+not rest on.
+
+A settled finding is re-run at every head the code moves to after it settled: in every
+later fix round (`reproduce:settled:<round>`) and at the mutation gate's head
+(`reproduce:settled:mutation`), budget or not. One that no longer exits 0 reopens, and
+gets the next round if one is left; at the mutation head, where no round follows, the
+run halts at Review before spending a review on it. Nothing here waits for a lens to
+report the regression, so a `residual` note is only ever a note: whether a new finding
+is a *variant* of a fixed one is decided by the lens setting `duplicate_of`, which is a
+judgement no exit code can make, and the cost of that judgement being wrong is a line in
+the PR body rather than another round.

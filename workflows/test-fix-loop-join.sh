@@ -549,18 +549,21 @@ function makeAgent(scenario, captured) {
       const hunkLines = scenario.hunks ? scenario.hunks(round) : defaultHunkLines(filesOf(scenario.tailReview))
       return reproduceResponse(prompt, scenario, (id) => exitFor(scenario, id, round), hunkLines)
     }
+    // Settled findings are re-run at every head the code moves to after they
+    // settled. Still fixed (0) unless a scenario says otherwise, so a scenario
+    // that never considered settled ids is unaffected by the recheck.
+    if (/^reproduce:settled:/.test(label)) {
+      const at = label.slice('reproduce:settled:'.length)
+      const round = /^\d+$/.test(at) ? Number(at) : at
+      return reproduceResponse(prompt, scenario,
+        (id) => scenario.settledExit ? scenario.settledExit(id, round) : 0)
+    }
     if (label === 'reproduce:mutation') {
       const hunkLines = scenario.hunks ? scenario.hunks('mutation') : defaultHunkLines(filesOf(scenario.postMutationReview))
       return reproduceResponse(prompt, scenario, () => undefined, hunkLines)
     }
     if (label === 'reproduce:mutation:fresh') {
       return reproduceResponse(prompt, scenario, (id) => exitFor(scenario, id, 'mutation'))
-    }
-    if (label === 'reproduce:residual') {
-      return reproduceResponse(prompt, scenario, (id) => exitFor(scenario, id, 'residual'))
-    }
-    if (label === 'reproduce:residual:mutation') {
-      return reproduceResponse(prompt, scenario, (id) => exitFor(scenario, id, 'residual:mutation'))
     }
     if (label === 'gate:opt-in') {
       if (scenario.gateProbeFails) return null
@@ -1079,8 +1082,8 @@ async function scenarioT() {
   check('the residual note references the settled finding',
     result.notes?.some(n => n.reason === 'residual' && n.residual_of === 'f1'), true)
   const lensPrompt = captured.calls.find(c => c.label.startsWith('review:mutation:'))?.prompt ?? ''
-  check('the lens is told a reference means these commits undid a fix',
-    lensPrompt.includes('undid one of those fixes'), true)
+  check('the lens is told settled fixes were already re-run, not to report them again',
+    lensPrompt.includes('already been re-run at their head'), true)
   check('the lens is told a defect outside this range is not a finding here',
     lensPrompt.includes('commits do not touch is not a finding'), true)
 }
@@ -2185,60 +2188,63 @@ async function scenarioBT() {
 // it was a re-report readied a PR carrying a real regression, under
 // unresolved_findings: []. The verifier decides now, and a suspect that still
 // reproduces blocks like any other finding.
-// Scenario AZ -- the reopen path: a duplicate_of reference to a settled
-// finding is a residual note, never opened on the spot, but the settled
-// finding's own reproducer is re-run once at the final head. Here it fails
-// again (the fix regressed), so the original finding reopens and the run
-// halts at Fix rather than reading the reference as noise.
+// Scenario AZ -- a later round that breaks an earlier round's fix is caught by
+// re-running every settled reproducer at that round's own head, whatever any
+// lens reported. With no round left the run halts on the reopened finding, and
+// says it hit the round limit: every reopen happens inside the loop, so the
+// "should not happen" fallback in fixStopReason stays unreachable.
 async function scenarioAZ() {
-  console.log('\n== scenario AZ: a residual note whose settled finding regresses reopens and halts at Fix')
-  const { result } = await run({
-    args: { maxReviewRounds: 1 },
+  console.log('\n== scenario AZ: a fix a later round breaks reopens and halts at Fix')
+  const { result, captured } = await run({
+    args: { maxReviewRounds: 2 },
     draftPr: { opened: true, number: 24, url: 'https://example.invalid/pr/24', detail: 'stub draft' },
     initialReview: {
-      correctness: [{ title: 'Route resolves from cwd', file: 'src/route.js',
-        claim: 'wrong repo', evidence: 'route.js:12' }],
+      correctness: [
+        { title: 'Route resolves from cwd', file: 'src/route.js', claim: 'wrong repo', evidence: 'route.js:12' },
+        { title: 'Missing guard', file: 'src/guard.js', claim: 'no guard', evidence: 'guard.js:3' },
+      ],
       advocate: [],
     },
-    // f1 verifies fixed at round 1, but its own reproducer fails again by the
-    // time the residual recheck runs at the final head.
-    verify: (id, round) => id === 'f1' ? round !== 'residual' : undefined,
-    fixHead: () => 'fix00000000000000000000000000000000000001',
-    tailReview: [{ title: 'Same route bug, worded differently',
-      file: 'src/route.js', claim: 'gate is skipped entirely',
-      evidence: 'route.js:20', duplicate_of: 'f1', reproducer: undefined }],
+    verify: (id, round) => id === 'f1' ? round === 1 : (id === 'f2' ? round === 2 : undefined),
+    settledExit: (id, round) => (id === 'f1' && round === 2 ? 1 : 0),
+    fixHead: (round) => `fix0000000000000000000000000000000000000${round}`,
+    tailReview: [],
     staleness: () => [],
   })
   check('halted at Fix rather than readying the PR', result.halted_at, 'Fix')
-  check('the reopened finding is reported as unresolved, not filed only as a note',
-    result.unresolved_findings?.length, 1)
-  check('it is the original finding, reopened', result.unresolved_findings?.[0]?.file, 'src/route.js')
+  check('only the regressed finding is unresolved', result.unresolved_findings?.length, 1)
+  check('it is the finding round 1 fixed', result.unresolved_findings?.[0]?.file, 'src/route.js')
+  check('the stop reason is the round limit, not the "should not happen" fallback',
+    /2-round limit/.test(result.stopped_because ?? ''), true)
+  check('nothing was settled before round 1, so no settled recheck ran there',
+    callCount(captured, 'reproduce:settled:1'), 0)
+  check('round 2 re-ran what round 1 settled', callCount(captured, 'reproduce:settled:2'), 1)
 }
 
-// Scenario BA -- the residual recheck is not gated on budget: silently
-// trusting a fix nobody re-checked is worse than one more cheap dispatch, so
-// it must run even once the rest of the run reads as out of budget.
+// Scenario BA -- the settled recheck is not gated on budget: silently trusting
+// a fix nobody re-checked is worse than one more cheap dispatch, so it runs
+// even in a round where the rest of the run reads as out of budget.
 async function scenarioBA() {
-  console.log('\n== scenario BA: the residual recheck still runs once the run is otherwise out of budget')
-  let roundRan = false
-  const { result, captured } = await run({
-    args: { maxReviewRounds: 1 },
-    budget: { total: 200000, spent: () => 0, remaining: () => (roundRan ? 100 : 999999) },
+  console.log('\n== scenario BA: the settled recheck still runs once the run is otherwise out of budget')
+  let exhausted = false
+  const { captured } = await run({
+    args: { maxReviewRounds: 2 },
+    budget: { total: 200000, spent: () => 0, remaining: () => (exhausted ? 100 : 999999) },
     draftPr: { opened: true, number: 25, url: 'https://example.invalid/pr/25', detail: 'stub draft' },
     initialReview: {
-      correctness: [{ title: 'Route resolves from cwd', file: 'src/route.js',
-        claim: 'wrong repo', evidence: 'route.js:12' }],
+      correctness: [
+        { title: 'Route resolves from cwd', file: 'src/route.js', claim: 'wrong repo', evidence: 'route.js:12' },
+        { title: 'Missing guard', file: 'src/guard.js', claim: 'no guard', evidence: 'guard.js:3' },
+      ],
       advocate: [],
     },
-    verify: (id) => { roundRan = true; return id === 'f1' ? true : undefined },
-    fixHead: () => 'fix00000000000000000000000000000000000001',
-    tailReview: [{ title: 'The fix fails open', file: 'src/route.js',
-      claim: 'gate is skipped', evidence: 'route.js:20', duplicate_of: 'f1',
-      reproducer: undefined }],
+    verify: (id, round) => id === 'f1' ? round === 1 : (id === 'f2' ? round === 2 : undefined),
+    fixHead: (round) => { if (round === 2) exhausted = true; return `fix0000000000000000000000000000000000000${round}` },
+    tailReview: [],
     staleness: () => [],
   })
-  check('the residual recheck still ran', callCount(captured, 'reproduce:residual'), 1)
-  check('halted_at is absent (the settled fix held)', result.halted_at, undefined)
+  check('the budget really was out: round 2 got no tail review', callCount(captured, 'review:fix:2'), 0)
+  check('the settled recheck still ran in round 2', callCount(captured, 'reproduce:settled:2'), 1)
 }
 
 // Scenario BU -- #38: a check green at the base commit and red after
@@ -3000,24 +3006,24 @@ async function scenarioDB() {
 }
 
 async function scenarioDC() {
-  console.log('\n== scenario DC: a post-mutation residual reference is rechecked, and reopens if the gate undid the fix')
-  const { result } = await run(convergedWithSuspect({
+  console.log('\n== scenario DC: a fix the mutation commits undo halts at Review before the mutation review is spent')
+  const { result, captured } = await run(convergedWithSuspect({
     tailReview: [],
     postMutationReview: [{ title: 'Boundary check excludes the last element', file: 'parser.js',
       claim: 'the mutation commits reverted the guard', evidence: 'parser.js:14',
       duplicate_of: 'f1', reproducer: undefined }],
     mutationResult: () => ({ green: true, head_sha: 'mut0000000000000000000000000000000000001', detail: 'stub green', scored: true }),
-    verify: (id, round) => id === 'f1' ? round !== 'residual:mutation' : undefined,
+    settledExit: (id, round) => (id === 'f1' && round === 'mutation' ? 1 : 0),
   }))
   check('halted at Review (the mutation gate undid the fix)', result.halted_at, 'Review')
   check('the reopened finding is reported as unresolved',
     result.unresolved_findings?.some(f => f.file === 'src/parser.js'), true)
-  check('a residual note is still recorded',
-    result.notes?.some(n => n.reason === 'residual'), true)
+  check('the mutation review did not run: the halt was already certain',
+    callCount(captured, 'review:mutation:correctness'), 0)
 }
 
 async function scenarioDD() {
-  console.log('\n== scenario DD: a residual note with its own failing reproducer opens, even when the settled target still holds')
+  console.log('\n== scenario DD: a residual note never blocks, even with its own failing reproducer')
   const { result } = await run({
     args: { maxReviewRounds: 1 },
     draftPr: { opened: true, number: 31, url: 'https://example.invalid/pr/31', detail: 'stub draft' },
@@ -3026,18 +3032,17 @@ async function scenarioDD() {
         claim: 'boundary is wrong', evidence: 'parser.js:12' }],
       advocate: [],
     },
-    verify: (id) => id === 'f1' ? true : (id === 'f2' ? false : undefined),
+    verify: (id) => id === 'f1' ? true : false,
     fixHead: () => 'fix00000000000000000000000000000000000001',
     tailReview: [{ title: 'The fix introduced a null deref', file: 'src/parser.js',
       claim: 'the added guard derefs before checking', evidence: 'parser.js:20',
       duplicate_of: 'f1' }],
     staleness: () => [],
   })
-  check('halted at Fix (the residual\'s own reproducer still fails)', result.halted_at, 'Fix')
-  check('the finding that opened is the one the fix introduced',
-    result.unresolved_findings?.some(f => f.title === 'The fix introduced a null deref'), true)
-  check('the original settled finding is not re-reported as unresolved',
-    result.unresolved_findings?.every(f => f.title !== 'Off-by-one in parser'), true)
+  check('the run did not halt on the residual', result.halted_at, undefined)
+  check('nothing is left unresolved', (result.unresolved_findings ?? []).length, 0)
+  check('the variant is recorded as a residual note',
+    result.notes?.some(n => n.title === 'The fix introduced a null deref' && n.reason === 'residual'), true)
 }
 
 async function scenarioDE() {
@@ -3098,13 +3103,13 @@ async function scenarioDG() {
     result.unresolved_findings?.some(f => f.title === 'Fresh defect'), true)
 }
 
-// Scenario DH -- gh-106: unmet-criterion's evidence is the quote alone, so a
-// lens that follows the prompt and omits a reproducer must not crash the
-// executor or the fix brief, both of which used to read reproducer.command
-// unconditionally.
+// Scenario DH -- a verbatim quote proves the criterion exists, not that the
+// change misses it. Blocking rests on something executed, so without a
+// reproducer the finding is a note, and no model is ever asked to judge the
+// criterion met in place of an exit code.
 async function scenarioDH() {
-  console.log('\n== scenario DH: an unmet-criterion finding with a verbatim quote and no reproducer of its own still opens')
-  const { result } = await run({
+  console.log('\n== scenario DH: an unmet-criterion finding with a verbatim quote but no reproducer is a note, not a halt')
+  const { result, captured } = await run({
     ticketResult: { found: true, summary: 'stub', comments: '',
       description: 'Acceptance: the client must retry on a 503 with backoff.' },
     initialReview: {
@@ -3117,37 +3122,13 @@ async function scenarioDH() {
       advocate: [],
     },
   })
-  check('halted at Fix (an unmet-criterion finding needs only its quote)', result.halted_at, 'Fix')
-  check('the finding opened without a reproducer of its own',
-    result.unresolved_findings?.some(f => f.title === 'Missing retry path'), true)
+  check('the run did not halt', result.halted_at, undefined)
+  check('it is a note for lack of a reproducer',
+    result.notes?.some(n => n.title === 'Missing retry path' && n.reason === 'no-reproducer'), true)
+  check('no agent was asked to judge whether a criterion is met',
+    captured.calls.some(c => /decide whether it is met/i.test(c.prompt ?? '')), false)
 }
 
-// Scenario DI -- gh-106: an unmet-criterion finding with no reproducer of its
-// own used to have no way out of `open` (executeAtHead never sent it to the
-// executor, so no exit code could ever settle it), so it survived every round
-// unfixed regardless of what the fixer did.
-async function scenarioDI() {
-  console.log('\n== scenario DI: an open unmet-criterion finding with no reproducer of its own settles once its criterion is judged met')
-  const { result } = await run({
-    ticketResult: { found: true, summary: 'stub', comments: '',
-      description: 'Acceptance: the client must retry on a 503 with backoff.' },
-    args: { maxReviewRounds: 2 },
-    initialReview: {
-      correctness: [
-        { category: 'unmet-criterion', title: 'Missing retry path', file: 'a.js',
-          claim: 'the retry path was never implemented', evidence: 'a.js:1',
-          criterion_quote: 'the client must retry on a 503 with backoff',
-          reproducer: undefined },
-      ],
-      advocate: [],
-    },
-    verify: (id) => id === 'f1' ? true : undefined,
-    fixHead: () => 'fix00000000000000000000000000000000000001',
-    staleness: () => [],
-  })
-  check('the run finished rather than halting at Fix', result.halted_at, undefined)
-  check('the criterion-only finding is not left unresolved', result.unresolved_findings, [])
-}
 
 // Scenario DJ -- gh-106: the mutation-hunk fetch runs zero reproducers
 // (`executeAtHead([], ...)`), so dirt found there can never be a reproducer's
@@ -3172,31 +3153,28 @@ async function scenarioDJ() {
     (result.note ?? '').includes('stray-mutation-file.txt'), true)
 }
 
-// Scenario DK -- gh-106: a residual variant reopened after a round converges
-// used to be checked only once, after the while loop had already exited, so
-// it halted immediately even with rounds still available -- the fixer never
-// saw it.
+// Scenario DK -- a fix that a later round breaks is reopened inside the loop,
+// so it gets the next round like any other open finding instead of halting
+// the run right past the loop.
 async function scenarioDK() {
-  console.log('\n== scenario DK: a residual variant reopened after a round still gets a fix round when rounds remain')
+  console.log('\n== scenario DK: a fix a later round breaks still gets a fix round when rounds remain')
   const { result } = await run({
-    args: { maxReviewRounds: 2 },
+    args: { maxReviewRounds: 3 },
     initialReview: {
-      correctness: [{ title: 'Off-by-one in parser', file: 'src/parser.js',
-        claim: 'boundary is wrong', evidence: 'parser.js:12' }],
+      correctness: [
+        { title: 'Off-by-one in parser', file: 'src/parser.js', claim: 'boundary is wrong', evidence: 'parser.js:12' },
+        { title: 'Missing guard', file: 'src/guard.js', claim: 'no guard', evidence: 'guard.js:3' },
+      ],
       advocate: [],
     },
-    verify: (id, round) => {
-      if (id === 'f1') return true
-      if (id === 'f2') return round === 2 ? true : (round === 'residual' ? false : undefined)
-      return undefined
-    },
+    verify: (id, round) => id === 'f1' ? (round === 1 || round === 3) : (id === 'f2' ? round === 2 : undefined),
+    settledExit: (id, round) => (id === 'f1' && round === 2 ? 1 : 0),
     fixHead: (round) => `fix0000000000000000000000000000000000000${round}`,
-    tailReview: [{ title: 'A variant the fix missed', file: 'src/parser.js',
-      claim: 'edge case at the far end', evidence: 'parser.js:22', duplicate_of: 'f1' }],
+    tailReview: [],
     staleness: () => [],
   })
-  check('the run finished rather than halting right after the loop', result.halted_at, undefined)
-  check('it took the second round to settle the reopened variant', result.fix_rounds, 2)
+  check('the run finished rather than halting', result.halted_at, undefined)
+  check('a third round settled the reopened fix', result.fix_rounds, 3)
 }
 
 // Scenario DL -- gh-106: the residual own-claim recheck used to select by
@@ -3265,6 +3243,47 @@ async function scenarioDN() {
   check('the run finished rather than halting on an out-of-range residual claim', result.halted_at, undefined)
 }
 
+// Scenario DO -- a residual never blocks, whatever its own fields claim. An
+// unmet-criterion residual with an invented quote and a failing reproducer is
+// the case where a second, hand-copied gate once disagreed with classify().
+async function scenarioDO() {
+  console.log('\n== scenario DO: a residual with an invented criterion quote and a failing reproducer is still only a note')
+  const { result } = await run({
+    args: { maxReviewRounds: 1 },
+    ticketResult: { found: true, summary: 'stub', comments: '',
+      description: 'Acceptance: the parser rejects an index past the end.' },
+    initialReview: {
+      correctness: [{ title: 'Off-by-one in parser', file: 'src/parser.js',
+        claim: 'boundary is wrong', evidence: 'parser.js:12' }],
+      advocate: [],
+    },
+    verify: (id) => id === 'f1' ? true : false,
+    fixHead: () => 'fix00000000000000000000000000000000000001',
+    tailReview: [{ category: 'unmet-criterion', title: 'Negative index accepted', file: 'src/parser.js',
+      claim: 'negative indexes pass', evidence: 'parser.js:20', duplicate_of: 'f1',
+      criterion_quote: 'the parser must reject every negative index outright' }],
+    staleness: () => [],
+  })
+  check('the run did not halt', result.halted_at, undefined)
+  check('the residual is a note',
+    result.notes?.some(n => n.title === 'Negative index accepted' && n.reason === 'residual'), true)
+}
+
+// Scenario DP -- a fix the mutation commits undo is caught by re-running the
+// settled reproducer at the mutation head, even when no lens reports it.
+async function scenarioDP() {
+  console.log('\n== scenario DP: a fix the mutation commits undo halts even when no lens reports it')
+  const { result, captured } = await run(convergedWithSuspect({
+    tailReview: [],
+    postMutationReview: [],
+    mutationResult: () => ({ green: true, head_sha: 'mut0000000000000000000000000000000000001', detail: 'stub green', scored: true }),
+    settledExit: (id, round) => (id === 'f1' && round === 'mutation' ? 1 : 0),
+  }))
+  check('halted at Review', result.halted_at, 'Review')
+  check('the undone fix is unresolved', result.unresolved_findings?.some(f => f.file === 'src/parser.js'), true)
+  check('the settled recheck ran at the mutation head', callCount(captured, 'reproduce:settled:mutation'), 1)
+}
+
 for (const scenario of [scenarioA, scenarioB, scenarioG, scenarioC, scenarioD, scenarioE, scenarioH,
                         scenarioI, scenarioJ, scenarioK, scenarioL, scenarioM, scenarioN,
                         scenarioO, scenarioP, scenarioQ, scenarioR, scenarioS, scenarioT,
@@ -3285,7 +3304,8 @@ for (const scenario of [scenarioA, scenarioB, scenarioG, scenarioC, scenarioD, s
                         scenarioCP, scenarioCQ, scenarioCR, scenarioCS, scenarioCT, scenarioCU, scenarioCV,
                         scenarioCW, scenarioCX, scenarioCY, scenarioCZ, scenarioDA, scenarioDB,
                         scenarioDC, scenarioDD, scenarioDE, scenarioDF, scenarioDG, scenarioDH,
-                        scenarioDI, scenarioDJ, scenarioDK, scenarioDL, scenarioDM, scenarioDN]) {
+                        scenarioDJ, scenarioDK, scenarioDL, scenarioDM, scenarioDN,
+                        scenarioDO, scenarioDP]) {
   await scenario()
 }
 

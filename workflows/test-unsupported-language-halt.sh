@@ -55,7 +55,7 @@ check "the 'left as a draft' wording appears only in prNote" \
 check "no text claims the work cannot open a PR, which the draft already did" \
   "$(grep -Fc 'cannot open a PR' "$SCRIPT" || true)" 0
 check "every note that reports the PR's fate reads the helper" \
-  "$(grep -Fc '${prNote()}' "$SCRIPT" || true)" 4
+  "$(grep -Fc '${prNote()}' "$SCRIPT" || true)" 5
 
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
