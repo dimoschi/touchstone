@@ -124,7 +124,7 @@ function makeAgent(scenario, captured) {
       return { crap_gated: true, mutation_gated: true, detail: 'stub' }
     }
     if (label === 'checks:discover') {
-      return { checks: [], detail: 'stub: no repo checks' }
+      return { file: '', sections: [], detail: 'stub: no repo checks' }
     }
     if (label === 'implementer') {
       return scenario.implementer

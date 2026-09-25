@@ -26,7 +26,7 @@ export const meta = {
 // against the manifest in scripts/check-version-bump.sh, so drift is a
 // gate's job rather than something this script verifies about itself.
 const PLUGIN_NAME = 'touchstone'
-const PIPELINE_VERSION = '0.20.1'
+const PIPELINE_VERSION = '0.21.0'
 
 // Boundaries. Wall-clock deadlines are not expressible here (no Date.now, by
 // design); the bounds are rounds, counts, and token budget instead.
@@ -276,18 +276,25 @@ const MARKERS = {
   },
 }
 
-// Discovery source: AGENTS.md/CLAUDE.md's "## Commands" fence, not
-// CONTRIBUTING.md's "## Tests" prose or .github/workflows/ci.yml -- the one
-// list already written for an agent to run verbatim, with no CI-provider
-// interpretation needed and no dependency on any CI existing at all.
+// Discovery source: AGENTS.md/CLAUDE.md read from the worktree (wt.path), not
+// the --git-common-dir root the gate:opt-in probe resolves -- a check list is
+// branch content the ticket can change, while the gate markers are repo-wide
+// policy no phase of this run writes. The agent transcribes every "##"
+// heading and the first fenced block under it verbatim, marker lines
+// included, choosing and interpreting nothing. Selecting the check heading,
+// dropping the fence's own marker lines, splitting the rest and assigning
+// ids is script code (checksFrom below): a check list runs again after every
+// step that commits, so what runs must come from parsing, never a model's
+// account of it.
 const CHECKS = {
-  type: 'object', additionalProperties: false, required: ['checks', 'detail'],
+  type: 'object', additionalProperties: false, required: ['file', 'sections', 'detail'],
   properties: {
-    checks: {
+    file: { type: 'string' },
+    sections: {
       type: 'array',
       items: {
-        type: 'object', additionalProperties: false, required: ['name', 'command'],
-        properties: { name: { type: 'string' }, command: { type: 'string' } },
+        type: 'object', additionalProperties: false, required: ['heading', 'fence'],
+        properties: { heading: { type: 'string' }, fence: { type: 'string' } },
       },
     },
     detail: { type: 'string' },
@@ -297,7 +304,10 @@ const CHECKS = {
 // what the fix phase is handed verbatim -- never a model's account of them.
 // Redness is keyed on exit_code alone, never on a model-judged boolean: exit
 // 2 and exit 4 are not passes either, and asking for a "passed" field let a
-// haiku call one of those green.
+// haiku call one of those green. id is the script-assigned check:N, never a
+// name the model invents, and command must equal the exact invocation the
+// script built (see invocationFor): a row whose command does not match is
+// not measured, never read as a pass.
 const CHECK_RUN = {
   type: 'object', additionalProperties: false, required: ['results', 'dirty'],
   properties: {
@@ -305,9 +315,9 @@ const CHECK_RUN = {
       type: 'array',
       items: {
         type: 'object', additionalProperties: false,
-        required: ['name', 'command', 'exit_code', 'output'],
+        required: ['id', 'command', 'exit_code', 'output'],
         properties: {
-          name: { type: 'string' }, command: { type: 'string' },
+          id: { type: 'string' }, command: { type: 'string' },
           exit_code: { type: 'integer' }, output: { type: 'string' },
         },
       },
@@ -315,6 +325,84 @@ const CHECK_RUN = {
     dirty: { type: 'boolean' },
     porcelain: { type: 'string' },
   },
+}
+// The only heading that is a check list. Only trailing whitespace is
+// ignored: '## checks', '### Checks', '##Checks', '## Checks ##' and
+// '## Commands' all name something else and must never match, because a
+// check here runs as a baseline before Implement and again after every step
+// that commits, so listing it must be a deliberate, exact choice, not a
+// heading that merely resembles it.
+const CHECKS_HEADING = '## Checks'
+
+// Strips an unquoted '#' at the start of a line or after whitespace, and
+// everything after it. Tracks single and double quotes only, with no
+// backslash handling: the fence holds one shell command per line, not a
+// string this needs to fully parse, and a quoted '#' is the one case where
+// stripping would silently corrupt a command's own argument.
+function stripComment(line) {
+  let quote = null
+  for (let i = 0; i < line.length; i++) {
+    const ch = line[i]
+    if (quote) {
+      if (ch === quote) quote = null
+      continue
+    }
+    if (ch === '"' || ch === "'") { quote = ch; continue }
+    if (ch === '#' && (i === 0 || /\s/.test(line[i - 1]))) return line.slice(0, i)
+  }
+  return line
+}
+
+// Turns a transcribed CHECKS response into the ordered, id-keyed list every
+// later phase runs against, plus a note for when there is nothing to run.
+// Duplicate commands stay separate entries -- checksFrom assigns by
+// position, never dedupes -- because two identical lines is the repo saying
+// to run the command twice, not a transcription accident to collapse.
+function checksFrom(source) {
+  if (!source) {
+    return { checks: [], note: 'discovery returned nothing' }
+  }
+  const file = source.file ?? ''
+  if (!file) {
+    return { checks: [], note: 'neither AGENTS.md nor CLAUDE.md exists at the worktree root' }
+  }
+  const sections = Array.isArray(source?.sections) ? source.sections : []
+  const section = sections.find(s => s?.heading?.trimEnd() === CHECKS_HEADING)
+  if (!section) {
+    const hasCommands = sections.some(s => /^##\s+commands\s*$/i.test(s?.heading?.trimEnd() ?? ''))
+    return {
+      checks: [],
+      note: `${file} has no '${CHECKS_HEADING}' heading` +
+        (hasCommands
+          ? `; ${file} has a ## Commands heading, which is no longer read as ` +
+            `checks. Only an exact ${CHECKS_HEADING} heading is, because every ` +
+            `line there is executed before this run's own work and again after ` +
+            `it, so it must list only read-only, deterministic checks.`
+          : '.'),
+    }
+  }
+  // The agent transcribes the fence with its own opening and closing marker
+  // lines (``` or ~~~, info string included), because "the contents between
+  // the markers" is ambiguous about whether an info string like `bash` on
+  // the opening line counts -- a literal reading would surface it as a
+  // spurious first command. Drop it here, where the marker regex is one
+  // rule applied once, rather than in the prompt. A fence transcribed
+  // without markers (or with only one) is unaffected: dropping is
+  // conditional on the line actually being a marker.
+  const fenceLines = (section.fence ?? '').split(/\r?\n/)
+  // A newline outside the fence, before the opening marker or after the
+  // closing one, fills the exact slot the marker check below looks at.
+  while (fenceLines.length && fenceLines[0].trim() === '') fenceLines.shift()
+  while (fenceLines.length && fenceLines[fenceLines.length - 1].trim() === '') fenceLines.pop()
+  const isFenceMarker = (l) => /^\s*(`{3,}|~{3,})/.test(l)
+  if (fenceLines.length && isFenceMarker(fenceLines[0])) fenceLines.shift()
+  if (fenceLines.length && isFenceMarker(fenceLines[fenceLines.length - 1])) fenceLines.pop()
+  const commands = fenceLines
+    .map(stripComment).map(l => l.trim()).filter(l => l.length > 0)
+  if (!commands.length) {
+    return { checks: [], note: `${file}'s '${CHECKS_HEADING}' section has no fence, or no command lines in it` }
+  }
+  return { checks: commands.map((command, i) => ({ id: `check:${i + 1}`, command })), note: '' }
 }
 
 const TRIAGE = {
@@ -1320,26 +1408,27 @@ const sChecksPre = stage('checks')
 phase('Implement')
 const discovery = await treeAgent(
   `[touchstone: checks:discover]\n` +
-  `Find the deterministic checks this repo advertises for its own ` +
-  `contributors, then STOP. Read only; run nothing and change nothing.\n` +
-  `1. Find the repo root: dirname "$(git rev-parse --path-format=absolute ` +
-  `--git-common-dir)".\n` +
-  `2. Read AGENTS.md at that root; if it does not exist, read CLAUDE.md ` +
-  `instead (it is conventionally a symlink to AGENTS.md).\n` +
-  `3. Find a "## Commands" heading (case-insensitive) followed by a fenced ` +
-  `code block. If neither file exists, or no such section is found, return ` +
-  `checks=[] and say why in detail.\n` +
-  `4. Otherwise return one entry per non-blank line inside that fence, in ` +
-  `the file's own order: name is the line's own script (its basename, e.g. ` +
-  `run-tests.sh), command is the full line with any trailing "#" comment ` +
-  `stripped. Do not add a check that is not literally a line there, and do ` +
-  `not drop one for looking slow or environment-specific -- that judgement ` +
-  `is the repo's, made by what it chose to list.`,
+  `Transcribe this repo's own heading structure, then STOP. Read only; run ` +
+  `nothing and change nothing. Do not choose, filter, reorder, trim, or ` +
+  `interpret anything below -- a later step decides what any of it means.\n` +
+  `1. Read ${wt.path}/AGENTS.md; if it does not exist, read ` +
+  `${wt.path}/CLAUDE.md instead (it is conventionally a symlink to ` +
+  `AGENTS.md). Return file as the absolute path you read, or '' if neither ` +
+  `exists.\n` +
+  `2. If a file was read, find every line starting with "##" that sits ` +
+  `outside a fenced code block. For each, return heading as that full line ` +
+  `verbatim, "#" characters included, and fence as the first fenced code ` +
+  `block that follows it and precedes the next such heading line, verbatim ` +
+  `and whole -- its opening marker line (\`\`\` or ~~~, with any info ` +
+  `string after it) and its closing marker line included -- or '' if there ` +
+  `is none before the next heading or the file's end. Return sections in ` +
+  `the file's own order.`,
   { label: 'checks:discover', schema: CHECKS, model: 'haiku', effort: 'low' })
-let discoveredChecks = discovery?.checks ?? []
+const { checks: sourceChecks, note: discoveryNote } = checksFrom(discovery)
+let discoveredChecks = sourceChecks
 log(discoveredChecks.length
-  ? `checks discovered: ${discoveredChecks.map(c => c.name).join(', ')}`
-  : `no repo-advertised checks found (${discovery?.detail ?? 'discovery returned nothing'}); nothing to run alongside review`)
+  ? `checks discovered: ${discoveredChecks.map(c => c.id).join(', ')}`
+  : `no repo-advertised checks found (${discoveryNote}); nothing to run alongside review`)
 
 // existingBranch resumes a branch that may already carry commits of its own,
 // so there is no clean base tree here to tell an environmental failure from
@@ -1347,27 +1436,41 @@ log(discoveredChecks.length
 // block: after #87 resuming is the normal path, not an edge case.
 const checksBlocking = !args?.existingBranch
 let checkAttempt = 0
+// Turns an arbitrary string into one POSIX shell word that expands back to
+// exactly that string: close the quote, splice in a backslash-escaped
+// literal quote, reopen it. Needed because a declared check's own command
+// (`pytest -k 'not slow'`) or the worktree path can carry a single quote,
+// and naive interpolation into a bare pair of quotes lets that quote end
+// the string early.
+const shQuote = (s) => `'${String(s).replace(/'/g, `'\\''`)}'`
+// The exact Bash invocation for a check, built once by the script and never
+// by the model: a fixer or a baseline that trusted a model-reported command
+// could be handed a result for something that only resembles what was asked
+// (an extra `timeout`, a different flag) and never know it ran the wrong
+// thing. c.command itself is spliced in unquoted -- it is the -c script's
+// source, not a single argument -- so only the cd target and the outer -c
+// argument need quoting.
+const invocationFor = (c) => `bash -c ${shQuote(`cd ${shQuote(wt.path)} && ${c.command}`)}`
 const executeChecks = async () => {
   checkAttempt++
   return await treeAgent(
     `[touchstone: checks:run]\n` +
-    `Run each command below, then STOP. Do not fix, edit, or investigate a ` +
-    `failure; a later phase does that.\n` +
+    `Run each Bash invocation below exactly as given, then STOP. Do not fix, ` +
+    `edit, or investigate a failure; a later phase does that.\n` +
     `This one call is the exception to the rule above about never running ` +
-    `cd, and only in the bash -c form: run each command as ` +
-    `bash -c 'cd ${wt.path} && <command>'. Never a bare ` +
-    `cd ${wt.path} && <command>, which does move this session. A ` +
-    `subshell does not move this session's own working directory, and cd ` +
-    `inside it is what makes a command written relative to the repo root ` +
-    `(as every discovered command is) mean this worktree rather than ` +
-    `wherever the session's own cwd happens to be.\n` +
-    `Report each command's exit code and its combined stdout and stderr ` +
-    `verbatim -- do not summarise, truncate, or interpret what it printed.\n` +
+    `cd, and only in the bash -c form each invocation already takes: its cd ` +
+    `runs inside a child shell, which does not move this session's own ` +
+    `working directory. Never split one into a bare cd ${wt.path} && ` +
+    `<command>, which does.\n` +
+    `Report each check's id, its exit code, and its combined stdout and ` +
+    `stderr verbatim -- do not summarise, truncate, or interpret what it ` +
+    `printed. Report command as the exact invocation you ran, copied back ` +
+    `verbatim: a row is only accepted when it matches what was asked.\n` +
     `Then run git -C ${wt.path} status --porcelain and report whether it ` +
     `printed anything (dirty) and, if so, its output (porcelain): a check ` +
     `that writes to the tree (a ledger, a generated file) must be visible, ` +
     `not silently carried into whatever commits next.\n` +
-    discoveredChecks.map(c => `${c.name}: ${c.command}`).join('\n'),
+    discoveredChecks.map(c => `${c.id}: ${invocationFor(c)}`).join('\n'),
     { label: `checks:run:${checkAttempt}`, schema: CHECK_RUN, model: 'haiku', effort: 'low' })
 }
 const CHECK_HEAD_BYTES = 1024
@@ -1383,33 +1486,53 @@ const truncateOutput = (s) => {
     `\n[touchstone: truncated, ${omitted} bytes omitted]\n` +
     t.slice(t.length - CHECK_TAIL_BYTES)
 }
-const toRedList = (results) => (Array.isArray(results) ? results : [])
-  .filter(r => r?.exit_code !== 0)
-  .map(r => ({ id: `check:${r.name}`, name: r.name, command: r.command,
-               exit_code: r.exit_code, output: truncateOutput(r.output) }))
-// A check nobody reported on is unknown, and unknown is red. Reading a
-// missing row as a pass would put the verdict back in the shape of the
-// model's answer, which is the thing this phase exists to take it out of.
-// The baseline does not come through here: an unreported row there is left
-// in place rather than dropped, since a missing answer is no evidence that a
-// check is environmental.
+// Splits a run's raw results into a real red list (ran, command matched,
+// non-zero exit) and an unmeasured one (nobody reported the id, or reported
+// it against a different command). Unmeasured never becomes a pass and
+// never counts as the repo's own environment: a row this phase cannot trust
+// is not evidence either way, so it is carried forward as red rather than
+// dropped or waved through.
+const classifyResults = (checks, results) => {
+  const byId = new Map((Array.isArray(results) ? results : [])
+    .filter(r => r?.id).map(r => [r.id, r]))
+  const red = []
+  const unmeasured = []
+  for (const c of checks) {
+    const row = byId.get(c.id)
+    if (!row) {
+      unmeasured.push({ id: c.id, command: c.command, exit_code: null,
+        output: 'no result was reported for this check' })
+      continue
+    }
+    const expected = invocationFor(c)
+    if (row.command !== expected) {
+      unmeasured.push({ id: c.id, command: c.command, exit_code: null,
+        output: `not measured: expected \`${expected}\`, got \`${row.command}\`` })
+      continue
+    }
+    if (row.exit_code !== 0) {
+      red.push({ id: c.id, command: c.command, exit_code: row.exit_code,
+        output: truncateOutput(row.output) })
+    }
+  }
+  return { red, unmeasured }
+}
 const runChecks = async () => {
   if (!discoveredChecks.length) return []
   const outcome = await executeChecks()
-  const reported = new Set((Array.isArray(outcome?.results) ? outcome.results : [])
-    .map(r => r?.name))
-  const unreported = discoveredChecks.filter(c => !reported.has(c.name))
-    .map(c => ({ id: `check:${c.name}`, name: c.name, command: c.command,
-                 exit_code: null, output: 'no result was reported for this check' }))
-  return [...toRedList(outcome?.results), ...unreported]
+  const { red, unmeasured } = classifyResults(discoveredChecks, outcome?.results)
+  return [...red, ...unmeasured]
 }
 
-const renderCheck = (c) => `Check ${c.name} (${c.command}) exited ${c.exit_code}:\n${c.output}`
+const renderCheck = (c) => `Check ${c.id} (${c.command}) exited ${c.exit_code}:\n${c.output}`
 
 // A check red before any work started is the repo's own environment, not
 // this run's doing, and there is no way to tell the two apart other than
 // measuring the base commit itself. Dropped, not merely downgraded, so it
-// can never re-enter a fixer prompt later.
+// can never re-enter a fixer prompt later. An unmeasured row is never part
+// of this: it is not evidence the repo's own environment is broken, only
+// that this run could not measure it, so it stays in discoveredChecks and
+// is tried again after Implement.
 let droppedAtBaseline = []
 if (discoveredChecks.length && checksBlocking) {
   const baseline = await executeChecks()
@@ -1424,13 +1547,13 @@ if (discoveredChecks.length && checksBlocking) {
         `or implemented. Find which check writes, then re-run.`,
     })
   }
-  const baseRed = toRedList(baseline?.results)
+  const { red: baseRed } = classifyResults(discoveredChecks, baseline?.results)
   if (baseRed.length) {
-    const redNames = new Set(baseRed.map(c => c.name))
+    const redIds = new Set(baseRed.map(c => c.id))
     droppedAtBaseline = baseRed
-    discoveredChecks = discoveredChecks.filter(c => !redNames.has(c.name))
+    discoveredChecks = discoveredChecks.filter(c => !redIds.has(c.id))
     log(`checks: dropped ${droppedAtBaseline.length} as environmental (red ` +
-        `before any work started): ${droppedAtBaseline.map(c => c.name).join(', ')}`)
+        `before any work started): ${droppedAtBaseline.map(c => c.id).join(', ')}`)
   }
 } else if (discoveredChecks.length) {
   log(`checks: existingBranch has no clean base tree to classify against; ` +
@@ -1448,11 +1571,11 @@ function checksPayload() {
     detail: (checksBlocking
       ? (droppedAtBaseline.length
           ? `dropped ${droppedAtBaseline.length} as environmental at the base ` +
-            `commit: ${droppedAtBaseline.map(c => c.name).join(', ')}. `
+            `commit: ${droppedAtBaseline.map(c => c.id).join(', ')}. `
           : '')
       : `advisory only: existingBranch has no clean base tree to classify ` +
         `checks against, so a red one here is reported but never blocks. `
-    ) + (discovery?.detail ?? ''),
+    ) + (discoveryNote || discovery?.detail || ''),
   }
 }
 // Red but not blocking (existingBranch) reaches the fixer as nothing at
@@ -1557,7 +1680,7 @@ let lastCheckedHead = headOf(impl.commit_range)
 let redChecks = await runChecks()
 if (redChecks.length) {
   log(`checks: ${redChecks.length} discovered check(s) red after Implement: ` +
-      redChecks.map(c => c.name).join(', '))
+      redChecks.map(c => c.id).join(', '))
 }
 
 // One checks-only fix round before Review, so a purely mechanical defect
@@ -2446,7 +2569,7 @@ if (open.length || blockingChecksOpen()) {
           `be marked ready. Judge each finding: fix it, or reject it as wrong.` +
           (blockingChecksOpen()
             ? ` A red check is the repo's own verdict, not a judgement call: ` +
-              `${redChecks.map(c => c.name).join(', ')}.`
+              `${redChecks.map(c => c.id).join(', ')}.`
             : '') +
           (staleCount
             ? ` ${staleCount} of them have code that changed since they were ` +

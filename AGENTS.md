@@ -14,7 +14,12 @@ Adding or changing a gate means touching both manifests.
 
 Read [docs/architecture.md](docs/architecture.md) before changing any of the three.
 
-## Commands
+## Checks
+
+Every line in the fence below is run by the delivery pipeline against a ticket
+branch in this repo: once as the environmental baseline before Implement, then
+again after every step that commits. It must stay read-only and deterministic
+for that reason.
 
 ```bash
 bash scripts/run-hook-tests.sh          # needs only python3 and git
