@@ -364,3 +364,32 @@ def test_unparseable_line_before_the_user_entry_does_not_stop_the_scan(monkeypat
     rc = _run(monkeypatch, _payload(
         path=str(repo / "app.py"), cwd=str(repo), transcript=parent, agent_id="a1"))
     assert rc == 2
+
+
+def test_entry_text_skips_non_text_blocks_and_textless_ones():
+    entry = {"message": {"content": [
+        {"type": "image"}, {"type": "text"}, {"type": "text", "text": "a"}]}}
+    assert gate._entry_text(entry) == "\n\na"
+
+
+def test_entry_text_of_a_non_dict_message_is_none():
+    assert gate._entry_text({"message": "a bare string"}) is None
+
+
+def test_first_user_entry_reads_past_undecodable_bytes(tmp_path):
+    transcript = tmp_path / "agent-a1.jsonl"
+    user = {"type": "user", "message": {"content": "hi"}}
+    transcript.write_bytes(b'\xff\xfe not json\n' + json.dumps(user).encode() + b"\n")
+    assert gate._first_user_entry(transcript) == user
+
+
+def test_edit_target_falls_back_to_dot_for_a_missing_empty_or_non_string_cwd():
+    base = {"tool_name": "Edit", "tool_input": {"file_path": "a.py"}}
+    assert gate._edit_target(base) == ("a.py", ".")
+    assert gate._edit_target({**base, "cwd": ""}) == ("a.py", ".")
+    assert gate._edit_target({**base, "cwd": None}) == ("a.py", ".")
+    assert gate._edit_target({**base, "cwd": "/w"}) == ("a.py", "/w")
+
+
+def test_a_non_string_transcript_path_names_no_worktree():
+    assert gate._active_worktree_for({"agent_id": "a1", "transcript_path": 123}) is None
