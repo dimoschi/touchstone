@@ -39,6 +39,11 @@
             "type": "command",
             "bash": "cd \"$PLUGIN_ROOT/hooks\" && exec python3 ./copilot-hook-runner.py generated-file",
             "timeoutSec": 30
+          },
+          {
+            "type": "command",
+            "bash": "cd \"$PLUGIN_ROOT/hooks\" && exec python3 ./copilot-hook-runner.py worktree-edit",
+            "timeoutSec": 30
           }
         ]
       }

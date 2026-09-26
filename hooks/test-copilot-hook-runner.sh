@@ -148,7 +148,7 @@ assert set(hooks) == {"PreToolUse", "PostToolUse"}
 
 pre = hooks["PreToolUse"]
 assert [group["matcher"] for group in pre] == ["Bash", "Edit|Write|MultiEdit"]
-assert [len(group["hooks"]) for group in pre] == [4, 2]
+assert [len(group["hooks"]) for group in pre] == [4, 3]
 expected_pre = [
     ("crap-commit", 600),
     ("mutation-pr", 600),
@@ -156,6 +156,7 @@ expected_pre = [
     ("gate-pipe", 30),
     ("contributing", 30),
     ("generated-file", 30),
+    ("worktree-edit", 30),
 ]
 seen = []
 for group in pre:
