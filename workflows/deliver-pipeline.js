@@ -507,16 +507,21 @@ const hasMarkerLine = (output) =>
 // below), never by the model reporting the result: a check's own exit code
 // is read only from this line, never from a model-filled exit_code field.
 const CHECK_EXIT_MARKER = 'TOUCHSTONE_CHECK_EXIT'
-// Whether a check's row carries its own exit line, and what it says. Whole
-// lines only, the same reason as hasMarkerLine above. Anything but exactly
-// one well-formed line naming this check's own id comes back as a reason
-// string instead of an exit code, so an ambiguous report reads as unmeasured
-// rather than guessed at.
+// Whether a check's row carries its own exit line, and what it says. Only
+// the first non-empty line is read: invocationFor prints the exit line before
+// any of the check's output, so a lookalike further down is the check's own
+// output (a suite that tests this runner prints them), and an exit line found
+// only further down was moved there by whoever relayed the output. Anything
+// but a well-formed first line naming this check's own id comes back as a
+// reason string instead of an exit code, so an ambiguous report reads as
+// unmeasured rather than guessed at.
 const exitLineOf = (output, id) => {
   const lines = String(output ?? '').split(/\r?\n/).map((line) => line.trim())
-    .filter((line) => line.startsWith(`${CHECK_EXIT_MARKER} `))
-  if (lines.length === 0) return { reason: 'no exit line' }
-  if (lines.length > 1) return { reason: `${lines.length} exit lines` }
+    .filter((line) => line !== '')
+  if (!(lines[0] ?? '').startsWith(`${CHECK_EXIT_MARKER} `)) {
+    return { reason: lines.some((line) => line.startsWith(`${CHECK_EXIT_MARKER} `))
+      ? 'exit line not first' : 'no exit line' }
+  }
   const m = lines[0].match(new RegExp(`^${CHECK_EXIT_MARKER} (\\S+) (\\d+)$`))
   if (!m) return { reason: 'malformed exit line' }
   if (m[1] !== id) return { reason: `exit line names ${m[1]}` }
@@ -1506,16 +1511,18 @@ const shQuote = (s) => {
 // check that calls `exit N` itself, or one whose command chain ends
 // nonzero, still leaves $? holding that value for the echo to read, and
 // `;` runs it regardless, where `&&` would have skipped it whenever the
-// check's own exit code was the one case this exists to capture. $? is
-// captured into ec right away, before the blank `echo` below can overwrite
-// it with its own (always 0) status. That blank echo guarantees the marker
-// starts on a line of its own even when the check's last printed byte was
-// not a newline (a bare `printf`, a `\r`-terminated progress line): without
-// it the marker text lands on that same line and exitLineOf, which only
-// accepts a whole line, reads the row as never measured.
+// check's own exit code was the one case this exists to capture.
+// The check's output goes to a temp file first so the exit line can be
+// printed before it, followed by only the output's last CHECK_TAIL_BYTES.
+// The Bash tool shows a large output only as a short preview of its start
+// (this repo's own fix-loop suite prints about 56KB), so an exit line at the
+// end was out of the runner's sight, and relaying the whole log verbatim is
+// the step runners have already failed at. A file rather than a pipe to
+// tail, because a pipe's status is tail's, and a piped gate is refused by a
+// hook here.
 const invocationFor = (c) =>
-  `bash -c ${shQuote(`cd ${shQuote(wt.path)} && ${c.command}`)}; ec=$?; echo; ` +
-  `echo "${CHECK_EXIT_MARKER} ${c.id} $ec"`
+  `o=$(mktemp); bash -c ${shQuote(`cd ${shQuote(wt.path)} && ${c.command}`)} >"$o" 2>&1; ` +
+  `echo "${CHECK_EXIT_MARKER} ${c.id} $?"; tail -c ${CHECK_TAIL_BYTES} "$o"; rm -f "$o"`
 const executeChecks = async (checks = discoveredChecks) => {
   checkAttempt++
   return await treeAgent(
@@ -1535,10 +1542,12 @@ const executeChecks = async (checks = discoveredChecks) => {
     `stderr verbatim -- do not summarise, truncate, or interpret what it ` +
     `printed. Report command as the exact invocation you ran, copied back ` +
     `verbatim: a row is only accepted when it matches what was asked. ` +
-    `Report the output exactly as printed, including its final ${CHECK_EXIT_MARKER} ` +
-    `line: never write, add, or change that line yourself. A call that does ` +
-    `not return within the timeout is reported with whatever it printed and ` +
-    `no exit line.\n` +
+    `Report the output exactly as printed, starting with its first line, ` +
+    `the ${CHECK_EXIT_MARKER} line: never write, add, move, or change that ` +
+    `line yourself. Each invocation already prints only the end of a long ` +
+    `log, so report all of what it printed. A call that does not return ` +
+    `within the timeout is reported with whatever it printed and no exit ` +
+    `line.\n` +
     `Only once the last invocation has returned, run git -C ${wt.path} ` +
     `status --porcelain and report whether it printed anything (dirty) and, ` +
     `if so, its output (porcelain): a check that writes to the tree (a ` +
@@ -1651,8 +1660,9 @@ const renderCheck = (c) => `Check ${c.id} (${c.command}) exited ${c.exit_code}:\
 const unmeasuredChecksHalt = (at, extra) => {
   const note = `${unmeasuredChecks.length} discovered check(s) could not be ` +
     `measured after a retry. This halt is about measurement, not the code: ` +
-    `the runner did not report them as asked, so no verdict exists either ` +
-    `way, and no fix round has been spent on them.\n` +
+    `the runner did not report them as asked, or they did not finish ` +
+    `within the 600000 ms Bash timeout, so no verdict exists either way, ` +
+    `and no fix round has been spent on them.\n` +
     unmeasuredChecks.map(c =>
       `- ${c.id}: expected \`${c.expected}\`; first run ${c.reason}; ` +
       `second run ${c.reason_again}.`

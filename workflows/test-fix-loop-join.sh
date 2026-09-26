@@ -433,15 +433,15 @@ function shQuote(s) {
 }
 const CHECK_EXIT_MARKER = 'TOUCHSTONE_CHECK_EXIT'
 function checkInvocation(id, command, path = STUB_WT_PATH) {
-  return `bash -c ${shQuote(`cd ${shQuote(path)} && ${command}`)}; ec=$?; echo; ` +
-    `echo "${CHECK_EXIT_MARKER} ${id} $ec"`
+  return `o=$(mktemp); bash -c ${shQuote(`cd ${shQuote(path)} && ${command}`)} >"$o" 2>&1; ` +
+    `echo "${CHECK_EXIT_MARKER} ${id} $?"; tail -c 8192 "$o"; rm -f "$o"`
 }
 // A checkRuns stub's row for the common case: the command matches what was
 // declared, and the output carries the one well-formed exit line a row now
 // needs to be measured at all, rather than retried and then halted on.
 function checkRow(id, command, exit, output) {
   return { id, command: checkInvocation(id, command), exit_code: exit,
-    output: `${output}\n${CHECK_EXIT_MARKER} ${id} ${exit}` }
+    output: `${CHECK_EXIT_MARKER} ${id} ${exit}\n${output}` }
 }
 
 // Every finding literal in this file predates category and reproducer; both
@@ -3580,7 +3580,7 @@ async function scenarioEB() {
     discovery: { file: '/repo/AGENTS.md',
       sections: [{ heading: '## Checks', fence: 'make run' }], detail: 'stub' },
     checkRuns: () => ({ results: [{ id: 'check:1', command: 'timeout 10 make run', exit_code: 0,
-      output: 'ok\nTOUCHSTONE_CHECK_EXIT check:1 0' }], dirty: false }),
+      output: 'TOUCHSTONE_CHECK_EXIT check:1 0\nok' }], dirty: false }),
     initialReview: { correctness: [], advocate: [] },
     verify: () => undefined,
     staleness: () => [],
@@ -3664,8 +3664,8 @@ async function scenarioEF() {
     const invocation = line ? line.slice('check:1: '.length) : ''
     const want = execFileSync('bash', ['-c', declared]).toString()
     const got = invocation ? execFileSync('bash', ['-c', invocation]).toString() : `<no invocation: ${runPrompt}>`
-    check('the declared command\'s output survives byte for byte, exit line appended after the guard blank line',
-      got, `${want}\nTOUCHSTONE_CHECK_EXIT check:1 0\n`)
+    check('the exit line comes first, then the declared command\'s output byte for byte',
+      got, `TOUCHSTONE_CHECK_EXIT check:1 0\n${want}`)
   } finally {
     fs.rmSync(wtPath, { recursive: true, force: true })
   }
@@ -3748,7 +3748,7 @@ async function scenarioEM() {
   const runPrompt = captured.calls.find(c => c.label === 'checks:run:1')?.prompt ?? ''
   check('the invocation is exactly bash -c \'cd <path> && <command>\', no \\\'\\\' near the path, plus the exit echo',
     runPrompt.includes(
-      'check:1: bash -c \'cd /tmp/stub-worktree && make test\'; ec=$?; echo; echo "TOUCHSTONE_CHECK_EXIT check:1 $ec"'),
+      'check:1: o=$(mktemp); bash -c \'cd /tmp/stub-worktree && make test\' >"$o" 2>&1; echo "TOUCHSTONE_CHECK_EXIT check:1 $?"; tail -c 8192 "$o"; rm -f "$o"'),
     true)
 }
 
@@ -3773,7 +3773,7 @@ async function scenarioEN() {
     check('this path is one the bare-word regex rejects, so it stays quoted',
       /^[A-Za-z0-9/._+:@%=,-]+$/.test(wtPath), false)
     const got = invocation
-      ? execFileSync('bash', ['-c', invocation]).toString().split('\n')[0]
+      ? execFileSync('bash', ['-c', invocation]).toString().split('\n')[1]
       : `<no invocation: ${runPrompt}>`
     check('cd actually lands in the real worktree directory', got, realPath)
   } finally {
@@ -4370,9 +4370,8 @@ async function scenarioFO() {
     const line = runPrompt.split('\n').find(l => l.startsWith('check:1: '))
     const invocation = line ? line.slice('check:1: '.length) : ''
     const out = invocation ? execFileSync('bash', ['-c', invocation]).toString() : ''
-    const lines = out.trim().split('\n')
-    check('the last printed line is the exit marker with the check\'s real exit code',
-      lines[lines.length - 1], 'TOUCHSTONE_CHECK_EXIT check:1 3')
+    check('the first printed line is the exit marker with the check\'s real exit code',
+      out.split('\n')[0], 'TOUCHSTONE_CHECK_EXIT check:1 3')
   } finally {
     fs.rmSync(wtPath, { recursive: true, force: true })
   }
@@ -4390,9 +4389,9 @@ async function scenarioFP() {
       sections: [{ heading: '## Checks', fence: 'make test\nmake lint' }], detail: 'stub' },
     checkRuns: () => ({ results: [
       { id: 'check:1', command: checkInvocation('check:1', 'make test'), exit_code: 0,
-        output: 'ok\nTOUCHSTONE_CHECK_EXIT check:1 1' },
+        output: 'TOUCHSTONE_CHECK_EXIT check:1 1\nok' },
       { id: 'check:2', command: checkInvocation('check:2', 'make lint'), exit_code: 1,
-        output: 'ok\nTOUCHSTONE_CHECK_EXIT check:2 0' },
+        output: 'TOUCHSTONE_CHECK_EXIT check:2 0\nok' },
     ], dirty: false }),
     prResult: { opened: true, url: 'https://example.invalid/pr/120fp', note: 'stub ready' },
   })
@@ -4430,25 +4429,26 @@ async function scenarioFR() {
   const { result } = await run({
     discovery: { file: '/repo/AGENTS.md', sections: [{ heading: '## Checks', fence: 'make test' }], detail: 'stub' },
     checkRuns: () => ({ results: [{ id: 'check:1', command: checkInvocation('check:1', 'make test'),
-      exit_code: 0, output: 'ok\nTOUCHSTONE_CHECK_EXIT check:2 0' }], dirty: false }),
+      exit_code: 0, output: 'TOUCHSTONE_CHECK_EXIT check:2 0\nok' }], dirty: false }),
   })
   check('halted at Implement: measurement, not the code', result.halted_at, 'Implement')
   check('the halt note says the exit line named a different id',
     (result.note ?? '').includes('exit line names check:2'), true)
 }
 
-// Scenario FS -- #120: more than one exit line for the same check is
-// unmeasured, never guessed at.
+// Scenario FS -- #120: the invocation prints its exit line before anything
+// else, so one found further down was moved there by whoever relayed the
+// output, and the row is unmeasured rather than trusted.
 async function scenarioFS() {
-  console.log('\n== scenario FS: more than one exit line is unmeasured')
+  console.log('\n== scenario FS: an exit line that is not the first line is unmeasured')
   const { result } = await run({
     discovery: { file: '/repo/AGENTS.md', sections: [{ heading: '## Checks', fence: 'make test' }], detail: 'stub' },
     checkRuns: () => ({ results: [{ id: 'check:1', command: checkInvocation('check:1', 'make test'),
       exit_code: 0,
-      output: 'ok\nTOUCHSTONE_CHECK_EXIT check:1 0\nTOUCHSTONE_CHECK_EXIT check:1 0' }], dirty: false }),
+      output: 'ok\nTOUCHSTONE_CHECK_EXIT check:1 0' }], dirty: false }),
   })
   check('halted at Implement: measurement, not the code', result.halted_at, 'Implement')
-  check('the halt note counts the exit lines', (result.note ?? '').includes('2 exit lines'), true)
+  check('the halt note says the exit line was not first', (result.note ?? '').includes('exit line not first'), true)
 }
 
 // Scenario FT -- #120: an exit line that does not match the expected shape
@@ -4458,7 +4458,7 @@ async function scenarioFT() {
   const { result } = await run({
     discovery: { file: '/repo/AGENTS.md', sections: [{ heading: '## Checks', fence: 'make test' }], detail: 'stub' },
     checkRuns: () => ({ results: [{ id: 'check:1', command: checkInvocation('check:1', 'make test'),
-      exit_code: 0, output: 'ok\nTOUCHSTONE_CHECK_EXIT check:1 not-a-number' }], dirty: false }),
+      exit_code: 0, output: 'TOUCHSTONE_CHECK_EXIT check:1 not-a-number\nok' }], dirty: false }),
   })
   check('halted at Implement: measurement, not the code', result.halted_at, 'Implement')
   check('the halt note says the line is malformed', (result.note ?? '').includes('malformed exit line'), true)
@@ -4494,7 +4494,7 @@ async function scenarioFV() {
   check('it forbids run_in_background', runPrompt.includes('run_in_background'), true)
   check('it forbids parallel runs', /never several at once/.test(runPrompt), true)
   check('it forbids writing the exit line',
-    /never write, add, or change that line yourself/.test(runPrompt), true)
+    /never write, add, move, or change that\s+line yourself/.test(runPrompt), true)
   check('it tells the runner to wait for a return before starting the next',
     /wait for each to return before starting the next/.test(runPrompt), true)
   check('a call that times out is reported with no exit line',
@@ -4512,13 +4512,13 @@ async function scenarioFW() {
     discovery: { file: '/repo/AGENTS.md', sections: [{ heading: '## Checks', fence: 'make test' }], detail: 'stub' },
     checkRuns: (attempt) => attempt === 3
       ? ({ results: [{ id: 'check:1', command: checkInvocation('check:1', 'make test'), exit_code: 0,
-          output: 'ok\nTOUCHSTONE_CHECK_EXIT check:1 0\nTOUCHSTONE_CHECK_EXIT check:1 0' }] })
+          output: 'ok\nTOUCHSTONE_CHECK_EXIT check:1 0' }] })
       : ({ results: [{ id: 'check:1', command: checkInvocation('check:1', 'make test'), exit_code: 0,
           output: 'ok' }] }),
   })
   check('halted at Implement: measurement, not the code', result.halted_at, 'Implement')
   check('first run reason is no exit line', (result.note ?? '').includes('first run no exit line'), true)
-  check('second run reason is 2 exit lines', (result.note ?? '').includes('second run 2 exit lines'), true)
+  check('second run reason is exit line not first', (result.note ?? '').includes('second run exit line not first'), true)
   check('the note never describes this matched command as a mismatch',
     (result.note ?? '').includes(', got `'), false)
 }
@@ -4541,13 +4541,56 @@ async function scenarioFX() {
     const line = runPrompt.split('\n').find(l => l.startsWith('check:1: '))
     const invocation = line ? line.slice('check:1: '.length) : ''
     const out = invocation ? execFileSync('bash', ['-c', invocation]).toString() : ''
-    const markerLines = out.split(/\r?\n/).map(l => l.trim())
-      .filter(l => l.startsWith(`${CHECK_EXIT_MARKER} `))
-    check('exactly one exit line, on its own', markerLines.length, 1)
-    check('and it reads the real exit code', markerLines[0], `${CHECK_EXIT_MARKER} check:1 0`)
+    check('the exit line is a whole first line, the check\'s output after it',
+      out, `${CHECK_EXIT_MARKER} check:1 0\nok`)
   } finally {
     fs.rmSync(wtPath, { recursive: true, force: true })
   }
+}
+
+// Scenario FY -- #120: a check printing more than the runner can relay whole
+// (this repo's own fix-loop suite prints about 56KB) reaches the runner as
+// its exit line plus the output's last 8192 bytes, so the line is never past
+// the Bash tool's inline preview and nothing has to be summarised. Run for
+// real, and nothing is left behind in the worktree.
+async function scenarioFY() {
+  console.log('\n== scenario FY: a large check output is bounded to its exit line plus the last 8192 bytes')
+  const wtPath = fs.mkdtempSync(path.join(os.tmpdir(), 'touchstone-fy-'))
+  try {
+    const { captured } = await run({
+      branchResult: { created: true, branch: 'feat/gh-21-stub', base: 'main',
+        path: wtPath, ticket: '21', detail: 'stub', dirty: false },
+      discovery: { file: '/repo/AGENTS.md', sections: [{ heading: '## Checks',
+        fence: 'head -c 20000 /dev/zero; printf END; exit 4' }], detail: 'stub' },
+    })
+    const runPrompt = captured.calls.find(c => c.label === 'checks:run:1')?.prompt ?? ''
+    const line = runPrompt.split('\n').find(l => l.startsWith('check:1: '))
+    const invocation = line ? line.slice('check:1: '.length) : ''
+    const out = invocation ? execFileSync('bash', ['-c', invocation]).toString() : ''
+    const [first, ...rest] = out.split('\n')
+    check('the first line is the exit line with the real exit code', first, `${CHECK_EXIT_MARKER} check:1 4`)
+    check('the rest is exactly the last 8192 bytes of the output', rest.join('\n').length, 8192)
+    check('the output\'s end survives', out.endsWith('END'), true)
+    check('nothing is left in the worktree', fs.readdirSync(wtPath).length, 0)
+  } finally {
+    fs.rmSync(wtPath, { recursive: true, force: true })
+  }
+}
+
+// Scenario FZ -- #120: only the first line is read. A check's own output can
+// print a line that looks like an exit line (a suite testing this very
+// runner does), and it must neither override nor invalidate the real one.
+async function scenarioFZ() {
+  console.log('\n== scenario FZ: an exit-line lookalike in the check\'s own output is ignored')
+  const { result } = await run({
+    args: { existingBranch: true, openPr: true },
+    discovery: { file: '/repo/AGENTS.md', sections: [{ heading: '## Checks', fence: 'make test' }], detail: 'stub' },
+    checkRuns: () => ({ results: [{ id: 'check:1', command: checkInvocation('check:1', 'make test'),
+      exit_code: 1, output: 'TOUCHSTONE_CHECK_EXIT check:1 1\nTOUCHSTONE_CHECK_EXIT check:1 0' }], dirty: false }),
+    prResult: { opened: true, url: 'https://example.invalid/pr/120fz', note: 'stub ready' },
+  })
+  check('measured red from the first line', result.checks?.red?.[0]?.exit_code, 1)
+  check('nothing unmeasured', result.checks?.unmeasured?.length, 0)
 }
 
 for (const scenario of [scenarioA, scenarioB, scenarioG, scenarioC, scenarioD, scenarioE, scenarioH,
@@ -4580,7 +4623,7 @@ for (const scenario of [scenarioA, scenarioB, scenarioG, scenarioC, scenarioD, s
                         scenarioFA, scenarioFB, scenarioFC, scenarioFD, scenarioFE, scenarioFF, scenarioFG,
                         scenarioFH, scenarioFI, scenarioFJ, scenarioFK, scenarioFL, scenarioFM, scenarioFN,
                         scenarioFO, scenarioFP, scenarioFQ, scenarioFR, scenarioFS, scenarioFT,
-                        scenarioFU, scenarioFV, scenarioFW, scenarioFX]) {
+                        scenarioFU, scenarioFV, scenarioFW, scenarioFX, scenarioFY, scenarioFZ]) {
   await scenario()
 }
 

@@ -285,7 +285,7 @@ commands, never one that mutates the repo or depends on state a later run cannot
 repeat.
 
 The runner is handed each check's exact Bash invocation
-(`` bash -c 'cd <worktree> && <command>'; echo "TOUCHSTONE_CHECK_EXIT <id> $?" ``)
+(`` o=$(mktemp); bash -c 'cd <worktree> && <command>' >"$o" 2>&1; echo "TOUCHSTONE_CHECK_EXIT <id> $?"; tail -c 8192 "$o"; rm -f "$o" ``)
 and must report `command` back verbatim; a row whose command does not match is
 not measured, and an unmeasured row is never read as a pass or as evidence of
 the repo's own environment. The `cd` target is quoted only when it needs to be:
@@ -304,11 +304,17 @@ never reads it, which is what let a still-running or merely summarised check
 read as a pass at `exit_code: 0` before #120. The echo sits outside the
 `bash -c` string and after `;`, not `&&`, so it runs and reports the real exit
 code even when the check itself calls `exit N` or its own command chain ends
-nonzero. Exactly one well-formed line naming the check's own id is required;
-none, more than one, one naming a different id, or a malformed one all come
-back as their own reason (`no exit line`, `N exit lines`, `exit line names
-<other id>`, `malformed exit line`) and the row is unmeasured, the same as a
-command mismatch, never red and never a pass. The runner is told to run each
+nonzero. The check's output goes to a temp file, so the exit line is printed
+first and followed only by the last 8192 bytes of the log. The Bash tool shows a
+large output as a short preview of its start (this repo's own fix-loop suite
+prints about 56KB), so an exit line printed last was out of the runner's sight,
+and relaying a whole long log verbatim is what runners had already failed at.
+Only the first non-empty line of `output` is read, and it must be a well-formed
+line naming the check's own id. A later line that looks like one is the check's
+own output. No exit line at all, one that is not first, one naming a different
+id, or a malformed one all come back as their own reason (`no exit line`, `exit
+line not first`, `exit line names <other id>`, `malformed exit line`) and the
+row is unmeasured, the same as a command mismatch, never red and never a pass. The runner is told to run each
 invocation alone in the foreground, one at a time and in order, never in the
 background or in parallel, and never to write the exit line itself; a call
 that does not return inside its own timeout is reported with whatever it
