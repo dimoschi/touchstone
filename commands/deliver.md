@@ -170,13 +170,24 @@ the work lands).
 
 Write it yourself: `mkdir -p` the parent directory, then write the returned payload as
 JSON to `<main checkout>/<record_file>`, with `run_id` (the `wf_` id the Workflow tool
-returned) and `recorded_on` (today's date) added. The run id reaches you only after the
-run has started, so nothing inside the workflow can be told it, which is why this has
-to happen out here rather than inside the run:
+returned), `models`, and `recorded_on` (today's date) added. The run id reaches you only
+after the run has started, so nothing inside the workflow can be told it, which is why
+this has to happen out here rather than inside the run:
 
 ```
-{ ...the returned payload..., "run_id": "<the wf_ id the Workflow tool returned>", "recorded_on": "<today>" }
+{ ...the returned payload..., "run_id": "<the wf_ id the Workflow tool returned>", "models": { "<alias>": ["<model id>", ...] }, "recorded_on": "<today>" }
 ```
+
+Build `models` from the run's own transcript directory, not by asking an agent which
+model it is: an agent's account of its own model is not evidence, only what the harness
+wrote is. Each agent this run dispatched has a `.meta.json` there naming the alias it was
+given (`haiku`, `sonnet`, `opus`) and an `agent-<id>.jsonl` transcript carrying the model
+ID that alias actually resolved to. Group those by alias into
+`{ "<alias>": ["<model id>", ...] }`; list more than one ID under an alias if a model
+release landed mid-run and later calls resolved differently than earlier ones. If the
+records cannot be read, write `models` as `{ "unavailable": "<reason>" }` instead of
+leaving the key out: a run whose models are unknown is not the same as one that used
+none.
 
 Without the id the record cannot be resumed from, which is most of its value: resume
 needs `resumeFromRunId` and the `scriptPath`, and both live under the launching
