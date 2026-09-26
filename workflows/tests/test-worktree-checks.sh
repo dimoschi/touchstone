@@ -479,6 +479,8 @@ async function scenarioCA() {
     (result.note ?? '').includes('?? generated.txt'), true)
   check('the note says it happened before implementation, not during it',
     (result.note ?? '').includes('before any implementation ran'), true)
+  check('no check is reported red: the baseline itself was green',
+    result.checks?.red?.length, 0)
 }
 
 // Scenario CB -- #116: asked to run several commands and report every byte of

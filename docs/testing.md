@@ -12,7 +12,7 @@ bash scripts/run-go-tests.sh            # the skill's Go-toolchain suites; needs
 bash scripts/run-php-python-tests.sh    # the skill's PHP/uv suites; needs a live PHP ^8.3 + infection + phpunit, and uv
 bash scripts/run-python-tests.sh        # pytest unit suites for hooks/ and lib/; needs pytest + coverage>=7.13.1
 bash workflows/test-fix-loop-join.sh    # the workflow's fix/verify/review loop
-bash workflows/test-harness-footer.sh   # harness.sh's own abort-handling and scenario filter
+bash workflows/test-harness-footer.sh   # harness.sh's own abort handling
 bash workflows/test-mutation-optin.sh   # marker opt-in behaviour
 bash scripts/test-version-bump.sh       # check-version-bump.sh's own suite
 bash scripts/test-build-pipeline.sh     # build-pipeline.sh's own suite
@@ -53,13 +53,7 @@ worktree/checks scenarios, review classification, and so on) per file. Run one
 area directly (`bash workflows/tests/test-worktree-checks.sh`) while iterating
 on it; each sources `workflows/tests/harness.sh` for the JS scenario runner
 they share, whose `run_js_scenarios` reports an aborted (throwing) scenario by
-name and keeps running the rest, and honours `TOUCHSTONE_SCENARIOS` (a
-comma-separated list of scenario function names) to run only those. Nothing
-about a normal suite invocation changes when it is unset; it exists for a
-caller that wants to re-run one scenario in isolation, deliberately unused by
-`scripts/check-assertions-discriminate.sh` itself, which needs the same
-suite file's scenario order regardless of how old the counterfactual script
-it is handed is, and a revision predating this env var would just ignore it.
+name and keeps running the rest.
 `workflows/test-mutation-optin.sh`, `workflows/test-pipeline-version.sh`
 and `workflows/test-unsupported-language-halt.sh` are separate, narrower
 suites at the top level; none of the four takes a scenario filter, so each

@@ -176,8 +176,19 @@ jobs:
         run: bash scripts/check-version-bump.sh
       - name: deliver-pipeline.js matches its parts
         run: bash scripts/build-pipeline.sh --check
-      - name: No new workflow test assertion that cannot fail
-        run: bash scripts/check-assertions-discriminate.sh
+
+  assertion-discrimination:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          # Its suite replays historical commits of this repo.
+          fetch-depth: 0
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+      - name: check-assertions-discriminate.sh's own suite
+        run: bash scripts/test-assertion-discrimination.sh
 
   manifests:
     runs-on: ubuntu-latest

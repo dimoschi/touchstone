@@ -210,6 +210,21 @@ if (reviewerCount && mutHead && mutHead !== reviewedThrough && !outOfBudget()) {
   reviewedThrough = mutHead
 }
 
+const { checks: advisoryChecks } = checksFrom(wt.checks_source, ADVISORY_CHECKS_HEADING, 'advisory')
+if (advisoryChecks.length && !outOfBudget()) {
+  const advisory = await executeChecks(advisoryChecks)
+  const { red, unmeasured } = classifyResults(advisoryChecks, advisory?.results)
+  for (const c of red) {
+    const report = String(c.output ?? '').split(/\r?\n/)
+      .filter(l => !l.trim().startsWith(`${CHECK_EXIT_MARKER} `)).join('\n').trim()
+    notes.push({ category: 'advisory', reason: 'advisory', title: `Advisory check \`${c.command}\` reported`,
+      claim: report || `exit ${c.exit_code}, no output` })
+  }
+  if (unmeasured.length) {
+    log(`advisory checks: ${unmeasured.map(c => c.id).join(', ')} not measured; nothing reported for them`)
+  }
+}
+
 // Reaching here means every gate is green: the Gate, Fix and Mutation halts
 // above are terminal, so there is no red state left to guard against.
 // Script-rendered, not agent-composed: every note's own title and claim,

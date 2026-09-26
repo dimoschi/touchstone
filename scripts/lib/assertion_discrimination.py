@@ -904,12 +904,10 @@ def archive_tree(repo: str, rev: str, dest: str) -> None:
 def run_suite(suite_path: str) -> tuple[str, int]:
     """Runs one suite file as its own process, the whole file every time.
 
-    Never scoped to one scenario via TOUCHSTONE_SCENARIOS: a counterfactual
-    tree's deliver-pipeline.js is the only thing that differs from head, and
-    an older revision used as `head` for a historical demonstration predates
-    that env var entirely, so relying on it here would silently run every
-    scenario anyway and misalign the positional matching below. `_ordered_groups`
-    and `_split_output_by_group` read the whole run instead.
+    Always the whole file: a counterfactual tree's deliver-pipeline.js is
+    the only thing that differs from head, and `_ordered_groups` and
+    `_split_output_by_group` match assertions by their position in the
+    whole run.
     """
     proc = subprocess.run(['bash', suite_path], capture_output=True, text=True)
     return proc.stdout + proc.stderr, proc.returncode

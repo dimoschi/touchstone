@@ -1,8 +1,7 @@
 #!/usr/bin/env bash
 # Regression test for workflows/tests/harness.sh's own scenario-running
 # footer (gh-96): a scenario that throws must not hide a scenario queued
-# after it in the same suite file, and TOUCHSTONE_SCENARIOS must let
-# assertion_discrimination.py re-run a single named scenario in isolation.
+# after it in the same suite file.
 #
 # Deliberately outside workflows/tests/ and not named test-fix-loop-join.sh,
 # so scripts/check-assertions-discriminate.sh's suite glob never selects it:
@@ -95,27 +94,6 @@ assert_contains "the throwing scenario's own earlier check still printed" "$OUT1
 assert_contains "the throw is reported by scenario name and message" "$OUT1" "ABORTED: scenarioThrows: boom"
 assert_contains "the later scenario still ran" "$OUT1" "ok:   runs after an earlier abort"
 check "the suite still exits non-zero over the abort" "$STATUS1" 1
-
-echo ""
-echo "== TOUCHSTONE_SCENARIOS runs only the named scenarios"
-SUITE2="$WORK/suite-filter.sh"
-write_suite "$SUITE2" <<'JS'
-async function scenarioThrows() {
-  console.log('\n== scenario scenarioThrows')
-  check('should not run', 1, 2)
-}
-async function scenarioAfter() {
-  console.log('\n== scenario scenarioAfter')
-  check('this one runs', 1, 1)
-}
-const SCENARIOS = [scenarioThrows, scenarioAfter]
-JS
-
-OUT2="$(TOUCHSTONE_SCENARIOS=scenarioAfter bash "$SUITE2" 2>&1)"
-STATUS2=$?
-assert_not_contains "the unselected scenario's header never printed" "$OUT2" "scenario scenarioThrows"
-assert_contains "the selected scenario ran" "$OUT2" "ok:   this one runs"
-check "the suite exits clean when the only selected scenario passes" "$STATUS2" 0
 
 echo ""
 if [ "$failures" -eq 0 ]; then
