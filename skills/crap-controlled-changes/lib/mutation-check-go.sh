@@ -189,6 +189,7 @@ fi
 
 total_rows=0
 total_generated=0
+total_exempt=0
 for mod in ${MODS[@]+"${MODS[@]}"}; do
   status=0
   TARGETS=()
@@ -226,6 +227,7 @@ for mod in ${MODS[@]+"${MODS[@]}"}; do
   prefix=""
   [ "$mod" != "." ] && prefix="$mod/"
   rows="$(python3 "$SKILL_LIB/parse_mutago.py" "$REPORT" "$prefix" "${TARGETS[@]}")"
+  total_exempt=$((total_exempt + $(python3 "$SKILL_LIB/parse_mutago.py" --exempt-count "$REPORT" "$prefix" "${TARGETS[@]}")))
   SUMMARY="$mod/mutago-summary.json"
   if [ -f "$SUMMARY" ]; then
     total_generated=$((total_generated + $(python3 "$SKILL_LIB/parse_mutago.py" --total "$SUMMARY")))
@@ -238,8 +240,12 @@ for mod in ${MODS[@]+"${MODS[@]}"}; do
 done
 
 if [ "$total_rows" -eq 0 ]; then
-  if [ "$total_generated" -gt 0 ]; then
-    echo "mutation-check[go]: generated $total_generated mutant(s) on changed lines, all killed."
+  real_generated=$((total_generated - total_exempt))
+  if [ "$real_generated" -gt 0 ]; then
+    echo "mutation-check[go]: generated $real_generated mutant(s) on changed lines, all killed."
+  elif [ "$total_exempt" -gt 0 ]; then
+    echo "mutation-check[go]: generated $total_generated mutant(s) on changed lines, all of them"
+    echo "  exempted (func main); nothing outside the exemption was measured, so this is not a pass."
   else
     echo "mutation-check[go]: generated no mutants on changed lines; nothing was measured, so this is not a pass."
   fi

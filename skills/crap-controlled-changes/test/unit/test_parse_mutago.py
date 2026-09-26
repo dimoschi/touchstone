@@ -95,6 +95,25 @@ def test_main_total_flag_defaults_to_zero_without_the_field(monkeypatch, tmp_pat
     assert capsys.readouterr().out == "0\n"
 
 
+def test_main_exempt_count_flag_counts_only_mutants_inside_main_span(monkeypatch, tmp_path, capsys):
+    report = _write_report(tmp_path, [
+        {"file": "main.go", "line": 12, "mutator": "M1", "id": "id1"},
+        {"file": "main.go", "line": 99, "mutator": "M2", "id": "id2"},
+    ])
+    monkeypatch.setattr(parse_mutago, "main_func_spans", lambda paths: {"main.go": (10, 20)})
+    monkeypatch.setattr("sys.argv", ["parse_mutago.py", "--exempt-count", str(report)])
+    parse_mutago.main()
+    assert capsys.readouterr().out == "1\n"
+
+
+def test_main_exempt_count_flag_zero_when_nothing_in_span(monkeypatch, tmp_path, capsys):
+    report = _write_report(tmp_path, [{"file": "a.go", "line": 5, "mutator": "M1", "id": "id1"}])
+    monkeypatch.setattr(parse_mutago, "main_func_spans", lambda paths: {})
+    monkeypatch.setattr("sys.argv", ["parse_mutago.py", "--exempt-count", str(report)])
+    parse_mutago.main()
+    assert capsys.readouterr().out == "0\n"
+
+
 def test_main_handles_missing_or_non_numeric_line(monkeypatch, tmp_path, capsys):
     report = _write_report(tmp_path, [{"file": "a.go", "line": None, "mutator": "M1", "id": "id1"}])
     monkeypatch.setattr(parse_mutago, "main_func_spans", lambda paths: {"a.go": (1, 5)})

@@ -120,33 +120,63 @@ def print_exempt(exempt):
         print(f"    {row}", file=sys.stderr)
 
 
-def report_survivors(path, prefix, allowed):
-    with open(path) as f:
-        doc = json.load(f)
-
+def _split_exempt(doc, prefix, allowed):
+    """rows, exempt: rows not inside func main(), and the formatted exempt lines."""
     rows = collect_rows(doc, prefix, allowed)
     spans = main_func_spans(sorted({r[0] for r in rows}))
 
-    exempt = []
+    kept, exempt = [], []
     for disk_path, line, m in rows:
         if in_span(spans.get(disk_path), line):
             loc = f"{disk_path}:{m.get('line', '?')}"
             exempt.append(f"{loc:<42} {m.get('mutator', '?')}")
             continue
-        print_survivor(disk_path, m)
+        kept.append((disk_path, m))
+    return kept, exempt
 
+
+def report_survivors(path, prefix, allowed):
+    with open(path) as f:
+        doc = json.load(f)
+    kept, exempt = _split_exempt(doc, prefix, allowed)
+    for disk_path, m in kept:
+        print_survivor(disk_path, m)
     if exempt:
         print_exempt(exempt)
 
 
+def exempt_count(path, prefix, allowed):
+    """How many mutants report_survivors dropped as inside func main().
+
+    mutago's totalMutantsCount (see total_mutants_count) counts these too, so
+    a caller comparing the two can tell "all real mutants killed" apart from
+    "everything generated here was exempted".
+    """
+    with open(path) as f:
+        doc = json.load(f)
+    _, exempt = _split_exempt(doc, prefix, allowed)
+    return len(exempt)
+
+
+def _path_prefix_allowed(argv):
+    path = argv[0]
+    prefix = argv[1] if len(argv) > 1 else ''
+    allowed = {a.removeprefix('./') for a in argv[2:]}
+    return path, prefix, allowed
+
+
+FLAGS = {
+    '--total': lambda argv: print(total_mutants_count(argv[0])),
+    '--exempt-count': lambda argv: print(exempt_count(*_path_prefix_allowed(argv))),
+}
+
+
 def main():
-    if len(sys.argv) > 2 and sys.argv[1] == '--total':
-        print(total_mutants_count(sys.argv[2]))
+    argv = sys.argv[1:]
+    if argv and argv[0] in FLAGS:
+        FLAGS[argv[0]](argv[1:])
         return
-    path = sys.argv[1]
-    prefix = sys.argv[2] if len(sys.argv) > 2 else ''
-    allowed = {a.removeprefix('./') for a in sys.argv[3:]}
-    report_survivors(path, prefix, allowed)
+    report_survivors(*_path_prefix_allowed(argv))
 
 
 if __name__ == '__main__':

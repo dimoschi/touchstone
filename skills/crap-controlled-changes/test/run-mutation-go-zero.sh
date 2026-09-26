@@ -89,4 +89,13 @@ echo "$OUT"
 echo "$OUT" | grep -qE "generated [0-9]+ mutant\(s\) on changed lines, all killed" || { echo "FAIL: expected the all-killed message with a nonzero count"; exit 1; }
 echo "$OUT" | grep -q "generated no mutants" && { echo "FAIL: a measured all-killed run must not read as unmeasured"; exit 1; }
 
+echo "--- phase 3: the outer gate's own verdict line does not read a zero-mutant run as a plain pass ---"
+GATE="$SKILL_DIR/mutation-check.sh"
+RC=0
+OUT="$(MUTATION_BASE=main MUTATION_ONLY='meta.go' "$GATE" "$WORK" 2>&1)" || RC=$?
+echo "$OUT"
+[ "$RC" -eq 0 ] || { echo "FAIL: expected exit 0, got $RC"; exit 1; }
+echo "$OUT" | tail -n 1 | grep -qE '^mutation-check: EXIT=0 MUTATION_OK($|;)' && { echo "FAIL: a zero-mutant run's final line must not read as a plain MUTATION_OK"; exit 1; }
+echo "$OUT" | grep -q 'this is not a pass' || { echo "FAIL: expected the zero-mutant module message to reach the outer verdict"; exit 1; }
+
 echo "MUTATION GO ZERO OK"
