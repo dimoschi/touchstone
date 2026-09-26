@@ -417,8 +417,9 @@ const LENS = {
   },
   requirements: {
     label: 'requirements',
-    // The only lens shown the ticket: it cannot quote an acceptance criterion
-    // it is never given, and it is the one charged with judging against them.
+    // The only lens shown the whole ticket: it cannot quote an acceptance
+    // criterion it is never given, and it is the one charged with judging
+    // against them.
     needsTicket: true,
     charge: `You are an adversarial reviewer. REFUTE the claim that this ` +
       `implementation is complete, through one lens: hunt for acceptance ` +
@@ -446,9 +447,10 @@ const LENS = {
       `working designs is never one. Put that same demonstration in reproducer ` +
       `too: the command from evidence, run from the worktree root, with its ` +
       `expected and actual output.\n` +
-      `You are deliberately not shown the ticket text; triage owns its claims. ` +
-      `Absence of evidence in the repo is not evidence of absence, so never ` +
-      `rest a finding on a negative grep.`,
+      `You are deliberately shown only the ticket's settled decisions, if it ` +
+      `has any, never the rest of its text; triage owns the rest of its ` +
+      `claims. Absence of evidence in the repo is not evidence of absence, so ` +
+      `never rest a finding on a negative grep.`,
   },
 }
 
@@ -468,6 +470,11 @@ if (!reviewerCount) {
       `one-liner is the ratio this workflow is trying to avoid`)
 } else {
   log(`review: ${lenses.map(l => l.label).join(', ')}`)
+  if (!settledDecisions) {
+    log(`review: ticket ${ticket} has no "Constraints, or decisions already ` +
+        `taken" section (or could not be read), so lenses get no settled ` +
+        `decisions`)
+  }
 }
 // Every finding gets an id and a recorded_at the moment it enters the script,
 // here and nowhere else: the initial review, every fix round's tail review,
@@ -542,6 +549,7 @@ const reviewOf = async (range, tag, picked, known = [], knownCharge = '') => {
       `${lens.charge}\n` +
       `${NATIVE_TOOLS}\n` +
       (lens.needsTicket ? ticketSpec() : '') +
+      decisionsSpec() +
       `Task: ${brief(task)}\n` +
       `Commit range: ${range}\n` +
       `You are given the range, not an account of what was done, on purpose: ` +
