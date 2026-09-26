@@ -559,7 +559,52 @@ async function scenarioEG() {
   check('no executor call overlapped another agent', overlapsWithExecutor(captured), [])
 }
 
-const SCENARIOS = [scenarioDL, scenarioDM, scenarioDN, scenarioDO, scenarioDP, scenarioDQ, scenarioDR, scenarioDS, scenarioDT, scenarioDU, scenarioDV, scenarioDW, scenarioDX, scenarioDY, scenarioDZ, scenarioEA, scenarioEB, scenarioEC, scenarioED, scenarioEE, scenarioEF, scenarioEJ, scenarioEK, scenarioEL, scenarioEM, scenarioEN, scenarioEO, scenarioEG]
+// Scenarios GA-GC -- the #118 run's runner reported the command in forms other
+// than the full invocation (the bare declared command at baseline, the inner
+// bash -c after Implement) and, on the later runs, dropped the exit line from
+// output. A row is measured when the command is one of the three forms the
+// script built and the exit line arrives in exit_line or as output's first
+// line; anything else stays unmeasured.
+async function scenarioGA() {
+  console.log('\n== scenario GA: a row reporting the bare declared command, exit line first in output, is measured')
+  const { result } = await run({
+    args: { existingBranch: true, openPr: true },
+    discovery: { file: '/repo/AGENTS.md', sections: [{ heading: '## Checks', fence: 'make test' }], detail: 'stub' },
+    checkRuns: () => ({ results: [{ id: 'check:1', command: 'make test', exit_code: 0,
+      output: 'TOUCHSTONE_CHECK_EXIT check:1 1\nboom' }], dirty: false }),
+    prResult: { opened: true, url: 'https://example.invalid/pr/118ga', note: 'stub ready' },
+  })
+  check('measured red from its exit line', result.checks?.red?.[0]?.exit_code, 1)
+  check('nothing unmeasured', result.checks?.unmeasured?.length, 0)
+}
+
+async function scenarioGB() {
+  console.log('\n== scenario GB: a row reporting the inner bash -c, exit line only in exit_line, is measured')
+  const { result } = await run({
+    args: { existingBranch: true, openPr: true },
+    discovery: { file: '/repo/AGENTS.md', sections: [{ heading: '## Checks', fence: 'make test' }], detail: 'stub' },
+    checkRuns: () => ({ results: [{ id: 'check:1', command: "bash -c 'cd /tmp/stub-worktree && make test'",
+      exit_code: 0, exit_line: 'TOUCHSTONE_CHECK_EXIT check:1 2', output: 'the tail of the log' }], dirty: false }),
+    prResult: { opened: true, url: 'https://example.invalid/pr/118gb', note: 'stub ready' },
+  })
+  check('measured red from exit_line', result.checks?.red?.[0]?.exit_code, 2)
+  check('nothing unmeasured', result.checks?.unmeasured?.length, 0)
+}
+
+async function scenarioGC() {
+  console.log('\n== scenario GC: an exit_line naming another check is unmeasured')
+  const { result } = await run({
+    args: { existingBranch: true, openPr: true },
+    discovery: { file: '/repo/AGENTS.md', sections: [{ heading: '## Checks', fence: 'make test' }], detail: 'stub' },
+    checkRuns: () => ({ results: [{ id: 'check:1', command: 'make test', exit_code: 0,
+      exit_line: 'TOUCHSTONE_CHECK_EXIT check:2 0', output: 'TOUCHSTONE_CHECK_EXIT check:1 0' }], dirty: false }),
+    prResult: { opened: true, url: 'https://example.invalid/pr/118gc', note: 'stub ready' },
+  })
+  check('not red', result.checks?.red?.length, 0)
+  check('unmeasured, naming the other id', result.checks?.unmeasured?.[0]?.reason, 'exit line names check:2')
+}
+
+const SCENARIOS = [scenarioDL, scenarioDM, scenarioDN, scenarioDO, scenarioDP, scenarioDQ, scenarioDR, scenarioDS, scenarioDT, scenarioDU, scenarioDV, scenarioDW, scenarioDX, scenarioDY, scenarioDZ, scenarioEA, scenarioEB, scenarioEC, scenarioED, scenarioEE, scenarioEF, scenarioEJ, scenarioEK, scenarioEL, scenarioEM, scenarioEN, scenarioEO, scenarioEG, scenarioGA, scenarioGB, scenarioGC]
 JS_EOF
 
 finish

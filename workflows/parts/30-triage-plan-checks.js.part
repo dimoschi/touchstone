@@ -327,8 +327,9 @@ const shQuote = (s) => {
 // the step runners have already failed at. A file rather than a pipe to
 // tail, because a pipe's status is tail's, and a piped gate is refused by a
 // hook here.
+const innerInvocationFor = (c) => `bash -c ${shQuote(`cd ${shQuote(wt.path)} && ${c.command}`)}`
 const invocationFor = (c) =>
-  `o=$(mktemp); bash -c ${shQuote(`cd ${shQuote(wt.path)} && ${c.command}`)} >"$o" 2>&1; ` +
+  `o=$(mktemp); ${innerInvocationFor(c)} >"$o" 2>&1; ` +
   `echo "${CHECK_EXIT_MARKER} ${c.id} $?"; tail -c ${CHECK_TAIL_BYTES} "$o"; rm -f "$o"`
 const executeChecks = async (checks = discoveredChecks) => {
   checkAttempt++
@@ -349,6 +350,8 @@ const executeChecks = async (checks = discoveredChecks) => {
     `stderr verbatim -- do not summarise, truncate, or interpret what it ` +
     `printed. Report command as the exact invocation you ran, copied back ` +
     `verbatim: a row is only accepted when it matches what was asked. ` +
+    `Report exit_line as the first line the invocation printed, the ` +
+    `${CHECK_EXIT_MARKER} line, copied exactly. ` +
     `Report the output exactly as printed, starting with its first line, ` +
     `the ${CHECK_EXIT_MARKER} line: never write, add, move, or change that ` +
     `line yourself. Each invocation already prints only the end of a long ` +
@@ -408,13 +411,19 @@ const classifyResults = (checks, results) => {
         expected, reported: null, reason: 'no result reported' })
       continue
     }
-    if (row.command !== expected) {
+    // Runners have reported the full invocation, only its inner bash -c, and
+    // only the declared command, for the same run. Any of the three means the
+    // runner says it ran what was asked; anything else (an added timeout, a
+    // changed flag) is a runner admitting it ran something different.
+    if (![expected, innerInvocationFor(c), c.command].includes(row.command)) {
       unmeasured.push({ id: c.id, command: c.command, exit_code: null,
         output: `not measured: expected \`${expected}\`, got \`${row.command}\``,
         expected, reported: row.command, reason: `reported \`${row.command}\`` })
       continue
     }
-    const parsed = exitLineOf(row.output, c.id)
+    // exit_line first: runners have dropped the line from output while
+    // relaying it, and one short field is easier to copy exactly.
+    const parsed = exitLineOf(`${row.exit_line ?? ''}\n${row.output ?? ''}`, c.id)
     if (parsed.reason) {
       unmeasured.push({ id: c.id, command: c.command, exit_code: null,
         output: `not measured: ${parsed.reason}`,

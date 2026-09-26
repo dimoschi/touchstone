@@ -86,10 +86,11 @@ const CHECK_RUN = {
       type: 'array',
       items: {
         type: 'object', additionalProperties: false,
-        required: ['id', 'command', 'exit_code', 'output'],
+        required: ['id', 'command', 'exit_code', 'exit_line', 'output'],
         properties: {
           id: { type: 'string' }, command: { type: 'string' },
-          exit_code: { type: 'integer' }, output: { type: 'string' },
+          exit_code: { type: 'integer' }, exit_line: { type: 'string' },
+          output: { type: 'string' },
         },
       },
     },

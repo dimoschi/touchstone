@@ -291,7 +291,10 @@ repeat.
 
 The runner is handed each check's exact Bash invocation
 (`` o=$(mktemp); bash -c 'cd <worktree> && <command>' >"$o" 2>&1; echo "TOUCHSTONE_CHECK_EXIT <id> $?"; tail -c 8192 "$o"; rm -f "$o" ``)
-and must report `command` back verbatim; a row whose command does not match is
+and must report `command` back as it ran it. The full invocation, its inner
+`bash -c '...'`, and the bare declared command are all accepted, because runners
+have reported each of the three in the same run; a row reporting anything else
+(an added `timeout`, a changed flag) is
 not measured, and an unmeasured row is never read as a pass or as evidence of
 the repo's own environment. The `cd` target is quoted only when it needs to be:
 a worktree path made only of letters, digits and `/ . _ - + : @ % = ,` is
@@ -314,7 +317,7 @@ first and followed only by the last 8192 bytes of the log. The Bash tool shows a
 large output as a short preview of its start (this repo's own fix-loop suite
 prints about 56KB), so an exit line printed last was out of the runner's sight,
 and relaying a whole long log verbatim is what runners had already failed at.
-Only the first non-empty line of `output` is read, and it must be a well-formed
+The runner also reports that line on its own in `exit_line`, since runners have dropped it from `output` while relaying the rest; the script reads `exit_line` followed by `output` as one text. Only its first non-empty line is read, and it must be a well-formed
 line naming the check's own id. A later line that looks like one is the check's
 own output. No exit line at all, one that is not first, one naming a different
 id, or a malformed one all come back as their own reason (`no exit line`, `exit
