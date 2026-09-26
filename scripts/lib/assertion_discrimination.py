@@ -631,23 +631,33 @@ def added_lines(diff_text: str) -> list[int]:
     return lines
 
 
-def line_delete_mutant(content: str, line_no: int) -> str:
-    """`content` with its 1-based `line_no` removed outright (a statement-deletion mutant)."""
-    lines = content.splitlines(keepends=True)
-    idx = line_no - 1
-    return ''.join(lines[:idx] + lines[idx + 1:])
-
-
 _STRING_LIT_RE = re.compile(r"""('([^'\\]|\\.)*'|"([^"\\]|\\.)*")""")
 
 
-def line_blank_string_mutants(content: str, line_no: int) -> list[str]:
-    """One mutant per non-empty string literal on `line_no`, that literal blanked.
+_COMPARISON_OPERAND_RE = re.compile(r'[=!]==?\s*$')
 
-    Targets a presence/absence check directly: deleting the whole line (see
-    `line_delete_mutant`) can change unrelated control flow, where blanking
-    just the literal a `.includes(...)` check is looking for isolates the one
-    thing such a check claims to test.
+
+def _is_comparison_operand(line: str, match_start: int) -> bool:
+    """Whether the string literal at `match_start` is immediately preceded by
+    `==`/`===`/`!=`/`!==`: a condition to route on, not text to check."""
+    return bool(_COMPARISON_OPERAND_RE.search(line[:match_start]))
+
+
+def line_blank_string_mutants(content: str, line_no: int) -> list[str]:
+    """One mutant per non-empty string literal on `line_no` that is not an
+    equality operand, that literal blanked.
+
+    Targets a presence/absence check directly, without the risk a whole-line
+    deletion mutant would carry: this codebase's notes are commonly one arm
+    of a long conditional chain, so deleting a line can reroute a different
+    arm's text into the one under test, rather than just removing what that
+    line contributed. Blanking a literal's contents changes no operator or
+    branch -- unless the literal itself is an `===`/`!==` operand, in which
+    case blanking it changes what the comparison matches and so, just like
+    deletion, can reroute a chain of these into an unrelated arm; skipping
+    those specifically is what tells the two apart. Otherwise a blanked
+    literal can only remove text a `.includes(...)` or grep check might
+    depend on, which is what these assertions actually check.
     """
     lines = content.splitlines(keepends=True)
     idx = line_no - 1
@@ -656,6 +666,8 @@ def line_blank_string_mutants(content: str, line_no: int) -> list[str]:
     for m in _STRING_LIT_RE.finditer(line):
         q = m.group(0)[0]
         if m.group(0) == q + q:
+            continue
+        if _is_comparison_operand(line, m.start()):
             continue
         new_line = line[:m.start()] + q + q + line[m.end():]
         mutants.append(''.join(lines[:idx] + [new_line] + lines[idx + 1:]))
@@ -799,12 +811,23 @@ def _survivors_of_counterfactual(tree: str, head: HeadIndex, pending: list[Call]
 
 
 def _mutant_contents(head_script: str, repo: str, base: str, head: str) -> list[str]:
-    """Every mutant of `head_script`, one per string literal or whole line
-    that base..head added to it -- the only lines a new assertion's own
-    production support could plausibly sit on."""
+    """Every mutant of `head_script`, one per string literal on a line
+    base..head added -- the only lines a new assertion's own production
+    support could plausibly sit on.
+
+    Deliberately not whole-line deletion: this codebase's notes are commonly
+    one arm of a long `cond ? a : cond2 ? b : ...` chain spanning many
+    `+`-joined template-literal lines, so deleting a line can reroute an
+    unrelated arm's text into the one under test instead of just removing
+    what that line contributes -- a false "this discriminates" from control
+    flow collateral damage, not from anything the deleted line's own content
+    said. Blanking only a literal's contents changes no operator or branch,
+    so it cannot reroute anything; it can only remove text an `.includes`
+    or grep check might depend on, which is what these assertions actually
+    check.
+    """
     contents = []
     for line_no in diff_added_lines(repo, base, head, PIPELINE_SCRIPT):
-        contents.append(line_delete_mutant(head_script, line_no))
         contents.extend(line_blank_string_mutants(head_script, line_no))
     return contents
 

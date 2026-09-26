@@ -212,12 +212,6 @@ def test_added_lines_reads_pure_additions_from_a_unified_diff():
     assert added_lines(diff) == [3, 4, 12]
 
 
-def test_line_delete_mutant_removes_exactly_that_line():
-    from assertion_discrimination import line_delete_mutant
-    content = "a\nb\nc\n"
-    assert line_delete_mutant(content, 2) == "a\nc\n"
-
-
 def test_line_blank_string_mutants_blanks_each_literal_on_the_line():
     from assertion_discrimination import line_blank_string_mutants
     content = "x\nconst s = 'Re-run without existingBranch to cut one'\ny\n"
@@ -230,6 +224,29 @@ def test_line_blank_string_mutants_skips_an_already_empty_literal():
     from assertion_discrimination import line_blank_string_mutants
     content = "const s = ''\n"
     assert line_blank_string_mutants(content, 1) == []
+
+
+def test_line_blank_string_mutants_skips_an_equality_comparison_operand():
+    # gh-96: blanking a string used as a `===`/`!==` operand reroutes which
+    # branch of a conditional runs, the same collateral-damage risk a
+    # whole-line deletion mutant carries -- not a text change the assertion
+    # under test claims to depend on.
+    from assertion_discrimination import line_blank_string_mutants
+    content = "  : halt_reason === 'ambiguous'\n"
+    assert line_blank_string_mutants(content, 1) == []
+
+
+def test_line_blank_string_mutants_skips_an_inequality_comparison_operand():
+    from assertion_discrimination import line_blank_string_mutants
+    content = "  : halt_reason !== 'ambiguous'\n"
+    assert line_blank_string_mutants(content, 1) == []
+
+
+def test_line_blank_string_mutants_still_blanks_a_non_comparison_literal_on_a_comparison_line():
+    from assertion_discrimination import line_blank_string_mutants
+    content = "  check('label', halt_reason === 'ambiguous', true)\n"
+    mutants = line_blank_string_mutants(content, 1)
+    assert mutants == ["  check('', halt_reason === 'ambiguous', true)\n"]
 
 
 def _init_scratch_repo(path):
