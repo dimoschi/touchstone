@@ -26,7 +26,7 @@ export const meta = {
 // against the manifest in scripts/check-version-bump.sh, so drift is a
 // gate's job rather than something this script verifies about itself.
 const PLUGIN_NAME = 'touchstone'
-const PIPELINE_VERSION = '0.23.1'
+const PIPELINE_VERSION = '0.23.2'
 
 // Boundaries. Wall-clock deadlines are not expressible here (no Date.now, by
 // design); the bounds are rounds, counts, and token budget instead.
@@ -300,14 +300,17 @@ const CHECKS = {
     detail: { type: 'string' },
   },
 }
-// One row per command, run exactly as discovered. exit_code and output are
-// what the fix phase is handed verbatim -- never a model's account of them.
-// Redness is keyed on exit_code alone, never on a model-judged boolean: exit
-// 2 and exit 4 are not passes either, and asking for a "passed" field let a
-// haiku call one of those green. id is the script-assigned check:N, never a
-// name the model invents, and command must equal the exact invocation the
-// script built (see invocationFor): a row whose command does not match is
-// not measured, never read as a pass.
+// One row per command, run exactly as discovered. output is what the fix
+// phase is handed verbatim -- never a model's account of it -- and it is
+// also the only place a row's real exit code lives: exitLineOf below reads
+// it from output's own TOUCHSTONE_CHECK_EXIT line, printed first by the
+// shell that ran the check, not from exit_code. exit_code stays required so
+// the schema still has somewhere for a model to answer, but classifyResults
+// never reads it: a summarised or still-running check reporting exit_code: 0
+// must not read as a pass just because the field says so. id is the
+// script-assigned check:N, never a name the model invents, and command must
+// equal the exact invocation the script built (see invocationFor): a row
+// whose command does not match is not measured, never read as a pass.
 const CHECK_RUN = {
   type: 'object', additionalProperties: false, required: ['results', 'dirty'],
   properties: {
@@ -500,6 +503,30 @@ const REPRODUCER = {
 const REPRODUCED_MARKER = 'TOUCHSTONE_DEFECT_REPRODUCED'
 const hasMarkerLine = (output) =>
   String(output ?? '').split(/\r?\n/).some((line) => line.trim() === REPRODUCED_MARKER)
+// Echoed by the shell that ran each check, before its output (invocationFor
+// below), never by the model reporting the result: a check's own exit code
+// is read only from this line, never from a model-filled exit_code field.
+const CHECK_EXIT_MARKER = 'TOUCHSTONE_CHECK_EXIT'
+// Whether a check's row carries its own exit line, and what it says. Only
+// the first non-empty line is read: invocationFor prints the exit line before
+// any of the check's output, so a lookalike further down is the check's own
+// output (a suite that tests this runner prints them), and an exit line found
+// only further down was moved there by whoever relayed the output. Anything
+// but a well-formed first line naming this check's own id comes back as a
+// reason string instead of an exit code, so an ambiguous report reads as
+// unmeasured rather than guessed at.
+const exitLineOf = (output, id) => {
+  const lines = String(output ?? '').split(/\r?\n/).map((line) => line.trim())
+    .filter((line) => line !== '')
+  if (!(lines[0] ?? '').startsWith(`${CHECK_EXIT_MARKER} `)) {
+    return { reason: lines.some((line) => line.startsWith(`${CHECK_EXIT_MARKER} `))
+      ? 'exit line not first' : 'no exit line' }
+  }
+  const m = lines[0].match(new RegExp(`^${CHECK_EXIT_MARKER} (\\S+) (\\d+)$`))
+  if (!m) return { reason: 'malformed exit line' }
+  if (m[1] !== id) return { reason: `exit line names ${m[1]}` }
+  return { exit: Number(m[2]) }
+}
 // The one place that turns an executor row into what it actually showed.
 // Read against the row's raw, untruncated output -- truncateOutput below
 // runs only on the copy that gets stored, never on the copy this reads -- so
@@ -1480,8 +1507,22 @@ const shQuote = (s) => {
 // source, not a single argument -- so only the cd target and the outer -c
 // argument need quoting. The outer argument always contains a space (`cd
 // ... && ...`), so it is quoted regardless; only the cd target can come out
-// bare.
-const invocationFor = (c) => `bash -c ${shQuote(`cd ${shQuote(wt.path)} && ${c.command}`)}`
+// bare. The echo sits outside the -c string and after `;`, not `&&`: a
+// check that calls `exit N` itself, or one whose command chain ends
+// nonzero, still leaves $? holding that value for the echo to read, and
+// `;` runs it regardless, where `&&` would have skipped it whenever the
+// check's own exit code was the one case this exists to capture.
+// The check's output goes to a temp file first so the exit line can be
+// printed before it, followed by only the output's last CHECK_TAIL_BYTES.
+// The Bash tool shows a large output only as a short preview of its start
+// (this repo's own fix-loop suite prints about 56KB), so an exit line at the
+// end was out of the runner's sight, and relaying the whole log verbatim is
+// the step runners have already failed at. A file rather than a pipe to
+// tail, because a pipe's status is tail's, and a piped gate is refused by a
+// hook here.
+const invocationFor = (c) =>
+  `o=$(mktemp); bash -c ${shQuote(`cd ${shQuote(wt.path)} && ${c.command}`)} >"$o" 2>&1; ` +
+  `echo "${CHECK_EXIT_MARKER} ${c.id} $?"; tail -c ${CHECK_TAIL_BYTES} "$o"; rm -f "$o"`
 const executeChecks = async (checks = discoveredChecks) => {
   checkAttempt++
   return await treeAgent(
@@ -1493,14 +1534,25 @@ const executeChecks = async (checks = discoveredChecks) => {
     `runs inside a child shell, which does not move this session's own ` +
     `working directory. Never split one into a bare cd ${wt.path} && ` +
     `<command>, which does.\n` +
+    `Run the invocations one at a time, in the order given, each in the ` +
+    `foreground with a Bash timeout of 600000 ms: never with ` +
+    `run_in_background, never several at once, and wait for each to return ` +
+    `before starting the next.\n` +
     `Report each check's id, its exit code, and its combined stdout and ` +
     `stderr verbatim -- do not summarise, truncate, or interpret what it ` +
     `printed. Report command as the exact invocation you ran, copied back ` +
-    `verbatim: a row is only accepted when it matches what was asked.\n` +
-    `Then run git -C ${wt.path} status --porcelain and report whether it ` +
-    `printed anything (dirty) and, if so, its output (porcelain): a check ` +
-    `that writes to the tree (a ledger, a generated file) must be visible, ` +
-    `not silently carried into whatever commits next.\n` +
+    `verbatim: a row is only accepted when it matches what was asked. ` +
+    `Report the output exactly as printed, starting with its first line, ` +
+    `the ${CHECK_EXIT_MARKER} line: never write, add, move, or change that ` +
+    `line yourself. Each invocation already prints only the end of a long ` +
+    `log, so report all of what it printed. A call that does not return ` +
+    `within the timeout is reported with whatever it printed and no exit ` +
+    `line.\n` +
+    `Only once the last invocation has returned, run git -C ${wt.path} ` +
+    `status --porcelain and report whether it printed anything (dirty) and, ` +
+    `if so, its output (porcelain): a check that writes to the tree (a ` +
+    `ledger, a generated file) must be visible, not silently carried into ` +
+    `whatever commits next.\n` +
     checks.map(c => `${c.id}: ${invocationFor(c)}`).join('\n'),
     { label: `checks:run:${checkAttempt}`, schema: CHECK_RUN, model: 'haiku', effort: 'low' })
 }
@@ -1523,12 +1575,18 @@ const truncateOutput = (s) => {
 const reproducerRunOf = (row, round) =>
   ({ outcome: outcomeOf(row), exit_code: row?.exit_code ?? null,
      output: truncateOutput(row?.output), round })
-// Splits a run's raw results into a real red list (ran, command matched,
-// non-zero exit) and an unmeasured one (nobody reported the id, or reported
-// it against a different command). Unmeasured is never a pass, but it is
-// also never red: a row this phase cannot trust is not evidence either way,
-// so it stays apart from red and is handed to runChecks below to retry, not
-// to a fixer that cannot change what a runner echoes back.
+// Splits a run's raw results into a real red list (ran, command matched, a
+// well-formed first-line exit line naming this check that reads nonzero) and an
+// unmeasured one (nobody reported the id, reported it against a different
+// command, or reported it against the right command but without an exit
+// line classifyResults can trust). Unmeasured is never a pass, but it is also
+// never red: a row this phase cannot trust is not evidence either way, so it
+// stays apart from red and is handed to runChecks below to retry, not to a
+// fixer that cannot change what a runner echoes back. reason is plain text
+// for unmeasuredChecksHalt below to render per attempt; it is never the
+// mismatched-command message when the command actually matched, which is
+// what let a matched check's own summarised or still-running output read as
+// a command mismatch before this ticket.
 const classifyResults = (checks, results) => {
   const byId = new Map((Array.isArray(results) ? results : [])
     .filter(r => r?.id).map(r => [r.id, r]))
@@ -1540,17 +1598,24 @@ const classifyResults = (checks, results) => {
     if (!row) {
       unmeasured.push({ id: c.id, command: c.command, exit_code: null,
         output: 'no result was reported for this check',
-        expected, reported: null })
+        expected, reported: null, reason: 'no result reported' })
       continue
     }
     if (row.command !== expected) {
       unmeasured.push({ id: c.id, command: c.command, exit_code: null,
         output: `not measured: expected \`${expected}\`, got \`${row.command}\``,
-        expected, reported: row.command })
+        expected, reported: row.command, reason: `reported \`${row.command}\`` })
       continue
     }
-    if (row.exit_code !== 0) {
-      red.push({ id: c.id, command: c.command, exit_code: row.exit_code,
+    const parsed = exitLineOf(row.output, c.id)
+    if (parsed.reason) {
+      unmeasured.push({ id: c.id, command: c.command, exit_code: null,
+        output: `not measured: ${parsed.reason}`,
+        expected, reported: row.command, reason: parsed.reason })
+      continue
+    }
+    if (parsed.exit !== 0) {
+      red.push({ id: c.id, command: c.command, exit_code: parsed.exit,
         output: truncateOutput(row.output) })
     }
   }
@@ -1573,8 +1638,10 @@ const runChecks = async () => {
   const second = await executeChecks(retryList)
   const { red: red2, unmeasured: unmeasured2 } = classifyResults(retryList, second?.results)
   const firstReportedById = new Map(unmeasured1.map(u => [u.id, u.reported]))
+  const firstReasonById = new Map(unmeasured1.map(u => [u.id, u.reason]))
   const unmeasured = unmeasured2.map(u =>
-    ({ ...u, reported: firstReportedById.get(u.id) ?? null, reported_again: u.reported }))
+    ({ ...u, reported: firstReportedById.get(u.id) ?? null, reported_again: u.reported,
+       reason: firstReasonById.get(u.id) ?? null, reason_again: u.reason }))
   return { red: [...red1, ...red2], unmeasured }
 }
 
@@ -1593,12 +1660,12 @@ const renderCheck = (c) => `Check ${c.id} (${c.command}) exited ${c.exit_code}:\
 const unmeasuredChecksHalt = (at, extra) => {
   const note = `${unmeasuredChecks.length} discovered check(s) could not be ` +
     `measured after a retry. This halt is about measurement, not the code: ` +
-    `the runner did not report them as asked, so no verdict exists either ` +
-    `way, and no fix round has been spent on them.\n` +
+    `the runner did not report them as asked, or they did not finish ` +
+    `within the 600000 ms Bash timeout, so no verdict exists either way, ` +
+    `and no fix round has been spent on them.\n` +
     unmeasuredChecks.map(c =>
-      `- ${c.id}: expected \`${c.expected}\`; first run reported ` +
-      `${c.reported ? `\`${c.reported}\`` : 'no result reported'}, second run ` +
-      `reported ${c.reported_again ? `\`${c.reported_again}\`` : 'no result reported'}.`
+      `- ${c.id}: expected \`${c.expected}\`; first run ${c.reason}; ` +
+      `second run ${c.reason_again}.`
     ).join('\n')
   return halted(at, {
     plan: plan.plan, implemented: impl.summary, gates: gatesPayload(), checks: checksPayload(),
