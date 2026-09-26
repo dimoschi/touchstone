@@ -176,7 +176,10 @@ that subagent's own transcript (`hook_invocation.subagent_transcript`, shared wi
 with no `agent_id` (the invoking session) or a subagent whose transcript is missing or
 never carries that header is waved through rather than refused: there is no opt-in marker
 to fail closed behind, and failing closed on absent evidence would block every subagent's
-first edit in every repo until its transcript happened to exist on disk.
+first edit in every repo until its transcript happened to exist on disk. Only the
+ticket worktree itself and the shared git directory (scratch path, gate ledgers) are
+exempt; another worktree under `.claude/worktrees/` is refused too, since a session
+running in a worktree of its own is where a stray relative path lands.
 
 Known gap: a Bash command that writes a file (a redirect, `sed -i`, a script, a test
 fixture writing fixtures of its own) is not covered. `base_branch.shell_tokens`'s own

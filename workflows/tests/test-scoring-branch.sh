@@ -562,7 +562,7 @@ async function scenarioBH() {
   for (const label of ['implementer', 'checks:fix', 'fix:1']) {
     const p = captured.calls.find(c => c.label === label)?.prompt ?? ''
     check(`${label}: names the worktree next to the native-tools sentence`,
-      p.includes(`with grep, sed, or cat. Every Read, Grep and Edit path starts with ${STUB_WT_PATH}/.`),
+      p.includes(`with grep, sed, or cat. Every Read, Grep and Edit path starts with ${STUB_WT_PATH}/, apart from the scratch path under the git directory given above.`),
       true)
   }
 }

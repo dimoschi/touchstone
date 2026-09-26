@@ -172,9 +172,10 @@ def test_a_later_transcript_entry_naming_the_header_does_not_count(monkeypatch, 
     assert rc == 0
 
 
-def test_a_worktree_under_claude_worktrees_is_never_refused(monkeypatch, tmp_path):
-    """Any worktree under <root>/.claude/worktrees/ is exempt, not only the
-    active agent's own one."""
+def test_another_worktree_under_claude_worktrees_is_refused(monkeypatch, tmp_path):
+    """Only the agent's own ticket worktree is exempt. A session running in a
+    worktree of its own (EnterWorktree puts it under .claude/worktrees/) is
+    where a stray relative path lands, so another worktree is refused too."""
     repo = _repo(tmp_path)
     other_wt = repo / ".claude" / "worktrees" / "gh-2-other"
     other_wt.mkdir(parents=True)
@@ -184,7 +185,7 @@ def test_a_worktree_under_claude_worktrees_is_never_refused(monkeypatch, tmp_pat
     )
     wt = _worktree(repo)
     rc = _active_run(monkeypatch, tmp_path, wt, other_wt / "app.py")
-    assert rc == 0
+    assert rc == 2
 
 
 def test_a_path_inside_the_git_common_dir_is_never_refused(monkeypatch, tmp_path):

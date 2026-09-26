@@ -143,13 +143,13 @@ def _active_worktree_for(data):
     return active_worktree(own) if own is not None else None
 
 
-def _exempt(target, wt, root):
+def _exempt(target, wt):
     """Whether `target` sits somewhere this gate never refuses: inside the
-    active worktree itself, inside any worktree under <root>/.claude/worktrees/,
-    or inside the repo's shared git directory."""
+    active worktree itself, or inside the repo's shared git directory (the
+    scratch path and the gate ledgers live there). Another worktree under
+    <root>/.claude/worktrees/ is not exempt: a session running in a worktree of
+    its own is exactly where a stray path lands."""
     if _contains(wt, target):
-        return True
-    if _contains((root / '.claude' / 'worktrees').resolve(), target):
         return True
     gcd = git_common_dir(wt)
     return bool(gcd) and _contains(Path(gcd).resolve(), target)
@@ -194,7 +194,7 @@ def main():
     if resolved is None:
         return 0
     target, wt, root = resolved
-    if not _contains(root, target) or _exempt(target, wt, root):
+    if not _contains(root, target) or _exempt(target, wt):
         return 0
 
     print(HELP.format(worktree=wt, path=target), file=sys.stderr)

@@ -134,7 +134,8 @@ const NATIVE_TOOLS = (worktreePath) =>
   `Use your native Read, Grep and Edit tools to read, search and edit files; ` +
   `Bash is for running things (tests, gates, git), never for reading code ` +
   `with grep, sed, or cat. Every Read, Grep and Edit path starts with ` +
-  `${worktreePath}/.`
+  `${worktreePath}/, apart from the scratch path under the git directory ` +
+  `given above.`
 
 // Shared by every prompt that commits code (implement, checks:fix, fix):
 // worded generically, since these prompts ship to other repos, not just
