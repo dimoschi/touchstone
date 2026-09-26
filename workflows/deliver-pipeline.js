@@ -182,10 +182,16 @@ let ceilingScale = 1
 // actually running at the halt, and its spend so far still belongs in
 // stageSpend rather than being silently dropped from it.
 const openStages = {}
+// 'checks' is the one name stage() opens twice (the pre-Implement baseline,
+// then the post-Implement run); by the time the second open reaches this
+// function, stageSpend.checks already holds the first window's spend, and
+// adding rather than overwriting is what keeps it instead of losing it to
+// the second window's own delta -- the same fix-up every normal close site
+// for 'checks' already does by hand with checksPreSpend.
 const closeOpenStages = () => {
   const names = Object.keys(openStages)
   for (const name of names) {
-    stageSpend[name] = budget.spent() - openStages[name]
+    stageSpend[name] = (stageSpend[name] ?? 0) + (budget.spent() - openStages[name])
     delete openStages[name]
   }
   return names

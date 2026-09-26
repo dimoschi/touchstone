@@ -386,9 +386,33 @@ async function scenarioSBW() {
   check('no comment lines are counted', result.size?.comment, 0)
 }
 
+// Scenario SBX -- gh-118: the checks stage opens twice (the pre-Implement
+// baseline, then the post-Implement run), and closeOpenStages() -- the path a
+// budget halt takes when it fires while the stage is still open -- has to
+// carry the baseline's spend forward the same way every normal close site
+// already does by hand (checksPreSpend + ...), or a halt mid-post-window
+// reports only the post-window's own spend and drops the baseline entirely.
+async function scenarioSBX() {
+  console.log('\n== scenario SBX: a budget halt mid-post-Implement-checks keeps the pre-Implement checks baseline in stage_spend')
+  const { result, captured } = await run({
+    args: { runBudget: 450_000 },
+    budgetPerAgentCall: 100_000,
+    discovery: { file: '/repo/AGENTS.md',
+      sections: [{ heading: '## Checks', fence: 'bash scripts/run-tests.sh' }], detail: 'stub' },
+    checkRuns: () => ({ results: [checkRow('check:1', 'bash scripts/run-tests.sh', 0, 'ok')], dirty: false }),
+  })
+  check('the baseline checks run was dispatched', callCount(captured, 'checks:run:1'), 1)
+  check('the post-window checks run was refused', (result.note ?? '').includes("'checks:run:2'"), true)
+  check('stage_spend.checks carries the baseline spend forward, not just the post-window\'s',
+    result.stage_spend?.checks, 100_000)
+  check('the note\'s own checks figure agrees with stage_spend',
+    (result.note ?? '').includes('checks 100k'), true)
+}
+
 const SCENARIOS = [scenarioSBA, scenarioSBB, scenarioSBC, scenarioSBD, scenarioSBE, scenarioSBF, scenarioSBG,
   scenarioSBH, scenarioSBI, scenarioSBJ, scenarioSBK, scenarioSBL, scenarioSBM, scenarioSBN, scenarioSBO,
-  scenarioSBP, scenarioSBQ, scenarioSBR, scenarioSBS, scenarioSBT, scenarioSBU, scenarioSBV, scenarioSBW]
+  scenarioSBP, scenarioSBQ, scenarioSBR, scenarioSBS, scenarioSBT, scenarioSBU, scenarioSBV, scenarioSBW,
+  scenarioSBX]
 JS_EOF
 
 finish
