@@ -496,8 +496,17 @@ run_js_scenarios() {
     printf '%s\n' "$JS_PRELUDE"
     printf '%s\n' "$area_js"
     cat <<'FOOTER_EOF'
+const wanted = process.env.TOUCHSTONE_SCENARIOS
+  ? new Set(process.env.TOUCHSTONE_SCENARIOS.split(','))
+  : null
 for (const scenario of SCENARIOS) {
-  await scenario()
+  if (wanted && !wanted.has(scenario.name)) continue
+  try {
+    await scenario()
+  } catch (e) {
+    console.log(`  ABORTED: ${scenario.name}: ${e.message}`)
+    failures++
+  }
 }
 
 console.log('')
