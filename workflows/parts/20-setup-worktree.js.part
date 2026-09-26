@@ -507,7 +507,12 @@ log(args?.existingBranch
 // given the text to scrutinise, and Plan to work from as the specification.
 // Handing it to every phase made the devil's advocate a critic of the ticket's
 // own reasoning and burned a whole plan-and-challenge cycle without changing a
-// line of code.
+// line of code. Every review lens gets one slice of that prose besides, via
+// decisionsSpec() below: the ticket's own "Constraints, or decisions already
+// taken" section, verbatim. That does not reopen the reason the rest stays
+// withheld, because a settled decision is not something to reason about, only
+// something to not flag; it hands a lens a fact to respect, never the ticket's
+// argument to critique.
 // withBase is off for the version probe alone. On a stacked run wt.base is the
 // branch under review, and naming it here handed the probe the exact ref its
 // prompt spends a paragraph telling it to ignore.
@@ -522,6 +527,39 @@ const ticketSpec = () => ticketDetail.found
     (ticketDetail.comments.trim()
       ? `Ticket comments:\n${ticketDetail.comments}\n` : '')
   : `Ticket ${ticket} could not be read; work from the task text alone.\n`
+
+// GitHub's feature form renders this field's label as a heading, one of the
+// two "### <label>" lines .github/ISSUE_TEMPLATE/feature.yml produces, so a
+// heading of any level whose text matches exactly is the field, and the next
+// heading of the same or shallower level (fewer #s) closes it -- a deeper one
+// is a subsection of the field's own body, not the end of it. Anchored to
+// line starts so the phrase said in passing, inside a paragraph, never
+// matches. Returns '' for a missing section, an empty body, or GitHub's
+// '_No response_' placeholder for an optional field left blank.
+const settledDecisionsOf = (description) => {
+  const heading = /^(#{1,6})[ \t]*Constraints, or decisions already taken[ \t]*$/m
+  const m = heading.exec(description ?? '')
+  if (!m) return ''
+  const level = m[1].length
+  const rest = description.slice(m.index + m[0].length)
+  const next = new RegExp(`^#{1,${level}}[ \t]+\\S`, 'm').exec(rest)
+  const body = (next ? rest.slice(0, next.index) : rest).trim()
+  return (body && body !== '_No response_') ? body : ''
+}
+const settledDecisions = ticketDetail.found ? settledDecisionsOf(ticketDetail.description) : ''
+
+// Handed to every review lens (reviewOf), never to Triage or Plan, which get
+// the whole ticket via ticketSpec() instead. Framed as settled rather than as
+// more ticket text to weigh, so a lens does not file the specified behaviour
+// as the defect it was told to hunt for.
+const decisionsSpec = () => settledDecisions
+  ? `Settled decisions (the ticket's "Constraints, or decisions already ` +
+    `taken" section, verbatim; decided, not under review):\n${settledDecisions}\n` +
+    `Behaviour a settled decision specifies is not a defect: do not report it ` +
+    `as wrong-result, crash, gate-bypass or unmet-criterion. Disagreeing with ` +
+    `a decision is at most a design or scope note, which never blocks. Do not ` +
+    `critique the rest of the ticket's reasoning.\n`
+  : ''
 
 const treeAgent = (prompt, { omitBase = false, ...opts }) =>
   dispatch(
