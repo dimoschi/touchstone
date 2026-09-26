@@ -524,6 +524,5 @@ function checksPayload() {
 }
 // Red but not blocking (existingBranch) reaches the fixer as nothing at
 // all: it is visibility for a human, not work to hand to an agent.
-let preReviewFixCommitted = false
 const blockingChecksOpen = () => checksBlocking && redChecks.length > 0
 

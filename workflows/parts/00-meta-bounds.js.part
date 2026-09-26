@@ -8,7 +8,7 @@ export const meta = {
     { title: 'Plan', detail: 'planner produces plan + acceptance criteria + risk areas' },
     { title: 'Implement', detail: 'one implementer, TDD via crap-controlled-changes, many small signed commits' },
     { title: 'Draft PR', detail: 'push the branch and open a draft PR, so the work is visible and any later halt has somewhere durable to be reported' },
-    { title: 'Review', detail: 'adversarial reviewers on distinct lenses, chosen by diff size: correctness and devil\'s advocate normally, plus requirements coverage on a big diff, none on a one-liner. Only a wrong-result, crash, gate-bypass or unmet-criterion finding with a demonstrated reproducer can hold the run; everything else reaches the PR as a note. Runs again on any commits a later phase adds, and from the first re-review on a finding also has to fall inside what that range actually changed' },
+    { title: 'Review', detail: 'a measured diffstat (code churn, with comments, tests and docs counted apart) decides the reviewer lenses: correctness and devil\'s advocate normally, plus requirements coverage on a large or wide change, none on a one-liner; support code (tests, docs, comments) far outweighing the actual change halts here before any lens runs. Only a wrong-result, crash, gate-bypass or unmet-criterion finding with a demonstrated reproducer can hold the run; everything else reaches the PR as a note. Runs again on any commits a later phase adds, and from the first re-review on a finding also has to fall inside what that range actually changed' },
     { title: 'Fix', detail: 'fix confirmed findings, bounded rounds; a finding is fixed when its own reproducer exits 0, never by a model\'s judgement of the diff' },
     { title: 'Mutation', detail: 'pre-PR mutation gate; kill survivors with tests, never weaken code. Its own commits are reviewed before the PR' },
     { title: 'PR', detail: 'push, fill in the PR against the repo template, and mark the draft ready for review, only when every gate is green' },
@@ -96,6 +96,20 @@ const outOfBudget = () => budget.total && budget.remaining() < BUDGET_FLOOR
 // sends it straight to Implement, and Review skips its lenses for a diff under
 // the same bar.
 const INLINE_LOC = args?.inlineLoc ?? 10
+// The rest of the lens-count and ratio thresholds Review measures against,
+// once the diffstat probe has sized the actual diff (see lensKeysFor and
+// sizeOf in part 40): below ONE_LENS_LOC a single correctness lens is
+// enough; above BIG_LOC, or past BIG_FILES code files touched, the
+// requirements lens joins too. RATIO_MIN_CODE is the floor below which the
+// support-ratio halt does not apply at all -- a change that is mostly tests
+// by design must not halt on that alone -- and MAX_SUPPORT_RATIO is the
+// limit past it; args.supportRatio raises the limit for a run that knows
+// its own ratio is intentional.
+const ONE_LENS_LOC = 150
+const BIG_LOC = 400
+const BIG_FILES = 5
+const RATIO_MIN_CODE = 20
+const MAX_SUPPORT_RATIO = 3
 
 // Long briefs make agents thorough about the wrong things, and the task text is
 // re-sent to every agent in the pipeline. Clamp what gets forwarded.
@@ -208,6 +222,12 @@ const dispatch = async (prompt, opts) => {
 // phase that opens it.
 let draftPr = null
 
+// Set once the diffstat probe (Draft PR phase, part 40) has measured the
+// real diff; null on every halt before that, and read unconditionally by
+// halted() below so every halt from Review onward carries it without each
+// call site having to pass it through `extra` by hand.
+let size = null
+
 // executed never changes; base_branch and mismatch stay null until the
 // merged setup call (before Worktree) has something to report, which is why
 // a halt at Worktree carries the executed value with the other two still
@@ -239,7 +259,7 @@ const prNote = () => draftPr
 const halted = async (at, extra) => {
   const payload = {
     task, halted_at: at, pipeline_version: pipelineVersion, stage_spend: stageSpend,
-    needs_user: true, record_file: runRecordFile, ...extra,
+    needs_user: true, record_file: runRecordFile, size, ...extra,
   }
   if (draftPr?.number) {
     log(`halt at ${at}: draft PR ${draftPr.url} left as it is; the reason is in ` +

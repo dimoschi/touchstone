@@ -279,7 +279,7 @@ async function scenarioCT() {
 async function scenarioCU() {
   console.log('\n== scenario CU: only the requirements lens is shown the ticket text')
   const { captured } = await run({
-    implInsertions: 300, // forces big=true, which adds the requirements lens
+    diffstatFiles: [['a.js', 500, 0]], // codeChurn 500 (> BIG_LOC), adds the requirements lens
     ticketResult: { found: true, summary: 'stub', comments: '', description: 'ACCEPTANCE_TEXT_MARKER' },
     initialReview: { correctness: [], advocate: [], requirements: [] },
   })

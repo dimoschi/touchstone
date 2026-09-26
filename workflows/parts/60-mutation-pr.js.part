@@ -297,6 +297,7 @@ const result = {
   gates: gatesPayload(),
   checks: checksPayload(),
   mutation,
+  size,
   reviewers: reviewerCount,
   // Raised but never blocking: wrong category, no reproducer, an unmet
   // criterion whose quote was not found, out of range, or a residual of a

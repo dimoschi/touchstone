@@ -208,15 +208,17 @@ const TRIAGE = {
 // halt returns a human reads, and is deliberately NOT forwarded to the
 // reviewer: an adversarial reviewer told what the implementer believes it did
 // is anchored before it opens a file. files_changed is forwarded, because scope
-// is a fact rather than the implementer's account of itself.
+// is a fact rather than the implementer's account of itself. insertions is
+// gone: it described the implementer's own commits and went stale the
+// moment a pre-review checks fix landed after them; the diffstat probe
+// (part 40, `size` in the result) replaces it with a real, measured count.
 const IMPL = {
   type: 'object', additionalProperties: false,
-  required: ['summary', 'files_changed', 'commit_range', 'insertions', 'scored'],
+  required: ['summary', 'files_changed', 'commit_range', 'scored'],
   properties: {
     summary: { type: 'string' },
     files_changed: { type: 'array', items: { type: 'string' } },
     commit_range: { type: 'string' },
-    insertions: { type: 'integer' },
     scored: { type: 'boolean' },
     gate_note: { type: 'string' },
     // Set when the one halt this phase can hit -- a NEXT_ACTION of

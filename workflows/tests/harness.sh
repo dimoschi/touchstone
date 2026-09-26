@@ -230,11 +230,34 @@ function makeAgent(scenario, captured) {
     }
     if (label === 'implementer') {
       return { summary: 'stub implementation', files_changed: scenario.implFilesChanged ?? ['a.js', 'b.js'],
-        commit_range: COMMIT_RANGE, insertions: scenario.implInsertions ?? 20, scored: scenario.implScored ?? true,
+        commit_range: COMMIT_RANGE, scored: scenario.implScored ?? true,
         ...(scenario.implGateNote ? { gate_note: scenario.implGateNote } : {}) }
     }
-    if (label === 'draft-pr') {
-      return scenario.draftPr ?? { opened: false, detail: 'no draft in this test' }
+    // draft-pr and size (gh-118): the diffstat probe and its one retry. Both
+    // read the range straight out of their own prompt (diffstatCommandFor
+    // embeds it verbatim after "TOUCHSTONE_DIFFSTAT "), so the default
+    // diffstat always names whatever range the script actually asked about,
+    // including a range a pre-review checks fix already folded in.
+    // diffstatFiles defaults to a two-file, two-lens-sized diff (matching
+    // this file's old implFilesChanged/implInsertions defaults, so the ~90
+    // scenarios that never touch sizing keep getting the same two lenses).
+    // scenario.diffstat/.sizeRetryDiffstat override one call each;
+    // scenario.sizeUnmeasured makes both return something parseDiffstat
+    // rejects, for the still-unmeasured-after-retry halt.
+    if (label === 'draft-pr' || label === 'size') {
+      const range = (/TOUCHSTONE_DIFFSTAT ([^\n;]+);/.exec(prompt) ?? [])[1]?.trim() ?? COMMIT_RANGE
+      const files = scenario.diffstatFiles ?? [['a.js', 100, 0], ['b.js', 100, 0]]
+      const goodDiffstat = `TOUCHSTONE_DIFFSTAT ${range}\n` +
+        files.map(([p, a, r]) => `${a}\t${r}\t${p}`).join('\n') +
+        `\nTOUCHSTONE_COMMENT_LINES\nTOUCHSTONE_DIFFSTAT_END`
+      if (label === 'size') {
+        if (scenario.sizeRetryFails) return null
+        return { diffstat: scenario.sizeRetryDiffstat ??
+          (scenario.sizeUnmeasured ? 'still not a real diffstat' : goodDiffstat) }
+      }
+      const diffstat = scenario.diffstat ??
+        (scenario.sizeUnmeasured ? 'not a real diffstat' : goodDiffstat)
+      return { diffstat, ...(scenario.draftPr ?? { opened: false, detail: 'no draft in this test' }) }
     }
     // Opening the PR is the workflow's only write to GitHub. These two labels
     // posted comments on it; throwing rather than stubbing them means any

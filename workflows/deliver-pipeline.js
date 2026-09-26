@@ -8,7 +8,7 @@ export const meta = {
     { title: 'Plan', detail: 'planner produces plan + acceptance criteria + risk areas' },
     { title: 'Implement', detail: 'one implementer, TDD via crap-controlled-changes, many small signed commits' },
     { title: 'Draft PR', detail: 'push the branch and open a draft PR, so the work is visible and any later halt has somewhere durable to be reported' },
-    { title: 'Review', detail: 'adversarial reviewers on distinct lenses, chosen by diff size: correctness and devil\'s advocate normally, plus requirements coverage on a big diff, none on a one-liner. Only a wrong-result, crash, gate-bypass or unmet-criterion finding with a demonstrated reproducer can hold the run; everything else reaches the PR as a note. Runs again on any commits a later phase adds, and from the first re-review on a finding also has to fall inside what that range actually changed' },
+    { title: 'Review', detail: 'a measured diffstat (code churn, with comments, tests and docs counted apart) decides the reviewer lenses: correctness and devil\'s advocate normally, plus requirements coverage on a large or wide change, none on a one-liner; support code (tests, docs, comments) far outweighing the actual change halts here before any lens runs. Only a wrong-result, crash, gate-bypass or unmet-criterion finding with a demonstrated reproducer can hold the run; everything else reaches the PR as a note. Runs again on any commits a later phase adds, and from the first re-review on a finding also has to fall inside what that range actually changed' },
     { title: 'Fix', detail: 'fix confirmed findings, bounded rounds; a finding is fixed when its own reproducer exits 0, never by a model\'s judgement of the diff' },
     { title: 'Mutation', detail: 'pre-PR mutation gate; kill survivors with tests, never weaken code. Its own commits are reviewed before the PR' },
     { title: 'PR', detail: 'push, fill in the PR against the repo template, and mark the draft ready for review, only when every gate is green' },
@@ -96,6 +96,20 @@ const outOfBudget = () => budget.total && budget.remaining() < BUDGET_FLOOR
 // sends it straight to Implement, and Review skips its lenses for a diff under
 // the same bar.
 const INLINE_LOC = args?.inlineLoc ?? 10
+// The rest of the lens-count and ratio thresholds Review measures against,
+// once the diffstat probe has sized the actual diff (see lensKeysFor and
+// sizeOf in part 40): below ONE_LENS_LOC a single correctness lens is
+// enough; above BIG_LOC, or past BIG_FILES code files touched, the
+// requirements lens joins too. RATIO_MIN_CODE is the floor below which the
+// support-ratio halt does not apply at all -- a change that is mostly tests
+// by design must not halt on that alone -- and MAX_SUPPORT_RATIO is the
+// limit past it; args.supportRatio raises the limit for a run that knows
+// its own ratio is intentional.
+const ONE_LENS_LOC = 150
+const BIG_LOC = 400
+const BIG_FILES = 5
+const RATIO_MIN_CODE = 20
+const MAX_SUPPORT_RATIO = 3
 
 // Long briefs make agents thorough about the wrong things, and the task text is
 // re-sent to every agent in the pipeline. Clamp what gets forwarded.
@@ -208,6 +222,12 @@ const dispatch = async (prompt, opts) => {
 // phase that opens it.
 let draftPr = null
 
+// Set once the diffstat probe (Draft PR phase, part 40) has measured the
+// real diff; null on every halt before that, and read unconditionally by
+// halted() below so every halt from Review onward carries it without each
+// call site having to pass it through `extra` by hand.
+let size = null
+
 // executed never changes; base_branch and mismatch stay null until the
 // merged setup call (before Worktree) has something to report, which is why
 // a halt at Worktree carries the executed value with the other two still
@@ -239,7 +259,7 @@ const prNote = () => draftPr
 const halted = async (at, extra) => {
   const payload = {
     task, halted_at: at, pipeline_version: pipelineVersion, stage_spend: stageSpend,
-    needs_user: true, record_file: runRecordFile, ...extra,
+    needs_user: true, record_file: runRecordFile, size, ...extra,
   }
   if (draftPr?.number) {
     log(`halt at ${at}: draft PR ${draftPr.url} left as it is; the reason is in ` +
@@ -475,15 +495,17 @@ const TRIAGE = {
 // halt returns a human reads, and is deliberately NOT forwarded to the
 // reviewer: an adversarial reviewer told what the implementer believes it did
 // is anchored before it opens a file. files_changed is forwarded, because scope
-// is a fact rather than the implementer's account of itself.
+// is a fact rather than the implementer's account of itself. insertions is
+// gone: it described the implementer's own commits and went stale the
+// moment a pre-review checks fix landed after them; the diffstat probe
+// (part 40, `size` in the result) replaces it with a real, measured count.
 const IMPL = {
   type: 'object', additionalProperties: false,
-  required: ['summary', 'files_changed', 'commit_range', 'insertions', 'scored'],
+  required: ['summary', 'files_changed', 'commit_range', 'scored'],
   properties: {
     summary: { type: 'string' },
     files_changed: { type: 'array', items: { type: 'string' } },
     commit_range: { type: 'string' },
-    insertions: { type: 'integer' },
     scored: { type: 'boolean' },
     gate_note: { type: 'string' },
     // Set when the one halt this phase can hit -- a NEXT_ACTION of
@@ -1820,7 +1842,6 @@ function checksPayload() {
 }
 // Red but not blocking (existingBranch) reaches the fixer as nothing at
 // all: it is visibility for a human, not work to hand to an agent.
-let preReviewFixCommitted = false
 const blockingChecksOpen = () => checksBlocking && redChecks.length > 0
 
 const sImpl = stage('implement')
@@ -1978,7 +1999,6 @@ if (blockingChecksOpen() && !sChecksPost.over()) {
     const implBase = impl.commit_range.includes('..')
       ? impl.commit_range.split('..')[0].trim() : impl.commit_range.trim()
     impl.commit_range = `${implBase}..${preReviewHead}`
-    preReviewFixCommitted = true
     lastCheckedHead = preReviewHead
     ;({ red: redChecks, unmeasured: unmeasuredChecks } = await runChecks())
     log(redChecks.length
@@ -2015,14 +2035,118 @@ stageSpend.checks = checksPreSpend + (stageSpend.checks ?? 0)
 // downstream of here.
 const DRAFT = {
   type: 'object', additionalProperties: false,
-  required: ['opened', 'detail'],
+  required: ['opened', 'detail', 'diffstat'],
   properties: {
     opened: { type: 'boolean' },
     url: { type: 'string' },
     number: { type: 'integer' },
     detail: { type: 'string' },
+    diffstat: { type: 'string' },
   },
 }
+// The exact command the diffstat probe runs, and its retry (below) rerun
+// verbatim: a numstat pass for added/removed per file, then an awk pass
+// counting, per file, added lines whose trimmed text opens a comment ("//",
+// "/*", "*", or "#", but never "#!", a shebang is code) -- sizeOf needs that
+// count per file, not one grand total, since only a code file's own comment
+// lines subtract from its own added count. Three markers bound the two
+// sections so parseDiffstat can tell a well-formed response from a
+// truncated or off-range one: the begin line names this exact range, the
+// middle line separates numstat from comment counts, and the end line is
+// the last thing printed.
+const diffstatCommandFor = (range) =>
+  `echo TOUCHSTONE_DIFFSTAT ${range}; ` +
+  `git -C ${wt.path} diff --numstat --no-renames ${range}; ` +
+  `echo TOUCHSTONE_COMMENT_LINES; ` +
+  `git -C ${wt.path} diff --unified=0 --no-color --no-renames ${range} | awk '` +
+  `/^\\+\\+\\+ /{ f=$0; sub(/^\\+\\+\\+ (b\\/)?/, "", f); cur=f; next } ` +
+  `/^\\+/{ if (cur=="") next; line=$0; sub(/^\\+/, "", line); t=line; ` +
+  `sub(/^[ \\t]+/, "", t); if (t ~ /^(\\/\\/|\\/\\*|\\*|#)/ && t !~ /^#!/) cnt[cur]++ } ` +
+  `END{ for (k in cnt) print cnt[k] "\\t" k }'; ` +
+  `echo TOUCHSTONE_DIFFSTAT_END`
+
+// Pure: reads only the shape of the probe's own output, never a model's
+// account of it. The begin line, naming this exact range, must be the first
+// non-empty line -- a diffstat whose begin line names a different range was
+// run against the wrong commits and must not be trusted -- and the end line
+// must be the last. A numstat row failing NUMSTAT_ROW, a missing
+// TOUCHSTONE_COMMENT_LINES marker, or a malformed comment-count row all
+// count as unmeasured, the same as either marker missing: anything this
+// strict about the shape either parses cleanly or is not trusted at all.
+const NUMSTAT_ROW = /^(\d+|-)\t(\d+|-)\t(.+)$/
+const parseDiffstat = (output, range) => {
+  const lines = String(output ?? '').split(/\r?\n/).map(l => l.replace(/\r$/, ''))
+  while (lines.length && lines[0].trim() === '') lines.shift()
+  while (lines.length && lines[lines.length - 1].trim() === '') lines.pop()
+  if (lines.length < 2) return null
+  if (lines[0] !== `TOUCHSTONE_DIFFSTAT ${range}`) return null
+  if (lines[lines.length - 1] !== 'TOUCHSTONE_DIFFSTAT_END') return null
+  const body = lines.slice(1, -1)
+  const markerIdx = body.indexOf('TOUCHSTONE_COMMENT_LINES')
+  if (markerIdx === -1) return null
+  const files = []
+  for (const line of body.slice(0, markerIdx)) {
+    if (line.trim() === '') continue
+    const m = NUMSTAT_ROW.exec(line)
+    if (!m) return null
+    files.push({ added: m[1] === '-' ? 0 : Number(m[1]), removed: m[2] === '-' ? 0 : Number(m[2]), path: m[3] })
+  }
+  const comments = new Map()
+  for (const line of body.slice(markerIdx + 1)) {
+    if (line.trim() === '') continue
+    const m = /^(\d+)\t(.+)$/.exec(line)
+    if (!m) return null
+    comments.set(m[2], Number(m[1]))
+  }
+  return { files, comments }
+}
+
+// test: test/, tests/, __tests__/ or spec/ dirs; test-* or test_* basenames;
+// *_test.*, *.test.*, *.spec.*, *Test.php. doc: *.md, *.rst, *.adoc, *.txt,
+// or anything under docs/. Everything else is code.
+const classifyPath = (path) => {
+  const base = path.split('/').pop() ?? path
+  if (/(^|\/)(test|tests|__tests__|spec)\//.test(path) ||
+      /^test[-_]/.test(base) || /_test\.[^.]+$/.test(base) ||
+      /\.test\.[^.]+$/.test(base) || /\.spec\.[^.]+$/.test(base) ||
+      /Test\.php$/.test(base)) return 'test'
+  if (/\.(md|rst|adoc|txt)$/.test(base) || /(^|\/)docs\//.test(path)) return 'doc'
+  return 'code'
+}
+
+// code = a code file's added lines minus its own comment lines; comment =
+// those subtracted lines; test/doc = their files' added lines as-is (a
+// comment inside a test file is still test code, not support layered on top
+// of it); codeChurn = code-file added + removed, which lensKeysFor and the
+// ratio halt both key on; totalChurn is every file's added + removed,
+// regardless of kind, for the single-file trivial case below, where kind
+// does not matter.
+const sizeOf = (parsed) => {
+  let code = 0, comment = 0, test = 0, doc = 0, codeChurn = 0, codeFiles = 0, totalChurn = 0
+  for (const f of parsed.files) {
+    totalChurn += f.added + f.removed
+    const kind = classifyPath(f.path)
+    if (kind === 'test') { test += f.added; continue }
+    if (kind === 'doc') { doc += f.added; continue }
+    codeFiles++
+    const c = parsed.comments.get(f.path) ?? 0
+    code += Math.max(0, f.added - c)
+    comment += c
+    codeChurn += f.added + f.removed
+  }
+  return { files: parsed.files.length, codeFiles, code, comment, test, doc, codeChurn, totalChurn }
+}
+
+// Replaces big/trivial: a real, measured diff decides the lens count, never
+// the implementer's own report of what it touched, which goes stale the
+// moment a pre-review checks fix lands after it without updating either
+// field.
+const lensKeysFor = (size) =>
+  size.files <= 1 && size.totalChurn < INLINE_LOC ? []
+  : size.codeChurn < ONE_LENS_LOC ? ['correctness']
+  : size.codeChurn > BIG_LOC || size.codeFiles > BIG_FILES ? ['correctness', 'advocate', 'requirements']
+  : ['correctness', 'advocate']
+
 enterPhase('Draft PR')
 const draft = await treeAgent(
   `Make sure this branch has a pull request to hang the run's progress on, ` +
@@ -2048,7 +2172,11 @@ const draft = await treeAgent(
   `gh fails, return opened=false with the error in detail and stop. Do not ` +
   `retry in a loop, do not open a non-draft PR instead, and do not merge.\n` +
   `Return the PR url and number for the PR this branch now has, whether you ` +
-  `opened it or adopted one that was already there.`,
+  `opened it or adopted one that was already there.\n` +
+  `Separately, measure the diff: run exactly this and put all of its output ` +
+  `verbatim in diffstat, unsummarised: neither this measurement nor the PR ` +
+  `it goes with reads what the commits changed as well as running the exact ` +
+  `command does.\n${diffstatCommandFor(impl.commit_range)}`,
   { label: 'draft-pr', phase: 'Draft PR', schema: DRAFT, model: 'haiku',
     effort: 'low' })
 // number, not opened: the PR phase addresses the draft by number to update and
@@ -2063,15 +2191,58 @@ if (draft?.number) {
 
 enterPhase('Review')
 const sReview = stage('review')
-// risky_areas is deliberately not part of this: it is a required schema field
-// and a planner asked for risky areas always returns some, so including it
-// pinned `big` to true and made the diffstat agent's answer decorative.
-const big = impl.files_changed.length > 5 || (impl.insertions ?? 999) > 200
-// files_changed and insertions describe the implementer's own commits, and
-// the checks-only fix commits after them without updating either. Since this
-// latch can skip review outright, a run that took that fix is never trivial.
-const trivial = !preReviewFixCommitted &&
-  impl.files_changed.length <= 1 && (impl.insertions ?? 999) < INLINE_LOC
+
+// A malformed or off-range diffstat gets one retry, at the same range, via a
+// dedicated call rather than re-running draft-pr's whole job again. Still
+// unmeasured after that halts here: this is a measurement problem, not a
+// code problem, the same principle unmeasuredChecksHalt and notExecutedHalt
+// apply elsewhere in this file.
+let sizeParsed = parseDiffstat(draft?.diffstat, impl.commit_range)
+if (!sizeParsed) {
+  const SIZE_PROBE = {
+    type: 'object', additionalProperties: false, required: ['diffstat'],
+    properties: { diffstat: { type: 'string' } },
+  }
+  const retried = await treeAgent(
+    `Run exactly this and put all of its output verbatim in diffstat, ` +
+    `unsummarised, then STOP.\n${diffstatCommandFor(impl.commit_range)}`,
+    { label: 'size', schema: SIZE_PROBE, model: 'haiku', effort: 'low' })
+  sizeParsed = parseDiffstat(retried?.diffstat, impl.commit_range)
+}
+if (!sizeParsed) {
+  sReview.close()
+  return await halted('Review', {
+    plan: plan.plan, implemented: impl.summary, gates: gatesPayload(), checks: checksPayload(),
+    note: `The diff could not be measured, even after a retry: the diffstat ` +
+      `probe's output did not have the shape parseDiffstat requires (the ` +
+      `begin/end markers naming ${impl.commit_range}, or a well-formed ` +
+      `numstat/comment-count row). This is a measurement problem, not a ` +
+      `code problem; re-run.`,
+  })
+}
+size = sizeOf(sizeParsed)
+
+// Below RATIO_MIN_CODE the ratio does not apply at all: an ordinary TDD
+// change reads well over 1:1 test-to-code and must not halt on that alone.
+// Above it, support code (tests, docs, and a code file's own comments)
+// outweighing the actual code by more than MAX_SUPPORT_RATIO halts before
+// any lens spends a token on a diff that is mostly something other than the
+// change itself.
+if (size.code >= RATIO_MIN_CODE) {
+  const supportRatio = typeof args?.supportRatio === 'number' ? args.supportRatio : MAX_SUPPORT_RATIO
+  const ratio = (size.test + size.doc + size.comment) / size.code
+  if (ratio > supportRatio) {
+    sReview.close()
+    return await halted('Review', {
+      plan: plan.plan, implemented: impl.summary, gates: gatesPayload(), checks: checksPayload(),
+      note: `Support code outweighs the actual change: ${size.code} code ` +
+        `line(s) against ${size.test} test, ${size.doc} doc and ` +
+        `${size.comment} comment line(s) (${ratio.toFixed(1)}:1), over the ` +
+        `${supportRatio}:1 limit. If this ratio is intentional for this ` +
+        `change, pass args.supportRatio to raise it, then re-run.`,
+    })
+  }
+}
 // Named, not positional. The count used to slice a list from the front, so the
 // third lens ran only when someone passed reviewers: 3 by hand, and the size
 // latches silently decided WHICH lenses existed rather than how many. The
@@ -2123,10 +2294,8 @@ const LENS = {
 
 // The advocate is a reviewer, counted and gated with the rest: a one-line diff
 // used to get zero reviewers and an advocate anyway, which is the ratio the
-// trivial latch exists to prevent.
-const lensKeys = trivial ? [] : (big
-  ? ['correctness', 'advocate', 'requirements']
-  : ['correctness', 'advocate'])
+// files<=1/totalChurn latch in lensKeysFor exists to prevent.
+const lensKeys = lensKeysFor(size)
 const lenses = (args?.reviewers != null
     ? lensKeys.slice(0, Math.max(0, Math.min(args.reviewers, lensKeys.length)))
     : lensKeys)
@@ -2134,8 +2303,9 @@ const lenses = (args?.reviewers != null
   .map(k => LENS[k])
 const reviewerCount = lenses.length
 if (!reviewerCount) {
-  log(`review skipped: ${impl.files_changed.length} file(s) / ${impl.insertions} insertion(s) ` +
-      `is under the ${INLINE_LOC}-line bar; adversarial lenses on a one-liner is the ratio this workflow is trying to avoid`)
+  log(`review skipped: ${size.files} file(s), ${size.codeChurn} code churn ` +
+      `line(s) is under the ${INLINE_LOC}-line bar; adversarial lenses on a ` +
+      `one-liner is the ratio this workflow is trying to avoid`)
 } else {
   log(`review: ${lenses.map(l => l.label).join(', ')}`)
 }
@@ -3256,6 +3426,7 @@ const result = {
   gates: gatesPayload(),
   checks: checksPayload(),
   mutation,
+  size,
   reviewers: reviewerCount,
   // Raised but never blocking: wrong category, no reproducer, an unmet
   // criterion whose quote was not found, out of range, or a residual of a

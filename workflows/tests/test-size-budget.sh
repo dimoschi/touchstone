@@ -118,7 +118,134 @@ async function scenarioSBG() {
   check('the run never reached the PR phase', callCount(captured, 'pr'), 0)
 }
 
-const SCENARIOS = [scenarioSBA, scenarioSBB, scenarioSBC, scenarioSBD, scenarioSBE, scenarioSBF, scenarioSBG]
+// Scenario SBH -- a single file under the inline bar gets no lenses at all,
+// the files<=1/totalChurn case in lensKeysFor.
+async function scenarioSBH() {
+  console.log('\n== scenario SBH: a tiny one-file diff gets no reviewer lenses')
+  const { result, captured } = await run({
+    diffstatFiles: [['a.js', 5, 0]],
+  })
+  check('no review lens ran', captured.calls.some(c => c.label.startsWith('review:')), false)
+  check('the run does not halt', result.halted_at, undefined)
+  check('the result reports zero reviewers', result.reviewers, 0)
+}
+
+// Scenario SBI -- under ONE_LENS_LOC a single correctness lens runs, and with
+// fewer than two reviewers review:dedup is skipped by the guard it already
+// has (reviewerCount < 2), so a small diff pays for neither a second lens
+// nor the dedup call.
+async function scenarioSBI() {
+  console.log('\n== scenario SBI: a small diff (2 files, under ONE_LENS_LOC) runs correctness only, no dedup')
+  const { captured } = await run({
+    diffstatFiles: [['a.js', 50, 0], ['b.js', 50, 0]],
+  })
+  check('correctness ran', captured.calls.some(c => c.label === 'review:correctness'), true)
+  check('advocate did not run', captured.calls.some(c => c.label === 'review:advocate'), false)
+  check('review:dedup never ran', callCount(captured, 'review:dedup'), 0)
+}
+
+// Scenario SBJ -- between ONE_LENS_LOC and BIG_LOC, with at most BIG_FILES
+// code files, correctness and the devil's advocate both run.
+async function scenarioSBJ() {
+  console.log('\n== scenario SBJ: a mid-sized diff runs correctness and advocate')
+  const { result } = await run({
+    diffstatFiles: [['a.js', 100, 0], ['b.js', 100, 0]],
+  })
+  check('two reviewers', result.reviewers, 2)
+}
+
+// Scenario SBK -- past BIG_LOC, or past BIG_FILES code files, the
+// requirements lens joins the other two.
+async function scenarioSBK() {
+  console.log('\n== scenario SBK: a big diff (codeChurn > BIG_LOC) adds the requirements lens')
+  const { result, captured } = await run({
+    diffstatFiles: [['a.js', 500, 0]],
+    ticketResult: { found: true, summary: 's', description: 'the ticket', comments: '' },
+  })
+  check('three reviewers', result.reviewers, 3)
+  check('the requirements lens ran', captured.calls.some(c => c.label === 'review:requirements'), true)
+}
+
+// Scenario SBL -- more than BIG_FILES code files also trips the big case,
+// even when each file's own churn is small.
+async function scenarioSBL() {
+  console.log('\n== scenario SBL: more than BIG_FILES code files also adds the requirements lens, even under BIG_LOC')
+  const { result } = await run({
+    // codeChurn = 6*30 = 180, between ONE_LENS_LOC and BIG_LOC: only the
+    // file count (6 > BIG_FILES) should be why this promotes to three.
+    diffstatFiles: [['a.js', 30, 0], ['b.js', 30, 0], ['c.js', 30, 0], ['d.js', 30, 0], ['e.js', 30, 0], ['f.js', 30, 0]],
+  })
+  check('three reviewers', result.reviewers, 3)
+}
+
+// Scenario SBM -- a diffstat probe that never produces a well-formed
+// response (neither the first call nor its one retry) halts at Review as a
+// measurement problem, never reaching a lens.
+async function scenarioSBM() {
+  console.log('\n== scenario SBM: an unmeasurable diffstat halts after one retry, never reaching a lens')
+  const { result, captured } = await run({
+    sizeUnmeasured: true,
+  })
+  check('halted at Review', result.halted_at, 'Review')
+  check('the retry ran exactly once', callCount(captured, 'size'), 1)
+  check('no review lens ran', captured.calls.some(c => c.label.startsWith('review:')), false)
+  check('the note says this is a measurement problem', (result.note ?? '').includes('measurement problem'), true)
+}
+
+// Scenario SBN -- a diffstat whose begin line names a different range than
+// the one asked about is unmeasured too, not silently accepted; it still
+// gets its retry, which recovers here since the retry names the right range.
+async function scenarioSBN() {
+  console.log('\n== scenario SBN: a diffstat naming the wrong range counts as unmeasured, retried and recovered')
+  const { result, captured } = await run({
+    diffstat: 'TOUCHSTONE_DIFFSTAT wrong..range\n100\t0\ta.js\nTOUCHSTONE_COMMENT_LINES\nTOUCHSTONE_DIFFSTAT_END',
+  })
+  check('the retry ran exactly once', callCount(captured, 'size'), 1)
+  check('the run recovered rather than halting', result.halted_at, undefined)
+}
+
+// Scenario SBO -- the ratio halt: support code (here, a test file) far
+// outweighing the actual code halts before any lens runs, and the note
+// carries every count and the limit.
+async function scenarioSBO() {
+  console.log('\n== scenario SBO: support code outweighing the actual change halts before any lens runs')
+  const { result, captured } = await run({
+    diffstatFiles: [['a.js', 20, 0], ['tests/x.js', 100, 0]],
+  })
+  check('halted at Review', result.halted_at, 'Review')
+  check('no review lens ran', captured.calls.some(c => c.label.startsWith('review:')), false)
+  check('the note carries the code count', (result.note ?? '').includes('20 code'), true)
+  check('the note carries the test count', (result.note ?? '').includes('100 test'), true)
+  check('the note carries the computed ratio', (result.note ?? '').includes('5.0:1'), true)
+  check('the note carries the limit', (result.note ?? '').includes('3:1 limit'), true)
+  check('the note names the override', (result.note ?? '').includes('args.supportRatio'), true)
+}
+
+// Scenario SBP -- below RATIO_MIN_CODE the ratio never applies, which is
+// what lets a change that is mostly tests by design (an ordinary TDD change)
+// through without halting.
+async function scenarioSBP() {
+  console.log('\n== scenario SBP: a tests-only change under the code floor does not trip the ratio halt')
+  const { result } = await run({
+    diffstatFiles: [['a.js', 5, 0], ['tests/x.js', 500, 0]],
+  })
+  check('the run does not halt on the ratio', (result.note ?? '').includes('Support code outweighs'), false)
+}
+
+// Scenario SBQ -- args.supportRatio raises the limit for a run that knows
+// its own ratio is intentional.
+async function scenarioSBQ() {
+  console.log('\n== scenario SBQ: args.supportRatio raises the ratio limit past what would otherwise halt')
+  const { result } = await run({
+    args: { supportRatio: 10 },
+    diffstatFiles: [['a.js', 20, 0], ['tests/x.js', 100, 0]],
+  })
+  check('the run does not halt', result.halted_at, undefined)
+}
+
+const SCENARIOS = [scenarioSBA, scenarioSBB, scenarioSBC, scenarioSBD, scenarioSBE, scenarioSBF, scenarioSBG,
+  scenarioSBH, scenarioSBI, scenarioSBJ, scenarioSBK, scenarioSBL, scenarioSBM, scenarioSBN, scenarioSBO,
+  scenarioSBP, scenarioSBQ]
 JS_EOF
 
 finish
