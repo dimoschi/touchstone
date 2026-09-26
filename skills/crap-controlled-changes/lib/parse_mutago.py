@@ -106,6 +106,10 @@ def print_survivor(disk_path, m):
         print(f"    kill hint: {m['kill_hint']}")
 
 
+def in_span(span, line):
+    return span is not None and line is not None and span[0] <= line <= span[1]
+
+
 def print_exempt(exempt):
     # stderr so the row capture in mutation-check-go.sh stays clean. Never
     # silent: an exemption the user cannot see is a gate that shrank without
@@ -125,9 +129,8 @@ def report_survivors(path, prefix, allowed):
 
     exempt = []
     for disk_path, line, m in rows:
-        loc = f"{disk_path}:{m.get('line', '?')}"
-        span = spans.get(disk_path)
-        if span and line is not None and span[0] <= line <= span[1]:
+        if in_span(spans.get(disk_path), line):
+            loc = f"{disk_path}:{m.get('line', '?')}"
             exempt.append(f"{loc:<42} {m.get('mutator', '?')}")
             continue
         print_survivor(disk_path, m)
