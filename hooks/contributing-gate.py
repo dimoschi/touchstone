@@ -29,7 +29,7 @@ from copilot_session_evidence import (
     canonical_path,
     read_session_paths,
 )
-from hook_invocation import normalize_invocation, tool_input_path
+from hook_invocation import normalize_invocation, subagent_transcript, tool_input_path
 
 # Extensionless CONTRIBUTORS is deliberately absent: it is commonly a generated
 # list of names rather than a guide, so gating on it costs a read and teaches
@@ -215,18 +215,6 @@ def claude_guides(data):
     return [g for g in find_guides(top) if resolved(g) != resolved(target)]
 
 
-def agent_transcript(parent, agent_id):
-    """A subagent's own transcript, or None if it is not on disk.
-
-    Claude Code writes it beside the parent's, under <session>/subagents/, and
-    one level deeper under workflows/<run>/ for a pipeline agent. The id is
-    matched rather than the directory assumed, so both layouts resolve.
-    """
-    session_dir = Path(parent).with_suffix('')
-    found = sorted((session_dir / 'subagents').glob(f'**/agent-{agent_id}.jsonl'))
-    return found[0] if found else None
-
-
 def evidence_transcript(data):
     """(transcript that would record the acting agent's Reads, None), or
     (None, why we cannot tell).
@@ -247,7 +235,7 @@ def evidence_transcript(data):
     agent_id = data.get('agent_id')
     if not agent_id:
         return transcript, None
-    own = agent_transcript(transcript, agent_id)
+    own = subagent_transcript(transcript, agent_id)
     if own is None:
         return None, f'no transcript on disk for subagent {agent_id}'
     return own, None

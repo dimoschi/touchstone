@@ -28,6 +28,18 @@ def tool_input_path(tool_input: Mapping[str, object]) -> str | None:
     return None
 
 
+def subagent_transcript(parent: str | Path, agent_id: str) -> Path | None:
+    """A subagent's own transcript, or None if it is not on disk.
+
+    Claude Code writes it beside the parent's, under <session>/subagents/, and
+    one level deeper under workflows/<run>/ for a pipeline agent. The id is
+    matched rather than the directory assumed, so both layouts resolve.
+    """
+    session_dir = Path(parent).with_suffix("")
+    found = sorted((session_dir / "subagents").glob(f"**/agent-{agent_id}.jsonl"))
+    return found[0] if found else None
+
+
 def normalize_invocation(raw: object) -> HookInvocation | None:
     """Return the common input shape, or None for a malformed hook event."""
     if not isinstance(raw, Mapping):

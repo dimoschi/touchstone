@@ -174,6 +174,20 @@ def test_base_branch_names_without_origin_head_is_just_defaults(tmp_path):
     assert base_branch.base_branch_names(repo) == base_branch.BASE_BRANCHES
 
 
+def test_git_common_dir_resolves_worktree_to_the_shared_git_dir(tmp_path):
+    repo = _repo(tmp_path)
+    # A sibling of tmp_path, not tmp_path.parent / "wt": every test sharing
+    # this file's tmp_path.parent (the pytest session's own temp root) would
+    # otherwise fight over the same worktree directory.
+    wt_dir = tmp_path.parent / f"{tmp_path.name}-gcd-wt"
+    _git("worktree", "add", "-q", "-b", "gcdbranch", str(wt_dir), cwd=repo)
+    assert base_branch.git_common_dir(wt_dir) == str(repo / ".git")
+
+
+def test_git_common_dir_none_outside_repo(tmp_path):
+    assert base_branch.git_common_dir(tmp_path) is None
+
+
 def test_repo_common_root_resolves_worktree_to_shared_root(tmp_path):
     repo = _repo(tmp_path)
     wt_dir = tmp_path.parent / "wt"

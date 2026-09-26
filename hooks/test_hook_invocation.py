@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from hook_invocation import normalize_invocation, tool_input_path
+from hook_invocation import normalize_invocation, subagent_transcript, tool_input_path
 
 
 def _base(**overrides):
@@ -169,3 +169,24 @@ def test_tool_input_path_prefers_file_path_then_path():
     assert tool_input_path({}) is None
     assert tool_input_path({"file_path": ""}) is None
     assert tool_input_path({"file_path": 5}) is None
+
+
+def test_subagent_transcript_finds_the_file_beside_the_parent(tmp_path):
+    parent = tmp_path / "s1.jsonl"
+    dest = tmp_path / "s1" / "subagents"
+    dest.mkdir(parents=True)
+    (dest / "agent-a1.jsonl").write_text("")
+    assert subagent_transcript(parent, "a1") == dest / "agent-a1.jsonl"
+
+
+def test_subagent_transcript_finds_a_workflow_agent_one_level_deeper(tmp_path):
+    parent = tmp_path / "s1.jsonl"
+    dest = tmp_path / "s1" / "subagents" / "workflows" / "wf_abc"
+    dest.mkdir(parents=True)
+    (dest / "agent-a1.jsonl").write_text("")
+    assert subagent_transcript(parent, "a1") == dest / "agent-a1.jsonl"
+
+
+def test_subagent_transcript_missing_is_none(tmp_path):
+    parent = tmp_path / "s1.jsonl"
+    assert subagent_transcript(parent, "ghost") is None
