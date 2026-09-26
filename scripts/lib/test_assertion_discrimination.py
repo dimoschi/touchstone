@@ -100,17 +100,17 @@ def test_parses_js_calls_inside_the_heredoc():
     assert 'the note does not recommend cutting a new branch' in labels
 
 
-def test_js_call_scenario_is_the_enclosing_async_function():
+def test_js_call_scenario_is_the_enclosing_console_log_header():
     calls = parse_suite_source('workflows/tests/test-worktree-checks.sh', JS_SUITE)
     by_label = {c.label: c for c in calls}
-    assert by_label['halted at Worktree'].scenario == 'scenarioBM'
-    assert by_label['the note does not recommend cutting a new branch'].scenario == 'scenarioBM'
+    assert by_label['halted at Worktree'].scenario == '== scenario BM'
+    assert by_label['the note does not recommend cutting a new branch'].scenario == '== scenario BM'
 
 
 def test_js_label_concatenation_is_evaluated():
     calls = parse_suite_source('workflows/tests/test-worktree-checks.sh', JS_SUITE)
-    by_scenario = {c.scenario: c for c in calls if c.scenario == 'scenarioBN'}
-    assert by_scenario['scenarioBN'].label == (
+    by_scenario = {c.scenario: c for c in calls if c.scenario == '== scenario BN'}
+    assert by_scenario['== scenario BN'].label == (
         'cutting a new branch is safe advice here: the lookup already '
         'covered every worktree and branch for this ticket and found none'
     )
@@ -175,7 +175,7 @@ def test_extract_statuses_reads_ok_and_fail_lines_in_order():
 def test_match_call_status_is_positional_and_stops_at_a_mismatch():
     from assertion_discrimination import match_call_status
     calls = parse_suite_source('workflows/tests/test-worktree-checks.sh', JS_SUITE)
-    scenario_calls = [c for c in calls if c.scenario == 'scenarioBM']
+    scenario_calls = [c for c in calls if c.scenario == '== scenario BM']
     stdout = (
         "  ok:   halted at Worktree (\"Worktree\")\n"
         "  ok:   the note does not recommend cutting a new branch (false)\n"
@@ -188,7 +188,7 @@ def test_match_call_status_is_positional_and_stops_at_a_mismatch():
 def test_match_call_status_marks_unreached_calls_as_none():
     from assertion_discrimination import match_call_status
     calls = parse_suite_source('workflows/tests/test-worktree-checks.sh', JS_SUITE)
-    scenario_calls = [c for c in calls if c.scenario == 'scenarioBM']
+    scenario_calls = [c for c in calls if c.scenario == '== scenario BM']
     stdout = "  ok:   halted at Worktree (\"Worktree\")\n"  # scenario aborted before the 2nd check
     statuses = match_call_status(scenario_calls, stdout)
     assert statuses[scenario_calls[0]] == 'ok'
@@ -450,3 +450,47 @@ def test_bash_call_supports_a_bare_top_level_single_quoted_label():
     calls = parse_suite_source('workflows/tests/test-static.sh', source)
     assert len(calls) == 1
     assert calls[0].label == 'a bare single-quoted label'
+
+
+def test_is_header_line_matches_a_leading_double_equals():
+    from assertion_discrimination import _is_header_line
+    assert _is_header_line('== a header') is True
+    assert _is_header_line('  == an indented header') is True
+    assert _is_header_line('  ok:   not a header') is False
+
+
+def test_split_output_by_group_puts_pre_header_lines_in_the_none_group():
+    from assertion_discrimination import _split_output_by_group
+    stdout = "leading noise\n== first\n  ok:   a (1)\n== second\n  ok:   b (2)\n"
+    blocks = _split_output_by_group(stdout, [None, '== first', '== second'])
+    assert blocks[None] == 'leading noise'
+    assert 'ok:   a (1)' in blocks['== first']
+    assert 'ok:   b (2)' in blocks['== second']
+
+
+def test_split_output_by_group_fills_an_unowned_header_with_its_own_block():
+    from assertion_discrimination import _split_output_by_group
+    # A header with no check of its own (see suite_ordered_groups) still
+    # consumes one block, keeping every later header correctly aligned.
+    stdout = "== empty section\nnarration only\n== real section\n  ok:   c (1)\n"
+    blocks = _split_output_by_group(stdout, [None, '== empty section', '== real section'])
+    assert blocks[None] == ''
+    assert blocks['== empty section'] == '== empty section\nnarration only'
+    assert 'ok:   c (1)' in blocks['== real section']
+
+
+def test_scenario_execution_order_reads_the_modern_scenarios_array():
+    from assertion_discrimination import _scenario_execution_order
+    body = "const SCENARIOS = [scenarioA, scenarioB]\n"
+    assert _scenario_execution_order(body) == ['scenarioA', 'scenarioB']
+
+
+def test_scenario_execution_order_reads_the_historical_inline_for_loop():
+    from assertion_discrimination import _scenario_execution_order
+    body = "for (const scenario of [scenarioA, scenarioB]) {\n  await scenario()\n}\n"
+    assert _scenario_execution_order(body) == ['scenarioA', 'scenarioB']
+
+
+def test_scenario_execution_order_is_empty_without_either_form():
+    from assertion_discrimination import _scenario_execution_order
+    assert _scenario_execution_order("async function scenarioA() {}\n") == []

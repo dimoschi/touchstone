@@ -17,6 +17,7 @@ job, via `run_suite` and `git_show`/`git_archive` below.
 
 from __future__ import annotations
 
+import bisect
 import fnmatch
 import os
 import re
@@ -312,15 +313,17 @@ def _strip_shell_word(word: str) -> str:
     return word
 
 
-def _bash_section(source: str, before: int) -> str | None:
-    """The text of the nearest `echo "== ..."` line before `before`, if any."""
-    header = None
-    for m in re.finditer(r'^[ \t]*echo\s+"(==[^"]*)"', source[:before], re.MULTILINE):
-        header = m.group(1)
-    return header
+_BASH_HEADER_RE = re.compile(r'^[ \t]*echo\s+"(==[^"]*)"', re.MULTILINE)
 
 
-def _parse_bash_calls(file: str, source: str) -> list[Call]:
+def _nearest_header(headers: tuple[list[int], list[str]], offset: int) -> str | None:
+    """The text of the last header at or before `offset`, or None before the first one."""
+    positions, texts = headers
+    idx = bisect.bisect_right(positions, offset) - 1
+    return texts[idx] if idx >= 0 else None
+
+
+def _parse_bash_calls(file: str, source: str, headers: tuple[list[int], list[str]]) -> list[Call]:
     calls = []
     for m in _BASH_CHECK_RE.finditer(source):
         args_start = m.end()
@@ -332,7 +335,7 @@ def _parse_bash_calls(file: str, source: str) -> list[Call]:
         calls.append(Call(
             kind='bash', file=file,
             start_line=_line_of(source, m.start()), end_line=_line_of(source, end),
-            scenario=_bash_section(source, m.start()),
+            scenario=_nearest_header(headers, m.start()),
             label_src=label_src, label=_strip_shell_word(label_src),
             got_src=got_src, want_src=want_src,
             text=_collapse_ws(text),
@@ -342,11 +345,18 @@ def _parse_bash_calls(file: str, source: str) -> list[Call]:
 
 
 # ---------------------------------------------------------------------------
-# JS `check(label, got, want)` calls inside a `run_js_scenarios <<'EOF'` heredoc.
+# JS `check(label, got, want)` calls inside a JS heredoc: `run_js_scenarios
+# <<'EOF'` (workflows/tests/harness.sh, gh-118 onward) or the older, one-heredoc-
+# per-file `cat > "$WORK/harness.mjs" <<'EOF'` it replaced, needed to judge an
+# assertion against a revision from before that split.
 # ---------------------------------------------------------------------------
 
-_HEREDOC_START_RE = re.compile(r'run_js_scenarios[ \t]*<<[ \t]*[\'"]?(\w+)[\'"]?[ \t]*\n')
-_JS_CHECK_RE = re.compile(r'(?<![\w.])check\(')
+_HEREDOC_START_RE = re.compile(
+    r'(?:run_js_scenarios|cat > "\$WORK/harness\.mjs")[ \t]*<<[ \t]*[\'"]?(\w+)[\'"]?[ \t]*\n')
+# Excludes the historical heredoc's own `function check(label, got, want) {`
+# definition (harness.sh's equivalent lives outside every suite file's own
+# source, so this only ever matches in the pre-split, one-heredoc-per-file form).
+_JS_CHECK_RE = re.compile(r'(?<![\w.])(?<!function )check\(')
 _JS_SCENARIO_RE = re.compile(r'^async function (scenario\w+)\s*\(', re.MULTILINE)
 _JS_QUOTES = "'\"`"
 _JS_BRACKETS = {'(': ')', '[': ']', '{': '}'}
@@ -429,10 +439,84 @@ def _eval_js_label(expr: str) -> str | None:
     return ''.join(values)
 
 
+_CONSOLE_LOG_RE = re.compile(r'console\.log\(')
+
+
+def _js_header_at(source: str, open_paren: int) -> str | None:
+    """The header text of a `console.log('\\n==...')` call whose `(` is at
+    `open_paren`, or None if its argument is not a bare `'\\n==...'` literal
+    (a plain progress message, not a section/scenario header)."""
+    close = _scan_balanced(source, open_paren, '(', ')', _JS_QUOTES)
+    arg = source[open_paren + 1:close - 1].strip()
+    if not _is_bare_js_literal(arg):
+        return None
+    value = _unescape_js_string(arg[1:-1])
+    if not value.startswith('\n=='):
+        return None
+    return value[1:]
+
+
+_JS_SCENARIO_DEF_RE = re.compile(r'^async function (scenario\w+)\s*\([^)]*\)\s*\{', re.MULTILINE)
+# Modern form (workflows/tests/harness.sh onward): `const SCENARIOS = [...]`,
+# run by a separate footer loop. Historical form (predating that split): the
+# footer loops directly `for (const scenario of [...])`, no intermediate name.
+_SCENARIOS_ARRAY_RE = re.compile(
+    r'(?:const SCENARIOS\s*=|for\s*\(\s*const\s+scenario\s+of)\s*\[([^\]]*)\]')
+
+
+def _scenario_header_texts(body: str) -> dict[str, str]:
+    """Function name -> its own header text, for every `async function
+    scenarioXxx` in `body` whose first `console.log` is a bare `\n==...` header."""
+    result = {}
+    for m in _JS_SCENARIO_DEF_RE.finditer(body):
+        end = _scan_balanced(body, m.end() - 1, '{', '}', _JS_QUOTES)
+        log_m = _CONSOLE_LOG_RE.search(body, m.end(), end)
+        if log_m:
+            text = _js_header_at(body, log_m.end() - 1)
+            if text is not None:
+                result[m.group(1)] = text
+    return result
+
+
+def _scenario_execution_order(body: str) -> list[str]:
+    """Function names in `const SCENARIOS = [...]` order: the order they run
+    in, which need not be the order they are defined in the file."""
+    m = _SCENARIOS_ARRAY_RE.search(body)
+    if not m:
+        return []
+    return [name.strip() for name in m.group(1).split(',') if name.strip()]
+
+
+def _bash_headers(source: str, heredocs: list[tuple[int, int, int]]) -> tuple[list[int], list[str]]:
+    """(positions, texts) of every bash `echo "==..."` header outside every
+    heredoc, in source order (which is execution order for bash)."""
+    found = [(m.start(), m.group(1)) for m in _BASH_HEADER_RE.finditer(source)
+             if not any(s <= m.start() < e for s, e, _ in heredocs)]
+    return [p for p, _ in found], [t for _, t in found]
+
+
+def _js_header_texts_ordered(heredocs: list[tuple[int, int, int]], source: str) -> list[str]:
+    """Every heredoc's own scenario headers, in `const SCENARIOS = [...]`
+    order (which need not match the order the `async function`s are
+    defined in), heredocs themselves taken in source order."""
+    texts = []
+    for body_start, body_end, _ in heredocs:
+        body = source[body_start:body_end]
+        by_name = _scenario_header_texts(body)
+        texts.extend(by_name[name] for name in _scenario_execution_order(body) if name in by_name)
+    return texts
+
+
 def _parse_js_calls(file: str, source: str) -> list[Call]:
     calls = []
     for body_start, body_end, first_line in _heredoc_spans(source):
         body = source[body_start:body_end]
+        # A call's `scenario` is its own function's header text, looked up by
+        # name, never by position: `const SCENARIOS = [...]` can run functions
+        # in a different order than they are defined in, so a call's real
+        # source offset does not, in general, fall between the right two
+        # headers' offsets (see _scenario_execution_order).
+        header_by_function = _scenario_header_texts(body)
         for m in _JS_CHECK_RE.finditer(body):
             open_paren = m.end() - 1
             close = _scan_balanced(body, open_paren, '(', ')', _JS_QUOTES)
@@ -441,17 +525,17 @@ def _parse_js_calls(file: str, source: str) -> list[Call]:
             if len(args) != 3:
                 continue
             label_src, got_src, want_src = (a.strip() for a in args)
-            scenario = _js_scenario_at(body, m.start())
+            function_name = _js_scenario_at(body, m.start())
             text = body[m.start():close]
             calls.append(Call(
                 kind='js', file=file,
                 start_line=first_line - 1 + _line_of(body, m.start()),
                 end_line=first_line - 1 + _line_of(body, close),
-                scenario=scenario,
+                scenario=header_by_function.get(function_name),
                 label_src=label_src, label=_eval_js_label(label_src),
                 got_src=got_src, want_src=want_src,
                 text=_collapse_ws(text),
-                dependent=_scenario_calls_run(body, scenario),
+                dependent=_scenario_calls_run(body, function_name),
             ))
     return calls
 
@@ -610,12 +694,17 @@ def archive_tree(repo: str, rev: str, dest: str) -> None:
         raise RuntimeError(f'archiving {rev} from {repo} failed (git={git_rc}, tar={tar_proc.returncode}): {tar_proc.stderr}')
 
 
-def run_suite(suite_path: str, scenario: str | None) -> tuple[str, int]:
-    """Runs one suite file as its own process, optionally scoped to one JS scenario."""
-    env = dict(os.environ)
-    if scenario is not None:
-        env['TOUCHSTONE_SCENARIOS'] = scenario
-    proc = subprocess.run(['bash', suite_path], capture_output=True, text=True, env=env)
+def run_suite(suite_path: str) -> tuple[str, int]:
+    """Runs one suite file as its own process, the whole file every time.
+
+    Never scoped to one scenario via TOUCHSTONE_SCENARIOS: a counterfactual
+    tree's deliver-pipeline.js is the only thing that differs from head, and
+    an older revision used as `head` for a historical demonstration predates
+    that env var entirely, so relying on it here would silently run every
+    scenario anyway and misalign the positional matching below. `_ordered_groups`
+    and `_split_output_by_group` read the whole run instead.
+    """
+    proc = subprocess.run(['bash', suite_path], capture_output=True, text=True)
     return proc.stdout + proc.stderr, proc.returncode
 
 
@@ -637,19 +726,45 @@ def _group_by_scenario_per_file(calls: list[Call]) -> dict[str, dict[str | None,
     return by_file
 
 
-def _run_groups(tree: str, head_calls_by_file: dict[str, list[Call]],
+def _is_header_line(line: str) -> bool:
+    return line.lstrip().startswith('==')
+
+
+def _split_output_by_group(stdout: str, ordered_groups: list[str | None]) -> dict[str | None, str]:
+    """`stdout` split at each `== ...` header line, the blocks zipped
+    positionally against `ordered_groups` (see `suite_ordered_groups`): index
+    0 is whatever precedes the first header, then one block per header,
+    whether or not it turns out to own any call -- which is what keeps this
+    aligned even when a section/scenario earlier in the file has no checks
+    of its own (a header that owns none still consumes one block of output).
+    """
+    if ordered_groups == [None]:
+        return {None: stdout}
+    blocks: list[list[str]] = [[]]
+    for line in stdout.splitlines():
+        if _is_header_line(line):
+            blocks.append([line])
+        else:
+            blocks[-1].append(line)
+    return {g: '\n'.join(block) for g, block in zip(ordered_groups, blocks)}
+
+
+def _run_groups(tree: str, head: HeadIndex,
                  calls: list[Call]) -> list[tuple[str, list[Call], dict[Call, str | None], bool]]:
-    """Runs `calls`, one process per (file, scenario) group, sharing that
-    plumbing between `_passing_at_head` and `_survivors_of_counterfactual`:
-    both need the same groups run and matched against `tree`, only the
-    verdict they read off the result differs."""
+    """Runs `calls`, one process per file, sharing that plumbing between
+    `_passing_at_head` and `_survivors_of_counterfactual`: both need the same
+    files run and matched against `tree`, only the verdict they read off the
+    result differs."""
     results = []
     for f, groups in _group_by_scenario_per_file(calls).items():
+        all_calls_in_file = head.calls[f]
+        stdout, _ = run_suite(os.path.join(tree, f))
+        blocks = _split_output_by_group(stdout, suite_ordered_groups(head.sources[f]))
+        saw_any_record = bool(extract_statuses(stdout))
         for scenario, group in groups.items():
-            all_in_group = [c for c in head_calls_by_file[f] if c.scenario == scenario]
-            stdout, _ = run_suite(os.path.join(tree, f), scenario)
-            statuses = match_call_status(all_in_group, stdout)
-            results.append((f, group, statuses, bool(extract_statuses(stdout))))
+            all_in_group = [c for c in all_calls_in_file if c.scenario == scenario]
+            statuses = match_call_status(all_in_group, blocks.get(scenario, ''))
+            results.append((f, group, statuses, saw_any_record))
     return results
 
 
@@ -659,8 +774,7 @@ def _require_records(saw_record: dict[str, bool]) -> None:
             raise NoRecordsError(f)
 
 
-def _passing_at_head(tree: str, head_calls_by_file: dict[str, list[Call]],
-                      candidates: list[Call]) -> list[Call]:
+def _passing_at_head(tree: str, head: HeadIndex, candidates: list[Call]) -> list[Call]:
     """Of `candidates`, the ones that actually pass when `tree` is run as-is.
 
     A candidate already failing (or unreached) at head is a different,
@@ -671,17 +785,16 @@ def _passing_at_head(tree: str, head_calls_by_file: dict[str, list[Call]],
     """
     passing = []
     saw_record: dict[str, bool] = {}
-    for f, group, statuses, this_run_had_records in _run_groups(tree, head_calls_by_file, candidates):
+    for f, group, statuses, this_run_had_records in _run_groups(tree, head, candidates):
         saw_record[f] = saw_record.get(f, False) or this_run_had_records
         passing.extend(c for c in group if statuses.get(c) == 'ok')
     _require_records(saw_record)
     return passing
 
 
-def _survivors_of_counterfactual(tree: str, head_calls_by_file: dict[str, list[Call]],
-                                  pending: list[Call]) -> list[Call]:
+def _survivors_of_counterfactual(tree: str, head: HeadIndex, pending: list[Call]) -> list[Call]:
     """Of `pending`, the calls this one counterfactual tree did NOT fail."""
-    return [c for _, group, statuses, _ in _run_groups(tree, head_calls_by_file, pending)
+    return [c for _, group, statuses, _ in _run_groups(tree, head, pending)
             for c in group if statuses.get(c) != 'FAIL']
 
 
@@ -696,60 +809,76 @@ def _mutant_contents(head_script: str, repo: str, base: str, head: str) -> list[
     return contents
 
 
+@dataclass(frozen=True)
+class HeadIndex:
+    """Head's own suite files, parsed once and kept for the whole run: every
+    counterfactual tree still carries head's suite files unchanged (only
+    `PIPELINE_SCRIPT` is swapped), so re-parsing them per counterfactual
+    would just repeat the same answer."""
+    calls: dict[str, list[Call]]
+    sources: dict[str, str]
+
+
 def _parse_calls_at(repo: str, rev: str, file: str) -> list[Call]:
     return parse_suite_source(file, git_show(repo, rev, file) or '')
 
 
-def _collect_candidates(repo: str, base: str, head: str) -> tuple[dict[str, list[Call]], list[Call]]:
+def _build_head_index(repo: str, head: str) -> HeadIndex:
+    sources = {f: git_show(repo, head, f) or '' for f in list_suite_files(repo, head)}
+    calls = {f: parse_suite_source(f, src) for f, src in sources.items()}
+    return HeadIndex(calls=calls, sources=sources)
+
+
+def _collect_candidates(repo: str, base: str, head: str) -> tuple[HeadIndex, list[Call]]:
     base_texts = {c.text for f in list_suite_files(repo, base) for c in _parse_calls_at(repo, base, f)}
-    head_calls_by_file = {f: _parse_calls_at(repo, head, f) for f in list_suite_files(repo, head)}
-    candidates = [c for calls in head_calls_by_file.values() for c in select_candidates(calls, base_texts)]
-    return head_calls_by_file, candidates
+    head_index = _build_head_index(repo, head)
+    candidates = [c for calls in head_index.calls.values() for c in select_candidates(calls, base_texts)]
+    return head_index, candidates
 
 
 def _try_counterfactual(tmp: str, name: str, head_tree: str, script_content: str,
-                         head_calls_by_file: dict[str, list[Call]], pending: list[Call]) -> list[Call]:
+                         head: HeadIndex, pending: list[Call]) -> list[Call]:
     """Copies `head_tree`, swaps in `script_content`, and returns whichever of
     `pending` survive a run against it (see `_survivors_of_counterfactual`)."""
     tree = os.path.join(tmp, name)
     shutil.copytree(head_tree, tree)
     with open(os.path.join(tree, PIPELINE_SCRIPT), 'w') as fh:
         fh.write(script_content)
-    survivors = _survivors_of_counterfactual(tree, head_calls_by_file, pending)
+    survivors = _survivors_of_counterfactual(tree, head, pending)
     shutil.rmtree(tree)
     return survivors
 
 
 def _run_mutant_sweep(repo: str, base: str, head: str, tmp: str, head_tree: str,
-                       head_calls_by_file: dict[str, list[Call]], pending: list[Call]) -> list[Call]:
+                       head_index: HeadIndex, pending: list[Call]) -> list[Call]:
     head_script = git_show(repo, head, PIPELINE_SCRIPT) or ''
     for i, mutated in enumerate(_mutant_contents(head_script, repo, base, head)):
         if not pending:
             break
-        pending = _try_counterfactual(tmp, f'mutant-{i}', head_tree, mutated, head_calls_by_file, pending)
+        pending = _try_counterfactual(tmp, f'mutant-{i}', head_tree, mutated, head_index, pending)
     return pending
 
 
 def _run_counterfactuals(repo: str, base: str, head: str, tmp: str, head_tree: str,
-                          head_calls_by_file: dict[str, list[Call]], pending: list[Call]) -> list[Call]:
+                          head_index: HeadIndex, pending: list[Call]) -> list[Call]:
     base_script = git_show(repo, base, PIPELINE_SCRIPT)
     if pending and base_script is not None:
-        pending = _try_counterfactual(tmp, 'revert', head_tree, base_script, head_calls_by_file, pending)
+        pending = _try_counterfactual(tmp, 'revert', head_tree, base_script, head_index, pending)
     if pending:
-        pending = _run_mutant_sweep(repo, base, head, tmp, head_tree, head_calls_by_file, pending)
+        pending = _run_mutant_sweep(repo, base, head, tmp, head_tree, head_index, pending)
     return pending
 
 
 def find_reports(repo: str, base: str, head: str) -> list[Report]:
-    head_calls_by_file, candidates = _collect_candidates(repo, base, head)
+    head_index, candidates = _collect_candidates(repo, base, head)
     if not candidates:
         return []
 
     with tempfile.TemporaryDirectory(prefix='touchstone-assertion-discrimination-') as tmp:
         head_tree = os.path.join(tmp, 'head')
         archive_tree(repo, head, head_tree)
-        pending = _passing_at_head(head_tree, head_calls_by_file, candidates)
-        pending = _run_counterfactuals(repo, base, head, tmp, head_tree, head_calls_by_file, pending)
+        pending = _passing_at_head(head_tree, head_index, candidates)
+        pending = _run_counterfactuals(repo, base, head, tmp, head_tree, head_index, pending)
 
     return sorted(
         (Report(file=c.file, line=c.start_line, scenario=c.scenario,
@@ -770,9 +899,25 @@ def parse_suite_source(file: str, source: str) -> list[Call]:
         bash_source = bash_source[:body_start] + \
             re.sub(r'[^\n]', ' ', bash_source[body_start:body_end]) + \
             bash_source[body_end:]
-    calls = _parse_bash_calls(file, bash_source) + _parse_js_calls(file, source)
+    bash_headers = _bash_headers(source, heredocs)
+    calls = _parse_bash_calls(file, bash_source, bash_headers) + _parse_js_calls(file, source)
     calls.sort(key=lambda c: c.start_line)
     return calls
+
+
+def suite_ordered_groups(source: str) -> list[str | None]:
+    """Every section/scenario a suite's source declares, in the order its
+    header prints at runtime: `None` for whatever precedes the first header
+    (usually nothing), then every bash section (source order), then every JS
+    scenario (heredoc by heredoc, each in its own `SCENARIOS` order) -- a
+    header that owns no `check` call of its own still gets an entry, since it
+    still consumes one block of a real run's output (see `_split_output_by_group`),
+    and bash content is always outside, and before, every heredoc in a suite
+    that has one at all.
+    """
+    heredocs = _heredoc_spans(source)
+    _, bash_texts = _bash_headers(source, heredocs)
+    return [None] + bash_texts + _js_header_texts_ordered(heredocs, source)
 
 
 def _print_report(r: Report) -> None:
