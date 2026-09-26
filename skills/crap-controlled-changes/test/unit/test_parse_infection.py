@@ -92,3 +92,32 @@ def test_main_total_flag_prints_count_from_report(monkeypatch, tmp_path, capsys)
     monkeypatch.setattr("sys.argv", ["parse_infection.py", "--total", str(report)])
     parse_infection.main()
     assert capsys.readouterr().out == "3\n"
+
+
+def test_main_total_flag_needs_a_report_path_too(monkeypatch, tmp_path, capsys):
+    # No third argv element: falls through and opens sys.argv[1] itself as the report.
+    (tmp_path / "--total").write_text(json.dumps({"escaped": [], "uncovered": []}))
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr("sys.argv", ["parse_infection.py", "--total"])
+    parse_infection.main()
+    assert capsys.readouterr().out == ""
+
+
+def test_main_passes_root_argument_through_to_rows(monkeypatch, tmp_path):
+    report = tmp_path / "report.json"
+    report.write_text(json.dumps({"escaped": ["e"], "uncovered": ["u"]}))
+    calls = []
+    monkeypatch.setattr(parse_infection, "rows", lambda entries, root: calls.append((entries, root)))
+    monkeypatch.setattr("sys.argv", ["parse_infection.py", str(report), "/some/root"])
+    parse_infection.main()
+    assert calls == [(["e"], "/some/root"), (["u"], "/some/root")]
+
+
+def test_main_defaults_root_to_empty_string_without_root_argument(monkeypatch, tmp_path):
+    report = tmp_path / "report.json"
+    report.write_text(json.dumps({"escaped": [], "uncovered": []}))
+    calls = []
+    monkeypatch.setattr(parse_infection, "rows", lambda entries, root: calls.append(root))
+    monkeypatch.setattr("sys.argv", ["parse_infection.py", str(report)])
+    parse_infection.main()
+    assert calls == ["", ""]
