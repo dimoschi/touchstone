@@ -53,10 +53,10 @@ async function scenarioSBA() {
 }
 
 // Scenario SBB -- the derived figure is clamped at the floor: a tiny estimate
-// still gets at least 150k, since even a one-line change spends a few calls
+// still gets at least 300k, since even a one-line change spends a few calls
 // on setup, triage, implement and review.
 async function scenarioSBB() {
-  console.log('\n== scenario SBB: a tiny estimated_loc clamps the derived budget to the 150k floor')
+  console.log('\n== scenario SBB: a tiny estimated_loc clamps the derived budget to the 300k floor')
   const { captured } = await run({
     args: { runBudget: undefined },
     triage: { estimated_loc: 1 },
@@ -64,13 +64,13 @@ async function scenarioSBB() {
     verify: () => undefined,
     staleness: () => [],
   })
-  check('the budget is clamped up to 150k', captured.logs.some(l => /run budget: 150k output tokens/.test(l)), true)
+  check('the budget is clamped up to 300k', captured.logs.some(l => /run budget: 300k output tokens/.test(l)), true)
 }
 
 // Scenario SBC -- and clamped at the ceiling: a huge estimate does not buy an
 // unbounded run.
 async function scenarioSBC() {
-  console.log('\n== scenario SBC: a huge estimated_loc clamps the derived budget to the 800k ceiling')
+  console.log('\n== scenario SBC: a huge estimated_loc clamps the derived budget to the 1000k ceiling')
   const { captured } = await run({
     args: { runBudget: undefined },
     triage: { estimated_loc: 10000 },
@@ -78,7 +78,7 @@ async function scenarioSBC() {
     verify: () => undefined,
     staleness: () => [],
   })
-  check('the budget is clamped down to 800k', captured.logs.some(l => /run budget: 800k output tokens/.test(l)), true)
+  check('the budget is clamped down to 1000k', captured.logs.some(l => /run budget: 1000k output tokens/.test(l)), true)
 }
 
 // Scenario SBD -- no estimate at all falls back to a flat default by scope,
@@ -92,8 +92,8 @@ async function scenarioSBD() {
     verify: () => undefined,
     staleness: () => [],
   })
-  check('the inline default (150k) is used, not a formula on a missing number',
-    captured.logs.some(l => /run budget: 150k output tokens \(triage gave no estimated_loc; using the inline default\)/.test(l)), true)
+  check('the inline default (300k) is used, not a formula on a missing number',
+    captured.logs.some(l => /run budget: 300k output tokens \(triage gave no estimated_loc; using the inline default\)/.test(l)), true)
 }
 
 // Scenario SBE -- the team-scoped default is higher, and a numeric
@@ -427,10 +427,20 @@ async function scenarioSBZ() {
     /budget/i.test(result.note ?? ''), false)
 }
 
+// Scenario SBY -- triage is asked for the number the budget formula needs.
+// Before this, the prompt asked how large the change was but never named
+// estimated_loc, so every live run fell back to a flat default.
+async function scenarioSBY() {
+  console.log('\n== scenario SBY: the triage prompt asks for estimated_loc')
+  const { captured } = await run({ initialReview: { correctness: [], advocate: [] }, verify: () => undefined, staleness: () => [] })
+  const prompt = captured.calls.find(c => c.label === 'triage')?.prompt ?? ''
+  check('it names estimated_loc', /Set estimated_loc to/.test(prompt), true)
+}
+
 const SCENARIOS = [scenarioSBA, scenarioSBB, scenarioSBC, scenarioSBD, scenarioSBE, scenarioSBF, scenarioSBG,
   scenarioSBH, scenarioSBI, scenarioSBJ, scenarioSBK, scenarioSBL, scenarioSBM, scenarioSBN, scenarioSBO,
   scenarioSBP, scenarioSBQ, scenarioSBR, scenarioSBS, scenarioSBT, scenarioSBU, scenarioSBV, scenarioSBW,
-  scenarioSBX, scenarioSBZ]
+  scenarioSBX, scenarioSBZ, scenarioSBY]
 JS_EOF
 
 finish
