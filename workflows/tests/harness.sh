@@ -194,6 +194,7 @@ function makeAgent(scenario, captured) {
     // Each scenario field keeps its old name and meaning; only the label and
     // the object shape they arrive under changed.
     if (label === 'setup') {
+      if (scenario.setupFails) return null
       return {
         ticket: scenario.ticketResult ?? { found: true, summary: 'stub ticket', description: 'd', comments: '' },
         version: scenario.versionProbe ?? { found: false, name: '', version: '', detail: 'stub' },

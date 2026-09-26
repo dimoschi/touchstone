@@ -304,9 +304,31 @@ async function scenarioSBU() {
   check('the summary reports involved', captured.logs.some(l => /triage judged this involved/.test(l)), true)
 }
 
+// Scenario SBV -- gh-118: the merged setup call returning nothing at all (an
+// agent-level failure, not just one sub-answer coming back unconfirmed)
+// still degrades safely: no task fallback is needed here (the harness
+// always supplies one), the version comparison stays uncompared, and the
+// gate markers read as unconfirmed rather than the run crashing on a
+// missing setupResult.
+async function scenarioSBV() {
+  console.log('\n== scenario SBV: the merged setup call returning nothing degrades safely')
+  const { result, captured } = await run({
+    setupFails: true,
+    prResult: { opened: true, url: 'https://example.invalid/pr/21', note: 'stub ready' },
+    args: { openPr: true },
+    initialReview: { correctness: [], advocate: [] },
+    verify: () => undefined,
+    staleness: () => [],
+  })
+  check('the run does not crash or halt', result.halted_at, undefined)
+  check('pipeline_version stays uncompared', result.pipeline_version?.mismatch, null)
+  check('the gate is reported as not hook-enforced', result.gates?.bypass_blocked, false)
+  check('the run still reaches the PR phase', result.pr?.opened, true)
+}
+
 const SCENARIOS = [scenarioSBA, scenarioSBB, scenarioSBC, scenarioSBD, scenarioSBE, scenarioSBF, scenarioSBG,
   scenarioSBH, scenarioSBI, scenarioSBJ, scenarioSBK, scenarioSBL, scenarioSBM, scenarioSBN, scenarioSBO,
-  scenarioSBP, scenarioSBQ, scenarioSBR, scenarioSBS, scenarioSBT, scenarioSBU]
+  scenarioSBP, scenarioSBQ, scenarioSBR, scenarioSBS, scenarioSBT, scenarioSBU, scenarioSBV]
 JS_EOF
 
 finish
