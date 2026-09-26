@@ -1506,10 +1506,16 @@ const shQuote = (s) => {
 // check that calls `exit N` itself, or one whose command chain ends
 // nonzero, still leaves $? holding that value for the echo to read, and
 // `;` runs it regardless, where `&&` would have skipped it whenever the
-// check's own exit code was the one case this exists to capture.
+// check's own exit code was the one case this exists to capture. $? is
+// captured into ec right away, before the blank `echo` below can overwrite
+// it with its own (always 0) status. That blank echo guarantees the marker
+// starts on a line of its own even when the check's last printed byte was
+// not a newline (a bare `printf`, a `\r`-terminated progress line): without
+// it the marker text lands on that same line and exitLineOf, which only
+// accepts a whole line, reads the row as never measured.
 const invocationFor = (c) =>
-  `bash -c ${shQuote(`cd ${shQuote(wt.path)} && ${c.command}`)}; ` +
-  `echo "${CHECK_EXIT_MARKER} ${c.id} $?"`
+  `bash -c ${shQuote(`cd ${shQuote(wt.path)} && ${c.command}`)}; ec=$?; echo; ` +
+  `echo "${CHECK_EXIT_MARKER} ${c.id} $ec"`
 const executeChecks = async (checks = discoveredChecks) => {
   checkAttempt++
   return await treeAgent(

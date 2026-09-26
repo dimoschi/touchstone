@@ -433,8 +433,8 @@ function shQuote(s) {
 }
 const CHECK_EXIT_MARKER = 'TOUCHSTONE_CHECK_EXIT'
 function checkInvocation(id, command, path = STUB_WT_PATH) {
-  return `bash -c ${shQuote(`cd ${shQuote(path)} && ${command}`)}; ` +
-    `echo "${CHECK_EXIT_MARKER} ${id} $?"`
+  return `bash -c ${shQuote(`cd ${shQuote(path)} && ${command}`)}; ec=$?; echo; ` +
+    `echo "${CHECK_EXIT_MARKER} ${id} $ec"`
 }
 // A checkRuns stub's row for the common case: the command matches what was
 // declared, and the output carries the one well-formed exit line a row now
@@ -3664,8 +3664,8 @@ async function scenarioEF() {
     const invocation = line ? line.slice('check:1: '.length) : ''
     const want = execFileSync('bash', ['-c', declared]).toString()
     const got = invocation ? execFileSync('bash', ['-c', invocation]).toString() : `<no invocation: ${runPrompt}>`
-    check('the declared command\'s output survives byte for byte, exit line appended after it',
-      got, `${want}TOUCHSTONE_CHECK_EXIT check:1 0\n`)
+    check('the declared command\'s output survives byte for byte, exit line appended after the guard blank line',
+      got, `${want}\nTOUCHSTONE_CHECK_EXIT check:1 0\n`)
   } finally {
     fs.rmSync(wtPath, { recursive: true, force: true })
   }
@@ -3748,7 +3748,7 @@ async function scenarioEM() {
   const runPrompt = captured.calls.find(c => c.label === 'checks:run:1')?.prompt ?? ''
   check('the invocation is exactly bash -c \'cd <path> && <command>\', no \\\'\\\' near the path, plus the exit echo',
     runPrompt.includes(
-      'check:1: bash -c \'cd /tmp/stub-worktree && make test\'; echo "TOUCHSTONE_CHECK_EXIT check:1 $?"'),
+      'check:1: bash -c \'cd /tmp/stub-worktree && make test\'; ec=$?; echo; echo "TOUCHSTONE_CHECK_EXIT check:1 $ec"'),
     true)
 }
 
@@ -4523,6 +4523,33 @@ async function scenarioFW() {
     (result.note ?? '').includes(', got `'), false)
 }
 
+// Scenario FX -- #120: a check whose own last printed byte is not a newline
+// (printf with no trailing '\n', a `\r`-terminated progress line, an ANSI
+// reset) must not merge invocationFor's own echo onto that same line: run
+// for real against the built invocation, the same reason as FO, since a
+// hand-written synthetic output could not show the merge actually happening.
+async function scenarioFX() {
+  console.log('\n== scenario FX: a check\'s last byte with no trailing newline does not merge into the exit line')
+  const wtPath = fs.mkdtempSync(path.join(os.tmpdir(), 'touchstone-fx-'))
+  try {
+    const { captured } = await run({
+      branchResult: { created: true, branch: 'feat/gh-21-stub', base: 'main',
+        path: wtPath, ticket: '21', detail: 'stub', dirty: false },
+      discovery: { file: '/repo/AGENTS.md', sections: [{ heading: '## Checks', fence: 'printf ok' }], detail: 'stub' },
+    })
+    const runPrompt = captured.calls.find(c => c.label === 'checks:run:1')?.prompt ?? ''
+    const line = runPrompt.split('\n').find(l => l.startsWith('check:1: '))
+    const invocation = line ? line.slice('check:1: '.length) : ''
+    const out = invocation ? execFileSync('bash', ['-c', invocation]).toString() : ''
+    const markerLines = out.split(/\r?\n/).map(l => l.trim())
+      .filter(l => l.startsWith(`${CHECK_EXIT_MARKER} `))
+    check('exactly one exit line, on its own', markerLines.length, 1)
+    check('and it reads the real exit code', markerLines[0], `${CHECK_EXIT_MARKER} check:1 0`)
+  } finally {
+    fs.rmSync(wtPath, { recursive: true, force: true })
+  }
+}
+
 for (const scenario of [scenarioA, scenarioB, scenarioG, scenarioC, scenarioD, scenarioE, scenarioH,
                         scenarioI, scenarioJ, scenarioK, scenarioL, scenarioM, scenarioN,
                         scenarioO, scenarioP, scenarioQ, scenarioR, scenarioS, scenarioT,
@@ -4553,7 +4580,7 @@ for (const scenario of [scenarioA, scenarioB, scenarioG, scenarioC, scenarioD, s
                         scenarioFA, scenarioFB, scenarioFC, scenarioFD, scenarioFE, scenarioFF, scenarioFG,
                         scenarioFH, scenarioFI, scenarioFJ, scenarioFK, scenarioFL, scenarioFM, scenarioFN,
                         scenarioFO, scenarioFP, scenarioFQ, scenarioFR, scenarioFS, scenarioFT,
-                        scenarioFU, scenarioFV, scenarioFW]) {
+                        scenarioFU, scenarioFV, scenarioFW, scenarioFX]) {
   await scenario()
 }
 
