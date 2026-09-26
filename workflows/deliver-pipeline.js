@@ -474,8 +474,8 @@ function checksFrom(source) {
 
 const TRIAGE = {
   type: 'object', additionalProperties: false,
-  required: ['scope', 'complexity', 'complexity_note', 'premise_ok', 'evidence',
-             'premise_note'],
+  required: ['scope', 'complexity', 'expected_files', 'complexity_note', 'premise_ok',
+             'evidence', 'premise_note'],
   properties: {
     scope: { type: 'string', enum: ['inline', 'team'] },
     // Judgement, not arithmetic. A line count is a proxy for risk and a poor
@@ -484,7 +484,17 @@ const TRIAGE = {
     // answers, so it is the right place to say how hard this is, and the only
     // place that knows before anything expensive runs.
     complexity: { type: 'string', enum: ['trivial', 'routine', 'involved'] },
+    // Required, unlike expected_call_sites and involved_reason below: every
+    // verdict names what it expects the change to touch, but only an
+    // involved one has to explain why that is hard rather than routine.
+    expected_files: { type: 'array', items: { type: 'string' } },
     complexity_note: { type: 'string' },
+    // Optional: only an involved verdict needs either. A missing one demotes
+    // involved to routine in the script (see the complexity block below),
+    // never the other way, so leaving them out on a trivial or routine
+    // verdict costs nothing.
+    expected_call_sites: { type: 'array', items: { type: 'string' } },
+    involved_reason: { type: 'string' },
     premise_ok: { type: 'boolean' },
     estimated_loc: { type: 'integer' },
     evidence: { type: 'array', items: { type: 'string' } },
@@ -1366,7 +1376,15 @@ try {
   `trivial; a five-line change to a signing path is involved. When torn ` +
   `between two levels, choose the higher one: under-reasoning a hard change ` +
   `costs far more than over-reasoning an easy one. Put the deciding factor in ` +
-  `complexity_note, in one sentence.`,
+  `complexity_note, in one sentence.\n` +
+  `Always return expected_files: every file you expect the real change to ` +
+  `touch, from having read the code, not the ticket's own wording. A ticket ` +
+  `naming one file and one behaviour is routine unless you can say why it is ` +
+  `not. involved stands only when you also return involved_reason (why this ` +
+  `is hard rather than routine) and expected_call_sites (the function or ` +
+  `method names, not just files, you expect the change to touch); returning ` +
+  `involved without all three gets read as routine instead, since "this ` +
+  `feels hard" is not evidence and naming what you expect to touch is.`,
   { label: 'triage', schema: TRIAGE, model: 'sonnet', effort: 'medium' })
 } catch (e) {
   log(`triage returned no verdict: ${e?.message ?? e}`)
@@ -1444,13 +1462,31 @@ const EFFORT = {
 // get a trivial effort setting and the full 80k review ceiling, which is not a
 // budget so much as permission to keep going.
 const CEILING_SCALE = { trivial: 0.4, routine: 1, involved: 1.5 }
-const complexity = EFFORT[triage.complexity] ? triage.complexity : 'involved'
-const effortFor = EFFORT[complexity]
-ceilingScale = CEILING_SCALE[complexity]
+let complexity = EFFORT[triage.complexity] ? triage.complexity : 'involved'
 if (triage.complexity && complexity !== triage.complexity) {
   log(`triage returned an unrecognised complexity (${triage.complexity}); ` +
       `treating it as involved, which spends the most rather than the least`)
 }
+// involved triples effort and ceilings against routine, so it stands only
+// when triage backs it with a reason and the files and call sites that
+// reason names -- never on the strength of the word alone. This demotes a
+// *recognised* involved verdict that arrived unjustified; it never touches
+// the unrecognised-value fallback above, which stays involved regardless
+// (that case is not a judgement about difficulty, so there is nothing to
+// demote it against).
+const involvedJustified = !!triage.involved_reason &&
+  (triage.expected_files ?? []).length > 0 && (triage.expected_call_sites ?? []).length > 0
+if (triage.complexity === 'involved' && !involvedJustified) {
+  log(`triage judged this involved without a reason and the files and call ` +
+      `sites it expects the diff to touch; treating it as routine instead`)
+  complexity = 'routine'
+} else if (triage.complexity === 'involved') {
+  log(`triage justified involved: ${triage.involved_reason} (expected files: ` +
+      `${triage.expected_files.join(', ')}; expected call sites: ` +
+      `${triage.expected_call_sites.join(', ')})`)
+}
+const effortFor = EFFORT[complexity]
+ceilingScale = CEILING_SCALE[complexity]
 log(`triage judged this ${complexity}` +
     (triage.complexity_note ? `: ${triage.complexity_note}` : '') +
     ` -- plan/implement/review/verify effort ` +

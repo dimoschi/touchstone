@@ -220,9 +220,9 @@ function makeAgent(scenario, captured) {
     if (label === 'triage') {
       // scope: 'inline' skips the Plan phase, which this test has no reason
       // to exercise: it is not part of the join this ticket fixes.
-      return { scope: 'inline', complexity: 'trivial', complexity_note: 'stub',
-        premise_ok: true, estimated_loc: 5, evidence: [], premise_note: 'stub',
-        ...(scenario.triage ?? {}) }
+      return { scope: 'inline', complexity: 'trivial', expected_files: [],
+        complexity_note: 'stub', premise_ok: true, estimated_loc: 5, evidence: [],
+        premise_note: 'stub', ...(scenario.triage ?? {}) }
     }
     if (label === 'planner') {
       return scenario.plannerResult ?? { plan: 'stub plan', acceptance_criteria: [],

@@ -187,8 +187,8 @@ function checksFrom(source) {
 
 const TRIAGE = {
   type: 'object', additionalProperties: false,
-  required: ['scope', 'complexity', 'complexity_note', 'premise_ok', 'evidence',
-             'premise_note'],
+  required: ['scope', 'complexity', 'expected_files', 'complexity_note', 'premise_ok',
+             'evidence', 'premise_note'],
   properties: {
     scope: { type: 'string', enum: ['inline', 'team'] },
     // Judgement, not arithmetic. A line count is a proxy for risk and a poor
@@ -197,7 +197,17 @@ const TRIAGE = {
     // answers, so it is the right place to say how hard this is, and the only
     // place that knows before anything expensive runs.
     complexity: { type: 'string', enum: ['trivial', 'routine', 'involved'] },
+    // Required, unlike expected_call_sites and involved_reason below: every
+    // verdict names what it expects the change to touch, but only an
+    // involved one has to explain why that is hard rather than routine.
+    expected_files: { type: 'array', items: { type: 'string' } },
     complexity_note: { type: 'string' },
+    // Optional: only an involved verdict needs either. A missing one demotes
+    // involved to routine in the script (see the complexity block below),
+    // never the other way, so leaving them out on a trivial or routine
+    // verdict costs nothing.
+    expected_call_sites: { type: 'array', items: { type: 'string' } },
+    involved_reason: { type: 'string' },
     premise_ok: { type: 'boolean' },
     estimated_loc: { type: 'integer' },
     evidence: { type: 'array', items: { type: 'string' } },

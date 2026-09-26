@@ -243,9 +243,70 @@ async function scenarioSBQ() {
   check('the run does not halt', result.halted_at, undefined)
 }
 
+// Scenario SBR -- gh-118: an involved verdict with no reason, files or call
+// sites demotes to routine; the log names why.
+async function scenarioSBR() {
+  console.log('\n== scenario SBR: an unjustified involved verdict demotes to routine, logged')
+  const { captured } = await run({
+    triage: { complexity: 'involved' },
+  })
+  check('the demotion is logged',
+    captured.logs.some(l => /judged this involved without a reason/.test(l)), true)
+  check('the summary reports routine, not involved',
+    captured.logs.some(l => /triage judged this routine/.test(l)), true)
+}
+
+// Scenario SBS -- a justified involved verdict stands, and the log names the
+// reason, the files, and the call sites.
+async function scenarioSBS() {
+  console.log('\n== scenario SBS: a justified involved verdict stands, with its reason, files and call sites logged')
+  const { captured } = await run({
+    triage: {
+      complexity: 'involved',
+      involved_reason: 'touches the signing path',
+      expected_files: ['hooks/crap-commit-gate.py'],
+      expected_call_sites: ['resolve_repo_root'],
+    },
+  })
+  check('the summary reports involved, not a demotion',
+    captured.logs.some(l => /triage judged this involved/.test(l)), true)
+  check('the justification is logged with its reason',
+    captured.logs.some(l => l.includes('touches the signing path')), true)
+  check('the justification names the expected file',
+    captured.logs.some(l => l.includes('hooks/crap-commit-gate.py')), true)
+  check('the justification names the expected call site',
+    captured.logs.some(l => l.includes('resolve_repo_root')), true)
+}
+
+// Scenario SBT -- partial justification (a reason but no expected files or
+// call sites) still demotes: all three are required, not just one.
+async function scenarioSBT() {
+  console.log('\n== scenario SBT: a reason alone, with no expected files or call sites, still demotes')
+  const { captured } = await run({
+    triage: { complexity: 'involved', involved_reason: 'feels risky' },
+  })
+  check('the demotion is logged',
+    captured.logs.some(l => /judged this involved without a reason/.test(l)), true)
+}
+
+// Scenario SBU -- the unrecognised-value fallback is unaffected: a garbage
+// complexity value still reads as involved unconditionally, since that case
+// is not a judgement about difficulty at all.
+async function scenarioSBU() {
+  console.log('\n== scenario SBU: an unrecognised complexity value still falls back to involved, never demoted')
+  const { captured } = await run({
+    triage: { complexity: 'urgent' },
+  })
+  check('the unrecognised-value log still fires',
+    captured.logs.some(l => /unrecognised complexity/.test(l)), true)
+  check('the demotion log does not also fire',
+    captured.logs.some(l => /judged this involved without a reason/.test(l)), false)
+  check('the summary reports involved', captured.logs.some(l => /triage judged this involved/.test(l)), true)
+}
+
 const SCENARIOS = [scenarioSBA, scenarioSBB, scenarioSBC, scenarioSBD, scenarioSBE, scenarioSBF, scenarioSBG,
   scenarioSBH, scenarioSBI, scenarioSBJ, scenarioSBK, scenarioSBL, scenarioSBM, scenarioSBN, scenarioSBO,
-  scenarioSBP, scenarioSBQ]
+  scenarioSBP, scenarioSBQ, scenarioSBR, scenarioSBS, scenarioSBT, scenarioSBU]
 JS_EOF
 
 finish
