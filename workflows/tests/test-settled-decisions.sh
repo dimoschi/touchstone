@@ -147,6 +147,26 @@ async function scenarioNoLensesStaysQuiet() {
     captured.logs.some(l => l.includes('Constraints, or decisions already taken')), false)
 }
 
+// Scenario H -- a '# comment' line inside a fenced code block is not a
+// Markdown heading, so it must not cut the section short; a decision listed
+// after the fence still reaches the lens.
+async function scenarioFencedCommentNotAHeading() {
+  console.log('\n== scenario: a "#" comment inside a fenced code block does not end the section')
+  const { captured } = await run({
+    diffstatFiles: bigDiffstat,
+    ticketResult: { found: true, summary: 'stub', comments: '',
+      description: `### The problem\n${PROBLEM_MARKER}\n\n` +
+        `### Constraints, or decisions already taken\n` +
+        `- Run the gate this way, never piped:\n\`\`\`bash\n# redirect, then read the file\nbash gate.sh > log 2>&1\n\`\`\`\n` +
+        `- ${DECISION_MARKER}\n`,
+    },
+    initialReview: { correctness: [], advocate: [], requirements: [] },
+  })
+  const correctness = captured.calls.find(c => c.label === 'review:correctness')?.prompt ?? ''
+  check('the decision listed after the fenced block still reaches the lens',
+    correctness.includes(DECISION_MARKER), true)
+}
+
 const SCENARIOS = [
   scenarioSettledDecisionsInitialLenses,
   scenarioSettledDecisionsTailAndMutation,
@@ -155,6 +175,7 @@ const SCENARIOS = [
   scenarioPhraseInParagraphNotSelected,
   scenarioUnreadableTicket,
   scenarioNoLensesStaysQuiet,
+  scenarioFencedCommentNotAHeading,
 ]
 JS_EOF
 

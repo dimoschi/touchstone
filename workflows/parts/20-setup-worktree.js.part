@@ -542,8 +542,25 @@ const settledDecisionsOf = (description) => {
   if (!m) return ''
   const level = m[1].length
   const rest = description.slice(m.index + m[0].length)
-  const next = new RegExp(`^#{1,${level}}[ \t]+\\S`, 'm').exec(rest)
-  const body = (next ? rest.slice(0, next.index) : rest).trim()
+  // Line-scanned rather than one multiline regex: a fenced code block can
+  // contain a '#'-led line (a shell comment shown in an example), which a
+  // bare heading match cannot tell apart from a real heading, so anything
+  // between an odd and even fence marker is skipped.
+  const headingRe = new RegExp(`^#{1,${level}}[ \t]+\\S`)
+  const fenceRe = /^[ \t]{0,3}(`{3,}|~{3,})/
+  let inFence = false
+  let next = -1
+  let pos = 0
+  for (const line of rest.split('\n')) {
+    if (fenceRe.test(line)) {
+      inFence = !inFence
+    } else if (!inFence && headingRe.test(line)) {
+      next = pos
+      break
+    }
+    pos += line.length + 1
+  }
+  const body = (next >= 0 ? rest.slice(0, next) : rest).trim()
   return (body && body !== '_No response_') ? body : ''
 }
 const settledDecisions = ticketDetail.found ? settledDecisionsOf(ticketDetail.description) : ''
