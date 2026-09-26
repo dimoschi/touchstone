@@ -1,7 +1,7 @@
 const sImpl = stage('implement')
 const impl = await treeAgent(
   `Implement this task in the current repo.\n` +
-  `${NATIVE_TOOLS} ${GENERATED_FILES}\n` +
+  `${NATIVE_TOOLS(wt.path)} ${GENERATED_FILES}\n` +
   `Task: ${brief(task)}\nPlan: ${brief(plan.plan)}\n` +
   (plan.acceptance_criteria.length
     ? `Acceptance criteria:\n- ${plan.acceptance_criteria.join('\n- ')}\n`
@@ -123,7 +123,7 @@ if (blockingChecksOpen() && !sChecksPost.over()) {
     `do, and put the three options in note; leave head_sha as the ` +
     `unchanged HEAD if you made no commits before hitting it. Do not push ` +
     `or open a PR.\n` +
-    `${NATIVE_TOOLS} ${GENERATED_FILES}\n` +
+    `${NATIVE_TOOLS(wt.path)} ${GENERATED_FILES}\n` +
     `Task: ${brief(task)}\n` +
     redChecks.map(renderCheck).join('\n\n') + `\n` +
     `Return head_sha: the full 40-character SHA of HEAD after your last ` +
@@ -547,7 +547,7 @@ const reviewOf = async (range, tag, picked, known = [], knownCharge = '') => {
   const out = await parallel(picked.map((lens) => () =>
     treeAgent(
       `${lens.charge}\n` +
-      `${NATIVE_TOOLS}\n` +
+      `${NATIVE_TOOLS(wt.path)}\n` +
       (lens.needsTicket ? ticketSpec() : '') +
       decisionsSpec() +
       `Task: ${brief(task)}\n` +

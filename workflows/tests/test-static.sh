@@ -135,8 +135,8 @@ check "no separate ticket/plugin:version/gate:opt-in/checks:discover/run-record 
 
 echo ""
 echo "== static: gh-118 -- the shared native-tools and generated-files sentences reach every prompt that needs them"
-check "NATIVE_TOOLS reaches implement, checks:fix, fix and reviewOf" \
-  "$(grep -Fc '${NATIVE_TOOLS}' "$SCRIPT" || true)" 4
+check "NATIVE_TOOLS(wt.path) reaches implement, checks:fix, fix and reviewOf" \
+  "$(grep -Fc '${NATIVE_TOOLS(wt.path)}' "$SCRIPT" || true)" 4
 check "GENERATED_FILES reaches implement, checks:fix and fix, not reviewOf" \
   "$(grep -Fc '${GENERATED_FILES}' "$SCRIPT" || true)" 3
 
