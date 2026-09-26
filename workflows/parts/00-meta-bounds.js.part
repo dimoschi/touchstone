@@ -235,9 +235,15 @@ let runBudgetNote = null
 // throw was the budget's doing rather than a genuine failure to rethrow, since
 // parallel() and other call sites can wrap or swallow the error itself.
 let runBudgetSpent = null
+// budget.spent() is not zero when a run starts (the host counts spend from
+// before it: 4,634k on the first live run of this code, whose own stages had
+// spent 14k), so the run budget, like every stage ceiling, is measured from
+// this run's own start.
+const runSpendStart = budget.spent()
+const runSpent = () => budget.spent() - runSpendStart
 const dispatch = async (prompt, opts) => {
-  if (runBudget != null && budget.spent() >= runBudget) {
-    runBudgetSpent = { refused: opts.label, spent: budget.spent() }
+  if (runBudget != null && runSpent() >= runBudget) {
+    runBudgetSpent = { refused: opts.label, spent: runSpent() }
     throw new Error(
       `touchstone: run budget (${Math.round(runBudget / 1000)}k output ` +
       `tokens) spent before '${opts.label}' could dispatch`)

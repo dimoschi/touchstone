@@ -409,10 +409,28 @@ async function scenarioSBX() {
     (result.note ?? '').includes('checks 100k'), true)
 }
 
+// Scenario SBZ -- the host's budget.spent() is not zero when a run starts: on
+// the first live run of this code it read 4,634k with the run's own stages
+// at 14k, and the run halted before Plan. The budget is this run's spend,
+// measured from its own start, like every stage ceiling.
+async function scenarioSBZ() {
+  console.log('\n== scenario SBZ: spend from before the run started never counts against its budget')
+  const { result } = await run({
+    args: { runBudget: undefined },
+    triage: { estimated_loc: 100 },
+    budget: { total: null, spent: () => 4_634_000, remaining: () => Infinity },
+    initialReview: { correctness: [], advocate: [] },
+    verify: () => undefined,
+    staleness: () => [],
+  })
+  check('no budget halt on a run that has spent nothing itself',
+    /budget/i.test(result.note ?? ''), false)
+}
+
 const SCENARIOS = [scenarioSBA, scenarioSBB, scenarioSBC, scenarioSBD, scenarioSBE, scenarioSBF, scenarioSBG,
   scenarioSBH, scenarioSBI, scenarioSBJ, scenarioSBK, scenarioSBL, scenarioSBM, scenarioSBN, scenarioSBO,
   scenarioSBP, scenarioSBQ, scenarioSBR, scenarioSBS, scenarioSBT, scenarioSBU, scenarioSBV, scenarioSBW,
-  scenarioSBX]
+  scenarioSBX, scenarioSBZ]
 JS_EOF
 
 finish
