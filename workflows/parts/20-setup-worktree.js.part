@@ -1,0 +1,520 @@
+// Worktree before triage, not just before planning. Triage often routes small
+// work back to be done inline, and that work still needs to land somewhere
+// named: without the jira-/gh- marker the session is reported untracked
+// forever. Creating the worktree first means inline work happens in the right
+// place too. The cost is one unused worktree when triage rejects the premise.
+// Recording is the sanctioned way to finish, not an extra step. A phase that
+// halts never reaches the moment a human would report it, so halted runs used
+// to leave no trace at all and the evaluation data described only work that
+// completed -- it could not show this workflow failing, because failure never
+// arrived. The script cannot record on a phase's behalf: it has no shell, and a
+// phase that dies mid-flight returns nothing for it to write.
+// Set once the worktree exists. RECORD is called while building the worktree
+// agents' own prompts, before `wt` is initialised, so reading wt there is a
+// temporal dead zone crash on every run.
+let recordedBranch = ''
+
+const RECORD = (label) => !recordPhases ? '' :
+  `\n\nBefore you return, record this phase. It is the only reason a stopped ` +
+  `run leaves any evidence:\n` +
+  `  agent-eval record-phase --session "$CLAUDE_CODE_SESSION_ID" ` +
+  `--phase '${label}' --status <completed|halted|failed> [--reason '<why>'] `+
+  `--branch '${recordedBranch}'\n` +
+  `Use completed when you did the job; halted when you deliberately stopped ` +
+  `because the work should not continue; failed when you stopped without ` +
+  `deciding anything, such as running out of budget or hitting an error. ` +
+  `halted and failed look identical from outside and mean opposite things, so ` +
+  `do not use one for the other.\n` +
+  `agent-eval is an optional companion tool. If the command is not installed ` +
+  `(command not found), skip this step silently and carry on: it records ` +
+  `metrics and has no bearing on the work. Report any other error verbatim, ` +
+  `and never set CLAUDE_CONFIG_DIR to make it work.`
+
+// One fetch, before anything reads the envelope. A failed fetch is not a halt:
+// the ticket is required to exist as a reference, but its prose is enrichment,
+// and a Jira outage is not a reason to refuse to do the work.
+const fetched = await agent(
+  `[touchstone: ticket]\n` +
+  `Fetch the details of ticket ${ticket} and STOP. Do not plan, implement, ` +
+  `branch, or comment on anything.\n` +
+  `A key like PROJ-4821 or ABC-36 is a Jira issue: read it with the Atlassian ` +
+  `tools, which you can find via ToolSearch. A bare number like 216 is a ` +
+  `GitHub issue in the repo you are currently in: read it with ` +
+  `gh issue view <number> --json title,body,comments.\n` +
+  `Return found=true with summary (the title), description, and comments ` +
+  `(concatenated, newest last, each prefixed with its author; empty string if ` +
+  `none). Return found=false with empty strings if the ticket cannot be read ` +
+  `at all: say why in summary. Do not invent or infer any field.` +
+  RECORD('ticket'),
+  { label: 'ticket', schema: TICKET, model: 'haiku', effort: 'low' })
+
+const ticketDetail = fetched?.found
+  ? fetched
+  : { found: false, summary: fetched?.summary ?? 'not fetched', description: '', comments: '' }
+if (!ticketDetail.found) {
+  log(`ticket ${ticket} details unavailable (${ticketDetail.summary}); ` +
+      `continuing without it`)
+}
+
+// With no task given, the ticket's own title is the task. If neither exists
+// there is nothing to name a branch after and nothing to plan against, which is
+// a real dead end rather than something to invent a slug for.
+if (!task) {
+  if (!ticketDetail.found) {
+    throw new Error(
+      `touchstone: no task given and ticket ${ticket} could not be read ` +
+      `(${ticketDetail.summary}). Pass args {task: "..."} or make the ticket ` +
+      `readable; naming a branch after neither is how a fabricated link gets in.`)
+  }
+  task = ticketDetail.summary
+  log(`no task given; using ticket summary: ${task}`)
+}
+
+phase('Worktree')
+const sBranch = stage('branch')
+
+// --show-toplevel returns the worktree's own path when run from inside one,
+// not the repository; every session now runs inside a worktree, so a new
+// worktree path built from it nests inside the current one instead of sitting
+// beside it. The repo root must come from --git-common-dir instead.
+//
+// Re-running the same ticket is normal, not an error, and git will not let a
+// branch be checked out twice: both prompts below must find an existing
+// branch or worktree and reuse it rather than treat a collision as a halt.
+
+// existingBranch is for follow-up work on an open PR: review feedback, or scope
+// added to a ticket already in flight. Cutting a fresh branch there strands the
+// delta away from the PR it belongs to. The ticket stays mandatory either way.
+const wt = args?.existingBranch
+  ? await agent(
+      `[touchstone: branch:existing]\n` +
+      `Find the worktree that already holds this ticket's branch, then STOP. Do ` +
+      `not create a branch, do not fetch, do not pull, do not plan or ` +
+      `implement. The one exception is step 5: re-attaching a worktree to a ` +
+      `branch that already exists is not creating one.\n` +
+      `This task continues work on an existing branch for ticket ${ticket}.\n` +
+      `Two fields matter on every response below, halts included: dirty is ` +
+      `true only for step 7's dirty-checkout halt, false in every other ` +
+      `response; halt_reason is "ambiguous" for the two-or-more-matches halts ` +
+      `in steps 4 and 5, "merged" for step 4 or 5's already-merged-PR halt, ` +
+      `"occupied" for step 5's occupied-directory halt, "wrong-ticket" for ` +
+      `the different-ticket halt in step 6, and "none" in every other ` +
+      `response, including every success. Never omit it.\n` +
+      `1. Run git worktree prune. It only removes registrations for worktree ` +
+      `directories that no longer exist on disk; it never touches a directory ` +
+      `that does exist. Run it before listing worktrees so a stale record left ` +
+      `behind by a hand-deleted directory cannot be matched below.\n` +
+      `2. Find the repo root: dirname "$(git rev-parse --path-format=absolute ` +
+      `--git-common-dir)". Do not use git rev-parse --show-toplevel for this: ` +
+      `the invoking session usually runs inside another worktree, and ` +
+      `--show-toplevel would return that one, not the repo.\n` +
+      `3. Run git worktree list --porcelain. It prints one record per worktree: ` +
+      `a "worktree <path>" line followed by a "branch refs/heads/<name>" line ` +
+      `(or "detached"/"bare").\n` +
+      `4. Ticket lookup, tried first regardless of what the invoking checkout is ` +
+      `on: the base branch, another feature branch, or detached HEAD are all ` +
+      `fine here, because the branch this task needs lives in its own worktree, ` +
+      `not necessarily in whichever tree happens to be checked out right now. ` +
+      `Find every record whose branch, after its first "/", begins with ` +
+      `"${ticketMarker}-" -- that is <type>/${ticketMarker}-<slug>, the exact ` +
+      `shape a fresh run of this workflow cuts. Match on that marker segment, ` +
+      `never on this task's own branch-type prefix: a branch cut as ` +
+      `feat/${ticketMarker}-x must still be found here even if this run asks ` +
+      `for a different type. Its canonical directory is ` +
+      `<repo-root>/.claude/worktrees/${ticketMarker}-<slug>, the expected ` +
+      `location, but the record's own path wins if it differs: the branch lives ` +
+      `where git says it lives, not where convention says it should.\n` +
+      `   - Exactly one match: before reusing it, run gh pr view <branch> ` +
+      `--json state -q .state, using the matched branch's own name. This ` +
+      `workflow never removes a worktree once it creates one, so a leftover ` +
+      `worktree here is no signal by itself that the branch is still live. If ` +
+      `that reports MERGED, the ticket's work already shipped on that ` +
+      `branch; return created=false, halt_reason=merged, naming the branch ` +
+      `and that its PR merged. Do not commit into that tree: a merged branch ` +
+      `is done, not a tree to keep implementing into. If gh reports any ` +
+      `other state (OPEN, CLOSED), no PR at all, or the call itself fails ` +
+      `(no network, no auth), treat the branch as still live and go to step ` +
+      `7.\n` +
+      `   - Two or more matches: return created=false, halt_reason=ambiguous, ` +
+      `listing every matching branch and its path in detail. Do not guess ` +
+      `which one this task means.\n` +
+      `5. Only if step 4 matched nothing: a branch can carry the ` +
+      `${ticketMarker} marker with no worktree of its own. git worktree ` +
+      `prune (step 1) drops a worktree's registration once its directory is ` +
+      `gone, but never the branch itself. The most common way that happens ` +
+      `is the opposite of abandonment: the PR merged and the worktree was ` +
+      `cleaned up because the work was done, not because it was cut loose ` +
+      `mid-flight. Run git branch --list "*/${ticketMarker}-*" to check for ` +
+      `one.\n` +
+      `   - Exactly one match: before touching it, run gh pr view <branch> ` +
+      `--json state -q .state, using the matched branch's own name, not ` +
+      `whatever is checked out here. If that reports MERGED, the ticket's ` +
+      `work already shipped on that branch; return created=false, ` +
+      `halt_reason=merged, naming the branch and that its PR merged. Do not ` +
+      `re-attach a worktree to it and do not run any further step on it: a ` +
+      `merged branch is done, not a tree to keep implementing into. If gh ` +
+      `reports any other state (OPEN, CLOSED), no PR at all, or the call ` +
+      `itself fails (no network, no auth), treat the branch as still live ` +
+      `and re-attach a worktree to it rather than losing it. Its canonical ` +
+      `directory is <repo-root>/.claude/worktrees/${ticketMarker}-<slug>; if ` +
+      `that path is already occupied by something else, return ` +
+      `created=false, halt_reason=occupied, naming the path and what is ` +
+      `there. Otherwise run git worktree add <path> <branch> -- no -b, the ` +
+      `branch already exists; a branch cannot be created twice, and this ` +
+      `step never creates one. Do not fetch or pull. Go to step 7.\n` +
+      `   - Two or more matches: return created=false, halt_reason=ambiguous, ` +
+      `listing every matching branch, same as step 4.\n` +
+      `   - No match: go to step 6.\n` +
+      `6. Only if steps 4 and 5 matched nothing: fall back to whatever is ` +
+      `actually checked out here (git branch --show-current). If HEAD is ` +
+      `detached, or the current branch is the repo's base branch (main, ` +
+      `master, or whatever origin/HEAD names), return created=false saying no ` +
+      `worktree or branch for ${ticketMarker} was found and the current ` +
+      `checkout is not on a feature branch either. If that branch carries a ` +
+      `jira- or gh- marker other than ${ticketMarker}, refuse it too: return ` +
+      `created=false, halt_reason=wrong-ticket, and say in detail which other ` +
+      `ticket it belongs to. The invoking session usually runs inside another ` +
+      `worktree, so this is reachable, and committing this task's work onto ` +
+      `another ticket's branch is worse than halting. Otherwise take the git ` +
+      `worktree list --porcelain record for that branch (every checked-out ` +
+      `branch has one) and use its path. An unmarked pre-existing branch is ` +
+      `allowed here and is not a failure: it predates the convention.\n` +
+      `7. This mode commits into the tree holding the branch, and a later phase ` +
+      `runs git add -A there, so unrelated dirty files sitting in that tree ` +
+      `would be swept into a commit. Check git -C <path> status --porcelain, ` +
+      `using the matched or re-attached path from step 4, 5, or 6, whether ` +
+      `that is the main checkout or a linked worktree; the risk is the same ` +
+      `either way. If it is non-empty, return created=false, dirty=true, and ` +
+      `say what is dirty. Never stash, reset, or discard the user's work.\n` +
+      `8. Otherwise return created=true, branch set to the matched record's own ` +
+      `branch name (never git branch --show-current, which names the invoking ` +
+      `checkout and not necessarily this ticket's branch), base set to the ` +
+      `repo's base branch, and path set to the absolute path from the matching ` +
+      `record. Note in detail whether the match came from the ticket lookup ` +
+      `(step 4), the worktree-less branch (step 5), or the fallback (step 6), ` +
+      `whether that path is the main checkout or a linked worktree, and ` +
+      `whether the branch name carries a jira- or gh- marker.` +
+      RECORD('branch:existing'),
+      { label: 'branch:existing', schema: EXISTING_BRANCH, model: 'haiku', effort: 'low' })
+  // A worktree is a separate checkout, so the main tree's state is irrelevant
+  // to it; cutting from origin/<base> is what removes the need to touch the
+  // main checkout at all.
+  : await agent(
+  `[touchstone: branch]\n` +
+  `Create the working branch and a git worktree for it, then STOP. Do not ` +
+  `plan, implement, or commit any code.\n` +
+  `Task: ${brief(task)}\n` +
+  `Ticket: ${ticket}\n` +
+  `Branch type prefix: ${args?.branchType ?? 'feat'}\n` +
+  `One field matters on every response below, halts included: dirty is true ` +
+  `only for step 6's dirty-checkout halt, false in every other response.\n` +
+  `1. Run git worktree prune. It only removes registrations for worktree ` +
+  `directories that no longer exist on disk, never a directory that does ` +
+  `exist, so it is safe to run unconditionally; it clears the way for ` +
+  `re-adding a worktree whose directory was deleted by hand.\n` +
+  `2. Find the repo root: dirname "$(git rev-parse --path-format=absolute ` +
+  `--git-common-dir)". Do not use git rev-parse --show-toplevel for this.\n` +
+  (baseOverride
+    ? `3. The base for this branch is given: ${baseOverride}. Do not read the ` +
+      `remote HEAD and do not substitute main or master; this work is stacked ` +
+      `on that branch deliberately. Verify the ref resolves ` +
+      `(git rev-parse --verify ${baseOverride}) and return created=false naming ` +
+      `it if it does not.\n`
+    : `3. Find this repo's base branch: read the remote HEAD ` +
+      `(git symbolic-ref --short refs/remotes/origin/HEAD), which prints an ` +
+      `origin/-prefixed name; strip that prefix so the base is the bare ` +
+      `branch name (main, not origin/main), falling back to whichever of ` +
+      `main or master exists when there is no remote-tracking HEAD. Do not ` +
+      `assume main.\n`) +
+  `4. Name the branch exactly ` +
+  `${args?.branchType ?? 'feat'}/${ticketMarker}-<slug>. The prefix is given ` +
+  `in full, already resolved against the ticket: use it character for ` +
+  `character and do not re-derive it, abbreviate it, or swap jira- for gh- or ` +
+  `back. Supply only <slug>, from the task: lowercase, hyphen-separated, at ` +
+  `most 6 words, no trailing hyphen.\n` +
+  `5. The worktree path is ` +
+  `<repo-root>/.claude/worktrees/${ticketMarker}-<slug>, the branch name with ` +
+  `its ${args?.branchType ?? 'feat'}/ prefix stripped.\n` +
+  `6. Run git worktree list --porcelain and look for a record whose "branch ` +
+  `refs/heads/<name>" line matches the branch name from step 4. If one ` +
+  `exists, the branch is already checked out somewhere; git refuses to check ` +
+  `it out twice, so that record's own path (even if it differs from the ` +
+  `path in step 5) is what this task must reuse. This mode commits into ` +
+  `that tree, and a later phase runs git add -A there, so check git -C ` +
+  `<that path> status --porcelain: if it is non-empty, return created=false, ` +
+  `dirty=true, and say what is dirty. Never stash, reset, or discard the ` +
+  `user's work. Otherwise return created=true using that path, note in ` +
+  `detail that the branch was reused rather than created, and stop: do not ` +
+  `fetch, pull, or run any worktree add.\n` +
+  `7. Otherwise check whether the branch exists at all (git show-ref --verify ` +
+  `--quiet refs/heads/<name>). If it does, the fetch and cut in step 10 are ` +
+  `not needed; go straight to step 8.\n` +
+  `8. Check whether the path from step 5 already exists on disk. If it does, ` +
+  `return created=false naming the exact path and explaining what is there. ` +
+  `Do not delete it, do not rename around it, and do not pick a different ` +
+  `slug: a surprising second worktree is worse than a clear halt.\n` +
+  `9. If the branch exists (step 7) and the path is clear (step 8), run ` +
+  `git worktree add <path> <branch>, without -b since the branch already ` +
+  `exists; a branch cannot be created twice. Note in detail that the branch ` +
+  `was reused rather than created, and set base to ` +
+  (baseOverride ? `${baseOverride}.\n` : `the repo's base branch.\n`) +
+  (baseOverride
+    ? `10. If the branch does not exist, run ` +
+      `git worktree add <path> -b <branch> ${baseOverride} directly. Do not ` +
+      `fetch, do not check out the base, and do not pull or rebase it: it is a ` +
+      `branch under review whose head the user chose, and it may itself be ` +
+      `checked out in another worktree, where checking it out again would fail.\n`
+    : `10. If the branch does not exist, run git fetch origin, then resolve ` +
+      `the cut point with git rev-parse --verify origin/<base>. If the fetch ` +
+      `fails or that ref does not resolve, return created=false naming the ` +
+      `base and the reason, rather than falling back to the local branch. ` +
+      `Otherwise run git worktree add <path> -b <branch> origin/<base>. Do ` +
+      `not check out the base branch, do not run git pull, and do not modify ` +
+      `the main checkout's working tree in any way: the worktree is a ` +
+      `separate checkout, cut straight from the fetched remote ref.\n`) +
+  `Do not check out the new branch in this working tree; the worktree is a ` +
+  `separate checkout.\n` +
+  `Return the branch you created or reused, the base you cut it from (or ` +
+  (baseOverride ? `${baseOverride}` : `the repo's base branch`) +
+  ` if the branch already existed), and the absolute worktree path.` +
+  RECORD('branch'),
+  { label: 'branch', schema: BRANCH, model: 'haiku', effort: 'low' })
+sBranch.close()
+
+// A failed worktree step halts rather than falling through: implementing onto
+// whatever tree happened to be checked out is how unrelated work lands in a PR.
+if (!wt?.created) {
+  return await halted('Worktree', {
+    branch: wt?.branch,
+    base: wt?.base,
+    detail: wt?.detail,
+    // wt.dirty names the actual cause regardless of mode: both the default
+    // reuse path (step 6) and the existingBranch guard (step 7) halt here for
+    // the same reason, an uncommitted checkout, and re-running with
+    // existingBranch: true would only hit that same existingBranch guard.
+    // wt.halt_reason distinguishes the existingBranch prompt's other halts,
+    // which need their own notes rather than falling into the plain
+    // not-found one below: an ambiguous marker match, a fallback branch
+    // marked for a different ticket, a matched branch whose PR already
+    // merged, or a matched branch's canonical directory already occupied.
+    // None of the four is safe to answer with "cut a new branch" -- an
+    // ambiguous match already has too many candidates, a wrong-ticket match
+    // means this ticket's own branch or worktree is still missing rather
+    // than nothing existing to reuse, a merged match means the ticket's
+    // branch already exists and shipped, and an occupied match means the
+    // ticket's branch already exists and only its directory is blocked.
+    note: wt?.dirty
+      ? 'The checkout that holds this branch has uncommitted changes, so ' +
+        'nothing was planned or implemented. Commit or stash them, then ' +
+        're-run.'
+      : wt?.halt_reason === 'ambiguous'
+      ? `Found more than one branch carrying the ${ticketMarker} marker, so ` +
+        `nothing was planned or implemented: ${wt?.detail}. This lookup ` +
+        `cannot tell which one the task means; delete or rename the branch ` +
+        `this ticket does not need, then re-run with existingBranch: true.`
+      : wt?.halt_reason === 'wrong-ticket'
+      ? `The only checked-out branch belongs to a different ticket, so ` +
+        `nothing was planned or implemented: ${wt?.detail}. No branch or ` +
+        `worktree for ${ticketMarker} exists yet. Re-run without ` +
+        `existingBranch to cut one.`
+      : wt?.halt_reason === 'merged'
+      ? `The only branch carrying the ${ticketMarker} marker already has a ` +
+        `merged pull request, so nothing was planned or implemented: ` +
+        `${wt?.detail}. That work already shipped. Re-running without ` +
+        `existingBranch is not a reliable escape: that path names the branch ` +
+        `<type>/${ticketMarker}-<slug> from this run's own type and a slug ` +
+        `it re-derives from the task, and only the name decides what ` +
+        `happens. Land on this same name and it reuses the merged branch, ` +
+        `so the new commits push onto its closed pull request; land on a ` +
+        `different one and it either cuts a fresh branch or halts on the ` +
+        `worktree directory this branch already holds. Do not rely on ` +
+        `which. Remove that worktree and delete the branch first, or track ` +
+        `the new work under a ticket of its own.`
+      : wt?.halt_reason === 'occupied'
+      ? `A branch carrying the ${ticketMarker} marker was found with no ` +
+        `worktree of its own, but its canonical worktree directory is ` +
+        `occupied, so nothing was planned or implemented: ${wt?.detail}. ` +
+        `Clear or rename what is occupying that path, then re-run with ` +
+        `existingBranch: true; re-running without existingBranch either ` +
+        `halts on this same occupied path or, if it re-derives a different ` +
+        `slug, cuts a duplicate branch for a ticket that already has one.`
+      : args?.existingBranch
+      ? `No worktree or branch carrying the ${ticketMarker}-<slug> marker ` +
+        `was found (any branch type, e.g. under ` +
+        `.claude/worktrees/${ticketMarker}-<slug>), and the current ` +
+        `checkout is not on a branch for this ticket either. Re-run without ` +
+        `existingBranch to cut one, or pass existingBranch: true again once ` +
+        `a branch or worktree for this ticket exists.`
+      : 'No worktree was created, so nothing was planned or implemented. ' +
+        'Resolve the base branch problem in detail, then re-run. If fetch ' +
+        'cannot run here (a remote needing a hardware key, for example), ' +
+        'fetch the base branch manually first, or pass existingBranch: true ' +
+        'if this work belongs on a branch that already exists.',
+  })
+}
+// Bare unconditionally: neither gh pr create --base nor the merge-base rule
+// below can take an origin/-qualified name.
+wt.base = (baseOverride || wt.base).replace(/^origin\//, '')
+recordedBranch = wt.branch
+log(args?.existingBranch
+  ? `worktree ${wt.path} reused for branch ${wt.branch} (base ${wt.base})`
+  : `worktree ${wt.path} created for branch ${wt.branch} (base ${wt.base})`)
+
+
+// Every agent dispatch below inherits the session's working directory, which
+// is the main checkout, not the worktree; each prompt must say so explicitly
+// or the agent will silently plan, implement, or push from the wrong tree.
+// Nothing passed to agent() reaches disk as an identity: opts.label is display
+// only, and the workflow journal records just an agent id and a prompt hash. The
+// tag below is the only durable name a workflow agent gets, so it is read back
+// out of the transcript's first user message rather than restated at each call.
+// The envelope: facts every phase needs, and nothing else. Deliberately not a
+// shared conversation. Withholding each phase's reasoning from the others is
+// what keeps the devil's advocate and the reviewers unbiased, so the envelope
+// carries only what is true regardless of who is reading -- where the code is,
+// what the ticket asks for -- and never what another phase concluded about it.
+//
+// Fetched once. Every phase used to rediscover the ticket, or more often work
+// without it, from a task string clamped short enough to lose the requirement.
+// The ticket is the specification, so it is never clamped: clamping it here cut
+// one ticket mid-acceptance-criterion and three phases planned against a spec
+// whose second half they could not see.
+// The envelope carries the ticket's identity, never its prose. Only Triage is
+// given the text to scrutinise, and Plan to work from as the specification.
+// Handing it to every phase made the devil's advocate a critic of the ticket's
+// own reasoning and burned a whole plan-and-challenge cycle without changing a
+// line of code.
+// withBase is off for the version probe alone. On a stacked run wt.base is the
+// branch under review, and naming it here handed the probe the exact ref its
+// prompt spends a paragraph telling it to ignore.
+const envelope = (withBase = true) =>
+  `Ticket ${ticket}${ticketDetail.found ? `: ${ticketDetail.summary}` : ' (details unavailable)'}\n` +
+  `Repo worktree: ${wt.path}\nBranch: ${wt.branch}${withBase ? ` (base ${wt.base})` : ''}\n`
+
+// Never clamped: brief() once cut a ticket mid-acceptance-criterion and three
+// phases planned against a spec whose second half they could not see.
+const ticketSpec = () => ticketDetail.found
+  ? `Ticket description:\n${ticketDetail.description}\n` +
+    (ticketDetail.comments.trim()
+      ? `Ticket comments:\n${ticketDetail.comments}\n` : '')
+  : `Ticket ${ticket} could not be read; work from the task text alone.\n`
+
+const treeAgent = (prompt, { omitBase = false, ...opts }) =>
+  agent(
+    `[touchstone: ${opts.label}]\n` +
+    `Work in the git worktree at ${wt.path}. Every command, git included, acts ` +
+    `on that tree and not on the main checkout: pass it explicitly, with ` +
+    `git -C ${wt.path} and absolute paths. Never cd there, not even as ` +
+    `cd ${wt.path} && <cmd>. The Bash working directory persists between ` +
+    `calls, so one such command moves the whole session, and the run state ` +
+    `written afterwards is filed under the worktree's path instead of the ` +
+    `repo's. crap-commit.sh, crap-check.sh, mutation-check.sh and ` +
+    `deadcode-check.sh all take this worktree path as an optional leading ` +
+    `argument (crap-commit.sh already required it; the other three now accept ` +
+    `it too) and print the repo and branch they resolved as their first line ` +
+    `of output -- read that line and pass ${wt.path} there, every time, rather ` +
+    `than relying on cwd. GIT_DIR/GIT_WORK_TREE env vars and cd are not the way ` +
+    `to target it. Any reproduction or experiment -- a scratch clone, a throwaway ` +
+    `git repo to test a git behaviour, anything you would otherwise drop in /tmp ` +
+    `-- goes under the path printed by ` +
+    `git -C ${wt.path} rev-parse --git-path touchstone-scratch instead, never ` +
+    `/tmp. That path lives under the worktree's own git dir, not its working ` +
+    `tree, so it needs no gitignore entry and is gone once the worktree is ` +
+    `removed. Git resolves identity and signing config by directory, so a repo ` +
+    `created there inherits whatever the global config says, which can mean ` +
+    `signing with the wrong identity or blocking on a hardware key no agent can ` +
+    `satisfy. A scratch git repo is therefore always created with signing off ` +
+    `and an explicit test identity, and every git command against it names ` +
+    `that path literally, for the same reason ${wt.path} is named literally ` +
+    `above. ` +
+    `git init -q <scratch path> creates the directory, which the path above ` +
+    `only names; git -C <scratch path> init cannot, because -C needs it to ` +
+    `exist already. Then ` +
+    `git -C <scratch path> add -A, then ` +
+    `GIT_AUTHOR_NAME=test GIT_AUTHOR_EMAIL=t@t GIT_COMMITTER_NAME=test ` +
+    `GIT_COMMITTER_EMAIL=t@t git -C <scratch path> -c commit.gpgsign=false ` +
+    `-c gpg.format=openpgp commit -q -m scratch.\n\n` +
+    envelope(!omitBase) + `\n` + prompt + RECORD(opts.label),
+    opts)
+
+const headOf = (range) => range.includes('..') ? range.split('..')[1].trim() : range.trim()
+
+// Read once, here, rather than folded into gate:opt-in below: comparing
+// against the repository's actual base branch rather than this worktree is
+// what makes the comparison safe on a resumed branch. The worktree's own
+// manifest already carries this run's own version-bump commit whenever one
+// landed in an earlier session -- the ordinary case on touchstone itself,
+// since check-version-bump.sh forces every workflows/ change to carry one --
+// and reading that back would report the run's own progress as drift against
+// itself. The probe must not just read origin/wt.base either: wt.base
+// becomes the branch under review whenever this run is stacked (baseOverride,
+// set above from args.base), and that branch's own manifest can carry its own
+// unmerged version bump, reviving the same self-accusation against a version
+// that never shipped. The probe resolves the real base itself instead, then
+// fetches it fresh -- nothing else in this workflow is guaranteed to have
+// refreshed that remote-tracking ref on a resumed run, so a stale fetch could
+// let a stale base pass as mismatch=false.
+const versionProbe = await treeAgent(
+  `[touchstone: plugin:version]\n` +
+  `Read .claude-plugin/plugin.json off the repository's actual base branch, ` +
+  `never this run's own working tree and never any stacked branch this work ` +
+  `sits on. Resolve that base yourself, the same way branch creation does: ` +
+  `git -C ${wt.path} symbolic-ref --short refs/remotes/origin/HEAD, which ` +
+  `prints an origin/-prefixed name; strip that prefix, falling back to ` +
+  `whichever of main or master exists when there is no remote-tracking HEAD. ` +
+  `This is not necessarily ${wt.branch}'s own base: ignore what branch ${wt.branch} ` +
+  `was actually cut from. Then run ` +
+  `git -C ${wt.path} fetch origin <that base> to refresh the remote-tracking ` +
+  `ref before reading it -- this worktree can be sessions old. If that fetch ` +
+  `fails (no network, no auth, a remote needing a hardware key), that is not ` +
+  `by itself a missing manifest: origin/<that base> can already hold it from ` +
+  `an earlier fetch or the initial clone, so read it anyway. Then read ` +
+  `git -C ${wt.path} show origin/<that base>:.claude-plugin/plugin.json. ` +
+  `Then STOP: the fetch is the only change to make; do not touch the working ` +
+  `tree, commit, or push.\n` +
+  `Return found=true with name and version set from that file's "name" and ` +
+  `"version" fields, or found=false with empty strings if the base cannot be ` +
+  `resolved, the ref still cannot be resolved even after attempting the read, ` +
+  `or the file is missing, unreadable, or has no such fields. A failed fetch ` +
+  `does not force found=false on its own. Do not invent either value. Set ` +
+  `refreshed=true only if that fetch actually succeeded, and false if it ` +
+  `failed, was refused, or you did not run it: false says the version you ` +
+  `read may predate the base branch's real state, so it must be reported ` +
+  `rather than assumed. Set detail to one line saying which case applied.`,
+  { label: 'plugin:version', omitBase: true, schema: MANIFEST_PROBE,
+    model: 'haiku', effort: 'low' })
+if (versionProbe == null) {
+  // Distinct from the found:false/wrong-name case below: this means the
+  // probe never answered at all, so pipeline_version's null/null does not
+  // mean "nothing to compare" here, it means the comparison did not run.
+  log(`the plugin:version probe returned nothing, so pipeline_version could ` +
+      `not be compared against the repository's base branch`)
+} else if (versionProbe.found && versionProbe.name === PLUGIN_NAME) {
+  const drift = versionProbe.version !== PIPELINE_VERSION
+  pipelineVersion = {
+    executed: PIPELINE_VERSION, base_branch: versionProbe.version, mismatch: drift,
+    base_refreshed: versionProbe.refreshed !== false,
+  }
+  if (drift) {
+    // Names both and orders neither: the executed snapshot is the newer one
+    // whenever the base was reverted or the plugin was built locally.
+    log(`this run is executing pipeline ${PIPELINE_VERSION}; the repository's ` +
+        `base branch's plugin.json names ${versionProbe.version}`)
+  }
+  if (versionProbe.refreshed === false) {
+    // Without this the fetch failing produces mismatch:false and silence,
+    // which is the stale agreement the fetch was added to rule out.
+    log(`the base branch's manifest was read from a remote-tracking ref this ` +
+        `run could not refresh, so its version may predate the base branch's ` +
+        `real state (${versionProbe.detail})`)
+  }
+} else {
+  // The probe answered but did not confirm a comparable manifest -- the
+  // ordinary case for every repo this pipeline delivers into other than
+  // touchstone's own, but logged regardless: an answer that came back
+  // uncomparable must not collapse into the same silence as a comparison
+  // that never ran at all (the branch above).
+  log(`the plugin:version probe found no comparable manifest on the ` +
+      `repository's base branch (${versionProbe.detail}), so pipeline_version ` +
+      `stays uncompared`)
+}

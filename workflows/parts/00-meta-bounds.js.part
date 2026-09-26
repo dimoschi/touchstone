@@ -1,0 +1,235 @@
+export const meta = {
+  name: 'deliver-pipeline',
+  description: 'Triage -> plan -> implement (TDD) -> gates -> adversarial review -> mutation -> PR, bounded',
+  whenToUse: 'Ticket-driven delivery in a repo that has opted into gating. Prefer the /deliver command, which parses flags and refuses without a ticket. Pass args: {ticket: "..."}; task is optional and narrows the ticket. Pass {plan: "..."} to reuse a plan an earlier run produced, which skips the Plan phase and starts at Implement.',
+  phases: [
+    { title: 'Worktree', detail: 'canonically named branch and worktree from a freshly pulled base, then fetch the ticket once for every later phase' },
+    { title: 'Triage', detail: 'one cheap agent checks the premise, sizes the job and judges its difficulty; a disproved premise halts, small work skips Plan, and the difficulty sets every later phase\'s reasoning effort' },
+    { title: 'Plan', detail: 'planner produces plan + acceptance criteria + risk areas' },
+    { title: 'Implement', detail: 'one implementer, TDD via crap-controlled-changes, many small signed commits' },
+    { title: 'Draft PR', detail: 'push the branch and open a draft PR, so the work is visible and any later halt has somewhere durable to be reported' },
+    { title: 'Review', detail: 'adversarial reviewers on distinct lenses, chosen by diff size: correctness and devil\'s advocate normally, plus requirements coverage on a big diff, none on a one-liner. Only a wrong-result, crash, gate-bypass or unmet-criterion finding with a demonstrated reproducer can hold the run; everything else reaches the PR as a note. Runs again on any commits a later phase adds, and from the first re-review on a finding also has to fall inside what that range actually changed' },
+    { title: 'Fix', detail: 'fix confirmed findings, bounded rounds; a finding is fixed when its own reproducer exits 0, never by a model\'s judgement of the diff' },
+    { title: 'Mutation', detail: 'pre-PR mutation gate; kill survivors with tests, never weaken code. Its own commits are reviewed before the PR' },
+    { title: 'PR', detail: 'push, fill in the PR against the repo template, and mark the draft ready for review, only when every gate is green' },
+  ],
+}
+
+// Built by scripts/build-pipeline.sh from workflows/parts/*.js.part;
+// edit the parts and rebuild, never this file directly.
+
+// A snapshot of this script can keep running after main moves past it: the
+// host that persists a copy under its own session directory, the plugin
+// cache, and this checkout can all disagree on which version actually
+// executed. The script has no fs and no imports (see docs/architecture.md),
+// so it cannot read .claude-plugin/plugin.json to find out -- any runtime
+// read would report whatever the *current* file holds, which is exactly
+// wrong when the point is to say what this *running* snapshot is. A literal
+// is the only value that travels with the executed bytes; a regex checks it
+// against the manifest in scripts/check-version-bump.sh, so drift is a
+// gate's job rather than something this script verifies about itself.
+const PLUGIN_NAME = 'touchstone'
+const PIPELINE_VERSION = '0.24.0'
+
+// Boundaries. Wall-clock deadlines are not expressible here (no Date.now, by
+// design); the bounds are rounds, counts, and token budget instead.
+// The ticket is the specification: its description and comments are fetched
+// below and given to Triage, which checks its claims, and to Plan, which works
+// from it. No other phase sees the text. A task string is therefore optional,
+// and when given it narrows or reframes rather than restates -- "just the retry
+// path of this ticket".
+let task = typeof args === 'string' ? args : args?.task
+
+// Every task traces to a ticket, by rule. Failing here rather than cutting an
+// unmarked branch keeps the link unfabricated: a branch with no jira-/gh- marker
+// is reported untracked forever, and nothing downstream can recover the ticket.
+const ticket = args?.ticket
+if (!ticket) {
+  throw new Error(
+    'deliver-pipeline: pass args {ticket: "PROJ-4821"} or {ticket: "216"}. ' +
+    'Every task must trace to a Jira ticket or GH issue. Do not infer one from ' +
+    'the task text; supply it explicitly or do the work outside this workflow.')
+}
+// Decided here, never by the branch agent. The two forms are mechanically
+// distinct -- 216 against PROJ-4821 -- but asked to classify one, a model put
+// GitHub issue 278 on a feat/jira-278-... branch. The marker is the run's only
+// ticket link, so that files it under a tracker the ticket is not in.
+const markerFor = (ref) => {
+  const t = String(ref).trim().replace(/^#/, '')
+  if (/^\d+$/.test(t)) return `gh-${t}`
+  if (/^[A-Za-z][A-Za-z0-9]*-\d+$/.test(t)) return `jira-${t.toUpperCase()}`
+  return null
+}
+const ticketMarker = markerFor(ticket)
+if (!ticketMarker) {
+  throw new Error(
+    `deliver-pipeline: ticket "${ticket}" is neither a GitHub issue number ` +
+    `(216, #216) nor a Jira key (PROJ-4821). Refusing rather than guessing: ` +
+    `the branch marker is the only record of which tracker the work came from.`)
+}
+// Phase recording goes to agent-eval, a separate optional tool. Default on so a
+// machine that has it keeps its ground truth without opting in every run; the
+// prompt tells each phase to skip a missing command rather than halt, so this
+// flag exists to silence the instruction entirely, not to make it safe.
+const recordPhases = args?.record !== false
+
+// Stacking on a PR still in flight. The review range is the merge base with the
+// base and the PR opens against it, so defaulting here puts the parent's commits
+// in this PR's diff.
+const baseOverride = typeof args?.base === 'string' && args.base.trim()
+  ? args.base.trim() : null
+
+const MAX_GATE_ATTEMPTS = args?.maxGateAttempts ?? 3
+// Three, not two: a fix round that introduces a new finding now spends a round
+// discovering that, so two left no round to actually resolve it.
+const MAX_REVIEW_ROUNDS = args?.maxReviewRounds ?? 3
+const BUDGET_FLOOR = 30_000
+const outOfBudget = () => budget.total && budget.remaining() < BUDGET_FLOOR
+
+// A change this small is cheaper to plan than to orchestrate around: Triage
+// sends it straight to Implement, and Review skips its lenses for a diff under
+// the same bar.
+const INLINE_LOC = args?.inlineLoc ?? 10
+
+// Long briefs make agents thorough about the wrong things, and the task text is
+// re-sent to every agent in the pipeline. Clamp what gets forwarded.
+const BRIEF_CHARS = args?.briefChars ?? 4000
+const brief = (s) => {
+  const t = String(s ?? '')
+  return t.length <= BRIEF_CHARS ? t : `${t.slice(0, BRIEF_CHARS)}\n[brief truncated]`
+}
+
+// Per-stage token ceilings (output tokens). Tripwires, not aborts: a running
+// agent can't be stopped from here, so over() is read only after the agent has
+// returned. On a single-shot stage that makes the ceiling retrospective -- it
+// cannot prevent the spend, it can only discard the finished work, which is why
+// plan and implement carry none. A ceiling is a real bound only where over()
+// gates a further iteration (the fix rounds, the mutation attempts, the
+// re-review latches), and those keep theirs. triage and branch keep theirs too:
+// both halt before any code exists, so tripping them forfeits nothing.
+// null means uncapped; args.stageBudgets can set a number to opt one back in.
+const CEILINGS = {
+  triage: 15_000,
+  branch: 10_000,
+  plan: null,
+  implement: null,
+  gate: 120_000,
+  // Two separate windows share this ceiling: discovery+baseline before
+  // Implement, and the post-Implement run plus its one pre-review fix
+  // round. stage_spend.checks sums both; each is bounded on its own.
+  checks: 20_000,
+  review: 80_000,
+  // Carries the tail review of each fix round as well as the fixing itself.
+  fix: 170_000,
+  mutation: 150_000,
+  pr: 30_000,
+  ...(args?.stageBudgets ?? {}),
+}
+const stageSpend = {}
+// Names the caller set by hand. Those keep their literal value: an explicit
+// budget is a decision, and scaling it would silently overrule it.
+const EXPLICIT_BUDGETS = new Set(Object.keys(args?.stageBudgets ?? {}))
+// Applied to every ceiling of a stage created after Triage, so the sizing that
+// already picks effort and lens count also picks how much the stage may spend.
+// 1 until Triage has judged; the stages before it are cheap and fixed.
+let ceilingScale = 1
+const stage = (name) => {
+  const start = budget.spent()
+  const raw = CEILINGS[name]
+  const cap = raw == null || EXPLICIT_BUDGETS.has(name)
+    ? raw
+    : Math.round(raw * ceilingScale)
+  return {
+    over: () => cap != null && budget.spent() - start > cap,
+    close: () => {
+      stageSpend[name] = budget.spent() - start
+      log(`${name}: ${Math.round(stageSpend[name] / 1000)}k output tokens ` +
+          (cap == null ? '(no ceiling)' : `(ceiling ${Math.round(cap / 1000)}k)`))
+    },
+  }
+}
+// Set once the draft PR exists; read by halted() so a stop has somewhere
+// durable to be reported. Declared here because halted() is defined before the
+// phase that opens it.
+let draftPr = null
+
+// executed never changes; base_branch and mismatch stay null until the
+// plugin:version probe (before Triage) has something to report, which is why
+// a halt at Worktree carries the executed value with the other two still
+// null. mismatch is null rather than false when the probe found no comparable
+// manifest (found:false, or a different plugin's name) -- the ordinary case
+// for every repo this runs against except touchstone's own, but it is logged
+// too, distinct from a real mismatch. A probe that returns nothing at all
+// leaves the same null/null pair, but is logged separately again, since that
+// case means the comparison did not run, not that there was nothing to
+// compare.
+let pipelineVersion = { executed: PIPELINE_VERSION, base_branch: null, mismatch: null }
+
+// Opening the draft is allowed to fail without ending the run, so a note that
+// states either outcome flatly is wrong half the time. Every halt note that
+// mentions the PR reads this instead of asserting one.
+const prNote = () => draftPr
+  ? `The PR was left as a draft`
+  : `No PR was opened, because the draft could not be opened earlier in this run`
+
+// Keyed by ticket, not run id: a script is never told its own run id, and the
+// ticket is what a human looks the run up by.
+const recordRun = async (record) => {
+  const key = String(ticket).replace(/[^A-Za-z0-9_-]/g, '-')
+  const written = await agent(
+    `Write one file, then STOP. Do not stage it, commit it or push, and do ` +
+    `not touch anything else.\n` +
+    `1. Resolve the main checkout: git rev-parse --path-format=absolute ` +
+    `--git-common-dir, then take that directory's parent. Write there, not in ` +
+    `this worktree, which is removed once the work lands.\n` +
+    `2. mkdir -p <main>/.claude/touchstone-runs\n` +
+    `3. Write the JSON below to <main>/.claude/touchstone-runs/${key}.json ` +
+    `byte for byte, with a quoted heredoc (cat > path <<'TOUCHSTONE_EOF'). Do ` +
+    `not reformat it, re-indent it, summarise it or add fields. It is a record, ` +
+    `not a draft.\n` +
+    `Return the absolute path you wrote.\n\n` +
+    JSON.stringify(record, null, 2),
+    { label: 'run-record', model: 'haiku', effort: 'low' })
+  log(written
+    ? `run record written to .claude/touchstone-runs/${key}.json`
+    : `run record could not be written; this run survives only in the transcript`)
+  return typeof written === 'string' ? written : null
+}
+
+// A halt is a result, not an absence of one, and the run record is where it
+// survives the session. It used to be posted as a comment on the draft PR too.
+// That put the run's internal state -- which phase stopped, which findings a
+// lens raised -- on the repository's public record, where a reviewer cannot act
+// on it and someone has to delete it by hand. Opening the PR is this workflow's
+// only write to GitHub. Async because recordRun is, and every call site is
+// `return await`.
+const halted = async (at, extra) => {
+  const payload = {
+    task, halted_at: at, pipeline_version: pipelineVersion, stage_spend: stageSpend,
+    needs_user: true, ...extra,
+  }
+  if (draftPr?.number) {
+    log(`halt at ${at}: draft PR ${draftPr.url} left as it is; the reason is in ` +
+        `this run's result and record`)
+  }
+  payload.record_path = await recordRun(payload)
+  return payload
+}
+
+// task_demands_implementation is asked of the planner rather than pattern-matched
+// here because the contradiction arrives as prose. A real run was handed a task
+// reading "the plan below is already written... then implement", obeyed the task
+// over the phase rule, and committed 51 edits from the Plan stage; the review that
+// would have compared its reasoning to its code never ran.
+const PLAN = {
+  type: 'object', additionalProperties: false,
+  required: ['plan', 'acceptance_criteria', 'risky_areas',
+             'task_demands_implementation'],
+  properties: {
+    plan: { type: 'string' },
+    acceptance_criteria: { type: 'array', items: { type: 'string' } },
+    risky_areas: { type: 'array', items: { type: 'string' } },
+    task_demands_implementation: { type: 'boolean' },
+    conflict_note: { type: 'string' },
+  },
+}

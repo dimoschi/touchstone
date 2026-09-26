@@ -184,6 +184,11 @@ with runtime-provided globals (`agent`, `parallel`, `phase`, `budget`, `log`) pl
 top-level `await` and `return`. CI parses it with `vm.compileFunction` wrapped in an
 async IIFE for exactly that reason. It cannot be run with `node`.
 
+The host needs it as one file, so it is generated: `scripts/build-pipeline.sh`
+concatenates `workflows/parts/*.js.part`, in sorted-name order, into the committed
+`workflows/deliver-pipeline.js`. Edit a part and rebuild; `--check` refuses a stale
+build.
+
 Structure, top to bottom: `meta` (phase titles must match the `phase()` calls exactly),
 argument validation that throws early, `CEILINGS` per stage, then the phases in order.
 

@@ -14,6 +14,7 @@ bash scripts/run-python-tests.sh        # pytest unit suites for hooks/ and lib/
 bash workflows/test-fix-loop-join.sh    # the workflow's fix/verify/review loop
 bash workflows/test-mutation-optin.sh   # marker opt-in behaviour
 bash scripts/test-version-bump.sh       # check-version-bump.sh's own suite
+bash scripts/test-build-pipeline.sh     # build-pipeline.sh's own suite
 ```
 
 The two `crap-commit.sh` suites need an ssh key for `CRAP_SIGNING_KEY` (defaulting to

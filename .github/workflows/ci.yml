@@ -49,6 +49,8 @@ jobs:
         run: bash workflows/test-pipeline-version.sh
       - name: Version bump test suite
         run: bash scripts/test-version-bump.sh
+      - name: Build-pipeline test suite
+        run: bash scripts/test-build-pipeline.sh
 
   go:
     # The skill's Go suites (crap-check.sh, deadcode-check.sh, mutation-check.sh)
@@ -172,6 +174,8 @@ jobs:
           python-version: '3.12'
       - name: Gated directories require a version bump
         run: bash scripts/check-version-bump.sh
+      - name: deliver-pipeline.js matches its parts
+        run: bash scripts/build-pipeline.sh --check
 
   manifests:
     runs-on: ubuntu-latest

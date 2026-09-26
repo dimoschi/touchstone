@@ -1,0 +1,542 @@
+
+// Latch 1. The premise checks that matter most are usually one grep, and a task
+// whose stated facts are wrong must not be planned around. Buying that check
+// for one cheap agent is the difference between a 2-agent run and an 11-agent
+// one, so it runs before anything expensive.
+phase('Triage')
+const sTriage = stage('triage')
+let triage = null
+try {
+  triage = await treeAgent(
+  `You are triage. Do the cheapest investigation that settles two questions, ` +
+  `then STOP. Do not implement, do not commit, do not write a plan.\n` +
+  `Task: ${brief(task)}\n` +
+  `You are the ONLY phase that scrutinises the ticket itself. No later phase ` +
+  `sees this text, so a claim in it that you do not check goes unchecked for ` +
+  `the whole run:\n` +
+  ticketSpec() +
+  `1. Is every factual claim the task makes actually true of the code? Check ` +
+  `them with grep/read. A false premise is your single most valuable output: ` +
+  `report it in premise_note with the command that disproves it.\n` +
+  `   Absence of evidence in the repo is not evidence of absence, and calling ` +
+  `a premise false on a negative grep is the most expensive mistake this ` +
+  `phase makes. Deployment config, infrastructure and runtime state often ` +
+  `live outside the repo, and something wanted but not yet built is still a ` +
+  `real requirement. Set premise_ok=false only for a claim you positively ` +
+  `contradicted by reading code that says otherwise, never for one you merely ` +
+  `could not find.\n` +
+  `2. How large is the real change, in lines?\n` +
+  `scope is about SIZE only, never about whether the task is a good idea: a ` +
+  `wrong premise goes in premise_ok and premise_note, and setting scope from it ` +
+  `would route a task that needs rethinking into being built immediately. ` +
+  `Return scope='inline' if a competent engineer would finish this in roughly ` +
+  `ten tool calls or fewer (a comment, a rename, a one-line fix, a config ` +
+  `value). Return scope='team' only when the work genuinely needs a plan, new ` +
+  `tests, and independent review.\n` +
+  `3. How hard is it to get right? This is a separate question from size, and ` +
+  `it sets how much reasoning every later phase is given, so answer it on its ` +
+  `own terms rather than reading it off the line count.\n` +
+  `  trivial  - mechanical and locally verifiable. Config, docs, a rename, a ` +
+  `version bump, a value change with an obvious correct answer.\n` +
+  `  routine  - ordinary feature or fix work in a well-understood area, where ` +
+  `the shape of the answer is clear once you have read the code.\n` +
+  `  involved - concurrency, migrations, auth or crypto, protocol or data ` +
+  `formats, anything whose failure is silent, anything touching a boundary ` +
+  `other systems depend on, or anywhere you are genuinely unsure what correct ` +
+  `looks like.\n` +
+  `Size and difficulty are independent. A two-hundred-line test file is ` +
+  `trivial; a five-line change to a signing path is involved. When torn ` +
+  `between two levels, choose the higher one: under-reasoning a hard change ` +
+  `costs far more than over-reasoning an easy one. Put the deciding factor in ` +
+  `complexity_note, in one sentence.`,
+  { label: 'triage', schema: TRIAGE, model: 'sonnet', effort: 'medium' })
+} catch (e) {
+  log(`triage returned no verdict: ${e?.message ?? e}`)
+}
+
+// An absent verdict halts rather than fails open: planning on an unverified
+// premise is the one failure this latch exists to prevent.
+if (!triage) {
+  sTriage.close()
+  return await halted('Triage', {
+    note: 'Triage produced no verdict, so the task premise is unverified and ' +
+          'nothing was planned or implemented. Re-run; if it repeats, the task ' +
+          'text or the TRIAGE schema is at fault, not the model.',
+  })
+}
+
+// A disproved premise halts: that is a fact about the task, and planning around
+// it is the one thing this latch exists to stop.
+if (!triage.premise_ok) {
+  sTriage.close()
+  return await halted('Triage', {
+    scope: triage.scope,
+    premise_ok: false,
+    premise_note: triage.premise_note,
+    estimated_loc: triage.estimated_loc,
+    evidence: triage.evidence,
+    note: 'The task\'s premise does not hold. Fix the brief before planning ' +
+      'around it; see premise_note.',
+  })
+}
+
+// Size does not. The old latch halted here and told the user to do the work
+// themselves, which delivers nothing: triage's finding was that the change is
+// SMALL, not that it is unwanted, and handing back a ten-line edit costs more
+// of the user's attention than making it. Small work now runs, with the
+// planning and multi-lens review phases skipped instead of the work.
+const inlineMode = triage.scope === 'inline'
+  || (triage.estimated_loc ?? Infinity) < INLINE_LOC
+if (inlineMode) {
+  log(`triage sized this as ` +
+      (triage.estimated_loc != null
+        ? `~${triage.estimated_loc} LOC (< ${INLINE_LOC})`
+        : 'inline') +
+      `; implementing it directly, skipping the Plan phase`)
+}
+
+// Reasoning effort, scaled by the difficulty triage just judged.
+//
+// This is the lever that actually bounds spend, and the only one available
+// before an agent starts. The stage ceilings below cannot do it: they are read
+// after an agent returns, so on a single-shot stage a ceiling spends the tokens
+// and then discards the work, which is why plan and implement deliberately
+// carry none. effort is set on the call.
+//
+// It is also the lever that matters most, for a reason that is not obvious from
+// the token counts. On a measured run of this pipeline, output was 15% of cost
+// and re-read context was 85%: every turn an agent takes re-reads everything it
+// has accumulated. Lower effort earns its saving mainly by taking fewer turns,
+// so the context is re-read fewer times -- not by writing shorter replies.
+//
+// Levels follow Anthropic's published effort/cost measurements: on long-horizon
+// coding `medium` gave up about two points of pass rate for half the cost,
+// while research-shaped work was near flat between `medium` and the default. So
+// the phases that reason about code drop a level on routine work, and the
+// phases that mostly read and report drop further.
+//
+// `involved` keeps every default. The point of asking triage is to spend less
+// on easy work, never less on hard work.
+const EFFORT = {
+  trivial:  { plan: 'low',    implement: 'medium', review: 'medium', verify: 'low' },
+  routine:  { plan: 'medium', implement: 'high',   review: 'high',   verify: 'low' },
+  involved: { plan: 'high',   implement: 'xhigh',  review: 'xhigh',  verify: 'medium' },
+}
+// Ceilings scale with the same judgement as effort. A trivial change used to
+// get a trivial effort setting and the full 80k review ceiling, which is not a
+// budget so much as permission to keep going.
+const CEILING_SCALE = { trivial: 0.4, routine: 1, involved: 1.5 }
+const complexity = EFFORT[triage.complexity] ? triage.complexity : 'involved'
+const effortFor = EFFORT[complexity]
+ceilingScale = CEILING_SCALE[complexity]
+if (triage.complexity && complexity !== triage.complexity) {
+  log(`triage returned an unrecognised complexity (${triage.complexity}); ` +
+      `treating it as involved, which spends the most rather than the least`)
+}
+log(`triage judged this ${complexity}` +
+    (triage.complexity_note ? `: ${triage.complexity_note}` : '') +
+    ` -- plan/implement/review/verify effort ` +
+    `${effortFor.plan}/${effortFor.implement}/${effortFor.review}/${effortFor.verify}` +
+    `, ceilings x${ceilingScale}` +
+    (EXPLICIT_BUDGETS.size
+      ? ` (${[...EXPLICIT_BUDGETS].join(', ')} left at the value you passed)`
+      : ''))
+sTriage.close()
+
+// A plan an earlier run already produced arrives as args.plan and starts this
+// run at Implement. Without it the only way to reuse a plan was to paste it into
+// the task, which routed it back through the planner and asked that phase to
+// carry out work it is forbidden to do.
+const givenPlan = typeof args?.plan === 'string' && args.plan.trim()
+  ? args.plan.trim() : null
+let plan = givenPlan
+  ? {
+      plan: givenPlan,
+      acceptance_criteria: args?.acceptanceCriteria ?? [],
+      risky_areas: args?.riskyAreas ?? [],
+      task_demands_implementation: false,
+    }
+  : null
+
+if (givenPlan) log('Plan supplied in args; Plan phase skipped.')
+
+if (!plan && inlineMode) {
+  plan = {
+    plan: `Triage sized this as a small, self-contained change and no planning ` +
+      `phase ran. What triage found: ${triage.premise_note}\n` +
+      `Make the change the task asks for and nothing more.`,
+    acceptance_criteria: [],
+    risky_areas: [],
+    task_demands_implementation: false,
+  }
+}
+
+if (!givenPlan && !inlineMode) {
+phase('Plan')
+const sPlan = stage('plan')
+plan = await treeAgent(
+  `You are the planner for this task; do NOT implement anything. You have no ` +
+  `Edit or Write tool, and must not reach for another route to the same thing.\n` +
+  `Task: ${brief(task)}\n` +
+  `Triage found: ${triage?.premise_note ?? 'n/a'}\n` +
+  `The ticket is the specification. Triage has already checked its factual ` +
+  `claims, so take its requirement and do not re-litigate its reasoning; no ` +
+  `later phase sees this text, so every requirement it states must survive ` +
+  `into your plan and acceptance criteria:\n` +
+  ticketSpec() +
+  `Read the relevant code first. Return a concrete implementation plan, ` +
+  `testable acceptance criteria, and the risky areas a reviewer should probe.\n` +
+  `If the task itself tells you to implement, or says a plan already exists and ` +
+  `only needs carrying out, set task_demands_implementation and explain in ` +
+  `conflict_note. Do not resolve the contradiction by obeying the task: pass a ` +
+  `plan already in hand as args.plan instead, which starts the run at Implement.`,
+  { label: 'planner', schema: PLAN, model: 'opus', effort: effortFor.plan,
+    agentType: 'touchstone:planner' })
+if (!plan) throw new Error('planner failed')
+
+// This used to halt and ask the user to re-run with args.plan. The script is
+// already holding that plan, so the halt bought nothing but a round trip: the
+// planner cannot implement anyway, having no Edit or Write tool.
+if (plan.task_demands_implementation) {
+  log(`planner reports the task itself demands implementation ` +
+      `(${plan.conflict_note ?? 'no note given'}); using its plan as-is and ` +
+      `going straight to Implement`)
+}
+
+sPlan.close()
+if (sPlan.over()) {
+  return await halted('Plan', {
+    plan: plan.plan,
+    note: 'plan stage exceeded its token ceiling; the run stopped before Implement. ' +
+      'Check the branch before re-running: a planner that overruns has sometimes ' +
+      'written code despite being forbidden to.',
+  })
+}
+}
+
+// The Fix, Mutation and final-result payloads below all report a `gates`
+// field, and the Mutation phase further down needs the mutation opt-in
+// marker. One probe answers both here, before either marker is needed.
+//
+// crap-commit-gate.py's PreToolUse hook only blocks a raw `git commit` when
+// .crap-gated exists at the repo root; crap-commit.sh itself runs the CRAP
+// and dead-code gates on every commit it makes regardless of that marker. So
+// the marker answers one question only -- could a raw commit have bypassed
+// the wrapper -- not whether the gates ran, and `gates` below reports both
+// separately rather than folding them into one "enforced" claim.
+//
+// The two markers take opposite fail-safe defaults on an unconfirmed answer.
+// Mutation: unknown counts as gated, which only costs an extra mutation run.
+// CRAP: unknown must NOT count as gated, because that would assert a raw
+// commit could not have bypassed the wrapper when nobody confirmed the
+// marker is there -- the false assertion this ticket exists to remove. So
+// crap_gated counts only a confirmed `true`; everything else, including a
+// probe that returned nothing, is reported as unconfirmed.
+const sGate = stage('gate')
+const gateProbe = await treeAgent(
+  `[touchstone: gate opt-in]\n` +
+  `Report whether this repo opts into CRAP-gated commits and into mutation ` +
+  `gating, then STOP. Run no tests, no gate tooling, and change nothing.\n` +
+  `1. Find the repo root: dirname "$(git rev-parse --path-format=absolute ` +
+  `--git-common-dir)".\n` +
+  `2. Test for a file named exactly .crap-gated at that root, and separately ` +
+  `for one named exactly .mutation-gated.\n` +
+  `3. Return crap_gated=true only if .crap-gated is there; crap_gated=false ` +
+  `otherwise, whether it is confirmed absent or you could not tell -- an ` +
+  `unconfirmed CRAP marker must never be reported as gated. Return ` +
+  `mutation_gated=true if .mutation-gated is there or you could not ` +
+  `determine either way, mutation_gated=false only if you confirmed it is ` +
+  `absent -- an unconfirmed mutation marker should still run the gate, which ` +
+  `only costs a run rather than dropping a real one.\n` +
+  `Report the paths you checked in detail.`,
+  { label: 'gate:opt-in', schema: MARKERS, model: 'haiku', effort: 'low' })
+sGate.close()
+
+const crapGated = gateProbe?.crap_gated === true
+const mutationGated = gateProbe?.mutation_gated !== false
+if (!gateProbe) {
+  log(`gate opt-in probe returned nothing; treating CRAP gating as ` +
+      `unconfirmed (reported as not hook-enforced) and mutation gating as ` +
+      `opted-in (safe default: costs an extra run rather than dropping a real gate)`)
+}
+
+const sChecksPre = stage('checks')
+phase('Implement')
+const discovery = await treeAgent(
+  `[touchstone: checks:discover]\n` +
+  `Transcribe this repo's own heading structure, then STOP. Read only; run ` +
+  `nothing and change nothing. Do not choose, filter, reorder, trim, or ` +
+  `interpret anything below -- a later step decides what any of it means.\n` +
+  `1. Read ${wt.path}/AGENTS.md; if it does not exist, read ` +
+  `${wt.path}/CLAUDE.md instead (it is conventionally a symlink to ` +
+  `AGENTS.md). Return file as the absolute path you read, or '' if neither ` +
+  `exists.\n` +
+  `2. If a file was read, find every line starting with "##" that sits ` +
+  `outside a fenced code block. For each, return heading as that full line ` +
+  `verbatim, "#" characters included, and fence as the first fenced code ` +
+  `block that follows it and precedes the next such heading line, verbatim ` +
+  `and whole -- its opening marker line (\`\`\` or ~~~, with any info ` +
+  `string after it) and its closing marker line included -- or '' if there ` +
+  `is none before the next heading or the file's end. Return sections in ` +
+  `the file's own order.`,
+  { label: 'checks:discover', schema: CHECKS, model: 'haiku', effort: 'low' })
+const { checks: sourceChecks, note: discoveryNote } = checksFrom(discovery)
+let discoveredChecks = sourceChecks
+log(discoveredChecks.length
+  ? `checks discovered: ${discoveredChecks.map(c => c.id).join(', ')}`
+  : `no repo-advertised checks found (${discoveryNote}); nothing to run alongside review`)
+
+// existingBranch resumes a branch that may already carry commits of its own,
+// so there is no clean base tree here to tell an environmental failure from
+// a real one. Checks still run and are still reported below, but never
+// block: after #87 resuming is the normal path, not an edge case.
+const checksBlocking = !args?.existingBranch
+let checkAttempt = 0
+// A row is only measured when the runner echoes `command` back exactly
+// (classifyResults below), so the string built here is also the string an
+// agent has to copy verbatim. A path made only of characters no shell ever
+// treats specially is left bare for that reason: on the pipeline 0.21.0 run
+// that #116 is about, the runner miscopied the nested `'\''` escaping on
+// every one of 8 rows, and no check was ever measured again. Quoting still
+// closes the quote, splices in a backslash-escaped literal quote, and
+// reopens it, for the one case that still needs it: a declared check's own
+// command (`pytest -k 'not slow'`) or a worktree path carrying a character a
+// bare word cannot hold as-is.
+const shQuote = (s) => {
+  const str = String(s)
+  return /^[A-Za-z0-9/._+:@%=,-]+$/.test(str) ? str : `'${str.replace(/'/g, `'\\''`)}'`
+}
+// The exact Bash invocation for a check, built once by the script and never
+// by the model: a fixer or a baseline that trusted a model-reported command
+// could be handed a result for something that only resembles what was asked
+// (an extra `timeout`, a different flag) and never know it ran the wrong
+// thing. c.command itself is spliced in unquoted -- it is the -c script's
+// source, not a single argument -- so only the cd target and the outer -c
+// argument need quoting. The outer argument always contains a space (`cd
+// ... && ...`), so it is quoted regardless; only the cd target can come out
+// bare. The echo sits outside the -c string and after `;`, not `&&`: a
+// check that calls `exit N` itself, or one whose command chain ends
+// nonzero, still leaves $? holding that value for the echo to read, and
+// `;` runs it regardless, where `&&` would have skipped it whenever the
+// check's own exit code was the one case this exists to capture.
+// The check's output goes to a temp file first so the exit line can be
+// printed before it, followed by only the output's last CHECK_TAIL_BYTES.
+// The Bash tool shows a large output only as a short preview of its start
+// (this repo's own fix-loop suite prints about 56KB), so an exit line at the
+// end was out of the runner's sight, and relaying the whole log verbatim is
+// the step runners have already failed at. A file rather than a pipe to
+// tail, because a pipe's status is tail's, and a piped gate is refused by a
+// hook here.
+const invocationFor = (c) =>
+  `o=$(mktemp); bash -c ${shQuote(`cd ${shQuote(wt.path)} && ${c.command}`)} >"$o" 2>&1; ` +
+  `echo "${CHECK_EXIT_MARKER} ${c.id} $?"; tail -c ${CHECK_TAIL_BYTES} "$o"; rm -f "$o"`
+const executeChecks = async (checks = discoveredChecks) => {
+  checkAttempt++
+  return await treeAgent(
+    `[touchstone: checks:run]\n` +
+    `Run each Bash invocation below exactly as given, then STOP. Do not fix, ` +
+    `edit, or investigate a failure; a later phase does that.\n` +
+    `This one call is the exception to the rule above about never running ` +
+    `cd, and only in the bash -c form each invocation already takes: its cd ` +
+    `runs inside a child shell, which does not move this session's own ` +
+    `working directory. Never split one into a bare cd ${wt.path} && ` +
+    `<command>, which does.\n` +
+    `Run the invocations one at a time, in the order given, each in the ` +
+    `foreground with a Bash timeout of 600000 ms: never with ` +
+    `run_in_background, never several at once, and wait for each to return ` +
+    `before starting the next.\n` +
+    `Report each check's id, its exit code, and its combined stdout and ` +
+    `stderr verbatim -- do not summarise, truncate, or interpret what it ` +
+    `printed. Report command as the exact invocation you ran, copied back ` +
+    `verbatim: a row is only accepted when it matches what was asked. ` +
+    `Report the output exactly as printed, starting with its first line, ` +
+    `the ${CHECK_EXIT_MARKER} line: never write, add, move, or change that ` +
+    `line yourself. Each invocation already prints only the end of a long ` +
+    `log, so report all of what it printed. A call that does not return ` +
+    `within the timeout is reported with whatever it printed and no exit ` +
+    `line.\n` +
+    `Only once the last invocation has returned, run git -C ${wt.path} ` +
+    `status --porcelain and report whether it printed anything (dirty) and, ` +
+    `if so, its output (porcelain): a check that writes to the tree (a ` +
+    `ledger, a generated file) must be visible, not silently carried into ` +
+    `whatever commits next.\n` +
+    checks.map(c => `${c.id}: ${invocationFor(c)}`).join('\n'),
+    { label: `checks:run:${checkAttempt}`, schema: CHECK_RUN, model: 'haiku', effort: 'low' })
+}
+const CHECK_HEAD_BYTES = 1024
+const CHECK_TAIL_BYTES = 8192
+// A cap stated only in a prompt is a request; a slice is a bound. Head and
+// tail both, since a gate prints the repo and branch it resolved first and
+// its verdict last.
+const truncateOutput = (s) => {
+  const t = String(s ?? '')
+  if (t.length <= CHECK_HEAD_BYTES + CHECK_TAIL_BYTES) return t
+  const omitted = t.length - CHECK_HEAD_BYTES - CHECK_TAIL_BYTES
+  return t.slice(0, CHECK_HEAD_BYTES) +
+    `\n[touchstone: truncated, ${omitted} bytes omitted]\n` +
+    t.slice(t.length - CHECK_TAIL_BYTES)
+}
+// The one record kept of what a reproducer actually did at a given round.
+// outcomeOf reads row.output raw, before this ever truncates the copy that
+// gets stored, so truncation can never hide the marker from the decision.
+const reproducerRunOf = (row, round) =>
+  ({ outcome: outcomeOf(row), exit_code: row?.exit_code ?? null,
+     output: truncateOutput(row?.output), round })
+// Splits a run's raw results into a real red list (ran, command matched, a
+// well-formed first-line exit line naming this check that reads nonzero) and an
+// unmeasured one (nobody reported the id, reported it against a different
+// command, or reported it against the right command but without an exit
+// line classifyResults can trust). Unmeasured is never a pass, but it is also
+// never red: a row this phase cannot trust is not evidence either way, so it
+// stays apart from red and is handed to runChecks below to retry, not to a
+// fixer that cannot change what a runner echoes back. reason is plain text
+// for unmeasuredChecksHalt below to render per attempt; it is never the
+// mismatched-command message when the command actually matched, which is
+// what let a matched check's own summarised or still-running output read as
+// a command mismatch before this ticket.
+const classifyResults = (checks, results) => {
+  const byId = new Map((Array.isArray(results) ? results : [])
+    .filter(r => r?.id).map(r => [r.id, r]))
+  const red = []
+  const unmeasured = []
+  for (const c of checks) {
+    const row = byId.get(c.id)
+    const expected = invocationFor(c)
+    if (!row) {
+      unmeasured.push({ id: c.id, command: c.command, exit_code: null,
+        output: 'no result was reported for this check',
+        expected, reported: null, reason: 'no result reported' })
+      continue
+    }
+    if (row.command !== expected) {
+      unmeasured.push({ id: c.id, command: c.command, exit_code: null,
+        output: `not measured: expected \`${expected}\`, got \`${row.command}\``,
+        expected, reported: row.command, reason: `reported \`${row.command}\`` })
+      continue
+    }
+    const parsed = exitLineOf(row.output, c.id)
+    if (parsed.reason) {
+      unmeasured.push({ id: c.id, command: c.command, exit_code: null,
+        output: `not measured: ${parsed.reason}`,
+        expected, reported: row.command, reason: parsed.reason })
+      continue
+    }
+    if (parsed.exit !== 0) {
+      red.push({ id: c.id, command: c.command, exit_code: parsed.exit,
+        output: truncateOutput(row.output) })
+    }
+  }
+  return { red, unmeasured }
+}
+// Runs every discovered check once, then -- only for whatever came back
+// unmeasured -- runs those again exactly one more time, rather than
+// re-running minute-long suites the first pass already measured at this
+// head. A runner that miscopies once can copy correctly on a second try; one
+// that miscopies twice is not fixed by a code change, so nothing past this
+// point retries again -- it halts instead (unmeasuredChecksHalt).
+const runChecks = async () => {
+  if (!discoveredChecks.length) return { red: [], unmeasured: [] }
+  const first = await executeChecks(discoveredChecks)
+  const { red: red1, unmeasured: unmeasured1 } = classifyResults(discoveredChecks, first?.results)
+  if (!unmeasured1.length) return { red: red1, unmeasured: [] }
+  log(`checks: ${unmeasured1.length} check(s) unmeasured, retrying once: ` +
+      unmeasured1.map(c => c.id).join(', '))
+  const retryList = discoveredChecks.filter(c => unmeasured1.some(u => u.id === c.id))
+  const second = await executeChecks(retryList)
+  const { red: red2, unmeasured: unmeasured2 } = classifyResults(retryList, second?.results)
+  const firstReportedById = new Map(unmeasured1.map(u => [u.id, u.reported]))
+  const firstReasonById = new Map(unmeasured1.map(u => [u.id, u.reason]))
+  const unmeasured = unmeasured2.map(u =>
+    ({ ...u, reported: firstReportedById.get(u.id) ?? null, reported_again: u.reported,
+       reason: firstReasonById.get(u.id) ?? null, reason_again: u.reason }))
+  return { red: [...red1, ...red2], unmeasured }
+}
+
+const renderCheck = (c) => `Check ${c.id} (${c.command}) exited ${c.exit_code}:\n${c.output}`
+
+// Reports a check the runner never measured, after runChecks already
+// retried it once. Never sent to a fixer: a fixer cannot change what a
+// runner echoes back, and three fix rounds were burned on exactly that
+// before #116. plan, impl, gatesPayload and checksPayload are read here only
+// by closure -- this halts solely from a call site after impl exists (the
+// three sites below), never from above it, so none of open/notes/round/
+// fixRoundSpend can be read here: those are `let` bindings this file
+// declares only inside the fix loop, and reading them from a call site
+// before that loop starts would be the same TDZ failure the comment above
+// `scored` records. The fix-loop call site passes them through extra.
+const unmeasuredChecksHalt = (at, extra) => {
+  const note = `${unmeasuredChecks.length} discovered check(s) could not be ` +
+    `measured after a retry. This halt is about measurement, not the code: ` +
+    `the runner did not report them as asked, or they did not finish ` +
+    `within the 600000 ms Bash timeout, so no verdict exists either way, ` +
+    `and no fix round has been spent on them.\n` +
+    unmeasuredChecks.map(c =>
+      `- ${c.id}: expected \`${c.expected}\`; first run ${c.reason}; ` +
+      `second run ${c.reason_again}.`
+    ).join('\n')
+  return halted(at, {
+    plan: plan.plan, implemented: impl.summary, gates: gatesPayload(), checks: checksPayload(),
+    ...extra, note,
+  })
+}
+
+// A check red before any work started is the repo's own environment, not
+// this run's doing, and there is no way to tell the two apart other than
+// measuring the base commit itself. Dropped, not merely downgraded, so it
+// can never re-enter a fixer prompt later. An unmeasured row is never part
+// of this: it is not evidence the repo's own environment is broken, only
+// that this run could not measure it, so it stays in discoveredChecks and
+// is tried again after Implement.
+let droppedAtBaseline = []
+if (discoveredChecks.length && checksBlocking) {
+  const baseline = await executeChecks()
+  if (baseline?.dirty) {
+    sChecksPre.close()
+    return await halted('Implement', {
+      checks: { discovered: discoveredChecks.length, blocking: checksBlocking, red: [],
+        detail: 'halted before any check ran against real implementation work' },
+      note: `A discovered check wrote to the working tree while establishing ` +
+        `the environmental baseline, before any implementation ran: ` +
+        `${baseline.porcelain || '(no detail returned)'}. Nothing was planned ` +
+        `or implemented. Find which check writes, then re-run.`,
+    })
+  }
+  const { red: baseRed } = classifyResults(discoveredChecks, baseline?.results)
+  if (baseRed.length) {
+    const redIds = new Set(baseRed.map(c => c.id))
+    droppedAtBaseline = baseRed
+    discoveredChecks = discoveredChecks.filter(c => !redIds.has(c.id))
+    log(`checks: dropped ${droppedAtBaseline.length} as environmental (red ` +
+        `before any work started): ${droppedAtBaseline.map(c => c.id).join(', ')}`)
+  }
+} else if (discoveredChecks.length) {
+  log(`checks: existingBranch has no clean base tree to classify against; ` +
+      `the ${discoveredChecks.length} discovered check(s) are reported but ` +
+      `never block this run`)
+}
+sChecksPre.close()
+const checksPreSpend = stageSpend.checks ?? 0
+
+let redChecks = []
+let unmeasuredChecks = []
+function checksPayload() {
+  return {
+    discovered: discoveredChecks.length,
+    blocking: checksBlocking,
+    red: redChecks,
+    unmeasured: unmeasuredChecks,
+    detail: (checksBlocking
+      ? (droppedAtBaseline.length
+          ? `dropped ${droppedAtBaseline.length} as environmental at the base ` +
+            `commit: ${droppedAtBaseline.map(c => c.id).join(', ')}. `
+          : '')
+      : `advisory only: existingBranch has no clean base tree to classify ` +
+        `checks against, so a red one here is reported but never blocks. `
+    ) + (discoveryNote || discovery?.detail || ''),
+  }
+}
+// Red but not blocking (existingBranch) reaches the fixer as nothing at
+// all: it is visibility for a human, not work to hand to an agent.
+let preReviewFixCommitted = false
+const blockingChecksOpen = () => checksBlocking && redChecks.length > 0
+

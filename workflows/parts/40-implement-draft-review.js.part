@@ -1,0 +1,450 @@
+const sImpl = stage('implement')
+const impl = await treeAgent(
+  `Implement this task in the current repo.\n` +
+  `Task: ${brief(task)}\nPlan: ${brief(plan.plan)}\n` +
+  (plan.acceptance_criteria.length
+    ? `Acceptance criteria:\n- ${plan.acceptance_criteria.join('\n- ')}\n`
+    : `Acceptance criteria: none were supplied with this plan. Derive them from ` +
+      `it before you write anything, and state them in your summary.\n`) +
+  `Follow the crap-controlled-changes skill: TDD first, iterating with the ` +
+  `repo's own test command. Commit with crap-commit.sh ${wt.path} -m "...", ` +
+  `which runs the gate itself and refuses if it is red; do not run ` +
+  `crap-check.sh first, since that doubles a check that already runs the ` +
+  `suite twice, and do not use either as your test loop. Run it in the ` +
+  `foreground with a Bash timeout of 600000; never background it and wait ` +
+  `with sleep. Follow its NEXT_ACTION until green. Commit signed, in as many ` +
+  `commits as the work naturally takes. Never run ` +
+  `--accept or --mark-scored yourself; both need explicit user approval. ` +
+  `Never create, edit or delete .crap-gated, .mutation-gated or ` +
+  `.comment-gated on your own initiative: whether a repo is gated (and by ` +
+  `which policy) is the repo owner's decision, not yours, and a repo ` +
+  `without any of them is simply not gated -- say so and continue. The ` +
+  `one exception is a NEXT_ACTION of UNSUPPORTED_LANGUAGE: halt ` +
+  `and report its three options to the user rather than picking one and ` +
+  `editing the marker yourself. Set unsupported_language=true when you do, ` +
+  `and put the three options in summary; leave commit_range as the unchanged ` +
+  `base if you made no commits before hitting it. ` +
+  `Do not push and do not open a PR: those are the user's to authorise.\n` +
+  `Return scored=true if crap-commit.sh printed that it scored the change ` +
+  `(ran the CRAP and dead-code checks on your commits), scored=false if you ` +
+  `made no commits or it printed nothing to score. Base this on what it ` +
+  `printed, never on whether .crap-gated exists and never on your own ` +
+  `judgement of the change. If it printed its own gate message, copy it ` +
+  `verbatim into gate_note.\n` +
+  `Return commit_range as '<base-sha>..<head-sha>', both as full 40-character ` +
+  `SHAs, using your final HEAD and a base you work out yourself: find the ` +
+  `merge base of HEAD with ${wt.base} and with origin/${wt.base}. If only ` +
+  `one of those refs resolves, use its merge base. If both resolve, use ` +
+  `whichever of the two merge-base commits is a descendant of the other ` +
+  `(git merge-base --is-ancestor); if neither is, use the one from ` +
+  `origin/${wt.base} -- the gates resolve their own diff base as origin/HEAD ` +
+  `first, and this keeps the reviewed range aligned with the measured one. ` +
+  `Later phases compare their own HEAD against the head of this range to ` +
+  `work out what is still unreviewed, and an abbreviated SHA never matches. ` +
+  `Downstream phases are given that range and read the diff themselves, so ` +
+  `it is how your work is handed on: a summary of it is not, and will not ` +
+  `be forwarded.`,
+  { label: 'implementer', schema: IMPL, model: 'sonnet', effort: effortFor.implement })
+if (!impl) throw new Error('implementer failed')
+sImpl.close()
+
+// Whether anything actually went through the gate, across every committing
+// phase from here through the mutation loop -- an implementer that scored
+// nothing (nothing changed the gate checks) can still be followed by a fix
+// round or the mutation loop that does. Folded with OR, never overwritten, so
+// one scored=true anywhere makes the whole run's `measured` claim 'scored'.
+//
+// Declared above the halts below, not after them: these are `let` bindings,
+// and the gate payload helper reads all three, so a halt that called it from
+// above this point died with "Cannot access 'scored' before initialization"
+// rather than reporting the gate.
+let scored = impl.scored === true
+// Kept apart by whether the reporting phase itself scored: pairing a final
+// measured='scored' with an unscored phase's "nothing to score" note would
+// misattribute evidence, and the reverse throws away the only observation
+// there is for a run that never scores at all -- scored=false covers "no
+// commits", "it printed nothing to score" and more, and the note is what
+// says which.
+let scoredNote = scored ? (impl.gate_note ?? '') : ''
+let unscoredNote = scored ? '' : (impl.gate_note ?? '')
+
+// The only other outcome this phase can report, and the only one that must
+// not fall through to Draft PR: the schema has no other way to say "I
+// stopped", so an unhandled unsupported_language would read as a normal,
+// reviewable result and the refused work would never reach a commit.
+if (impl.unsupported_language) {
+  return await halted('Implement', {
+    plan: plan.plan, implemented: impl.summary, gates: gatesPayload(),
+    note: impl.summary,
+  })
+}
+if (sImpl.over()) {
+  return await halted('Implement', {
+    plan: plan.plan, implemented: impl.summary, gates: gatesPayload(),
+    // The note says nothing about the gates: an implementer that committed
+    // before overrunning did gate those commits, and what was measured is in
+    // the gates field now.
+    note: 'implementer exceeded its token ceiling; any work is on the branch and review did not run',
+  })
+}
+
+// Run before Review spends any budget on something a script already
+// answers with an exit code.
+const sChecksPost = stage('checks')
+let lastCheckedHead = headOf(impl.commit_range)
+;({ red: redChecks, unmeasured: unmeasuredChecks } = await runChecks())
+if (redChecks.length) {
+  log(`checks: ${redChecks.length} discovered check(s) red after Implement: ` +
+      redChecks.map(c => c.id).join(', '))
+}
+if (checksBlocking && unmeasuredChecks.length) {
+  sChecksPost.close()
+  stageSpend.checks = checksPreSpend + (stageSpend.checks ?? 0)
+  return await unmeasuredChecksHalt('Implement')
+}
+
+// One checks-only fix round before Review, so a purely mechanical defect
+// (a missing version bump, the incident this exists for) is applied as
+// part of the same diff Review reads, rather than reaching a reviewer as
+// something to notice.
+if (blockingChecksOpen() && !sChecksPost.over()) {
+  const preReviewFixed = await treeAgent(
+    `Fix the repo's own failing checks below in the current repo, iterating ` +
+    `with the repo's own test command if a fix needs one. Commit with ` +
+    `crap-commit.sh ${wt.path} -m "...", which gates and commits in one ` +
+    `call: run it in the foreground with a Bash timeout of 600000, never ` +
+    `background it and wait with sleep, and do not pre-run crap-check.sh. ` +
+    `Never create, edit or delete .crap-gated, .mutation-gated or ` +
+    `.comment-gated on your own initiative: that is the repo owner's ` +
+    `decision, not yours. The one exception is a NEXT_ACTION of ` +
+    `UNSUPPORTED_LANGUAGE: halt and report its three options rather than ` +
+    `editing the marker yourself. Set unsupported_language=true when you ` +
+    `do, and put the three options in note; leave head_sha as the ` +
+    `unchanged HEAD if you made no commits before hitting it. Do not push ` +
+    `or open a PR.\n` +
+    `Task: ${brief(task)}\n` +
+    redChecks.map(renderCheck).join('\n\n') + `\n` +
+    `Return head_sha: the full 40-character SHA of HEAD after your last ` +
+    `commit, or of the unchanged HEAD if you committed nothing. Return ` +
+    `scored=true if crap-commit.sh printed that it scored this round's ` +
+    `commits, scored=false otherwise; if it printed its own gate message, ` +
+    `copy it verbatim into gate_note.`,
+    { label: 'checks:fix', schema: FIXED, model: 'sonnet', effort: effortFor.implement })
+  if (preReviewFixed?.scored === true) {
+    scored = true
+    if (preReviewFixed?.gate_note) scoredNote = preReviewFixed.gate_note
+  } else if (preReviewFixed?.gate_note) {
+    unscoredNote = preReviewFixed.gate_note
+  }
+  if (preReviewFixed?.unsupported_language) {
+    sChecksPost.close()
+    stageSpend.checks = checksPreSpend + (stageSpend.checks ?? 0)
+    return await halted('Implement', {
+      plan: plan.plan, implemented: impl.summary, gates: gatesPayload(),
+      checks: checksPayload(),
+      note: preReviewFixed.note,
+    })
+  }
+  // impl.commit_range is what Review reads below; folding the pre-review
+  // fix's head into it is what keeps the version bump inside the diff a
+  // reviewer sees, instead of arriving as a fix round after the fact.
+  const preReviewHead = preReviewFixed?.head_sha?.trim()
+  if (preReviewHead && preReviewHead !== lastCheckedHead) {
+    const implBase = impl.commit_range.includes('..')
+      ? impl.commit_range.split('..')[0].trim() : impl.commit_range.trim()
+    impl.commit_range = `${implBase}..${preReviewHead}`
+    preReviewFixCommitted = true
+    lastCheckedHead = preReviewHead
+    ;({ red: redChecks, unmeasured: unmeasuredChecks } = await runChecks())
+    log(redChecks.length
+      ? `checks: ${redChecks.length} still red after the pre-review fix round`
+      : `checks: all clear after the pre-review fix round`)
+    if (unmeasuredChecks.length) {
+      sChecksPost.close()
+      stageSpend.checks = checksPreSpend + (stageSpend.checks ?? 0)
+      return await unmeasuredChecksHalt('Implement')
+    }
+  }
+}
+sChecksPost.close()
+stageSpend.checks = checksPreSpend + (stageSpend.checks ?? 0)
+
+// A draft PR, opened as soon as there is a commit to hang it on.
+//
+// The alternative, and what this used to do, was to produce a PR only on the
+// happy path. Every other ending left the work in a worktree nobody opens and a
+// halt note in a session that scrolls away, so a run that spent an hour and
+// stopped one step short was indistinguishable from one that never happened.
+// That is the worst outcome this pipeline can produce, and it produced it
+// silently.
+//
+// So the artefact comes first and the *readiness* is what the run earns. From
+// here on every halt has somewhere durable to be written, GitHub notifies, and
+// the branch is pushed rather than stranded on one machine. Nothing about the
+// gates changes: a draft is not a review request, and the PR phase still
+// refuses to mark it ready until they are green.
+//
+// Deliberately not earlier: `gh pr create` needs a commit, and the halts before
+// this point (a disproved premise, a dirty tree, a planner that overran) are
+// cheap, immediate, and have no code to show. The expensive halts are all
+// downstream of here.
+const DRAFT = {
+  type: 'object', additionalProperties: false,
+  required: ['opened', 'detail'],
+  properties: {
+    opened: { type: 'boolean' },
+    url: { type: 'string' },
+    number: { type: 'integer' },
+    detail: { type: 'string' },
+  },
+}
+phase('Draft PR')
+const draft = await treeAgent(
+  `Make sure this branch has a pull request to hang the run's progress on, ` +
+  `then STOP.\n` +
+  `Task: ${brief(task)}\nWhat has been implemented so far: ${impl.summary}\n` +
+  `FIRST check whether one already exists: gh pr view ${wt.branch} ` +
+  `--json number,url,isDraft,state. A branch resumed with --existing normally ` +
+  `has one, and opening a second is not possible anyway. If an open PR is ` +
+  `already there, adopt it: return its number and url with opened=true, say so ` +
+  `in detail, and change nothing about it. In particular do not re-draft a PR ` +
+  `that is already marked ready for review -- someone did that deliberately.\n` +
+  `Only if there is none: git push -u origin ${wt.branch}, then gh pr create --draft` +
+  (baseOverride ? ` --base ${wt.base}` : '') + `. Push the branch either ` +
+  `way, so the commits are on the remote rather than on one machine.\n` +
+  `The body is a short statement of intent, not a report: two or three ` +
+  `sentences on what this branch sets out to do and why, from the ticket. Do ` +
+  `not describe the diff, do not claim it is finished, and do not list what ` +
+  `you verified -- review has not run yet and the gates are not the subject. ` +
+  `Open it as a draft and leave it a draft: something later in this run marks ` +
+  `it ready, and only once every gate is green.\n` +
+  `This exists so the work is visible even if the run stops early, so a ` +
+  `failure to open it is worth reporting but is never fatal: if push or ` +
+  `gh fails, return opened=false with the error in detail and stop. Do not ` +
+  `retry in a loop, do not open a non-draft PR instead, and do not merge.\n` +
+  `Return the PR url and number for the PR this branch now has, whether you ` +
+  `opened it or adopted one that was already there.`,
+  { label: 'draft-pr', phase: 'Draft PR', schema: DRAFT, model: 'haiku',
+    effort: 'low' })
+// number, not opened: the PR phase addresses the draft by number to update and
+// ready it, and a url with no number is not enough for that.
+if (draft?.number) {
+  draftPr = { url: draft.url, number: draft.number }
+  log(`PR #${draft.number} carries this run: ${draft.url ?? '(no url)'}`)
+} else {
+  log(`draft PR not opened (${draft?.detail ?? 'no detail'}); continuing. ` +
+      `A halt from here on is only visible in this session`)
+}
+
+phase('Review')
+const sReview = stage('review')
+// risky_areas is deliberately not part of this: it is a required schema field
+// and a planner asked for risky areas always returns some, so including it
+// pinned `big` to true and made the diffstat agent's answer decorative.
+const big = impl.files_changed.length > 5 || (impl.insertions ?? 999) > 200
+// files_changed and insertions describe the implementer's own commits, and
+// the checks-only fix commits after them without updating either. Since this
+// latch can skip review outright, a run that took that fix is never trivial.
+const trivial = !preReviewFixCommitted &&
+  impl.files_changed.length <= 1 && (impl.insertions ?? 999) < INLINE_LOC
+// Named, not positional. The count used to slice a list from the front, so the
+// third lens ran only when someone passed reviewers: 3 by hand, and the size
+// latches silently decided WHICH lenses existed rather than how many. The
+// dropped one was design fit; the devil's advocate covers that ground now and
+// has to demonstrate the claim, which design fit never did.
+const LENS = {
+  correctness: {
+    label: 'correctness',
+    charge: `You are an adversarial reviewer. REFUTE the claim that this ` +
+      `implementation is correct, through one lens: hunt for inputs or states ` +
+      `where the new code returns wrong results or breaks existing callers.`,
+  },
+  requirements: {
+    label: 'requirements',
+    // The only lens shown the ticket: it cannot quote an acceptance criterion
+    // it is never given, and it is the one charged with judging against them.
+    needsTicket: true,
+    charge: `You are an adversarial reviewer. REFUTE the claim that this ` +
+      `implementation is complete, through one lens: hunt for acceptance ` +
+      `criteria that are unmet, half-met, or untested. For an unmet criterion, ` +
+      `set category to unmet-criterion and copy the criterion into ` +
+      `criterion_quote verbatim from the ticket text below, whitespace and ` +
+      `all: the script checks it is actually there, so a paraphrase does not ` +
+      `hold the run.`,
+  },
+  advocate: {
+    label: 'advocate',
+    charge: `You are the devil's advocate: a reviewer whose lens is whether ` +
+      `this should exist at all, or exist in this shape. The others assume the ` +
+      `change is wanted and ask whether it is right; you are the one who does ` +
+      `not assume it. Run the repo's own tests, then hunt for a simpler route ` +
+      `that is only visible now the code exists (a config value, an existing ` +
+      `utility, deleting code instead), scope the change took on that nothing ` +
+      `asked for, and cost it imposes that the diff hides.\n` +
+      `Report a finding only where you DEMONSTRATED the gap against the ` +
+      `working code, and put that demonstration in evidence: a test that fails ` +
+      `and the assertion in it that fails, or the exact command with its ` +
+      `actual output beside what you expected. This is why you run against ` +
+      `built code instead of a plan. Something you could not reproduce is not ` +
+      `a finding however strongly you hold it, and a preference between two ` +
+      `working designs is never one. Put that same demonstration in reproducer ` +
+      `too: the command from evidence, run from the worktree root, with its ` +
+      `expected and actual output.\n` +
+      `You are deliberately not shown the ticket text; triage owns its claims. ` +
+      `Absence of evidence in the repo is not evidence of absence, so never ` +
+      `rest a finding on a negative grep.`,
+  },
+}
+
+// The advocate is a reviewer, counted and gated with the rest: a one-line diff
+// used to get zero reviewers and an advocate anyway, which is the ratio the
+// trivial latch exists to prevent.
+const lensKeys = trivial ? [] : (big
+  ? ['correctness', 'advocate', 'requirements']
+  : ['correctness', 'advocate'])
+const lenses = (args?.reviewers != null
+    ? lensKeys.slice(0, Math.max(0, Math.min(args.reviewers, lensKeys.length)))
+    : lensKeys)
+  .filter(k => !(k === 'advocate' && args?.devilsAdvocate === false))
+  .map(k => LENS[k])
+const reviewerCount = lenses.length
+if (!reviewerCount) {
+  log(`review skipped: ${impl.files_changed.length} file(s) / ${impl.insertions} insertion(s) ` +
+      `is under the ${INLINE_LOC}-line bar; adversarial lenses on a one-liner is the ratio this workflow is trying to avoid`)
+} else {
+  log(`review: ${lenses.map(l => l.label).join(', ')}`)
+}
+// Every finding gets an id and a recorded_at the moment it enters the script,
+// here and nowhere else: the initial review, every fix round's tail review,
+// and the post-mutation review all return through reviewOf. Neither is asked
+// of the model -- a model-supplied id is exactly as unreliable as the
+// model-supplied title this replaces, so the script stamps its own.
+let findingSeq = 0
+// A verifier told to copy an id "in brackets" sometimes copies the brackets
+// too. Strip a matching pair before joining, so [f1] lines up with f1.
+const stripBrackets = (s) => {
+  const t = s.trim()
+  const m = /^\[(.+)\]$/.exec(t)
+  return (m ? m[1] : t).trim()
+}
+// The settled/fresh-finding dedup below cannot key on id alone: every
+// reviewOf call mints a brand-new one, even for a finding that is, in
+// substance, the same one reported again. contentKeyOf catches a
+// byte-identical re-report without needing the model's cooperation.
+// duplicate_of is the other half: a reworded re-report can't match by
+// content either, so the reviewer is handed the known findings by id (the
+// `known` param below) and asked to reference one back instead of restating
+// it, the same way the verdict join below matches an id rather than text.
+const contentKeyOf = (f) => JSON.stringify([f.title, f.file, f.claim, f.evidence])
+// Falls back to the bare file when a lens reported no span, so a schema-legal
+// finding never breaks the fix brief that renders it.
+const locusOf = (f) =>
+  typeof f.line_start !== 'number' ? f.file
+  : (typeof f.line_end === 'number' && f.line_end !== f.line_start)
+    ? `${f.file}:${f.line_start}-${f.line_end}` : `${f.file}:${f.line_start}`
+const dupOf = (f) => (typeof f.duplicate_of === 'string' && f.duplicate_of.trim())
+  ? stripBrackets(f.duplicate_of) : null
+// Reports how the duplicate matched, not just that it did: referencing a
+// settled finding and restating one byte for byte mean different things, and
+// only the caller knows which it can afford to discard.
+// Order matters: all four fields matching byte for byte means the text was
+// copied from the known list the lens was handed, so it is a restatement even
+// if duplicate_of is set too.
+const duplicateTargetOf = (f, known) => {
+  const key = contentKeyOf(f)
+  const restated = known.find(k => contentKeyOf(k) === key)
+  if (restated) return { hit: restated, byReference: false }
+  const dup = dupOf(f)
+  const referenced = dup ? known.find(k => k.id === dup) : undefined
+  return referenced ? { hit: referenced, byReference: true } : null
+}
+
+// Review is a function of a range, not a one-shot on the implementer's commits.
+// Reviewing only impl.commit_range meant every later phase that commits -- the
+// fix rounds and the mutation gate -- shipped unread. On one run that was 314
+// insertions across 6 files, two of which no reviewer had ever opened, and it
+// silently reverted an earlier context-cancellation fix on every mutating
+// handler. The PR was green on every gate and carried a new bug.
+// Stated to every lens: what a reproducer is and who decides on it. Repeated
+// rather than assumed, since a lens that never reads CHECK_RUN's contract has
+// no other way to learn the script judges exit_code plus the marker line.
+const REPRODUCER_CONTRACT =
+  `A reproducer is one command, run from the worktree root (${wt.path}). It ` +
+  `exits 0 when the code is correct. Print ${REPRODUCED_MARKER} on a line of ` +
+  `its own when, and only when, you have observed the defect, and exit ` +
+  `nonzero; never print it unconditionally, from a ||-style fallback, or ` +
+  `from a trap. A nonzero exit without that line counts as the reproducer ` +
+  `failing to run, never as a demonstration. expected and actual hold what ` +
+  `it prints. The command must be self-contained: set any environment ` +
+  `variable it reads yourself, never rely on your own shell's exports, and ` +
+  `keep its output short. Any helper file it needs goes under the scratch ` +
+  `path already given above, never in the tracked tree. The script decides ` +
+  `on exit_code plus that marker line, never on your account of it.`
+
+const reviewOf = async (range, tag, picked, known = [], knownCharge = '') => {
+  const out = await parallel(picked.map((lens) => () =>
+    treeAgent(
+      `${lens.charge}\n` +
+      (lens.needsTicket ? ticketSpec() : '') +
+      `Task: ${brief(task)}\n` +
+      `Commit range: ${range}\n` +
+      `You are given the range, not an account of what was done, on purpose: ` +
+      `read git diff ${range} yourself and form your own view. Read the ` +
+      `surrounding code as well: a change is wrong in its context, not in ` +
+      `isolation, and a line this range only deletes may be load-bearing ` +
+      `somewhere the range does not show you.\n` +
+      `Read wide, report narrow. A finding must be a defect these commits ` +
+      `introduce, or one they were meant to fix and did not. A defect that was ` +
+      `already there in code this range does not touch is out of scope however ` +
+      `real it is: someone else's bug, filed here, costs a fix round and can ` +
+      `stop the run. Do not report it.\n` +
+      `Report only findings you can defend with file:line evidence. Do NOT ` +
+      `report coverage, complexity, test quality, or style: deterministic ` +
+      `gates own those. Set line_start (and line_end, if the span covers more ` +
+      `than one line) to where the defect sits, so the fix does not have to ` +
+      `re-read this range to find it; leave them out only when nothing that ` +
+      `narrow applies.\n` +
+      `Return at most ${MAX_FINDINGS_PER_LENS} findings, most serious first. An ` +
+      `empty list is the expected result for a correct change. Every finding ` +
+      `carries a category: wrong-result, crash, gate-bypass, unmet-criterion, ` +
+      `docs, wording, design, scope, or other. Only wrong-result, crash, ` +
+      `gate-bypass and unmet-criterion can hold this run, and only when they ` +
+      `also carry a reproducer (unmet-criterion additionally needs criterion_quote). ` +
+      `Everything else is still worth raising and reaches the pull request as a ` +
+      `note for a human to judge, but it never blocks. ${REPRODUCER_CONTRACT}` +
+      (known.length
+        ? `\nThe findings below were already reported earlier this run, each ` +
+          `with its id in brackets, whether still open, already settled, or ` +
+          `recorded as a note. If what you would report is the same ` +
+          `underlying issue as one of these, even worded quite differently, or a ` +
+          `variant of one already fixed (the same defect resurfacing elsewhere, ` +
+          `or an edge case its fix missed), set duplicate_of to that id instead ` +
+          `of inventing a new one; report a finding with no duplicate_of only ` +
+          `for a genuinely different bug.\n` +
+          known.map(k => `[${k.id}] ${k.title} (${k.file}): ${k.claim}`).join('\n') +
+          knownCharge
+        : ''),
+      { label: `${tag}:${lens.label}`, phase: 'Review', schema: FINDINGS,
+        model: 'opus', effort: effortFor.review })))
+  const raised = out.flatMap((r, i) => {
+    const findings = Array.isArray(r?.findings) ? r.findings : []
+    // The script slices, not the schema: a maxItems failure would null the
+    // whole lens's result rather than trim it.
+    if (findings.length > MAX_FINDINGS_PER_LENS) {
+      log(`${tag}:${picked[i].label}: returned ${findings.length} findings; ` +
+          `keeping the first ${MAX_FINDINGS_PER_LENS}, dropping ` +
+          `${findings.length - MAX_FINDINGS_PER_LENS}`)
+    }
+    return findings.slice(0, MAX_FINDINGS_PER_LENS)
+  }).map(f => ({ ...f, id: `f${++findingSeq}`, recorded_at: headOf(range) }))
+  // A finding with no span reaches the fixer as a bare filename, and the
+  // brief no longer points at the range either, so it arrives with less than
+  // it used to. Counted so that drift shows up instead of being argued about.
+  const spanless = raised.filter(f => typeof f.line_start !== 'number')
+  if (spanless.length) {
+    log(`${tag}: ${spanless.length} of ${raised.length} finding(s) carry no line span: ` +
+        spanless.map(f => `${f.id} (${f.file})`).join(', '))
+  }
+  return raised
+}
+

@@ -15,6 +15,9 @@ export const meta = {
   ],
 }
 
+// Built by scripts/build-pipeline.sh from workflows/parts/*.js.part;
+// edit the parts and rebuild, never this file directly.
+
 // A snapshot of this script can keep running after main moves past it: the
 // host that persists a copy under its own session directory, the plugin
 // cache, and this checkout can all disagree on which version actually
@@ -26,7 +29,7 @@ export const meta = {
 // against the manifest in scripts/check-version-bump.sh, so drift is a
 // gate's job rather than something this script verifies about itself.
 const PLUGIN_NAME = 'touchstone'
-const PIPELINE_VERSION = '0.23.2'
+const PIPELINE_VERSION = '0.24.0'
 
 // Boundaries. Wall-clock deadlines are not expressible here (no Date.now, by
 // design); the bounds are rounds, counts, and token budget instead.
