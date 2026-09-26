@@ -141,8 +141,23 @@ const EXPLICIT_BUDGETS = new Set(Object.keys(args?.stageBudgets ?? {}))
 // already picks effort and lens count also picks how much the stage may spend.
 // 1 until Triage has judged; the stages before it are cheap and fixed.
 let ceilingScale = 1
+// Stages left open when a throw unwinds past their own close(): stage()
+// records a start tick here, and close() deletes it again, so whatever
+// remains when the run-budget catch (below) fires is the stage that was
+// actually running at the halt, and its spend so far still belongs in
+// stageSpend rather than being silently dropped from it.
+const openStages = {}
+const closeOpenStages = () => {
+  const names = Object.keys(openStages)
+  for (const name of names) {
+    stageSpend[name] = budget.spent() - openStages[name]
+    delete openStages[name]
+  }
+  return names
+}
 const stage = (name) => {
   const start = budget.spent()
+  openStages[name] = start
   const raw = CEILINGS[name]
   const cap = raw == null || EXPLICIT_BUDGETS.has(name)
     ? raw
@@ -151,18 +166,50 @@ const stage = (name) => {
     over: () => cap != null && budget.spent() - start > cap,
     close: () => {
       stageSpend[name] = budget.spent() - start
+      delete openStages[name]
       log(`${name}: ${Math.round(stageSpend[name] / 1000)}k output tokens ` +
           (cap == null ? '(no ceiling)' : `(ceiling ${Math.round(cap / 1000)}k)`))
     },
   }
 }
+
+// Tracks which phase is actually running, so the run-budget catch (below)
+// can name it in a halt without every call site passing its own phase name
+// in. A thin wrapper over the runtime's own phase() rather than a replacement
+// for it.
+let currentPhase = null
+const enterPhase = (name) => { currentPhase = name; phase(name) }
+
+// The one choke point every agent dispatch passes through -- a static check
+// in test-static.sh asserts `agent(` appears nowhere else -- so a run-wide
+// token budget can refuse a call before it starts rather than merely notice
+// after. runBudget stays null until Triage has sized the work (set in the
+// Triage phase, below), so every dispatch before that -- setup, branch,
+// branch:existing -- is unbounded by it: there is no code yet for a budget to
+// bound.
+let runBudget = null
+// Set only by a refused dispatch, read only by the top-level catch: its
+// presence, not the thrown error's identity, is what tells that catch this
+// throw was the budget's doing rather than a genuine failure to rethrow, since
+// parallel() and other call sites can wrap or swallow the error itself.
+let runBudgetSpent = null
+const dispatch = async (prompt, opts) => {
+  if (runBudget != null && budget.spent() >= runBudget) {
+    runBudgetSpent = { refused: opts.label, spent: budget.spent() }
+    throw new Error(
+      `touchstone: run budget (${Math.round(runBudget / 1000)}k output ` +
+      `tokens) spent before '${opts.label}' could dispatch`)
+  }
+  return await agent(prompt, opts)
+}
+
 // Set once the draft PR exists; read by halted() so a stop has somewhere
 // durable to be reported. Declared here because halted() is defined before the
 // phase that opens it.
 let draftPr = null
 
 // executed never changes; base_branch and mismatch stay null until the
-// plugin:version probe (before Triage) has something to report, which is why
+// merged setup call (before Worktree) has something to report, which is why
 // a halt at Worktree carries the executed value with the other two still
 // null. mismatch is null rather than false when the probe found no comparable
 // manifest (found:false, or a different plugin's name) -- the ordinary case

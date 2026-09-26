@@ -141,8 +141,23 @@ const EXPLICIT_BUDGETS = new Set(Object.keys(args?.stageBudgets ?? {}))
 // already picks effort and lens count also picks how much the stage may spend.
 // 1 until Triage has judged; the stages before it are cheap and fixed.
 let ceilingScale = 1
+// Stages left open when a throw unwinds past their own close(): stage()
+// records a start tick here, and close() deletes it again, so whatever
+// remains when the run-budget catch (below) fires is the stage that was
+// actually running at the halt, and its spend so far still belongs in
+// stageSpend rather than being silently dropped from it.
+const openStages = {}
+const closeOpenStages = () => {
+  const names = Object.keys(openStages)
+  for (const name of names) {
+    stageSpend[name] = budget.spent() - openStages[name]
+    delete openStages[name]
+  }
+  return names
+}
 const stage = (name) => {
   const start = budget.spent()
+  openStages[name] = start
   const raw = CEILINGS[name]
   const cap = raw == null || EXPLICIT_BUDGETS.has(name)
     ? raw
@@ -151,18 +166,50 @@ const stage = (name) => {
     over: () => cap != null && budget.spent() - start > cap,
     close: () => {
       stageSpend[name] = budget.spent() - start
+      delete openStages[name]
       log(`${name}: ${Math.round(stageSpend[name] / 1000)}k output tokens ` +
           (cap == null ? '(no ceiling)' : `(ceiling ${Math.round(cap / 1000)}k)`))
     },
   }
 }
+
+// Tracks which phase is actually running, so the run-budget catch (below)
+// can name it in a halt without every call site passing its own phase name
+// in. A thin wrapper over the runtime's own phase() rather than a replacement
+// for it.
+let currentPhase = null
+const enterPhase = (name) => { currentPhase = name; phase(name) }
+
+// The one choke point every agent dispatch passes through -- a static check
+// in test-static.sh asserts `agent(` appears nowhere else -- so a run-wide
+// token budget can refuse a call before it starts rather than merely notice
+// after. runBudget stays null until Triage has sized the work (set in the
+// Triage phase, below), so every dispatch before that -- setup, branch,
+// branch:existing -- is unbounded by it: there is no code yet for a budget to
+// bound.
+let runBudget = null
+// Set only by a refused dispatch, read only by the top-level catch: its
+// presence, not the thrown error's identity, is what tells that catch this
+// throw was the budget's doing rather than a genuine failure to rethrow, since
+// parallel() and other call sites can wrap or swallow the error itself.
+let runBudgetSpent = null
+const dispatch = async (prompt, opts) => {
+  if (runBudget != null && budget.spent() >= runBudget) {
+    runBudgetSpent = { refused: opts.label, spent: budget.spent() }
+    throw new Error(
+      `touchstone: run budget (${Math.round(runBudget / 1000)}k output ` +
+      `tokens) spent before '${opts.label}' could dispatch`)
+  }
+  return await agent(prompt, opts)
+}
+
 // Set once the draft PR exists; read by halted() so a stop has somewhere
 // durable to be reported. Declared here because halted() is defined before the
 // phase that opens it.
 let draftPr = null
 
 // executed never changes; base_branch and mismatch stay null until the
-// plugin:version probe (before Triage) has something to report, which is why
+// merged setup call (before Worktree) has something to report, which is why
 // a halt at Worktree carries the executed value with the other two still
 // null. mismatch is null rather than false when the probe found no comparable
 // manifest (found:false, or a different plugin's name) -- the ordinary case
@@ -724,7 +771,7 @@ const RECORD = (label) => !recordPhases ? '' :
 // both unset at this point regardless. Its only write is the one
 // `git fetch origin <base>` the version check needs.
 const sSetup = stage('setup')
-const setupResult = await agent(
+const setupResult = await dispatch(
   `[touchstone: setup]\n` +
   `Gather three unrelated facts, then STOP. Do not plan, implement, branch, ` +
   `commit, or comment on anything.\n\n` +
@@ -855,7 +902,7 @@ if (!gateProbe) {
       `opted-in (safe default: costs an extra run rather than dropping a real gate)`)
 }
 
-phase('Worktree')
+enterPhase('Worktree')
 const sBranch = stage('branch')
 
 // --show-toplevel returns the worktree's own path when run from inside one,
@@ -893,7 +940,7 @@ const checksDiscoveryStep = (n, whichPath) =>
 // added to a ticket already in flight. Cutting a fresh branch there strands the
 // delta away from the PR it belongs to. The ticket stays mandatory either way.
 const wt = args?.existingBranch
-  ? await agent(
+  ? await dispatch(
       `[touchstone: branch:existing]\n` +
       `Find the worktree that already holds this ticket's branch, then STOP. Do ` +
       `not create a branch, do not fetch, do not pull, do not plan or ` +
@@ -1007,7 +1054,7 @@ const wt = args?.existingBranch
   // A worktree is a separate checkout, so the main tree's state is irrelevant
   // to it; cutting from origin/<base> is what removes the need to touch the
   // main checkout at all.
-  : await agent(
+  : await dispatch(
   `[touchstone: branch]\n` +
   `Create the working branch and a git worktree for it, then STOP. Do not ` +
   `plan, implement, or commit any code.\n` +
@@ -1209,7 +1256,7 @@ const ticketSpec = () => ticketDetail.found
   : `Ticket ${ticket} could not be read; work from the task text alone.\n`
 
 const treeAgent = (prompt, { omitBase = false, ...opts }) =>
-  agent(
+  dispatch(
     `[touchstone: ${opts.label}]\n` +
     `Work in the git worktree at ${wt.path}. Every command, git included, acts ` +
     `on that tree and not on the main checkout: pass it explicitly, with ` +
@@ -1252,7 +1299,7 @@ const headOf = (range) => range.includes('..') ? range.split('..')[1].trim() : r
 // whose stated facts are wrong must not be planned around. Buying that check
 // for one cheap agent is the difference between a 2-agent run and an 11-agent
 // one, so it runs before anything expensive.
-phase('Triage')
+enterPhase('Triage')
 const sTriage = stage('triage')
 let triage = null
 try {
@@ -1392,6 +1439,36 @@ log(`triage judged this ${complexity}` +
       : ''))
 sTriage.close()
 
+// Derived from the size triage just judged, in output tokens: a run-wide
+// ceiling dispatch() (part 00) refuses a call past, catching what the
+// per-stage ceilings above cannot -- those bound one stage each, and a run
+// that overruns several of them in turn still has nothing stopping it
+// overall. estimated_loc is optional on TRIAGE (a disproved premise trips
+// regardless of it), so a numeric args.runBudget aside, a missing one falls
+// back to a flat default by scope rather than the LOC formula: there is no
+// number to derive from and a change already latched to inline is smaller by
+// definition than a team-scoped one.
+if (typeof args?.runBudget === 'number') {
+  runBudget = args.runBudget
+  runBudgetNote = `set explicitly via args.runBudget`
+} else if (triage.estimated_loc != null) {
+  runBudget = Math.min(500_000, Math.max(80_000, 60_000 + 800 * triage.estimated_loc))
+  runBudgetNote = `derived from triage's ~${triage.estimated_loc} estimated LOC`
+} else {
+  runBudget = inlineMode ? 80_000 : 300_000
+  runBudgetNote = `triage gave no estimated_loc; using the ${inlineMode ? 'inline' : 'team'} default`
+}
+log(`run budget: ${Math.round(runBudget / 1000)}k output tokens (${runBudgetNote})`)
+
+// Everything from here on runs inside one try, so a dispatch the budget
+// above refuses -- wherever in the run it happens to fall -- unwinds to one
+// place rather than needing its own halt at every call site. The catch is at
+// the very end of the script (part 60): it checks runBudgetSpent, not the
+// thrown error's identity, since a genuine failure (the planner or
+// implementer returning nothing, for instance) must still propagate rather
+// than being read as a budget halt.
+try {
+
 // A plan an earlier run already produced arrives as args.plan and starts this
 // run at Implement. Without it the only way to reuse a plan was to paste it into
 // the task, which routed it back through the planner and asked that phase to
@@ -1421,7 +1498,7 @@ if (!plan && inlineMode) {
 }
 
 if (!givenPlan && !inlineMode) {
-phase('Plan')
+enterPhase('Plan')
 const sPlan = stage('plan')
 plan = await treeAgent(
   `You are the planner for this task; do NOT implement anything. You have no ` +
@@ -1472,7 +1549,7 @@ if (sPlan.over()) {
 // the wrapper -- not whether the gates ran.
 
 const sChecksPre = stage('checks')
-phase('Implement')
+enterPhase('Implement')
 // wt.checks_source came back from the branch/branch:existing call itself
 // (its last step, done only when created=true), replacing a separate
 // checks:discover dispatch now that the worktree it needs to read is
@@ -1946,7 +2023,7 @@ const DRAFT = {
     detail: { type: 'string' },
   },
 }
-phase('Draft PR')
+enterPhase('Draft PR')
 const draft = await treeAgent(
   `Make sure this branch has a pull request to hang the run's progress on, ` +
   `then STOP.\n` +
@@ -1984,7 +2061,7 @@ if (draft?.number) {
       `A halt from here on is only visible in this session`)
 }
 
-phase('Review')
+enterPhase('Review')
 const sReview = stage('review')
 // risky_areas is deliberately not part of this: it is a required schema field
 // and a planner asked for risky areas always returns some, so including it
@@ -2174,6 +2251,14 @@ const reviewOf = async (range, tag, picked, known = [], knownCharge = '') => {
         : ''),
       { label: `${tag}:${lens.label}`, phase: 'Review', schema: FINDINGS,
         model: 'opus', effort: effortFor.review })))
+  // parallel() (the runtime global) catches each thunk's own error and hands
+  // back null for the ones that threw, so a budget refusal inside one lens
+  // reads, past this point, exactly like a lens that legitimately found
+  // nothing -- every lens null is a plausible clean review, not evidence of a
+  // refusal. Re-checking the flag here is what tells the two apart, and
+  // re-throwing is what lets the top-level catch turn it into a halt instead
+  // of a false all-clear.
+  if (runBudgetSpent) throw new Error(`touchstone: run budget spent during review (${tag})`)
   const raised = out.flatMap((r, i) => {
     const findings = Array.isArray(r?.findings) ? r.findings : []
     // The script slices, not the schema: a maxItems failure would null the
@@ -2207,7 +2292,7 @@ let reviewedThrough = headOf(impl.commit_range)
 // which costs a duplicate rather than losing a defect.
 const collapseDuplicates = async (findings) => {
   if (findings.length < 2 || reviewerCount < 2) return findings
-  const grouped = await agent(
+  const grouped = await dispatch(
     `Several reviewers looked at the same diff without seeing each other's ` +
     `work, so the list below may describe the same defect more than once.\n` +
     `Group the ids that are the same defect. Same underlying bug at the same ` +
@@ -2586,6 +2671,10 @@ const markStale = async (findings) => {
         ).join('\n'),
         { label: 'staleness', schema: STALENESS, model: 'haiku', effort: 'low' })
     } catch (e) {
+      // A budget refusal must reach the top-level catch, not be swallowed
+      // into "reporting findings unmarked": that would let a halted run
+      // return a normal-looking result instead of stopping.
+      if (runBudgetSpent) throw e
       log(`staleness probe failed, reporting findings unmarked: ${e?.message ?? e}`)
     }
   }
@@ -2621,7 +2710,7 @@ const regressedOf = (items, exec, round) => {
 
 while ((open.length || blockingChecksOpen()) && round < MAX_REVIEW_ROUNDS && !outOfBudget() && !sFix.over()) {
   round++
-  phase('Fix')
+  enterPhase('Fix')
   const fixSpendStart = budget.spent()
   const fixed = await treeAgent(
     `Fix ` + (open.length && blockingChecksOpen()
@@ -2874,7 +2963,7 @@ if (open.length || blockingChecksOpen()) {
 // `gh pr ready` while it is red, so a red gate here means the PR phase below
 // cannot get past a draft anyway. It deliberately does not block
 // `gh pr create --draft`, which is how this pipeline opens the draft above.
-phase('Mutation')
+enterPhase('Mutation')
 const sMut = stage('mutation')
 let mutation = { green: false, detail: 'not run' }
 
@@ -3033,7 +3122,7 @@ if (mutHead && mutHead !== reviewedThrough && settled.length) {
   }
 }
 if (reviewerCount && mutHead && mutHead !== reviewedThrough && !outOfBudget()) {
-  phase('Review')
+  enterPhase('Review')
   const mutRange = `${reviewedThrough}..${mutHead}`
   // Fetches this range's own new-side hunks before the lens runs, the same
   // rule classify() applies to every review after the initial one: a finding
@@ -3095,7 +3184,7 @@ const notesSection = notes.length
   : ''
 let pr = null
 if (args?.openPr !== false && !outOfBudget()) {
-  phase('PR')
+  enterPhase('PR')
   const sPr = stage('pr')
   pr = await treeAgent(
     `Open a pull request for the work on this branch.\n` +
@@ -3182,3 +3271,28 @@ const result = {
   record_file: runRecordFile,
 }
 return result
+
+} catch (e) {
+  // runBudgetSpent's presence, not this error's identity, is the only safe
+  // test: parallel() (reviewOf) and markStale's own try/catch each re-throw
+  // only when that flag is set, but a plain `throw e` from either still
+  // arrives here as an ordinary Error, indistinguishable from one by message
+  // alone. Closing every open stage first means the halt's stage_spend is
+  // complete even for the stage that was actually running when the budget
+  // was refused, not just the ones that reached their own close().
+  if (runBudgetSpent) {
+    const stillOpen = closeOpenStages()
+    return await halted(currentPhase, {
+      note: `Run budget exhausted (${Math.round(runBudget / 1000)}k output ` +
+        `tokens, ${runBudgetNote}). Spend at halt: ` +
+        `${Math.round(runBudgetSpent.spent / 1000)}k output tokens. The ` +
+        `'${runBudgetSpent.refused}' dispatch was refused before it could ` +
+        `run` +
+        (stillOpen.length
+          ? `; still in progress when the budget was refused: ${stillOpen.join(', ')}`
+          : '') +
+        `. ${prNote()}`,
+    })
+  }
+  throw e
+}

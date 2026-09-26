@@ -4,7 +4,7 @@
 // `gh pr ready` while it is red, so a red gate here means the PR phase below
 // cannot get past a draft anyway. It deliberately does not block
 // `gh pr create --draft`, which is how this pipeline opens the draft above.
-phase('Mutation')
+enterPhase('Mutation')
 const sMut = stage('mutation')
 let mutation = { green: false, detail: 'not run' }
 
@@ -163,7 +163,7 @@ if (mutHead && mutHead !== reviewedThrough && settled.length) {
   }
 }
 if (reviewerCount && mutHead && mutHead !== reviewedThrough && !outOfBudget()) {
-  phase('Review')
+  enterPhase('Review')
   const mutRange = `${reviewedThrough}..${mutHead}`
   // Fetches this range's own new-side hunks before the lens runs, the same
   // rule classify() applies to every review after the initial one: a finding
@@ -225,7 +225,7 @@ const notesSection = notes.length
   : ''
 let pr = null
 if (args?.openPr !== false && !outOfBudget()) {
-  phase('PR')
+  enterPhase('PR')
   const sPr = stage('pr')
   pr = await treeAgent(
     `Open a pull request for the work on this branch.\n` +
@@ -312,3 +312,28 @@ const result = {
   record_file: runRecordFile,
 }
 return result
+
+} catch (e) {
+  // runBudgetSpent's presence, not this error's identity, is the only safe
+  // test: parallel() (reviewOf) and markStale's own try/catch each re-throw
+  // only when that flag is set, but a plain `throw e` from either still
+  // arrives here as an ordinary Error, indistinguishable from one by message
+  // alone. Closing every open stage first means the halt's stage_spend is
+  // complete even for the stage that was actually running when the budget
+  // was refused, not just the ones that reached their own close().
+  if (runBudgetSpent) {
+    const stillOpen = closeOpenStages()
+    return await halted(currentPhase, {
+      note: `Run budget exhausted (${Math.round(runBudget / 1000)}k output ` +
+        `tokens, ${runBudgetNote}). Spend at halt: ` +
+        `${Math.round(runBudgetSpent.spent / 1000)}k output tokens. The ` +
+        `'${runBudgetSpent.refused}' dispatch was refused before it could ` +
+        `run` +
+        (stillOpen.length
+          ? `; still in progress when the budget was refused: ${stillOpen.join(', ')}`
+          : '') +
+        `. ${prNote()}`,
+    })
+  }
+  throw e
+}

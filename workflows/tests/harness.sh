@@ -63,6 +63,10 @@ function baseArgs(overrides) {
     openPr: false,
     maxReviewRounds: 3,
     maxGateAttempts: 1,
+    // Infinite so existing scenarios' own fixed budget.spent() (see run()
+    // below) keeps meaning what it always did; a scenario testing the run
+    // budget itself passes its own args.runBudget to override this.
+    runBudget: Infinity,
     ...overrides,
   }
 }

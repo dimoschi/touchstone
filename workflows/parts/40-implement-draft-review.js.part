@@ -198,7 +198,7 @@ const DRAFT = {
     detail: { type: 'string' },
   },
 }
-phase('Draft PR')
+enterPhase('Draft PR')
 const draft = await treeAgent(
   `Make sure this branch has a pull request to hang the run's progress on, ` +
   `then STOP.\n` +
@@ -236,7 +236,7 @@ if (draft?.number) {
       `A halt from here on is only visible in this session`)
 }
 
-phase('Review')
+enterPhase('Review')
 const sReview = stage('review')
 // risky_areas is deliberately not part of this: it is a required schema field
 // and a planner asked for risky areas always returns some, so including it
@@ -426,6 +426,14 @@ const reviewOf = async (range, tag, picked, known = [], knownCharge = '') => {
         : ''),
       { label: `${tag}:${lens.label}`, phase: 'Review', schema: FINDINGS,
         model: 'opus', effort: effortFor.review })))
+  // parallel() (the runtime global) catches each thunk's own error and hands
+  // back null for the ones that threw, so a budget refusal inside one lens
+  // reads, past this point, exactly like a lens that legitimately found
+  // nothing -- every lens null is a plausible clean review, not evidence of a
+  // refusal. Re-checking the flag here is what tells the two apart, and
+  // re-throwing is what lets the top-level catch turn it into a halt instead
+  // of a false all-clear.
+  if (runBudgetSpent) throw new Error(`touchstone: run budget spent during review (${tag})`)
   const raised = out.flatMap((r, i) => {
     const findings = Array.isArray(r?.findings) ? r.findings : []
     // The script slices, not the schema: a maxItems failure would null the

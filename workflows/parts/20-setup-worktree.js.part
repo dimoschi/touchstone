@@ -39,7 +39,7 @@ const RECORD = (label) => !recordPhases ? '' :
 // both unset at this point regardless. Its only write is the one
 // `git fetch origin <base>` the version check needs.
 const sSetup = stage('setup')
-const setupResult = await agent(
+const setupResult = await dispatch(
   `[touchstone: setup]\n` +
   `Gather three unrelated facts, then STOP. Do not plan, implement, branch, ` +
   `commit, or comment on anything.\n\n` +
@@ -170,7 +170,7 @@ if (!gateProbe) {
       `opted-in (safe default: costs an extra run rather than dropping a real gate)`)
 }
 
-phase('Worktree')
+enterPhase('Worktree')
 const sBranch = stage('branch')
 
 // --show-toplevel returns the worktree's own path when run from inside one,
@@ -208,7 +208,7 @@ const checksDiscoveryStep = (n, whichPath) =>
 // added to a ticket already in flight. Cutting a fresh branch there strands the
 // delta away from the PR it belongs to. The ticket stays mandatory either way.
 const wt = args?.existingBranch
-  ? await agent(
+  ? await dispatch(
       `[touchstone: branch:existing]\n` +
       `Find the worktree that already holds this ticket's branch, then STOP. Do ` +
       `not create a branch, do not fetch, do not pull, do not plan or ` +
@@ -322,7 +322,7 @@ const wt = args?.existingBranch
   // A worktree is a separate checkout, so the main tree's state is irrelevant
   // to it; cutting from origin/<base> is what removes the need to touch the
   // main checkout at all.
-  : await agent(
+  : await dispatch(
   `[touchstone: branch]\n` +
   `Create the working branch and a git worktree for it, then STOP. Do not ` +
   `plan, implement, or commit any code.\n` +
@@ -524,7 +524,7 @@ const ticketSpec = () => ticketDetail.found
   : `Ticket ${ticket} could not be read; work from the task text alone.\n`
 
 const treeAgent = (prompt, { omitBase = false, ...opts }) =>
-  agent(
+  dispatch(
     `[touchstone: ${opts.label}]\n` +
     `Work in the git worktree at ${wt.path}. Every command, git included, acts ` +
     `on that tree and not on the main checkout: pass it explicitly, with ` +

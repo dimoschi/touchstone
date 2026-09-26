@@ -124,4 +124,13 @@ check "the aggregate comment does not stop the scope at the fix loop" \
 check "the aggregate comment names the mutation loop, matching gatesPayload's own comment" \
   "$(grep -Fc 'from here through the mutation loop' "$SCRIPT" || true)" 1
 
+echo ""
+echo "== static: gh-118 -- every agent dispatch passes through dispatch(), never agent() directly"
+check "the only real 'await agent(' call site is dispatch's own" \
+  "$(grep -c 'await agent(' "$SCRIPT" || true)" 1
+check "that one call site is inside dispatch, not a bare top-level call" \
+  "$(grep -Fc 'return await agent(prompt, opts)' "$SCRIPT" || true)" 1
+check "no separate ticket/plugin:version/gate:opt-in/checks:discover/run-record labels remain" \
+  "$(grep -cE "label: '(ticket|plugin:version|gate:opt-in|checks:discover|run-record)'" "$SCRIPT" || true)" 0
+
 finish

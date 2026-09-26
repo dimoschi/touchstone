@@ -3,7 +3,7 @@
 // whose stated facts are wrong must not be planned around. Buying that check
 // for one cheap agent is the difference between a 2-agent run and an 11-agent
 // one, so it runs before anything expensive.
-phase('Triage')
+enterPhase('Triage')
 const sTriage = stage('triage')
 let triage = null
 try {
@@ -143,6 +143,36 @@ log(`triage judged this ${complexity}` +
       : ''))
 sTriage.close()
 
+// Derived from the size triage just judged, in output tokens: a run-wide
+// ceiling dispatch() (part 00) refuses a call past, catching what the
+// per-stage ceilings above cannot -- those bound one stage each, and a run
+// that overruns several of them in turn still has nothing stopping it
+// overall. estimated_loc is optional on TRIAGE (a disproved premise trips
+// regardless of it), so a numeric args.runBudget aside, a missing one falls
+// back to a flat default by scope rather than the LOC formula: there is no
+// number to derive from and a change already latched to inline is smaller by
+// definition than a team-scoped one.
+if (typeof args?.runBudget === 'number') {
+  runBudget = args.runBudget
+  runBudgetNote = `set explicitly via args.runBudget`
+} else if (triage.estimated_loc != null) {
+  runBudget = Math.min(500_000, Math.max(80_000, 60_000 + 800 * triage.estimated_loc))
+  runBudgetNote = `derived from triage's ~${triage.estimated_loc} estimated LOC`
+} else {
+  runBudget = inlineMode ? 80_000 : 300_000
+  runBudgetNote = `triage gave no estimated_loc; using the ${inlineMode ? 'inline' : 'team'} default`
+}
+log(`run budget: ${Math.round(runBudget / 1000)}k output tokens (${runBudgetNote})`)
+
+// Everything from here on runs inside one try, so a dispatch the budget
+// above refuses -- wherever in the run it happens to fall -- unwinds to one
+// place rather than needing its own halt at every call site. The catch is at
+// the very end of the script (part 60): it checks runBudgetSpent, not the
+// thrown error's identity, since a genuine failure (the planner or
+// implementer returning nothing, for instance) must still propagate rather
+// than being read as a budget halt.
+try {
+
 // A plan an earlier run already produced arrives as args.plan and starts this
 // run at Implement. Without it the only way to reuse a plan was to paste it into
 // the task, which routed it back through the planner and asked that phase to
@@ -172,7 +202,7 @@ if (!plan && inlineMode) {
 }
 
 if (!givenPlan && !inlineMode) {
-phase('Plan')
+enterPhase('Plan')
 const sPlan = stage('plan')
 plan = await treeAgent(
   `You are the planner for this task; do NOT implement anything. You have no ` +
@@ -223,7 +253,7 @@ if (sPlan.over()) {
 // the wrapper -- not whether the gates ran.
 
 const sChecksPre = stage('checks')
-phase('Implement')
+enterPhase('Implement')
 // wt.checks_source came back from the branch/branch:existing call itself
 // (its last step, done only when created=true), replacing a separate
 // checks:discover dispatch now that the worktree it needs to read is

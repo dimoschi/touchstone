@@ -9,7 +9,7 @@ let reviewedThrough = headOf(impl.commit_range)
 // which costs a duplicate rather than losing a defect.
 const collapseDuplicates = async (findings) => {
   if (findings.length < 2 || reviewerCount < 2) return findings
-  const grouped = await agent(
+  const grouped = await dispatch(
     `Several reviewers looked at the same diff without seeing each other's ` +
     `work, so the list below may describe the same defect more than once.\n` +
     `Group the ids that are the same defect. Same underlying bug at the same ` +
@@ -388,6 +388,10 @@ const markStale = async (findings) => {
         ).join('\n'),
         { label: 'staleness', schema: STALENESS, model: 'haiku', effort: 'low' })
     } catch (e) {
+      // A budget refusal must reach the top-level catch, not be swallowed
+      // into "reporting findings unmarked": that would let a halted run
+      // return a normal-looking result instead of stopping.
+      if (runBudgetSpent) throw e
       log(`staleness probe failed, reporting findings unmarked: ${e?.message ?? e}`)
     }
   }
@@ -423,7 +427,7 @@ const regressedOf = (items, exec, round) => {
 
 while ((open.length || blockingChecksOpen()) && round < MAX_REVIEW_ROUNDS && !outOfBudget() && !sFix.over()) {
   round++
-  phase('Fix')
+  enterPhase('Fix')
   const fixSpendStart = budget.spent()
   const fixed = await treeAgent(
     `Fix ` + (open.length && blockingChecksOpen()
