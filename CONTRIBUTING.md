@@ -52,9 +52,10 @@ TDD, reviews, runs the gates and opens the PR. See
 
 Two conventions worth stating outright, because both are easy to get wrong:
 
-**Comments carry the WHY, at unusual density.** Most comments here record a
-specific failure that already happened. Read one before changing the line it sits
-on, and do not add comments that restate what the code plainly does.
+**Write a comment only when the reason is not obvious from the code.** Most
+existing comments record a specific failure that already happened. Read one
+before changing the line it sits on, and do not add one that restates what the
+code plainly does.
 
 **python3 does the real work; bash orchestrates.** Prefer extending a `lib/*.py`
 parser over growing a shell script.

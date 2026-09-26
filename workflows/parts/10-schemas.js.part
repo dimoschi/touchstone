@@ -1,0 +1,477 @@
+// Discovery source: AGENTS.md/CLAUDE.md read from the worktree, not the
+// --git-common-dir root the merged setup call resolves the gate markers
+// from -- a check list is branch content the ticket can change, while the
+// gate markers are repo-wide policy no phase of this run writes. The agent
+// transcribes every "##" heading and the first fenced block under it
+// verbatim, marker lines included, choosing and interpreting nothing.
+// Selecting the check heading, dropping the fence's own marker lines,
+// splitting the rest and assigning ids is script code (checksFrom below): a
+// check list runs again after every step that commits, so what runs must
+// come from parsing, never a model's account of it. Declared before BRANCH,
+// which embeds it as checks_source, since a const cannot be read before its
+// own declaration.
+const CHECKS = {
+  type: 'object', additionalProperties: false, required: ['file', 'sections', 'detail'],
+  properties: {
+    file: { type: 'string' },
+    sections: {
+      type: 'array',
+      items: {
+        type: 'object', additionalProperties: false, required: ['heading', 'fence'],
+        properties: { heading: { type: 'string' }, fence: { type: 'string' } },
+      },
+    },
+    detail: { type: 'string' },
+  },
+}
+
+// Scalars first, prose last. A required integer serialized after a long
+// free-text field is where the value drifts into the prose and validation
+// fails; premise_note is explicitly asked to be discursive. estimated_loc is
+// optional because the branch that needs it least is the one that fires most:
+// when premise_ok is false the latch trips regardless, and demanding a line
+// count for a change nobody has scoped yet forces a number out of thin air.
+const BRANCH = {
+  type: 'object', additionalProperties: false,
+  required: ['created', 'branch', 'base', 'path', 'detail', 'dirty'],
+  properties: {
+    created: { type: 'boolean' },
+    branch: { type: 'string' },
+    base: { type: 'string' },
+    path: { type: 'string' },
+    ticket: { type: 'string' },
+    detail: { type: 'string' },
+    dirty: { type: 'boolean' },
+    // Optional: only meaningful when created=true, the one case where a
+    // worktree exists to read AGENTS.md/CLAUDE.md out of. checksFrom() reads
+    // this instead of a separate checks:discover call, since the branch
+    // agent already has the worktree open by the time it can answer.
+    checks_source: CHECKS,
+  },
+}
+
+// halt_reason lives here, not on BRANCH, so the default branch agent never
+// sees a field its own prompt says nothing about. Required, because an
+// omitted one reads as the plain not-found note, which is the note these
+// halts exist to replace; 'none' keeps an absent key from being the signal.
+const EXISTING_BRANCH = {
+  ...BRANCH,
+  required: [...BRANCH.required, 'halt_reason'],
+  properties: {
+    ...BRANCH.properties,
+    halt_reason: { type: 'string', enum: ['none', 'ambiguous', 'wrong-ticket', 'merged', 'occupied'] },
+  },
+}
+
+// Answers both the CRAP and mutation opt-in questions in one call: both
+// markers live at the same repo root, and no phase of this run writes there,
+// so timing cannot change either answer.
+const MARKERS = {
+  type: 'object', additionalProperties: false,
+  required: ['crap_gated', 'mutation_gated', 'detail'],
+  properties: {
+    crap_gated: { type: 'boolean' },
+    mutation_gated: { type: 'boolean' },
+    detail: { type: 'string' },
+  },
+}
+
+// One row per command, run exactly as discovered. output is what the fix
+// phase is handed verbatim -- never a model's account of it -- and it is
+// also the only place a row's real exit code lives: exitLineOf below reads
+// it from output's own TOUCHSTONE_CHECK_EXIT line, printed first by the
+// shell that ran the check, not from exit_code. exit_code stays required so
+// the schema still has somewhere for a model to answer, but classifyResults
+// never reads it: a summarised or still-running check reporting exit_code: 0
+// must not read as a pass just because the field says so. id is the
+// script-assigned check:N, never a name the model invents, and command must
+// equal the exact invocation the script built (see invocationFor): a row
+// whose command does not match is not measured, never read as a pass.
+const CHECK_RUN = {
+  type: 'object', additionalProperties: false, required: ['results', 'dirty'],
+  properties: {
+    results: {
+      type: 'array',
+      items: {
+        type: 'object', additionalProperties: false,
+        required: ['id', 'command', 'exit_code', 'exit_line', 'output'],
+        properties: {
+          id: { type: 'string' }, command: { type: 'string' },
+          exit_code: { type: 'integer' }, exit_line: { type: 'string' },
+          output: { type: 'string' },
+        },
+      },
+    },
+    dirty: { type: 'boolean' },
+    porcelain: { type: 'string' },
+  },
+}
+// The only heading that is a check list. Only trailing whitespace is
+// ignored: '## checks', '### Checks', '##Checks', '## Checks ##' and
+// '## Commands' all name something else and must never match, because a
+// check here runs as a baseline before Implement and again after every step
+// that commits, so listing it must be a deliberate, exact choice, not a
+// heading that merely resembles it.
+const CHECKS_HEADING = '## Checks'
+
+// Strips an unquoted '#' at the start of a line or after whitespace, and
+// everything after it. Tracks single and double quotes only, with no
+// backslash handling: the fence holds one shell command per line, not a
+// string this needs to fully parse, and a quoted '#' is the one case where
+// stripping would silently corrupt a command's own argument.
+function stripComment(line) {
+  let quote = null
+  for (let i = 0; i < line.length; i++) {
+    const ch = line[i]
+    if (quote) {
+      if (ch === quote) quote = null
+      continue
+    }
+    if (ch === '"' || ch === "'") { quote = ch; continue }
+    if (ch === '#' && (i === 0 || /\s/.test(line[i - 1]))) return line.slice(0, i)
+  }
+  return line
+}
+
+// Turns a transcribed CHECKS response into the ordered, id-keyed list every
+// later phase runs against, plus a note for when there is nothing to run.
+// Duplicate commands stay separate entries -- checksFrom assigns by
+// position, never dedupes -- because two identical lines is the repo saying
+// to run the command twice, not a transcription accident to collapse.
+function checksFrom(source) {
+  if (!source) {
+    return { checks: [], note: 'discovery returned nothing' }
+  }
+  const file = source.file ?? ''
+  if (!file) {
+    return { checks: [], note: 'neither AGENTS.md nor CLAUDE.md exists at the worktree root' }
+  }
+  const sections = Array.isArray(source?.sections) ? source.sections : []
+  const section = sections.find(s => s?.heading?.trimEnd() === CHECKS_HEADING)
+  if (!section) {
+    const hasCommands = sections.some(s => /^##\s+commands\s*$/i.test(s?.heading?.trimEnd() ?? ''))
+    return {
+      checks: [],
+      note: `${file} has no '${CHECKS_HEADING}' heading` +
+        (hasCommands
+          ? `; ${file} has a ## Commands heading, which is no longer read as ` +
+            `checks. Only an exact ${CHECKS_HEADING} heading is, because every ` +
+            `line there is executed before this run's own work and again after ` +
+            `it, so it must list only read-only, deterministic checks.`
+          : '.'),
+    }
+  }
+  // The agent transcribes the fence with its own opening and closing marker
+  // lines (``` or ~~~, info string included), because "the contents between
+  // the markers" is ambiguous about whether an info string like `bash` on
+  // the opening line counts -- a literal reading would surface it as a
+  // spurious first command. Drop it here, where the marker regex is one
+  // rule applied once, rather than in the prompt. A fence transcribed
+  // without markers (or with only one) is unaffected: dropping is
+  // conditional on the line actually being a marker.
+  const fenceLines = (section.fence ?? '').split(/\r?\n/)
+  // A newline outside the fence, before the opening marker or after the
+  // closing one, fills the exact slot the marker check below looks at.
+  while (fenceLines.length && fenceLines[0].trim() === '') fenceLines.shift()
+  while (fenceLines.length && fenceLines[fenceLines.length - 1].trim() === '') fenceLines.pop()
+  const isFenceMarker = (l) => /^\s*(`{3,}|~{3,})/.test(l)
+  if (fenceLines.length && isFenceMarker(fenceLines[0])) fenceLines.shift()
+  if (fenceLines.length && isFenceMarker(fenceLines[fenceLines.length - 1])) fenceLines.pop()
+  const commands = fenceLines
+    .map(stripComment).map(l => l.trim()).filter(l => l.length > 0)
+  if (!commands.length) {
+    return { checks: [], note: `${file}'s '${CHECKS_HEADING}' section has no fence, or no command lines in it` }
+  }
+  return { checks: commands.map((command, i) => ({ id: `check:${i + 1}`, command })), note: '' }
+}
+
+const TRIAGE = {
+  type: 'object', additionalProperties: false,
+  required: ['scope', 'complexity', 'expected_files', 'complexity_note', 'premise_ok',
+             'evidence', 'premise_note'],
+  properties: {
+    scope: { type: 'string', enum: ['inline', 'team'] },
+    // Judgement, not arithmetic. A line count is a proxy for risk and a poor
+    // one: five lines in a signing path are harder than two hundred in a test
+    // file. Triage has already read the ticket and the code by the time it
+    // answers, so it is the right place to say how hard this is, and the only
+    // place that knows before anything expensive runs.
+    complexity: { type: 'string', enum: ['trivial', 'routine', 'involved'] },
+    // Required, unlike expected_call_sites and involved_reason below: every
+    // verdict names what it expects the change to touch, but only an
+    // involved one has to explain why that is hard rather than routine.
+    expected_files: { type: 'array', items: { type: 'string' } },
+    complexity_note: { type: 'string' },
+    // Optional: only an involved verdict needs either. A missing one demotes
+    // involved to routine in the script (see the complexity block below),
+    // never the other way, so leaving them out on a trivial or routine
+    // verdict costs nothing.
+    expected_call_sites: { type: 'array', items: { type: 'string' } },
+    involved_reason: { type: 'string' },
+    premise_ok: { type: 'boolean' },
+    estimated_loc: { type: 'integer' },
+    evidence: { type: 'array', items: { type: 'string' } },
+    premise_note: { type: 'string' },
+  },
+}
+// commit_range is what downstream phases are handed. summary exists for the
+// halt returns a human reads, and is deliberately NOT forwarded to the
+// reviewer: an adversarial reviewer told what the implementer believes it did
+// is anchored before it opens a file. files_changed is forwarded, because scope
+// is a fact rather than the implementer's account of itself. insertions is
+// gone: it described the implementer's own commits and went stale the
+// moment a pre-review checks fix landed after them; the diffstat probe
+// (part 40, `size` in the result) replaces it with a real, measured count.
+const IMPL = {
+  type: 'object', additionalProperties: false,
+  required: ['summary', 'files_changed', 'commit_range', 'scored'],
+  properties: {
+    summary: { type: 'string' },
+    files_changed: { type: 'array', items: { type: 'string' } },
+    commit_range: { type: 'string' },
+    scored: { type: 'boolean' },
+    gate_note: { type: 'string' },
+    // Set when the one halt this phase can hit -- a NEXT_ACTION of
+    // UNSUPPORTED_LANGUAGE -- fires. Without a schema field for it, the phase
+    // has no way to represent a halt at all: it would return a normal result
+    // and the run would sail on through Draft PR, Review, Fix and Mutation
+    // with the refused work never committed.
+    unsupported_language: { type: 'boolean' },
+  },
+}
+// head_sha is required, not optional: it is how the script learns what this
+// phase committed, and an absent one is indistinguishable from "committed
+// nothing" -- which is exactly the case that must not silently skip review.
+const GATE = {
+  type: 'object', additionalProperties: false,
+  required: ['green', 'head_sha', 'detail', 'scored'],
+  properties: {
+    green: { type: 'boolean' }, head_sha: { type: 'string' },
+    detail: { type: 'string' },
+    needs_user_run: { type: 'boolean' },
+    scored: { type: 'boolean' }, gate_note: { type: 'string' },
+    // Same halt escape IMPL carries: set when a NEXT_ACTION of
+    // UNSUPPORTED_LANGUAGE fires mid-mutation, so the phase has a field to
+    // report it on rather than burning every remaining attempt on a gate that
+    // cannot run.
+    unsupported_language: { type: 'boolean' },
+  },
+}
+// Closed set a finding's category must come from. Only the four in
+// BLOCKING_CATEGORIES can hold a run; the rest still reach the PR, as a note.
+const CATEGORIES = ['wrong-result', 'crash', 'gate-bypass', 'unmet-criterion',
+                     'docs', 'wording', 'design', 'scope', 'other']
+// Read only by the script -- classify() below -- never by a prompt: a
+// reviewer's own severity judgement is exactly what this ticket stops
+// trusting.
+const BLOCKING_CATEGORIES = new Set(['wrong-result', 'crash', 'gate-bypass', 'unmet-criterion'])
+// A lens returning unbounded findings can null its whole result on a
+// maxItems failure; reviewOf slices to this many itself instead, most
+// serious first, and logs what it dropped.
+const MAX_FINDINGS_PER_LENS = 5
+// One command, run from the worktree root: exits 0 when the code is correct.
+// A nonzero exit only counts as a demonstration when the executor's raw
+// output also carries REPRODUCED_MARKER on a line of its own; nonzero without
+// it means the command itself failed to run, not that it showed the defect.
+// expected/actual hold what it prints. The script decides on exit_code plus
+// the marker, never on a model's account of it -- the same principle as
+// CHECK_RUN below.
+const REPRODUCER = {
+  type: 'object', additionalProperties: false,
+  required: ['kind', 'command', 'expected', 'actual'],
+  properties: {
+    kind: { type: 'string', enum: ['test', 'command'] },
+    command: { type: 'string' }, expected: { type: 'string' }, actual: { type: 'string' },
+  },
+}
+// Printed by a reproducer on a line of its own when, and only when, it has
+// observed the defect. Matched whole-line (split, trim, ===) against the
+// executor's raw output, never as a substring: a `set -x` echo of this same
+// text, or a stack-trace source line that happens to mention it, must not
+// pass as a demonstration.
+const REPRODUCED_MARKER = 'TOUCHSTONE_DEFECT_REPRODUCED'
+const hasMarkerLine = (output) =>
+  String(output ?? '').split(/\r?\n/).some((line) => line.trim() === REPRODUCED_MARKER)
+// Echoed by the shell that ran each check, before its output (invocationFor
+// below), never by the model reporting the result: a check's own exit code
+// is read only from this line, never from a model-filled exit_code field.
+const CHECK_EXIT_MARKER = 'TOUCHSTONE_CHECK_EXIT'
+// Whether a check's row carries its own exit line, and what it says. Only
+// the first non-empty line is read: invocationFor prints the exit line before
+// any of the check's output, so a lookalike further down is the check's own
+// output (a suite that tests this runner prints them), and an exit line found
+// only further down was moved there by whoever relayed the output. Anything
+// but a well-formed first line naming this check's own id comes back as a
+// reason string instead of an exit code, so an ambiguous report reads as
+// unmeasured rather than guessed at.
+const exitLineOf = (output, id) => {
+  const lines = String(output ?? '').split(/\r?\n/).map((line) => line.trim())
+    .filter((line) => line !== '')
+  if (!(lines[0] ?? '').startsWith(`${CHECK_EXIT_MARKER} `)) {
+    return { reason: lines.some((line) => line.startsWith(`${CHECK_EXIT_MARKER} `))
+      ? 'exit line not first' : 'no exit line' }
+  }
+  const m = lines[0].match(new RegExp(`^${CHECK_EXIT_MARKER} (\\S+) (\\d+)$`))
+  if (!m) return { reason: 'malformed exit line' }
+  if (m[1] !== id) return { reason: `exit line names ${m[1]}` }
+  return { exit: Number(m[2]) }
+}
+// The one place that turns an executor row into what it actually showed.
+// Read against the row's raw, untruncated output -- truncateOutput below
+// runs only on the copy that gets stored, never on the copy this reads -- so
+// a long log can never cut the marker off and turn a real demonstration into
+// an error.
+const outcomeOf = (row) => {
+  if (!row) return 'not-executed'
+  if (row.exit_code === 0) return 'passed'
+  if (row.exit_code === 126 || row.exit_code === 127) return 'could-not-run'
+  return hasMarkerLine(row.output) ? 'reproduced' : 'errored'
+}
+const FINDINGS = {
+  type: 'object', additionalProperties: false, required: ['findings'],
+  properties: {
+    findings: {
+      type: 'array',
+      items: {
+        type: 'object', additionalProperties: false,
+        required: ['category', 'title', 'file', 'claim', 'evidence'],
+        properties: {
+          category: { type: 'string', enum: CATEGORIES },
+          title: { type: 'string' }, file: { type: 'string' },
+          claim: { type: 'string' }, evidence: { type: 'string' },
+          // Optional: a deletion or a repo-wide pattern has no single span,
+          // and schema validation must not fail a lens over that.
+          line_start: { type: 'integer' }, line_end: { type: 'integer' },
+          // An id copied from reviewOf's `known` list, never invented. Each
+          // call site states what a reference there means.
+          duplicate_of: { type: 'string' },
+          // Only a blocking-category finding needs one; classify() below
+          // treats an incomplete one the same as none at all.
+          reproducer: REPRODUCER,
+          // unmet-criterion only: copied verbatim from the ticket text, so
+          // the script can check it is actually there rather than trusting
+          // the claim.
+          criterion_quote: { type: 'string' },
+        },
+      },
+    },
+  },
+}
+// One group per real defect, each listing the ids that describe it. Ids only:
+// the grouping is a model judgement, but the join back is the script's.
+const DUPES = {
+  type: 'object', additionalProperties: false, required: ['groups'],
+  properties: {
+    groups: {
+      type: 'array',
+      items: {
+        type: 'object', additionalProperties: false,
+        required: ['ids', 'why'],
+        properties: {
+          ids: { type: 'array', items: { type: 'string' } },
+          why: { type: 'string' },
+        },
+      },
+    },
+  },
+}
+// Replaces the old LLM verifier (VERDICTS): whether a finding is fixed is
+// decided by executing its reproducer, never by a model's judgement of a
+// diff. One row per reproducer that actually ran; a finding whose id is
+// missing here was not executed, and executeAtHead() below leaves it open
+// rather than guessing why. diff_lines is present only when the call also
+// fetched a range's new-side hunks (the header lines of
+// `git diff --unified=0`), for classify()'s out-of-range rule.
+const EXECUTE_RESULT = {
+  type: 'object', additionalProperties: false, required: ['results', 'dirty'],
+  properties: {
+    results: {
+      type: 'array',
+      items: {
+        type: 'object', additionalProperties: false,
+        required: ['id', 'exit_code', 'output'],
+        properties: {
+          id: { type: 'string' }, exit_code: { type: 'integer' }, output: { type: 'string' },
+        },
+      },
+    },
+    dirty: { type: 'boolean' },
+    porcelain: { type: 'string' },
+    porcelain_before: { type: 'string' },
+    diff_lines: { type: 'array', items: { type: 'string' } },
+  },
+}
+// A fix round is a code change like any other, so the script has to know where
+// it landed to hand the next reviewer a range.
+const FIXED = {
+  type: 'object', additionalProperties: false, required: ['head_sha', 'note', 'scored'],
+  properties: {
+    head_sha: { type: 'string' }, note: { type: 'string' },
+    scored: { type: 'boolean' }, gate_note: { type: 'string' },
+    // Same halt escape IMPL carries: without it a fixer that hits
+    // UNSUPPORTED_LANGUAGE has no field to report the halt on, so the run
+    // reads a normal result and sails on into Mutation with the refused work
+    // uncommitted.
+    unsupported_language: { type: 'boolean' },
+  },
+}
+const STALENESS = {
+  type: 'object', additionalProperties: false, required: ['results'],
+  properties: {
+    results: {
+      type: 'array',
+      items: {
+        type: 'object', additionalProperties: false,
+        required: ['id', 'changed'],
+        properties: {
+          id: { type: 'string' }, changed: { type: 'boolean' },
+          detail: { type: 'string' },
+        },
+      },
+    },
+  },
+}
+const PR = {
+  type: 'object', additionalProperties: false, required: ['opened', 'url', 'note'],
+  properties: {
+    opened: { type: 'boolean' }, url: { type: 'string' }, note: { type: 'string' },
+  },
+}
+const TICKET = {
+  type: 'object', additionalProperties: false,
+  required: ['found', 'summary', 'description', 'comments'],
+  properties: {
+    found: { type: 'boolean' },
+    summary: { type: 'string' },
+    description: { type: 'string' },
+    comments: { type: 'string' },
+  },
+}
+
+const MANIFEST_PROBE = {
+  type: 'object', additionalProperties: false,
+  required: ['found', 'refreshed', 'name', 'version', 'detail'],
+  properties: {
+    found: { type: 'boolean' },
+    refreshed: { type: 'boolean' },
+    name: { type: 'string' },
+    version: { type: 'string' },
+    detail: { type: 'string' },
+  },
+}
+
+// One dispatch answering three unrelated questions before a worktree exists:
+// the ticket's own text, the repo's base-branch manifest, and its two gate
+// markers. Each sub-object keeps its own found/false fallback, so a model
+// that could not resolve one of the three still returns valid JSON for the
+// other two, rather than the whole call failing schema together.
+const SETUP = {
+  type: 'object', additionalProperties: false,
+  required: ['ticket', 'version', 'markers'],
+  properties: {
+    ticket: TICKET,
+    version: MANIFEST_PROBE,
+    markers: MARKERS,
+  },
+}
+

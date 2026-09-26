@@ -267,6 +267,15 @@ run needed one, while earlier runs on code tickets needed three and came to 252k
 Triage scales reasoning effort to the difficulty it judges, which bounds the output
 share. It does not bound the context re-reads, which are the larger half.
 
+A run budget, derived from the same triage judgement (roughly 100k output tokens
+plus 1,500 per estimated line of change, clamped 150k-800k), refuses any further
+dispatch once the run has spent past it, so a ticket whose fix rounds run long
+still stops rather than compounding. `args.runBudget` overrides the derived
+figure. Review also measures the actual diff before choosing reviewer lenses,
+rather than trusting the implementer's own report of what it touched, and
+halts before spending any lens on a change whose tests, docs and comments
+outweigh its actual code by more than 10:1 (`args.supportRatio` to raise it).
+
 ## Prior art
 
 [OpenHands](https://github.com/All-Hands-AI/OpenHands) and

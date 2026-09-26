@@ -8,12 +8,15 @@ export const meta = {
     { title: 'Plan', detail: 'planner produces plan + acceptance criteria + risk areas' },
     { title: 'Implement', detail: 'one implementer, TDD via crap-controlled-changes, many small signed commits' },
     { title: 'Draft PR', detail: 'push the branch and open a draft PR, so the work is visible and any later halt has somewhere durable to be reported' },
-    { title: 'Review', detail: 'adversarial reviewers on distinct lenses, chosen by diff size: correctness and devil\'s advocate normally, plus requirements coverage on a big diff, none on a one-liner. Only a wrong-result, crash, gate-bypass or unmet-criterion finding with a demonstrated reproducer can hold the run; everything else reaches the PR as a note. Runs again on any commits a later phase adds, and from the first re-review on a finding also has to fall inside what that range actually changed' },
+    { title: 'Review', detail: 'a measured diffstat (code churn, with comments, tests and docs counted apart) decides the reviewer lenses: correctness and devil\'s advocate normally, plus requirements coverage on a large or wide change, none on a one-liner; support code (tests, docs, comments) far outweighing the actual change halts here before any lens runs. Only a wrong-result, crash, gate-bypass or unmet-criterion finding with a demonstrated reproducer can hold the run; everything else reaches the PR as a note. Runs again on any commits a later phase adds, and from the first re-review on a finding also has to fall inside what that range actually changed' },
     { title: 'Fix', detail: 'fix confirmed findings, bounded rounds; a finding is fixed when its own reproducer exits 0, never by a model\'s judgement of the diff' },
     { title: 'Mutation', detail: 'pre-PR mutation gate; kill survivors with tests, never weaken code. Its own commits are reviewed before the PR' },
     { title: 'PR', detail: 'push, fill in the PR against the repo template, and mark the draft ready for review, only when every gate is green' },
   ],
 }
+
+// Built by scripts/build-pipeline.sh from workflows/parts/*.js.part;
+// edit the parts and rebuild, never this file directly.
 
 // A snapshot of this script can keep running after main moves past it: the
 // host that persists a copy under its own session directory, the plugin
@@ -26,7 +29,7 @@ export const meta = {
 // against the manifest in scripts/check-version-bump.sh, so drift is a
 // gate's job rather than something this script verifies about itself.
 const PLUGIN_NAME = 'touchstone'
-const PIPELINE_VERSION = '0.23.2'
+const PIPELINE_VERSION = '0.24.0'
 
 // Boundaries. Wall-clock deadlines are not expressible here (no Date.now, by
 // design); the bounds are rounds, counts, and token budget instead.
@@ -64,6 +67,12 @@ if (!ticketMarker) {
     `(216, #216) nor a Jira key (PROJ-4821). Refusing rather than guessing: ` +
     `the branch marker is the only record of which tracker the work came from.`)
 }
+// Keyed by ticket, not run id: a script is never told its own run id, and the
+// ticket is what a human looks the run up by. The script no longer writes this
+// file itself (that agent dispatch cost a full round trip for a mkdir and a
+// heredoc); it names the path and hands the payload back, and the invoking
+// session writes it, the same session that already appends run_id afterwards.
+const runRecordFile = `.claude/touchstone-runs/${String(ticket).replace(/[^A-Za-z0-9_-]/g, '-')}.json`
 // Phase recording goes to agent-eval, a separate optional tool. Default on so a
 // machine that has it keeps its ground truth without opting in every run; the
 // prompt tells each phase to skip a missing command rather than halt, so this
@@ -87,6 +96,23 @@ const outOfBudget = () => budget.total && budget.remaining() < BUDGET_FLOOR
 // sends it straight to Implement, and Review skips its lenses for a diff under
 // the same bar.
 const INLINE_LOC = args?.inlineLoc ?? 10
+// The rest of the lens-count and ratio thresholds Review measures against,
+// once the diffstat probe has sized the actual diff (see lensKeysFor and
+// sizeOf in part 40): below ONE_LENS_LOC a single correctness lens is
+// enough; above BIG_LOC, or past BIG_FILES code files touched, the
+// requirements lens joins too. RATIO_MIN_CODE is the floor below which the
+// support-ratio halt does not apply at all -- a change that is mostly tests
+// by design must not halt on that alone -- and MAX_SUPPORT_RATIO is the
+// limit past it; args.supportRatio raises the limit for a run that knows
+// its own ratio is intentional. This repo's own last 20 merged commits ran
+// 1.0-14.4:1, and every one still at or above the code floor ran 1.2-7.6:1:
+// a real TDD change with tests routinely clears 3:1, so the limit sits at
+// 10 instead, above that observed range with headroom.
+const ONE_LENS_LOC = 150
+const BIG_LOC = 400
+const BIG_FILES = 5
+const RATIO_MIN_CODE = 20
+const MAX_SUPPORT_RATIO = 10
 
 // Long briefs make agents thorough about the wrong things, and the task text is
 // re-sent to every agent in the pipeline. Clamp what gets forwarded.
@@ -95,6 +121,24 @@ const brief = (s) => {
   const t = String(s ?? '')
   return t.length <= BRIEF_CHARS ? t : `${t.slice(0, BRIEF_CHARS)}\n[brief truncated]`
 }
+
+// Shared by every prompt that reads or edits code (implement, checks:fix,
+// fix, reviewOf): a phase reaching for grep/sed/cat to read a file, or Bash
+// generally to search one, is the one habit worth naming once rather than
+// repeating per prompt.
+const NATIVE_TOOLS =
+  `Use your native Read, Grep and Edit tools to read, search and edit files; ` +
+  `Bash is for running things (tests, gates, git), never for reading code ` +
+  `with grep, sed, or cat.`
+
+// Shared by every prompt that commits code (implement, checks:fix, fix):
+// worded generically, since these prompts ship to other repos, not just
+// this one -- whose own workflows/deliver-pipeline.js is itself exactly
+// this kind of file.
+const GENERATED_FILES =
+  `A file the repo's AGENTS.md or its own header marks as built from parts ` +
+  `(this plugin's workflows/deliver-pipeline.js is one) is never edited ` +
+  `directly; edit its parts and run the build the repo names.`
 
 // Per-stage token ceilings (output tokens). Tripwires, not aborts: a running
 // agent can't be stopped from here, so over() is read only after the agent has
@@ -106,11 +150,13 @@ const brief = (s) => {
 // both halt before any code exists, so tripping them forfeits nothing.
 // null means uncapped; args.stageBudgets can set a number to opt one back in.
 const CEILINGS = {
+  // No ceiling: it runs once, before any code exists, so tripping one here
+  // would forfeit nothing but also bound nothing real.
+  setup: null,
   triage: 15_000,
   branch: 10_000,
   plan: null,
   implement: null,
-  gate: 120_000,
   // Two separate windows share this ceiling: discovery+baseline before
   // Implement, and the post-Implement run plus its one pre-review fix
   // round. stage_spend.checks sums both; each is bounded on its own.
@@ -130,8 +176,29 @@ const EXPLICIT_BUDGETS = new Set(Object.keys(args?.stageBudgets ?? {}))
 // already picks effort and lens count also picks how much the stage may spend.
 // 1 until Triage has judged; the stages before it are cheap and fixed.
 let ceilingScale = 1
+// Stages left open when a throw unwinds past their own close(): stage()
+// records a start tick here, and close() deletes it again, so whatever
+// remains when the run-budget catch (below) fires is the stage that was
+// actually running at the halt, and its spend so far still belongs in
+// stageSpend rather than being silently dropped from it.
+const openStages = {}
+// 'checks' is the one name stage() opens twice (the pre-Implement baseline,
+// then the post-Implement run); by the time the second open reaches this
+// function, stageSpend.checks already holds the first window's spend, and
+// adding rather than overwriting is what keeps it instead of losing it to
+// the second window's own delta -- the same fix-up every normal close site
+// for 'checks' already does by hand with checksPreSpend.
+const closeOpenStages = () => {
+  const names = Object.keys(openStages)
+  for (const name of names) {
+    stageSpend[name] = (stageSpend[name] ?? 0) + (budget.spent() - openStages[name])
+    delete openStages[name]
+  }
+  return names
+}
 const stage = (name) => {
   const start = budget.spent()
+  openStages[name] = start
   const raw = CEILINGS[name]
   const cap = raw == null || EXPLICIT_BUDGETS.has(name)
     ? raw
@@ -140,18 +207,63 @@ const stage = (name) => {
     over: () => cap != null && budget.spent() - start > cap,
     close: () => {
       stageSpend[name] = budget.spent() - start
+      delete openStages[name]
       log(`${name}: ${Math.round(stageSpend[name] / 1000)}k output tokens ` +
           (cap == null ? '(no ceiling)' : `(ceiling ${Math.round(cap / 1000)}k)`))
     },
   }
 }
+
+// Tracks which phase is actually running, so the run-budget catch (below)
+// can name it in a halt without every call site passing its own phase name
+// in. A thin wrapper over the runtime's own phase() rather than a replacement
+// for it.
+let currentPhase = null
+const enterPhase = (name) => { currentPhase = name; phase(name) }
+
+// The one choke point every agent dispatch passes through -- a static check
+// in test-static.sh asserts `agent(` appears nowhere else -- so a run-wide
+// token budget can refuse a call before it starts rather than merely notice
+// after. runBudget stays null until Triage has sized the work (set in the
+// Triage phase, below), so every dispatch before that -- setup, branch,
+// branch:existing -- is unbounded by it: there is no code yet for a budget to
+// bound.
+let runBudget = null
+let runBudgetNote = null
+// Set only by a refused dispatch, read only by the top-level catch: its
+// presence, not the thrown error's identity, is what tells that catch this
+// throw was the budget's doing rather than a genuine failure to rethrow, since
+// parallel() and other call sites can wrap or swallow the error itself.
+let runBudgetSpent = null
+// budget.spent() is not zero when a run starts (the host counts spend from
+// before it: 4,634k on the first live run of this code, whose own stages had
+// spent 14k), so the run budget, like every stage ceiling, is measured from
+// this run's own start.
+const runSpendStart = budget.spent()
+const runSpent = () => budget.spent() - runSpendStart
+const dispatch = async (prompt, opts) => {
+  if (runBudget != null && runSpent() >= runBudget) {
+    runBudgetSpent = { refused: opts.label, spent: runSpent() }
+    throw new Error(
+      `touchstone: run budget (${Math.round(runBudget / 1000)}k output ` +
+      `tokens) spent before '${opts.label}' could dispatch`)
+  }
+  return await agent(prompt, opts)
+}
+
 // Set once the draft PR exists; read by halted() so a stop has somewhere
 // durable to be reported. Declared here because halted() is defined before the
 // phase that opens it.
 let draftPr = null
 
+// Set once the diffstat probe (Draft PR phase, part 40) has measured the
+// real diff; null on every halt before that, and read unconditionally by
+// halted() below so every halt from Review onward carries it without each
+// call site having to pass it through `extra` by hand.
+let size = null
+
 // executed never changes; base_branch and mismatch stay null until the
-// plugin:version probe (before Triage) has something to report, which is why
+// merged setup call (before Worktree) has something to report, which is why
 // a halt at Worktree carries the executed value with the other two still
 // null. mismatch is null rather than false when the probe found no comparable
 // manifest (found:false, or a different plugin's name) -- the ordinary case
@@ -169,47 +281,24 @@ const prNote = () => draftPr
   ? `The PR was left as a draft`
   : `No PR was opened, because the draft could not be opened earlier in this run`
 
-// Keyed by ticket, not run id: a script is never told its own run id, and the
-// ticket is what a human looks the run up by.
-const recordRun = async (record) => {
-  const key = String(ticket).replace(/[^A-Za-z0-9_-]/g, '-')
-  const written = await agent(
-    `Write one file, then STOP. Do not stage it, commit it or push, and do ` +
-    `not touch anything else.\n` +
-    `1. Resolve the main checkout: git rev-parse --path-format=absolute ` +
-    `--git-common-dir, then take that directory's parent. Write there, not in ` +
-    `this worktree, which is removed once the work lands.\n` +
-    `2. mkdir -p <main>/.claude/touchstone-runs\n` +
-    `3. Write the JSON below to <main>/.claude/touchstone-runs/${key}.json ` +
-    `byte for byte, with a quoted heredoc (cat > path <<'TOUCHSTONE_EOF'). Do ` +
-    `not reformat it, re-indent it, summarise it or add fields. It is a record, ` +
-    `not a draft.\n` +
-    `Return the absolute path you wrote.\n\n` +
-    JSON.stringify(record, null, 2),
-    { label: 'run-record', model: 'haiku', effort: 'low' })
-  log(written
-    ? `run record written to .claude/touchstone-runs/${key}.json`
-    : `run record could not be written; this run survives only in the transcript`)
-  return typeof written === 'string' ? written : null
-}
-
 // A halt is a result, not an absence of one, and the run record is where it
 // survives the session. It used to be posted as a comment on the draft PR too.
 // That put the run's internal state -- which phase stopped, which findings a
 // lens raised -- on the repository's public record, where a reviewer cannot act
 // on it and someone has to delete it by hand. Opening the PR is this workflow's
-// only write to GitHub. Async because recordRun is, and every call site is
-// `return await`.
+// only write to GitHub. record_file only names where the invoking session
+// should write this payload (commands/deliver.md does that); the script has
+// no fs and cannot write it itself. Not async: nothing here dispatches an
+// agent, but every call site still says `return await` from when it did.
 const halted = async (at, extra) => {
   const payload = {
     task, halted_at: at, pipeline_version: pipelineVersion, stage_spend: stageSpend,
-    needs_user: true, ...extra,
+    needs_user: true, record_file: runRecordFile, size, ...extra,
   }
   if (draftPr?.number) {
     log(`halt at ${at}: draft PR ${draftPr.url} left as it is; the reason is in ` +
         `this run's result and record`)
   }
-  payload.record_path = await recordRun(payload)
   return payload
 }
 
@@ -230,6 +319,33 @@ const PLAN = {
     conflict_note: { type: 'string' },
   },
 }
+// Discovery source: AGENTS.md/CLAUDE.md read from the worktree, not the
+// --git-common-dir root the merged setup call resolves the gate markers
+// from -- a check list is branch content the ticket can change, while the
+// gate markers are repo-wide policy no phase of this run writes. The agent
+// transcribes every "##" heading and the first fenced block under it
+// verbatim, marker lines included, choosing and interpreting nothing.
+// Selecting the check heading, dropping the fence's own marker lines,
+// splitting the rest and assigning ids is script code (checksFrom below): a
+// check list runs again after every step that commits, so what runs must
+// come from parsing, never a model's account of it. Declared before BRANCH,
+// which embeds it as checks_source, since a const cannot be read before its
+// own declaration.
+const CHECKS = {
+  type: 'object', additionalProperties: false, required: ['file', 'sections', 'detail'],
+  properties: {
+    file: { type: 'string' },
+    sections: {
+      type: 'array',
+      items: {
+        type: 'object', additionalProperties: false, required: ['heading', 'fence'],
+        properties: { heading: { type: 'string' }, fence: { type: 'string' } },
+      },
+    },
+    detail: { type: 'string' },
+  },
+}
+
 // Scalars first, prose last. A required integer serialized after a long
 // free-text field is where the value drifts into the prose and validation
 // fails; premise_note is explicitly asked to be discursive. estimated_loc is
@@ -247,6 +363,11 @@ const BRANCH = {
     ticket: { type: 'string' },
     detail: { type: 'string' },
     dirty: { type: 'boolean' },
+    // Optional: only meaningful when created=true, the one case where a
+    // worktree exists to read AGENTS.md/CLAUDE.md out of. checksFrom() reads
+    // this instead of a separate checks:discover call, since the branch
+    // agent already has the worktree open by the time it can answer.
+    checks_source: CHECKS,
   },
 }
 
@@ -276,30 +397,6 @@ const MARKERS = {
   },
 }
 
-// Discovery source: AGENTS.md/CLAUDE.md read from the worktree (wt.path), not
-// the --git-common-dir root the gate:opt-in probe resolves -- a check list is
-// branch content the ticket can change, while the gate markers are repo-wide
-// policy no phase of this run writes. The agent transcribes every "##"
-// heading and the first fenced block under it verbatim, marker lines
-// included, choosing and interpreting nothing. Selecting the check heading,
-// dropping the fence's own marker lines, splitting the rest and assigning
-// ids is script code (checksFrom below): a check list runs again after every
-// step that commits, so what runs must come from parsing, never a model's
-// account of it.
-const CHECKS = {
-  type: 'object', additionalProperties: false, required: ['file', 'sections', 'detail'],
-  properties: {
-    file: { type: 'string' },
-    sections: {
-      type: 'array',
-      items: {
-        type: 'object', additionalProperties: false, required: ['heading', 'fence'],
-        properties: { heading: { type: 'string' }, fence: { type: 'string' } },
-      },
-    },
-    detail: { type: 'string' },
-  },
-}
 // One row per command, run exactly as discovered. output is what the fix
 // phase is handed verbatim -- never a model's account of it -- and it is
 // also the only place a row's real exit code lives: exitLineOf below reads
@@ -318,10 +415,11 @@ const CHECK_RUN = {
       type: 'array',
       items: {
         type: 'object', additionalProperties: false,
-        required: ['id', 'command', 'exit_code', 'output'],
+        required: ['id', 'command', 'exit_code', 'exit_line', 'output'],
         properties: {
           id: { type: 'string' }, command: { type: 'string' },
-          exit_code: { type: 'integer' }, output: { type: 'string' },
+          exit_code: { type: 'integer' }, exit_line: { type: 'string' },
+          output: { type: 'string' },
         },
       },
     },
@@ -410,8 +508,8 @@ function checksFrom(source) {
 
 const TRIAGE = {
   type: 'object', additionalProperties: false,
-  required: ['scope', 'complexity', 'complexity_note', 'premise_ok', 'evidence',
-             'premise_note'],
+  required: ['scope', 'complexity', 'expected_files', 'complexity_note', 'premise_ok',
+             'evidence', 'premise_note'],
   properties: {
     scope: { type: 'string', enum: ['inline', 'team'] },
     // Judgement, not arithmetic. A line count is a proxy for risk and a poor
@@ -420,7 +518,17 @@ const TRIAGE = {
     // answers, so it is the right place to say how hard this is, and the only
     // place that knows before anything expensive runs.
     complexity: { type: 'string', enum: ['trivial', 'routine', 'involved'] },
+    // Required, unlike expected_call_sites and involved_reason below: every
+    // verdict names what it expects the change to touch, but only an
+    // involved one has to explain why that is hard rather than routine.
+    expected_files: { type: 'array', items: { type: 'string' } },
     complexity_note: { type: 'string' },
+    // Optional: only an involved verdict needs either. A missing one demotes
+    // involved to routine in the script (see the complexity block below),
+    // never the other way, so leaving them out on a trivial or routine
+    // verdict costs nothing.
+    expected_call_sites: { type: 'array', items: { type: 'string' } },
+    involved_reason: { type: 'string' },
     premise_ok: { type: 'boolean' },
     estimated_loc: { type: 'integer' },
     evidence: { type: 'array', items: { type: 'string' } },
@@ -431,15 +539,17 @@ const TRIAGE = {
 // halt returns a human reads, and is deliberately NOT forwarded to the
 // reviewer: an adversarial reviewer told what the implementer believes it did
 // is anchored before it opens a file. files_changed is forwarded, because scope
-// is a fact rather than the implementer's account of itself.
+// is a fact rather than the implementer's account of itself. insertions is
+// gone: it described the implementer's own commits and went stale the
+// moment a pre-review checks fix landed after them; the diffstat probe
+// (part 40, `size` in the result) replaces it with a real, measured count.
 const IMPL = {
   type: 'object', additionalProperties: false,
-  required: ['summary', 'files_changed', 'commit_range', 'insertions', 'scored'],
+  required: ['summary', 'files_changed', 'commit_range', 'scored'],
   properties: {
     summary: { type: 'string' },
     files_changed: { type: 'array', items: { type: 'string' } },
     commit_range: { type: 'string' },
-    insertions: { type: 'integer' },
     scored: { type: 'boolean' },
     gate_note: { type: 'string' },
     // Set when the one halt this phase can hit -- a NEXT_ACTION of
@@ -671,6 +781,21 @@ const MANIFEST_PROBE = {
   },
 }
 
+// One dispatch answering three unrelated questions before a worktree exists:
+// the ticket's own text, the repo's base-branch manifest, and its two gate
+// markers. Each sub-object keeps its own found/false fallback, so a model
+// that could not resolve one of the three still returns valid JSON for the
+// other two, rather than the whole call failing schema together.
+const SETUP = {
+  type: 'object', additionalProperties: false,
+  required: ['ticket', 'version', 'markers'],
+  properties: {
+    ticket: TICKET,
+    version: MANIFEST_PROBE,
+    markers: MARKERS,
+  },
+}
+
 // Worktree before triage, not just before planning. Triage often routes small
 // work back to be done inline, and that work still needs to land somewhere
 // named: without the jira-/gh- marker the session is reported untracked
@@ -703,24 +828,65 @@ const RECORD = (label) => !recordPhases ? '' :
   `metrics and has no bearing on the work. Report any other error verbatim, ` +
   `and never set CLAUDE_CONFIG_DIR to make it work.`
 
-// One fetch, before anything reads the envelope. A failed fetch is not a halt:
-// the ticket is required to exist as a reference, but its prose is enrichment,
-// and a Jira outage is not a reason to refuse to do the work.
-const fetched = await agent(
-  `[touchstone: ticket]\n` +
-  `Fetch the details of ticket ${ticket} and STOP. Do not plan, implement, ` +
-  `branch, or comment on anything.\n` +
-  `A key like PROJ-4821 or ABC-36 is a Jira issue: read it with the Atlassian ` +
-  `tools, which you can find via ToolSearch. A bare number like 216 is a ` +
-  `GitHub issue in the repo you are currently in: read it with ` +
-  `gh issue view <number> --json title,body,comments.\n` +
-  `Return found=true with summary (the title), description, and comments ` +
-  `(concatenated, newest last, each prefixed with its author; empty string if ` +
-  `none). Return found=false with empty strings if the ticket cannot be read ` +
-  `at all: say why in summary. Do not invent or infer any field.` +
-  RECORD('ticket'),
-  { label: 'ticket', schema: TICKET, model: 'haiku', effort: 'low' })
+// One dispatch, before anything reads the envelope, answering three questions
+// that share nothing but their timing: none needs a worktree, and each used
+// to cost its own haiku round trip (ticket, plugin:version, gate:opt-in). Not
+// a treeAgent -- there is no worktree yet, so every git command below
+// resolves the repo root itself (dirname of --git-common-dir) rather than
+// being pointed at one, and the prompt never names wt.base or baseOverride,
+// both unset at this point regardless. Its only write is the one
+// `git fetch origin <base>` the version check needs.
+const sSetup = stage('setup')
+const setupResult = await dispatch(
+  `[touchstone: setup]\n` +
+  `Gather three unrelated facts, then STOP. Do not plan, implement, branch, ` +
+  `commit, or comment on anything.\n\n` +
+  `1. TICKET. A key like PROJ-4821 or ABC-36 is a Jira issue: read it with ` +
+  `the Atlassian tools, which you can find via ToolSearch. A bare number ` +
+  `like 216 is a GitHub issue in the repo you are currently in: read it ` +
+  `with gh issue view <number> --json title,body,comments. Fetch ticket ` +
+  `${ticket}. Return ticket.found=true with ticket.summary (the title), ` +
+  `ticket.description, and ticket.comments (concatenated, newest last, ` +
+  `each prefixed with its author; empty string if none). Return ` +
+  `ticket.found=false with empty strings if the ticket cannot be read at ` +
+  `all: say why in ticket.summary. Do not invent or infer any field.\n\n` +
+  `2. VERSION. Find the repo root: dirname "$(git rev-parse ` +
+  `--path-format=absolute --git-common-dir)". Resolve the repo's actual ` +
+  `base branch: git -C <repo root> symbolic-ref --short refs/remotes/` +
+  `origin/HEAD, which prints an origin/-prefixed name; strip that prefix, ` +
+  `falling back to whichever of main or master exists when there is no ` +
+  `remote-tracking HEAD. Then run git -C <repo root> fetch origin <that ` +
+  `base> to refresh the remote-tracking ref before reading it -- this ` +
+  `checkout can be sessions old. If that fetch fails (no network, no auth, ` +
+  `a remote needing a hardware key), that is not by itself a missing ` +
+  `manifest: origin/<that base> can already hold it from an earlier fetch ` +
+  `or the initial clone, so read it anyway. Then read git -C <repo root> ` +
+  `show origin/<that base>:.claude-plugin/plugin.json. This fetch is the ` +
+  `only change to make anywhere in this task; do not touch a working tree, ` +
+  `commit, or push. Return version.found=true with version.name and ` +
+  `version.version set from that file's "name" and "version" fields, or ` +
+  `version.found=false with empty strings if the base cannot be resolved, ` +
+  `the ref still cannot be resolved even after attempting the read, or the ` +
+  `file is missing, unreadable, or has no such fields. A failed fetch does ` +
+  `not force version.found=false on its own. Do not invent either value. ` +
+  `Set version.refreshed=true only if that fetch actually succeeded, and ` +
+  `false if it failed, was refused, or you did not run it. Set ` +
+  `version.detail to one line saying which case applied.\n\n` +
+  `3. MARKERS. At the same repo root, test for a file named exactly ` +
+  `.crap-gated, and separately for one named exactly .mutation-gated. ` +
+  `Return markers.crap_gated=true only if .crap-gated is there; ` +
+  `markers.crap_gated=false otherwise, whether it is confirmed absent or ` +
+  `you could not tell -- an unconfirmed CRAP marker must never be reported ` +
+  `as gated. Return markers.mutation_gated=true if .mutation-gated is ` +
+  `there or you could not determine either way, markers.mutation_gated=` +
+  `false only if you confirmed it is absent -- an unconfirmed mutation ` +
+  `marker should still run the gate, which only costs a run rather than ` +
+  `dropping a real one. Report the paths you checked in markers.detail.` +
+  RECORD('setup'),
+  { label: 'setup', schema: SETUP, model: 'haiku', effort: 'low' })
+sSetup.close()
 
+const fetched = setupResult?.ticket
 const ticketDetail = fetched?.found
   ? fetched
   : { found: false, summary: fetched?.summary ?? 'not fetched', description: '', comments: '' }
@@ -743,7 +909,66 @@ if (!task) {
   log(`no task given; using ticket summary: ${task}`)
 }
 
-phase('Worktree')
+// executed never changes; base_branch and mismatch stay null until this
+// probe has something to report, which is why a halt at Worktree carries the
+// executed value with the other two still null. mismatch is null rather than
+// false when the probe found no comparable manifest (found:false, or a
+// different plugin's name) -- the ordinary case for every repo this runs
+// against except touchstone's own, but it is logged too, distinct from a real
+// mismatch. A probe that returns nothing at all leaves the same null/null
+// pair, but is logged separately again, since that case means the comparison
+// did not run, not that there was nothing to compare.
+const versionProbe = setupResult?.version
+if (versionProbe == null) {
+  log(`the plugin:version probe returned nothing, so pipeline_version could ` +
+      `not be compared against the repository's base branch`)
+} else if (versionProbe.found && versionProbe.name === PLUGIN_NAME) {
+  const drift = versionProbe.version !== PIPELINE_VERSION
+  pipelineVersion = {
+    executed: PIPELINE_VERSION, base_branch: versionProbe.version, mismatch: drift,
+    base_refreshed: versionProbe.refreshed !== false,
+  }
+  if (drift) {
+    // Names both and orders neither: the executed snapshot is the newer one
+    // whenever the base was reverted or the plugin was built locally.
+    log(`this run is executing pipeline ${PIPELINE_VERSION}; the repository's ` +
+        `base branch's plugin.json names ${versionProbe.version}`)
+  }
+  if (versionProbe.refreshed === false) {
+    // Without this the fetch failing produces mismatch:false and silence,
+    // which is the stale agreement the fetch was added to rule out.
+    log(`the base branch's manifest was read from a remote-tracking ref this ` +
+        `run could not refresh, so its version may predate the base branch's ` +
+        `real state (${versionProbe.detail})`)
+  }
+} else {
+  // The probe answered but did not confirm a comparable manifest -- the
+  // ordinary case for every repo this pipeline delivers into other than
+  // touchstone's own, but logged regardless: an answer that came back
+  // uncomparable must not collapse into the same silence as a comparison
+  // that never ran at all (the branch above).
+  log(`the plugin:version probe found no comparable manifest on the ` +
+      `repository's base branch (${versionProbe.detail}), so pipeline_version ` +
+      `stays uncompared`)
+}
+
+// The two markers take opposite fail-safe defaults on an unconfirmed answer.
+// Mutation: unknown counts as gated, which only costs an extra mutation run.
+// CRAP: unknown must NOT count as gated, because that would assert a raw
+// commit could not have bypassed the wrapper when nobody confirmed the
+// marker is there -- the false assertion this ticket exists to remove. So
+// crap_gated counts only a confirmed `true`; everything else, including a
+// probe that returned nothing, is reported as unconfirmed.
+const gateProbe = setupResult?.markers
+const crapGated = gateProbe?.crap_gated === true
+const mutationGated = gateProbe?.mutation_gated !== false
+if (!gateProbe) {
+  log(`gate opt-in probe returned nothing; treating CRAP gating as ` +
+      `unconfirmed (reported as not hook-enforced) and mutation gating as ` +
+      `opted-in (safe default: costs an extra run rather than dropping a real gate)`)
+}
+
+enterPhase('Worktree')
 const sBranch = stage('branch')
 
 // --show-toplevel returns the worktree's own path when run from inside one,
@@ -755,11 +980,33 @@ const sBranch = stage('branch')
 // branch be checked out twice: both prompts below must find an existing
 // branch or worktree and reuse it rather than treat a collision as a halt.
 
+// Shared by both worktree-creation prompts below: transcribing the same repo
+// file the same way, whichever path found the worktree. Read only; chooses,
+// filters and interprets nothing, since checksFrom() (used once wt exists)
+// is what decides what any of it means. Folded into the worktree prompt
+// itself rather than a separate checks:discover call after it, since that
+// agent already has the worktree path open by the time it can answer this.
+const checksDiscoveryStep = (n, whichPath) =>
+  `${n}. Before you return from the step above: read ${whichPath}/AGENTS.md; ` +
+  `if it does not exist, read ${whichPath}/CLAUDE.md instead (conventionally ` +
+  `a symlink to it). Set checks_source.file to the absolute path you read, ` +
+  `or '' if neither exists. If a file was read, find every line starting ` +
+  `with "##" that sits outside a fenced code block. For each, set ` +
+  `checks_source.sections[].heading to that full line verbatim, "#" ` +
+  `characters included, and .fence to the first fenced code block that ` +
+  `follows it and precedes the next such heading line, verbatim and whole ` +
+  `-- its opening marker line (\`\`\` or ~~~, with any info string after ` +
+  `it) and its closing marker line included -- or '' if there is none ` +
+  `before the next heading or the file's end. List sections in the file's ` +
+  `own order. Do not choose, filter, reorder, trim, or interpret any of ` +
+  `it; a later step decides what it means. Set checks_source.detail to one ` +
+  `line saying what you found.`
+
 // existingBranch is for follow-up work on an open PR: review feedback, or scope
 // added to a ticket already in flight. Cutting a fresh branch there strands the
 // delta away from the PR it belongs to. The ticket stays mandatory either way.
 const wt = args?.existingBranch
-  ? await agent(
+  ? await dispatch(
       `[touchstone: branch:existing]\n` +
       `Find the worktree that already holds this ticket's branch, then STOP. Do ` +
       `not create a branch, do not fetch, do not pull, do not plan or ` +
@@ -866,13 +1113,14 @@ const wt = args?.existingBranch
       `record. Note in detail whether the match came from the ticket lookup ` +
       `(step 4), the worktree-less branch (step 5), or the fallback (step 6), ` +
       `whether that path is the main checkout or a linked worktree, and ` +
-      `whether the branch name carries a jira- or gh- marker.` +
+      `whether the branch name carries a jira- or gh- marker.\n` +
+      checksDiscoveryStep(9, 'that path') +
       RECORD('branch:existing'),
       { label: 'branch:existing', schema: EXISTING_BRANCH, model: 'haiku', effort: 'low' })
   // A worktree is a separate checkout, so the main tree's state is irrelevant
   // to it; cutting from origin/<base> is what removes the need to touch the
   // main checkout at all.
-  : await agent(
+  : await dispatch(
   `[touchstone: branch]\n` +
   `Create the working branch and a git worktree for it, then STOP. Do not ` +
   `plan, implement, or commit any code.\n` +
@@ -917,8 +1165,8 @@ const wt = args?.existingBranch
   `<that path> status --porcelain: if it is non-empty, return created=false, ` +
   `dirty=true, and say what is dirty. Never stash, reset, or discard the ` +
   `user's work. Otherwise return created=true using that path, note in ` +
-  `detail that the branch was reused rather than created, and stop: do not ` +
-  `fetch, pull, or run any worktree add.\n` +
+  `detail that the branch was reused rather than created, then go straight ` +
+  `to step 11: do not fetch, pull, or run any worktree add.\n` +
   `7. Otherwise check whether the branch exists at all (git show-ref --verify ` +
   `--quiet refs/heads/<name>). If it does, the fetch and cut in step 10 are ` +
   `not needed; go straight to step 8.\n` +
@@ -947,6 +1195,7 @@ const wt = args?.existingBranch
       `separate checkout, cut straight from the fetched remote ref.\n`) +
   `Do not check out the new branch in this working tree; the worktree is a ` +
   `separate checkout.\n` +
+  checksDiscoveryStep(11, 'the worktree path from step 5 (or the reused path from step 6)') + `\n` +
   `Return the branch you created or reused, the base you cut it from (or ` +
   (baseOverride ? `${baseOverride}` : `the repo's base branch`) +
   ` if the branch already existed), and the absolute worktree path.` +
@@ -1073,7 +1322,7 @@ const ticketSpec = () => ticketDetail.found
   : `Ticket ${ticket} could not be read; work from the task text alone.\n`
 
 const treeAgent = (prompt, { omitBase = false, ...opts }) =>
-  agent(
+  dispatch(
     `[touchstone: ${opts.label}]\n` +
     `Work in the git worktree at ${wt.path}. Every command, git included, acts ` +
     `on that tree and not on the main checkout: pass it explicitly, with ` +
@@ -1112,91 +1361,11 @@ const treeAgent = (prompt, { omitBase = false, ...opts }) =>
 
 const headOf = (range) => range.includes('..') ? range.split('..')[1].trim() : range.trim()
 
-// Read once, here, rather than folded into gate:opt-in below: comparing
-// against the repository's actual base branch rather than this worktree is
-// what makes the comparison safe on a resumed branch. The worktree's own
-// manifest already carries this run's own version-bump commit whenever one
-// landed in an earlier session -- the ordinary case on touchstone itself,
-// since check-version-bump.sh forces every workflows/ change to carry one --
-// and reading that back would report the run's own progress as drift against
-// itself. The probe must not just read origin/wt.base either: wt.base
-// becomes the branch under review whenever this run is stacked (baseOverride,
-// set above from args.base), and that branch's own manifest can carry its own
-// unmerged version bump, reviving the same self-accusation against a version
-// that never shipped. The probe resolves the real base itself instead, then
-// fetches it fresh -- nothing else in this workflow is guaranteed to have
-// refreshed that remote-tracking ref on a resumed run, so a stale fetch could
-// let a stale base pass as mismatch=false.
-const versionProbe = await treeAgent(
-  `[touchstone: plugin:version]\n` +
-  `Read .claude-plugin/plugin.json off the repository's actual base branch, ` +
-  `never this run's own working tree and never any stacked branch this work ` +
-  `sits on. Resolve that base yourself, the same way branch creation does: ` +
-  `git -C ${wt.path} symbolic-ref --short refs/remotes/origin/HEAD, which ` +
-  `prints an origin/-prefixed name; strip that prefix, falling back to ` +
-  `whichever of main or master exists when there is no remote-tracking HEAD. ` +
-  `This is not necessarily ${wt.branch}'s own base: ignore what branch ${wt.branch} ` +
-  `was actually cut from. Then run ` +
-  `git -C ${wt.path} fetch origin <that base> to refresh the remote-tracking ` +
-  `ref before reading it -- this worktree can be sessions old. If that fetch ` +
-  `fails (no network, no auth, a remote needing a hardware key), that is not ` +
-  `by itself a missing manifest: origin/<that base> can already hold it from ` +
-  `an earlier fetch or the initial clone, so read it anyway. Then read ` +
-  `git -C ${wt.path} show origin/<that base>:.claude-plugin/plugin.json. ` +
-  `Then STOP: the fetch is the only change to make; do not touch the working ` +
-  `tree, commit, or push.\n` +
-  `Return found=true with name and version set from that file's "name" and ` +
-  `"version" fields, or found=false with empty strings if the base cannot be ` +
-  `resolved, the ref still cannot be resolved even after attempting the read, ` +
-  `or the file is missing, unreadable, or has no such fields. A failed fetch ` +
-  `does not force found=false on its own. Do not invent either value. Set ` +
-  `refreshed=true only if that fetch actually succeeded, and false if it ` +
-  `failed, was refused, or you did not run it: false says the version you ` +
-  `read may predate the base branch's real state, so it must be reported ` +
-  `rather than assumed. Set detail to one line saying which case applied.`,
-  { label: 'plugin:version', omitBase: true, schema: MANIFEST_PROBE,
-    model: 'haiku', effort: 'low' })
-if (versionProbe == null) {
-  // Distinct from the found:false/wrong-name case below: this means the
-  // probe never answered at all, so pipeline_version's null/null does not
-  // mean "nothing to compare" here, it means the comparison did not run.
-  log(`the plugin:version probe returned nothing, so pipeline_version could ` +
-      `not be compared against the repository's base branch`)
-} else if (versionProbe.found && versionProbe.name === PLUGIN_NAME) {
-  const drift = versionProbe.version !== PIPELINE_VERSION
-  pipelineVersion = {
-    executed: PIPELINE_VERSION, base_branch: versionProbe.version, mismatch: drift,
-    base_refreshed: versionProbe.refreshed !== false,
-  }
-  if (drift) {
-    // Names both and orders neither: the executed snapshot is the newer one
-    // whenever the base was reverted or the plugin was built locally.
-    log(`this run is executing pipeline ${PIPELINE_VERSION}; the repository's ` +
-        `base branch's plugin.json names ${versionProbe.version}`)
-  }
-  if (versionProbe.refreshed === false) {
-    // Without this the fetch failing produces mismatch:false and silence,
-    // which is the stale agreement the fetch was added to rule out.
-    log(`the base branch's manifest was read from a remote-tracking ref this ` +
-        `run could not refresh, so its version may predate the base branch's ` +
-        `real state (${versionProbe.detail})`)
-  }
-} else {
-  // The probe answered but did not confirm a comparable manifest -- the
-  // ordinary case for every repo this pipeline delivers into other than
-  // touchstone's own, but logged regardless: an answer that came back
-  // uncomparable must not collapse into the same silence as a comparison
-  // that never ran at all (the branch above).
-  log(`the plugin:version probe found no comparable manifest on the ` +
-      `repository's base branch (${versionProbe.detail}), so pipeline_version ` +
-      `stays uncompared`)
-}
-
 // Latch 1. The premise checks that matter most are usually one grep, and a task
 // whose stated facts are wrong must not be planned around. Buying that check
 // for one cheap agent is the difference between a 2-agent run and an 11-agent
 // one, so it runs before anything expensive.
-phase('Triage')
+enterPhase('Triage')
 const sTriage = stage('triage')
 let triage = null
 try {
@@ -1241,7 +1410,15 @@ try {
   `trivial; a five-line change to a signing path is involved. When torn ` +
   `between two levels, choose the higher one: under-reasoning a hard change ` +
   `costs far more than over-reasoning an easy one. Put the deciding factor in ` +
-  `complexity_note, in one sentence.`,
+  `complexity_note, in one sentence.\n` +
+  `Always return expected_files: every file you expect the real change to ` +
+  `touch, from having read the code, not the ticket's own wording. A ticket ` +
+  `naming one file and one behaviour is routine unless you can say why it is ` +
+  `not. involved stands only when you also return involved_reason (why this ` +
+  `is hard rather than routine) and expected_call_sites (the function or ` +
+  `method names, not just files, you expect the change to touch); returning ` +
+  `involved without all three gets read as routine instead, since "this ` +
+  `feels hard" is not evidence and naming what you expect to touch is.`,
   { label: 'triage', schema: TRIAGE, model: 'sonnet', effort: 'medium' })
 } catch (e) {
   log(`triage returned no verdict: ${e?.message ?? e}`)
@@ -1290,11 +1467,14 @@ if (inlineMode) {
 
 // Reasoning effort, scaled by the difficulty triage just judged.
 //
-// This is the lever that actually bounds spend, and the only one available
-// before an agent starts. The stage ceilings below cannot do it: they are read
-// after an agent returns, so on a single-shot stage a ceiling spends the tokens
-// and then discards the work, which is why plan and implement deliberately
-// carry none. effort is set on the call.
+// This is the lever that shapes what one call spends, and the only one
+// available before that agent starts. The stage ceilings below cannot do it:
+// they are read after an agent returns, so on a single-shot stage a ceiling
+// spends the tokens and then discards the work, which is why plan and
+// implement deliberately carry none. effort is set on the call. runBudget,
+// derived just below, is the other lever available this early, but it works
+// differently: it refuses a whole call outright once the run has spent past
+// it, rather than shaping how any one call spends.
 //
 // It is also the lever that matters most, for a reason that is not obvious from
 // the token counts. On a measured run of this pipeline, output was 15% of cost
@@ -1319,13 +1499,31 @@ const EFFORT = {
 // get a trivial effort setting and the full 80k review ceiling, which is not a
 // budget so much as permission to keep going.
 const CEILING_SCALE = { trivial: 0.4, routine: 1, involved: 1.5 }
-const complexity = EFFORT[triage.complexity] ? triage.complexity : 'involved'
-const effortFor = EFFORT[complexity]
-ceilingScale = CEILING_SCALE[complexity]
+let complexity = EFFORT[triage.complexity] ? triage.complexity : 'involved'
 if (triage.complexity && complexity !== triage.complexity) {
   log(`triage returned an unrecognised complexity (${triage.complexity}); ` +
       `treating it as involved, which spends the most rather than the least`)
 }
+// involved triples effort and ceilings against routine, so it stands only
+// when triage backs it with a reason and the files and call sites that
+// reason names -- never on the strength of the word alone. This demotes a
+// *recognised* involved verdict that arrived unjustified; it never touches
+// the unrecognised-value fallback above, which stays involved regardless
+// (that case is not a judgement about difficulty, so there is nothing to
+// demote it against).
+const involvedJustified = !!triage.involved_reason &&
+  (triage.expected_files ?? []).length > 0 && (triage.expected_call_sites ?? []).length > 0
+if (triage.complexity === 'involved' && !involvedJustified) {
+  log(`triage judged this involved without a reason and the files and call ` +
+      `sites it expects the diff to touch; treating it as routine instead`)
+  complexity = 'routine'
+} else if (triage.complexity === 'involved') {
+  log(`triage justified involved: ${triage.involved_reason} (expected files: ` +
+      `${triage.expected_files.join(', ')}; expected call sites: ` +
+      `${triage.expected_call_sites.join(', ')})`)
+}
+const effortFor = EFFORT[complexity]
+ceilingScale = CEILING_SCALE[complexity]
 log(`triage judged this ${complexity}` +
     (triage.complexity_note ? `: ${triage.complexity_note}` : '') +
     ` -- plan/implement/review/verify effort ` +
@@ -1335,6 +1533,39 @@ log(`triage judged this ${complexity}` +
       ? ` (${[...EXPLICIT_BUDGETS].join(', ')} left at the value you passed)`
       : ''))
 sTriage.close()
+
+// Derived from the size triage just judged, in output tokens: a run-wide
+// ceiling dispatch() (part 00) refuses a call past, catching what the
+// per-stage ceilings above cannot -- those bound one stage each, and a run
+// that overruns several of them in turn still has nothing stopping it
+// overall. estimated_loc is optional on TRIAGE (a disproved premise trips
+// regardless of it), so a numeric args.runBudget aside, a missing one falls
+// back to a flat default by scope rather than the LOC formula: there is no
+// number to derive from and a change already latched to inline is smaller by
+// definition than a team-scoped one. The figures are set so the healthy
+// runs measured before this existed (about 270k-300k output tokens for
+// 240-450 changed lines) finish with room to spare: a budget halt strands
+// work mid-run, so it is for a run that has gone wrong, not a tight fit.
+if (typeof args?.runBudget === 'number') {
+  runBudget = args.runBudget
+  runBudgetNote = `set explicitly via args.runBudget`
+} else if (triage.estimated_loc != null) {
+  runBudget = Math.min(800_000, Math.max(150_000, 100_000 + 1_500 * triage.estimated_loc))
+  runBudgetNote = `derived from triage's ~${triage.estimated_loc} estimated LOC`
+} else {
+  runBudget = inlineMode ? 150_000 : 400_000
+  runBudgetNote = `triage gave no estimated_loc; using the ${inlineMode ? 'inline' : 'team'} default`
+}
+log(`run budget: ${Math.round(runBudget / 1000)}k output tokens (${runBudgetNote})`)
+
+// Everything from here on runs inside one try, so a dispatch the budget
+// above refuses -- wherever in the run it happens to fall -- unwinds to one
+// place rather than needing its own halt at every call site. The catch is at
+// the very end of the script (part 60): it checks runBudgetSpent, not the
+// thrown error's identity, since a genuine failure (the planner or
+// implementer returning nothing, for instance) must still propagate rather
+// than being read as a budget halt.
+try {
 
 // A plan an earlier run already produced arrives as args.plan and starts this
 // run at Implement. Without it the only way to reuse a plan was to paste it into
@@ -1365,7 +1596,7 @@ if (!plan && inlineMode) {
 }
 
 if (!givenPlan && !inlineMode) {
-phase('Plan')
+enterPhase('Plan')
 const sPlan = stage('plan')
 plan = await treeAgent(
   `You are the planner for this task; do NOT implement anything. You have no ` +
@@ -1407,73 +1638,21 @@ if (sPlan.over()) {
 }
 }
 
-// The Fix, Mutation and final-result payloads below all report a `gates`
-// field, and the Mutation phase further down needs the mutation opt-in
-// marker. One probe answers both here, before either marker is needed.
-//
+// gates below reports crapGated/mutationGated (from the merged setup call)
+// separately rather than folding them into one "enforced" claim:
 // crap-commit-gate.py's PreToolUse hook only blocks a raw `git commit` when
 // .crap-gated exists at the repo root; crap-commit.sh itself runs the CRAP
 // and dead-code gates on every commit it makes regardless of that marker. So
 // the marker answers one question only -- could a raw commit have bypassed
-// the wrapper -- not whether the gates ran, and `gates` below reports both
-// separately rather than folding them into one "enforced" claim.
-//
-// The two markers take opposite fail-safe defaults on an unconfirmed answer.
-// Mutation: unknown counts as gated, which only costs an extra mutation run.
-// CRAP: unknown must NOT count as gated, because that would assert a raw
-// commit could not have bypassed the wrapper when nobody confirmed the
-// marker is there -- the false assertion this ticket exists to remove. So
-// crap_gated counts only a confirmed `true`; everything else, including a
-// probe that returned nothing, is reported as unconfirmed.
-const sGate = stage('gate')
-const gateProbe = await treeAgent(
-  `[touchstone: gate opt-in]\n` +
-  `Report whether this repo opts into CRAP-gated commits and into mutation ` +
-  `gating, then STOP. Run no tests, no gate tooling, and change nothing.\n` +
-  `1. Find the repo root: dirname "$(git rev-parse --path-format=absolute ` +
-  `--git-common-dir)".\n` +
-  `2. Test for a file named exactly .crap-gated at that root, and separately ` +
-  `for one named exactly .mutation-gated.\n` +
-  `3. Return crap_gated=true only if .crap-gated is there; crap_gated=false ` +
-  `otherwise, whether it is confirmed absent or you could not tell -- an ` +
-  `unconfirmed CRAP marker must never be reported as gated. Return ` +
-  `mutation_gated=true if .mutation-gated is there or you could not ` +
-  `determine either way, mutation_gated=false only if you confirmed it is ` +
-  `absent -- an unconfirmed mutation marker should still run the gate, which ` +
-  `only costs a run rather than dropping a real one.\n` +
-  `Report the paths you checked in detail.`,
-  { label: 'gate:opt-in', schema: MARKERS, model: 'haiku', effort: 'low' })
-sGate.close()
-
-const crapGated = gateProbe?.crap_gated === true
-const mutationGated = gateProbe?.mutation_gated !== false
-if (!gateProbe) {
-  log(`gate opt-in probe returned nothing; treating CRAP gating as ` +
-      `unconfirmed (reported as not hook-enforced) and mutation gating as ` +
-      `opted-in (safe default: costs an extra run rather than dropping a real gate)`)
-}
+// the wrapper -- not whether the gates ran.
 
 const sChecksPre = stage('checks')
-phase('Implement')
-const discovery = await treeAgent(
-  `[touchstone: checks:discover]\n` +
-  `Transcribe this repo's own heading structure, then STOP. Read only; run ` +
-  `nothing and change nothing. Do not choose, filter, reorder, trim, or ` +
-  `interpret anything below -- a later step decides what any of it means.\n` +
-  `1. Read ${wt.path}/AGENTS.md; if it does not exist, read ` +
-  `${wt.path}/CLAUDE.md instead (it is conventionally a symlink to ` +
-  `AGENTS.md). Return file as the absolute path you read, or '' if neither ` +
-  `exists.\n` +
-  `2. If a file was read, find every line starting with "##" that sits ` +
-  `outside a fenced code block. For each, return heading as that full line ` +
-  `verbatim, "#" characters included, and fence as the first fenced code ` +
-  `block that follows it and precedes the next such heading line, verbatim ` +
-  `and whole -- its opening marker line (\`\`\` or ~~~, with any info ` +
-  `string after it) and its closing marker line included -- or '' if there ` +
-  `is none before the next heading or the file's end. Return sections in ` +
-  `the file's own order.`,
-  { label: 'checks:discover', schema: CHECKS, model: 'haiku', effort: 'low' })
-const { checks: sourceChecks, note: discoveryNote } = checksFrom(discovery)
+enterPhase('Implement')
+// wt.checks_source came back from the branch/branch:existing call itself
+// (its last step, done only when created=true), replacing a separate
+// checks:discover dispatch now that the worktree it needs to read is
+// already open by the time that call answers.
+const { checks: sourceChecks, note: discoveryNote } = checksFrom(wt.checks_source)
 let discoveredChecks = sourceChecks
 log(discoveredChecks.length
   ? `checks discovered: ${discoveredChecks.map(c => c.id).join(', ')}`
@@ -1520,8 +1699,9 @@ const shQuote = (s) => {
 // the step runners have already failed at. A file rather than a pipe to
 // tail, because a pipe's status is tail's, and a piped gate is refused by a
 // hook here.
+const innerInvocationFor = (c) => `bash -c ${shQuote(`cd ${shQuote(wt.path)} && ${c.command}`)}`
 const invocationFor = (c) =>
-  `o=$(mktemp); bash -c ${shQuote(`cd ${shQuote(wt.path)} && ${c.command}`)} >"$o" 2>&1; ` +
+  `o=$(mktemp); ${innerInvocationFor(c)} >"$o" 2>&1; ` +
   `echo "${CHECK_EXIT_MARKER} ${c.id} $?"; tail -c ${CHECK_TAIL_BYTES} "$o"; rm -f "$o"`
 const executeChecks = async (checks = discoveredChecks) => {
   checkAttempt++
@@ -1542,6 +1722,8 @@ const executeChecks = async (checks = discoveredChecks) => {
     `stderr verbatim -- do not summarise, truncate, or interpret what it ` +
     `printed. Report command as the exact invocation you ran, copied back ` +
     `verbatim: a row is only accepted when it matches what was asked. ` +
+    `Report exit_line as the first line the invocation printed, the ` +
+    `${CHECK_EXIT_MARKER} line, copied exactly. ` +
     `Report the output exactly as printed, starting with its first line, ` +
     `the ${CHECK_EXIT_MARKER} line: never write, add, move, or change that ` +
     `line yourself. Each invocation already prints only the end of a long ` +
@@ -1601,13 +1783,27 @@ const classifyResults = (checks, results) => {
         expected, reported: null, reason: 'no result reported' })
       continue
     }
-    if (row.command !== expected) {
+    // Runners have reported the full invocation, only its inner bash -c, and
+    // only the declared command, for the same run. Any of the three means the
+    // runner says it ran what was asked; anything else (an added timeout, a
+    // changed flag) is a runner admitting it ran something different.
+    if (![expected, innerInvocationFor(c), c.command].includes(row.command)) {
       unmeasured.push({ id: c.id, command: c.command, exit_code: null,
         output: `not measured: expected \`${expected}\`, got \`${row.command}\``,
         expected, reported: row.command, reason: `reported \`${row.command}\`` })
       continue
     }
-    const parsed = exitLineOf(row.output, c.id)
+    // Runners have dropped the exit line from output while relaying it, so
+    // exit_line alone can stand in for it. Only the output's copy was printed
+    // by the check's own shell, though: a model-filled exit_line never
+    // overrides a real one there, and the two disagreeing is unmeasured.
+    const fromOutput = exitLineOf(row.output, c.id)
+    const fromField = row.exit_line ? exitLineOf(row.exit_line, c.id) : null
+    const parsed = !fromField ? fromOutput
+      : fromField.reason ? fromField
+      : fromOutput.reason ? fromField
+      : fromField.exit !== fromOutput.exit ? { reason: 'exit_line disagrees with output' }
+      : fromOutput
     if (parsed.reason) {
       unmeasured.push({ id: c.id, command: c.command, exit_code: null,
         output: `not measured: ${parsed.reason}`,
@@ -1725,17 +1921,17 @@ function checksPayload() {
           : '')
       : `advisory only: existingBranch has no clean base tree to classify ` +
         `checks against, so a red one here is reported but never blocks. `
-    ) + (discoveryNote || discovery?.detail || ''),
+    ) + (discoveryNote || wt.checks_source?.detail || ''),
   }
 }
 // Red but not blocking (existingBranch) reaches the fixer as nothing at
 // all: it is visibility for a human, not work to hand to an agent.
-let preReviewFixCommitted = false
 const blockingChecksOpen = () => checksBlocking && redChecks.length > 0
 
 const sImpl = stage('implement')
 const impl = await treeAgent(
   `Implement this task in the current repo.\n` +
+  `${NATIVE_TOOLS} ${GENERATED_FILES}\n` +
   `Task: ${brief(task)}\nPlan: ${brief(plan.plan)}\n` +
   (plan.acceptance_criteria.length
     ? `Acceptance criteria:\n- ${plan.acceptance_criteria.join('\n- ')}\n`
@@ -1857,6 +2053,7 @@ if (blockingChecksOpen() && !sChecksPost.over()) {
     `do, and put the three options in note; leave head_sha as the ` +
     `unchanged HEAD if you made no commits before hitting it. Do not push ` +
     `or open a PR.\n` +
+    `${NATIVE_TOOLS} ${GENERATED_FILES}\n` +
     `Task: ${brief(task)}\n` +
     redChecks.map(renderCheck).join('\n\n') + `\n` +
     `Return head_sha: the full 40-character SHA of HEAD after your last ` +
@@ -1888,7 +2085,6 @@ if (blockingChecksOpen() && !sChecksPost.over()) {
     const implBase = impl.commit_range.includes('..')
       ? impl.commit_range.split('..')[0].trim() : impl.commit_range.trim()
     impl.commit_range = `${implBase}..${preReviewHead}`
-    preReviewFixCommitted = true
     lastCheckedHead = preReviewHead
     ;({ red: redChecks, unmeasured: unmeasuredChecks } = await runChecks())
     log(redChecks.length
@@ -1925,15 +2121,123 @@ stageSpend.checks = checksPreSpend + (stageSpend.checks ?? 0)
 // downstream of here.
 const DRAFT = {
   type: 'object', additionalProperties: false,
-  required: ['opened', 'detail'],
+  required: ['opened', 'detail', 'diffstat'],
   properties: {
     opened: { type: 'boolean' },
     url: { type: 'string' },
     number: { type: 'integer' },
     detail: { type: 'string' },
+    diffstat: { type: 'string' },
   },
 }
-phase('Draft PR')
+// The exact command the diffstat probe runs, and its retry (below) rerun
+// verbatim: a numstat pass for added/removed per file, then an awk pass
+// counting, per file, added lines whose trimmed text opens a comment: "//"
+// or "/*" anywhere, a bare "*" only when it opens a block-comment
+// continuation or close ("* foo", "*/", not "*p = v", a Go/C pointer
+// write), and "#" unless it is "#!" (a shebang) or "#[" (a PHP 8 attribute,
+// e.g. #[ORM\Column]) -- sizeOf needs that count per file, not one grand
+// total, since only a code file's own comment lines subtract from its own
+// added count. Three markers bound the two sections so parseDiffstat can
+// tell a well-formed response from a truncated or off-range one: the begin
+// line names this exact range, the middle line separates numstat from
+// comment counts, and the end line is the last thing printed.
+const diffstatCommandFor = (range) =>
+  `echo TOUCHSTONE_DIFFSTAT ${range}; ` +
+  `git -C ${wt.path} diff --numstat --no-renames ${range}; ` +
+  `echo TOUCHSTONE_COMMENT_LINES; ` +
+  `git -C ${wt.path} diff --unified=0 --no-color --no-renames ${range} | awk '` +
+  `/^\\+\\+\\+ /{ f=$0; sub(/^\\+\\+\\+ (b\\/)?/, "", f); cur=f; next } ` +
+  `/^\\+/{ if (cur=="") next; line=$0; sub(/^\\+/, "", line); t=line; ` +
+  `sub(/^[ \\t]+/, "", t); if ((t ~ /^(\\/\\/|\\/\\*)/) || ` +
+  `(t ~ /^\\*($|[ \\t\\/])/) || (t ~ /^#/ && t !~ /^#!/ && ` +
+  `t !~ /^#\\[/)) cnt[cur]++ } ` +
+  `END{ for (k in cnt) print cnt[k] "\\t" k }'; ` +
+  `echo TOUCHSTONE_DIFFSTAT_END`
+
+// Pure: reads only the shape of the probe's own output, never a model's
+// account of it. The begin line, naming this exact range, must be the first
+// non-empty line -- a diffstat whose begin line names a different range was
+// run against the wrong commits and must not be trusted -- and the end line
+// must be the last. A numstat row failing NUMSTAT_ROW, a missing
+// TOUCHSTONE_COMMENT_LINES marker, or a malformed comment-count row all
+// count as unmeasured, the same as either marker missing: anything this
+// strict about the shape either parses cleanly or is not trusted at all.
+const NUMSTAT_ROW = /^(\d+|-)\t(\d+|-)\t(.+)$/
+const parseDiffstat = (output, range) => {
+  const lines = String(output ?? '').split(/\r?\n/).map(l => l.replace(/\r$/, ''))
+  while (lines.length && lines[0].trim() === '') lines.shift()
+  while (lines.length && lines[lines.length - 1].trim() === '') lines.pop()
+  if (lines.length < 2) return null
+  if (lines[0] !== `TOUCHSTONE_DIFFSTAT ${range}`) return null
+  if (lines[lines.length - 1] !== 'TOUCHSTONE_DIFFSTAT_END') return null
+  const body = lines.slice(1, -1)
+  const markerIdx = body.indexOf('TOUCHSTONE_COMMENT_LINES')
+  if (markerIdx === -1) return null
+  const files = []
+  for (const line of body.slice(0, markerIdx)) {
+    if (line.trim() === '') continue
+    const m = NUMSTAT_ROW.exec(line)
+    if (!m) return null
+    files.push({ added: m[1] === '-' ? 0 : Number(m[1]), removed: m[2] === '-' ? 0 : Number(m[2]), path: m[3] })
+  }
+  const comments = new Map()
+  for (const line of body.slice(markerIdx + 1)) {
+    if (line.trim() === '') continue
+    const m = /^(\d+)\t(.+)$/.exec(line)
+    if (!m) return null
+    comments.set(m[2], Number(m[1]))
+  }
+  return { files, comments }
+}
+
+// test: test/, tests/, __tests__/ or spec/ dirs; test-* or test_* basenames;
+// *_test.*, *.test.*, *.spec.*, *Test.php. doc: *.md, *.rst, *.adoc, *.txt,
+// or anything under docs/. Everything else is code.
+const classifyPath = (path) => {
+  const base = path.split('/').pop() ?? path
+  if (/(^|\/)(test|tests|__tests__|spec)\//.test(path) ||
+      /^test[-_]/.test(base) || /_test\.[^.]+$/.test(base) ||
+      /\.test\.[^.]+$/.test(base) || /\.spec\.[^.]+$/.test(base) ||
+      /Test\.php$/.test(base)) return 'test'
+  if (/\.(md|rst|adoc|txt)$/.test(base) || /(^|\/)docs\//.test(path)) return 'doc'
+  return 'code'
+}
+
+// code = a code file's added lines minus its own comment lines; comment =
+// those subtracted lines; test/doc = their files' added lines as-is (a
+// comment inside a test file is still test code, not support layered on top
+// of it); codeChurn = code-file added + removed, which lensKeysFor and the
+// ratio halt both key on; totalChurn is every file's added + removed,
+// regardless of kind, for the single-file trivial case below, where kind
+// does not matter.
+const sizeOf = (parsed) => {
+  let code = 0, comment = 0, test = 0, doc = 0, codeChurn = 0, codeFiles = 0, totalChurn = 0
+  for (const f of parsed.files) {
+    totalChurn += f.added + f.removed
+    const kind = classifyPath(f.path)
+    if (kind === 'test') { test += f.added; continue }
+    if (kind === 'doc') { doc += f.added; continue }
+    codeFiles++
+    const c = parsed.comments.get(f.path) ?? 0
+    code += Math.max(0, f.added - c)
+    comment += c
+    codeChurn += f.added + f.removed
+  }
+  return { files: parsed.files.length, codeFiles, code, comment, test, doc, codeChurn, totalChurn }
+}
+
+// Replaces big/trivial: a real, measured diff decides the lens count, never
+// the implementer's own report of what it touched, which goes stale the
+// moment a pre-review checks fix lands after it without updating either
+// field.
+const lensKeysFor = (size) =>
+  size.files <= 1 && size.totalChurn < INLINE_LOC ? []
+  : size.codeChurn < ONE_LENS_LOC ? ['correctness']
+  : size.codeChurn > BIG_LOC || size.codeFiles > BIG_FILES ? ['correctness', 'advocate', 'requirements']
+  : ['correctness', 'advocate']
+
+enterPhase('Draft PR')
 const draft = await treeAgent(
   `Make sure this branch has a pull request to hang the run's progress on, ` +
   `then STOP.\n` +
@@ -1958,7 +2262,11 @@ const draft = await treeAgent(
   `gh fails, return opened=false with the error in detail and stop. Do not ` +
   `retry in a loop, do not open a non-draft PR instead, and do not merge.\n` +
   `Return the PR url and number for the PR this branch now has, whether you ` +
-  `opened it or adopted one that was already there.`,
+  `opened it or adopted one that was already there.\n` +
+  `Separately, measure the diff: run exactly this and put all of its output ` +
+  `verbatim in diffstat, unsummarised: neither this measurement nor the PR ` +
+  `it goes with reads what the commits changed as well as running the exact ` +
+  `command does.\n${diffstatCommandFor(impl.commit_range)}`,
   { label: 'draft-pr', phase: 'Draft PR', schema: DRAFT, model: 'haiku',
     effort: 'low' })
 // number, not opened: the PR phase addresses the draft by number to update and
@@ -1971,17 +2279,60 @@ if (draft?.number) {
       `A halt from here on is only visible in this session`)
 }
 
-phase('Review')
+enterPhase('Review')
 const sReview = stage('review')
-// risky_areas is deliberately not part of this: it is a required schema field
-// and a planner asked for risky areas always returns some, so including it
-// pinned `big` to true and made the diffstat agent's answer decorative.
-const big = impl.files_changed.length > 5 || (impl.insertions ?? 999) > 200
-// files_changed and insertions describe the implementer's own commits, and
-// the checks-only fix commits after them without updating either. Since this
-// latch can skip review outright, a run that took that fix is never trivial.
-const trivial = !preReviewFixCommitted &&
-  impl.files_changed.length <= 1 && (impl.insertions ?? 999) < INLINE_LOC
+
+// A malformed or off-range diffstat gets one retry, at the same range, via a
+// dedicated call rather than re-running draft-pr's whole job again. Still
+// unmeasured after that halts here: this is a measurement problem, not a
+// code problem, the same principle unmeasuredChecksHalt and notExecutedHalt
+// apply elsewhere in this file.
+let sizeParsed = parseDiffstat(draft?.diffstat, impl.commit_range)
+if (!sizeParsed) {
+  const SIZE_PROBE = {
+    type: 'object', additionalProperties: false, required: ['diffstat'],
+    properties: { diffstat: { type: 'string' } },
+  }
+  const retried = await treeAgent(
+    `Run exactly this and put all of its output verbatim in diffstat, ` +
+    `unsummarised, then STOP.\n${diffstatCommandFor(impl.commit_range)}`,
+    { label: 'size', schema: SIZE_PROBE, model: 'haiku', effort: 'low' })
+  sizeParsed = parseDiffstat(retried?.diffstat, impl.commit_range)
+}
+if (!sizeParsed) {
+  sReview.close()
+  return await halted('Review', {
+    plan: plan.plan, implemented: impl.summary, gates: gatesPayload(), checks: checksPayload(),
+    note: `The diff could not be measured, even after a retry: the diffstat ` +
+      `probe's output did not have the shape parseDiffstat requires (the ` +
+      `begin/end markers naming ${impl.commit_range}, or a well-formed ` +
+      `numstat/comment-count row). This is a measurement problem, not a ` +
+      `code problem; re-run.`,
+  })
+}
+size = sizeOf(sizeParsed)
+
+// Below RATIO_MIN_CODE the ratio does not apply at all: an ordinary TDD
+// change reads well over 1:1 test-to-code and must not halt on that alone.
+// Above it, support code (tests, docs, and a code file's own comments)
+// outweighing the actual code by more than MAX_SUPPORT_RATIO halts before
+// any lens spends a token on a diff that is mostly something other than the
+// change itself.
+if (size.code >= RATIO_MIN_CODE) {
+  const supportRatio = typeof args?.supportRatio === 'number' ? args.supportRatio : MAX_SUPPORT_RATIO
+  const ratio = (size.test + size.doc + size.comment) / size.code
+  if (ratio > supportRatio) {
+    sReview.close()
+    return await halted('Review', {
+      plan: plan.plan, implemented: impl.summary, gates: gatesPayload(), checks: checksPayload(),
+      note: `Support code outweighs the actual change: ${size.code} code ` +
+        `line(s) against ${size.test} test, ${size.doc} doc and ` +
+        `${size.comment} comment line(s) (${ratio.toFixed(1)}:1), over the ` +
+        `${supportRatio}:1 limit. If this ratio is intentional for this ` +
+        `change, pass args.supportRatio to raise it, then re-run.`,
+    })
+  }
+}
 // Named, not positional. The count used to slice a list from the front, so the
 // third lens ran only when someone passed reviewers: 3 by hand, and the size
 // latches silently decided WHICH lenses existed rather than how many. The
@@ -2033,10 +2384,8 @@ const LENS = {
 
 // The advocate is a reviewer, counted and gated with the rest: a one-line diff
 // used to get zero reviewers and an advocate anyway, which is the ratio the
-// trivial latch exists to prevent.
-const lensKeys = trivial ? [] : (big
-  ? ['correctness', 'advocate', 'requirements']
-  : ['correctness', 'advocate'])
+// files<=1/totalChurn latch in lensKeysFor exists to prevent.
+const lensKeys = lensKeysFor(size)
 const lenses = (args?.reviewers != null
     ? lensKeys.slice(0, Math.max(0, Math.min(args.reviewers, lensKeys.length)))
     : lensKeys)
@@ -2044,8 +2393,9 @@ const lenses = (args?.reviewers != null
   .map(k => LENS[k])
 const reviewerCount = lenses.length
 if (!reviewerCount) {
-  log(`review skipped: ${impl.files_changed.length} file(s) / ${impl.insertions} insertion(s) ` +
-      `is under the ${INLINE_LOC}-line bar; adversarial lenses on a one-liner is the ratio this workflow is trying to avoid`)
+  log(`review skipped: ${size.files} file(s), ${size.codeChurn} code churn ` +
+      `line(s) is under the ${INLINE_LOC}-line bar; adversarial lenses on a ` +
+      `one-liner is the ratio this workflow is trying to avoid`)
 } else {
   log(`review: ${lenses.map(l => l.label).join(', ')}`)
 }
@@ -2120,6 +2470,7 @@ const reviewOf = async (range, tag, picked, known = [], knownCharge = '') => {
   const out = await parallel(picked.map((lens) => () =>
     treeAgent(
       `${lens.charge}\n` +
+      `${NATIVE_TOOLS}\n` +
       (lens.needsTicket ? ticketSpec() : '') +
       `Task: ${brief(task)}\n` +
       `Commit range: ${range}\n` +
@@ -2161,6 +2512,14 @@ const reviewOf = async (range, tag, picked, known = [], knownCharge = '') => {
         : ''),
       { label: `${tag}:${lens.label}`, phase: 'Review', schema: FINDINGS,
         model: 'opus', effort: effortFor.review })))
+  // parallel() (the runtime global) catches each thunk's own error and hands
+  // back null for the ones that threw, so a budget refusal inside one lens
+  // reads, past this point, exactly like a lens that legitimately found
+  // nothing -- every lens null is a plausible clean review, not evidence of a
+  // refusal. Re-checking the flag here is what tells the two apart, and
+  // re-throwing is what lets the top-level catch turn it into a halt instead
+  // of a false all-clear.
+  if (runBudgetSpent) throw new Error(`touchstone: run budget spent during review (${tag})`)
   const raised = out.flatMap((r, i) => {
     const findings = Array.isArray(r?.findings) ? r.findings : []
     // The script slices, not the schema: a maxItems failure would null the
@@ -2194,7 +2553,7 @@ let reviewedThrough = headOf(impl.commit_range)
 // which costs a duplicate rather than losing a defect.
 const collapseDuplicates = async (findings) => {
   if (findings.length < 2 || reviewerCount < 2) return findings
-  const grouped = await agent(
+  const grouped = await dispatch(
     `Several reviewers looked at the same diff without seeing each other's ` +
     `work, so the list below may describe the same defect more than once.\n` +
     `Group the ids that are the same defect. Same underlying bug at the same ` +
@@ -2573,6 +2932,10 @@ const markStale = async (findings) => {
         ).join('\n'),
         { label: 'staleness', schema: STALENESS, model: 'haiku', effort: 'low' })
     } catch (e) {
+      // A budget refusal must reach the top-level catch, not be swallowed
+      // into "reporting findings unmarked": that would let a halted run
+      // return a normal-looking result instead of stopping.
+      if (runBudgetSpent) throw e
       log(`staleness probe failed, reporting findings unmarked: ${e?.message ?? e}`)
     }
   }
@@ -2608,7 +2971,7 @@ const regressedOf = (items, exec, round) => {
 
 while ((open.length || blockingChecksOpen()) && round < MAX_REVIEW_ROUNDS && !outOfBudget() && !sFix.over()) {
   round++
-  phase('Fix')
+  enterPhase('Fix')
   const fixSpendStart = budget.spent()
   const fixed = await treeAgent(
     `Fix ` + (open.length && blockingChecksOpen()
@@ -2628,6 +2991,7 @@ while ((open.length || blockingChecksOpen()) && round < MAX_REVIEW_ROUNDS && !ou
     `to the user rather than picking one and editing the marker yourself. Set ` +
     `unsupported_language=true when you do, and put the three options in note. ` +
     `Do not push or open a PR.\n` +
+    `${NATIVE_TOOLS} ${GENERATED_FILES}\n` +
     `Task: ${brief(task)}\n` +
     `Each finding names the place it was raised against. Work from there. ` +
     `Read git diff ${impl.commit_range} only when that place cannot tell you ` +
@@ -2861,7 +3225,7 @@ if (open.length || blockingChecksOpen()) {
 // `gh pr ready` while it is red, so a red gate here means the PR phase below
 // cannot get past a draft anyway. It deliberately does not block
 // `gh pr create --draft`, which is how this pipeline opens the draft above.
-phase('Mutation')
+enterPhase('Mutation')
 const sMut = stage('mutation')
 let mutation = { green: false, detail: 'not run' }
 
@@ -3020,7 +3384,7 @@ if (mutHead && mutHead !== reviewedThrough && settled.length) {
   }
 }
 if (reviewerCount && mutHead && mutHead !== reviewedThrough && !outOfBudget()) {
-  phase('Review')
+  enterPhase('Review')
   const mutRange = `${reviewedThrough}..${mutHead}`
   // Fetches this range's own new-side hunks before the lens runs, the same
   // rule classify() applies to every review after the initial one: a finding
@@ -3082,7 +3446,7 @@ const notesSection = notes.length
   : ''
 let pr = null
 if (args?.openPr !== false && !outOfBudget()) {
-  phase('PR')
+  enterPhase('PR')
   const sPr = stage('pr')
   pr = await treeAgent(
     `Open a pull request for the work on this branch.\n` +
@@ -3154,6 +3518,7 @@ const result = {
   gates: gatesPayload(),
   checks: checksPayload(),
   mutation,
+  size,
   reviewers: reviewerCount,
   // Raised but never blocking: wrong category, no reproducer, an unmet
   // criterion whose quote was not found, out of range, or a residual of a
@@ -3166,6 +3531,36 @@ const result = {
   unresolved_findings: open,
   pr,
   needs_user: args?.openPr !== false && !pr?.opened,
+  record_file: runRecordFile,
 }
-result.record_path = await recordRun(result)
 return result
+
+} catch (e) {
+  // runBudgetSpent's presence, not this error's identity, is the only safe
+  // test: parallel() (reviewOf) and markStale's own try/catch each re-throw
+  // only when that flag is set, but a plain `throw e` from either still
+  // arrives here as an ordinary Error, indistinguishable from one by message
+  // alone. Closing every open stage first means the halt's stage_spend is
+  // complete even for the stage that was actually running when the budget
+  // was refused, not just the ones that reached their own close().
+  if (runBudgetSpent) {
+    const stillOpen = closeOpenStages()
+    // commands/deliver.md tells the invoking session to report the note
+    // verbatim, so the per-stage spend has to live in the note itself, not
+    // only in the stage_spend payload a plain report never surfaces.
+    const byStage = Object.entries(stageSpend)
+      .map(([name, spent]) => `${name} ${Math.round(spent / 1000)}k`).join(', ')
+    return await halted(currentPhase, {
+      note: `Run budget exhausted (${Math.round(runBudget / 1000)}k output ` +
+        `tokens, ${runBudgetNote}). Spend at halt: ` +
+        `${Math.round(runBudgetSpent.spent / 1000)}k output tokens (${byStage}). The ` +
+        `'${runBudgetSpent.refused}' dispatch was refused before it could ` +
+        `run` +
+        (stillOpen.length
+          ? `; still in progress when the budget was refused: ${stillOpen.join(', ')}`
+          : '') +
+        `. ${prNote()}`,
+    })
+  }
+  throw e
+}

@@ -1,0 +1,677 @@
+// Everything from here to the PR is measured against reviewedThrough: the SHA
+// an adversary has actually read up to. It only ever advances by way of a
+// review, so a phase that commits without one leaves it behind and the PR
+// guard below refuses.
+let reviewedThrough = headOf(impl.commit_range)
+
+// Lenses cannot see each other, and contentKeyOf cannot merge them: two
+// reviewers describe one bug in different words. A failure keeps everything,
+// which costs a duplicate rather than losing a defect.
+const collapseDuplicates = async (findings) => {
+  if (findings.length < 2 || reviewerCount < 2) return findings
+  const grouped = await dispatch(
+    `Several reviewers looked at the same diff without seeing each other's ` +
+    `work, so the list below may describe the same defect more than once.\n` +
+    `Group the ids that are the same defect. Same underlying bug at the same ` +
+    `place counts as one even when the wording, the severity or the suggested ` +
+    `fix differ. Two defects that merely sit in one function are NOT one ` +
+    `group. Return only groups of two or more ids; if nothing duplicates, ` +
+    `return an empty list. Do not judge whether any finding is correct.\n` +
+    findings.map(f => `[${f.id}] ${f.title} (${f.file}): ${f.claim}`).join('\n'),
+    { label: 'review:dedup', phase: 'Review', schema: DUPES,
+      model: 'haiku', effort: 'low' })
+  const byId = new Map(findings.map(f => [f.id, f]))
+  const dropped = new Set()
+  for (const g of grouped?.groups ?? []) {
+    const ids = (Array.isArray(g?.ids) ? g.ids : [])
+      .map(stripBrackets)
+      .filter(id => findings.some(f => f.id === id))
+    if (ids.length < 2) continue
+    // The survivor is whichever id in the group would actually hold the
+    // run, not just the first one a dedup agent happened to list: keeping
+    // ids[0] unconditionally meant a demonstrated, blocking defect from one
+    // lens could be discarded in favor of a non-blocking one from another.
+    const survivor = ids.find(id => looksBlocking(byId.get(id))) ?? ids[0]
+    for (const id of ids) if (id !== survivor) dropped.add(id)
+    log(`review: ${ids.filter(id => id !== survivor).join(', ')} fold into ${survivor}` +
+        (g.why ? ` (${g.why})` : ''))
+  }
+  if (!dropped.size) return findings
+  log(`review: ${findings.length} finding(s) from ${reviewerCount} reviewers ` +
+      `collapse to ${findings.length - dropped.size}`)
+  return findings.filter(f => !dropped.has(f.id))
+}
+
+// classify() turns a lens's structured fields into a script decision -- a
+// candidate whose reproducer gets executed next, or a note -- never a
+// reviewer's own self-reported severity. ctx.hunks, given from the first
+// tail review on (never the initial review), is a per-file list of
+// new-side [start, end] ranges the preceding fix (or mutation) range
+// actually touched.
+const collapseWs = (s) => String(s ?? '').replace(/\s+/g, ' ').trim()
+// Shared between classify() and collapseDuplicates(): whether a finding
+// carries every field a reproducer needs, never just that the key is present.
+const hasCompleteReproducer = (f) => {
+  const r = f.reproducer
+  return !!(r && typeof r === 'object' &&
+    ['kind', 'command', 'expected', 'actual'].every(k => typeof r[k] === 'string' && r[k].length > 0))
+}
+// unmet-criterion's evidence is the quote, not a reproducer: verbatim and
+// long enough that a paraphrase cannot pass as a match.
+const criterionQuoteFound = (f) => {
+  const quote = collapseWs(f.criterion_quote)
+  const haystack = collapseWs(`${ticketDetail.description}\n${ticketDetail.comments}`)
+  return quote.length >= 20 && haystack.includes(quote)
+}
+// Mirrors classify()'s own gate, ahead of classify() ever seeing the
+// finding: used only to rank collapseDuplicates()'s survivor, never to
+// decide anything classify() itself decides.
+const looksBlocking = (f) =>
+  BLOCKING_CATEGORIES.has(f?.category) &&
+  (f.category === 'unmet-criterion' ? criterionQuoteFound(f) : hasCompleteReproducer(f))
+// A lens is told to use absolute paths (treeAgent's own rule) but hands
+// classify() its own file field, which hunks (keyed on the repo-relative
+// "+++ b/<path>" git prints) never matches unless normalized the same way: an
+// absolute path under the worktree, a ./-relative one, and a trailing
+// ":line" or ":start-end" a lens sometimes appends to the path itself.
+const normalizeFilePath = (p) => {
+  let s = String(p ?? '').replace(/:\d+(?:-\d+)?$/, '')
+  if (s === wt.path) s = ''
+  else if (s.startsWith(`${wt.path}/`)) s = s.slice(wt.path.length + 1)
+  return s.replace(/^\.\//, '').replace(/^[ab]\//, '')
+}
+const overlapsHunk = (f, hunks) => {
+  const ranges = hunks?.[normalizeFilePath(f.file)]
+  if (!ranges?.length) return false
+  const start = typeof f.line_start === 'number' ? f.line_start : null
+  if (start === null) return false // a finding with no span never overlaps
+  const end = typeof f.line_end === 'number' ? f.line_end : start
+  return ranges.some(r => start <= r.end && r.start <= end)
+}
+// Parses `git diff --unified=0` header lines, given back verbatim by an
+// agent because the script itself cannot run git. "+++ b/path" names the
+// file that follows; each "@@ -o,p +n,q @@" contributes one new-side range.
+// A pure deletion hunk (q=0) adds no new line, but the deleted content used
+// to sit right at that point in the new file, so it still anchors a
+// one-line range there (n and n+1, the surviving lines either side of the
+// gap) rather than contributing nothing: a fix or mutation commit that only
+// removes code (a dropped guard, a reverted fix) must still be in range.
+const parseHunks = (lines) => {
+  const hunks = {}
+  let file = null
+  for (const line of Array.isArray(lines) ? lines : []) {
+    const plus = /^\+\+\+ (?:b\/)?(.+)$/.exec(line)
+    if (plus) { file = plus[1] === '/dev/null' ? null : plus[1]; continue }
+    const at = /^@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@/.exec(line)
+    if (at && file) {
+      const start = Number(at[1])
+      const count = at[2] !== undefined ? Number(at[2]) : 1
+      const range = count > 0 ? { start, end: start + count - 1 } : { start, end: start + 1 }
+      ;(hunks[file] ??= []).push(range)
+    }
+  }
+  return hunks
+}
+const classify = (f, ctx) => {
+  const dupe = duplicateTargetOf(f, ctx.known ?? [])
+  if (dupe && !dupe.byReference) return { drop: true }
+  if (dupe && dupe.byReference) {
+    if (ctx.settledIds?.has(dupe.hit.id)) {
+      return { note: { ...f, reason: 'residual', residual_of: dupe.hit.id, round: ctx.round } }
+    }
+    if (ctx.openIds?.has(dupe.hit.id)) {
+      // Already tracked as open; no need to re-add it.
+      return { drop: true }
+    }
+    // References a note: nothing tracks that id in a way that can block, so
+    // fall through and classify this finding on its own merits instead of
+    // dropping it in silence. The reference the first report was folded
+    // under (a bad reproducer, an earlier out-of-range round, the wrong
+    // category) does not mean the defect itself is gone.
+  }
+  if (!BLOCKING_CATEGORIES.has(f.category)) {
+    return { note: { ...f, reason: 'category', round: ctx.round } }
+  }
+  if (!hasCompleteReproducer(f)) {
+    return { note: { ...f, reason: 'no-reproducer', round: ctx.round } }
+  }
+  // The quote proves the criterion exists; the reproducer is what shows the
+  // change misses it. Without the second, the only way to decide "unmet" is a
+  // model reading the code, which is exactly what blocking must not rest on.
+  if (f.category === 'unmet-criterion' && !criterionQuoteFound(f)) {
+    return { note: { ...f, reason: 'quote-not-found', round: ctx.round } }
+  }
+  if (ctx.hunks && !overlapsHunk(f, ctx.hunks)) {
+    return { note: { ...f, reason: 'out-of-range', round: ctx.round } }
+  }
+  return { candidate: f }
+}
+
+// Replaces verifyOpen: whether a finding is fixed is decided by executing its
+// reproducer, never by a model's judgement of a diff. One haiku dispatch runs
+// every item's reproducer against the worktree's current HEAD; when
+// diffRange is given, the same call also fetches that range's own new-side
+// diff hunks, verbatim, for classify()'s out-of-range rule.
+const executeAtHead = async (items, label, diffRange) => {
+  const runnable = items.filter(it => it.reproducer?.command)
+  const out = await treeAgent(
+    `First run git -C ${wt.path} status --porcelain and report its output in ` +
+    `porcelain_before, even when empty: dirt already there before anything ` +
+    `below runs must never be blamed on what runs next.\n` +
+    (runnable.length
+      ? `Run each reproducer below in this worktree, then STOP. Do not fix, ` +
+        `edit, or investigate a failure; a later phase does that.\n` +
+        `This one call is the exception to the rule above about never running ` +
+        `cd, and only in the bash -c form: run each command as ` +
+        `bash -c 'cd ${wt.path} && <command>'. Never a bare ` +
+        `cd ${wt.path} && <command>, which does move this session.\n` +
+        `Report each command's exit code verbatim, never your own judgement of ` +
+        `whether it passed. Report output as its combined stdout and stderr, ` +
+        `verbatim and complete -- do not summarise, truncate, or interpret ` +
+        `what it printed, since the script reads it.\n` +
+        runnable.map(it => `[${it.id}] ${it.reproducer.command}`).join('\n') + `\n`
+      : '') +
+    (diffRange
+      ? `Run git -C ${wt.path} diff --unified=0 --no-color ${diffRange} and return, ` +
+        `in diff_lines, every line of its output that starts with "+++ " or ` +
+        `"@@ ", verbatim and in order, with nothing else: no other line of the ` +
+        `diff, no summary, no comment of your own.\n`
+      : '') +
+    `Then run git -C ${wt.path} status --porcelain again and report whether it ` +
+    `printed anything (dirty) and, if so, its output (porcelain): a reproducer ` +
+    `that writes to the tree must be visible, not silently carried into ` +
+    `whatever commits next.`,
+    { label, schema: EXECUTE_RESULT, model: 'haiku', effort: 'low' })
+  // A Map, not the old [id, exit_code] pairs: outcomeOf needs each row's raw
+  // output too, to check the marker before truncateOutput ever runs on it.
+  const runs = new Map((Array.isArray(out?.results) ? out.results : [])
+    .filter(r => typeof r?.id === 'string')
+    .map(r => [stripBrackets(r.id), { exit_code: r.exit_code, output: r.output }]))
+  return {
+    runs,
+    // null (not {}) when the fetch itself failed -- the executor returned
+    // nothing, failed schema, or omitted diff_lines -- so classify()'s
+    // ctx.hunks guard reads "could not measure" as unknown, never as "this
+    // range touched nothing", which would wrongly mark every fresh finding
+    // out-of-range.
+    hunks: diffRange && Array.isArray(out?.diff_lines) ? parseHunks(out.diff_lines) : null,
+    dirty: out?.dirty === true,
+    porcelain: out?.porcelain ?? '',
+    // True when nothing this call could have dirtied: either it ran no
+    // reproducer at all (the mutation-hunk fetch calls with an empty items
+    // list), or the tree was already dirty before anything below ran. Without
+    // this, a fixer whose crap-commit.sh was refused -- the wrapper leaves the
+    // staged changes in place, with no reset/stash/restore -- gets a halt
+    // blaming "a reproducer execution" for dirt that predates it.
+    preexisting: !runnable.length ||
+      (typeof out?.porcelain_before === 'string' && out.porcelain_before.trim() !== ''),
+  }
+}
+
+// A reproducer run that leaves the tree dirty halts outright: a check that
+// writes to the tree (a ledger, a generated file, a mutated fixture) must not
+// be silently carried into whatever commits next, the same principle
+// runChecks already applies to the repo's own discovered checks. extraOpen is
+// for a caller (the post-mutation site) whose first-call verdicts live in a
+// local variable rather than the closed-over `open`, so they still reach the
+// halt instead of being silently dropped alongside it.
+const dirtyReproducerHalt = async (phaseName, exec, extraOpen = []) => halted(phaseName, {
+  plan: plan.plan, implemented: impl.summary, gates: gatesPayload(),
+  unresolved_findings: [...open, ...extraOpen], notes, fix_rounds: round,
+  note: exec.preexisting
+    ? `The working tree was already dirty before this check ran, so nothing ` +
+      `it did caused it: ${exec.porcelain || '(no detail returned)'}. Find ` +
+      `what left it dirty earlier in this round, then re-run.`
+    : `A reproducer execution left the working tree dirty: ` +
+      `${exec.porcelain || '(no detail returned)'}. Nothing further ran; find ` +
+      `which reproducer writes to the tree, then re-run.`,
+})
+
+// Every note is a finding the run does not block on: raised, but not
+// demonstrated, not blocking-category, not in range, or a residual of a fix
+// already verified. Separate from unresolved_findings, which stays reserved
+// for what actually holds the run.
+let notes = []
+const knownForRound = () => [...settled, ...open, ...notes]
+// Splits a batch of freshly raised findings into candidates (subject to an
+// executeAtHead call next) and notes, via classify() alone.
+const classifyBatch = (raised, hunks, round) => {
+  const settledIds = new Set(settled.map(f => f.id))
+  const openIds = new Set(open.map(f => f.id))
+  const known = knownForRound()
+  const candidates = [], freshNotes = []
+  for (const f of raised) {
+    const r = classify(f, { known, settledIds, openIds, hunks, round })
+    if (r.candidate) candidates.push(r.candidate)
+    else if (r.note) freshNotes.push(r.note)
+  }
+  return { candidates, freshNotes }
+}
+// The initial-classification rule, shared by the initial review, each
+// round's fresh tail-review candidates, and the post-mutation review. Keyed
+// on outcomeOf, not the bare exit code: only 'reproduced' -- nonzero exit and
+// the marker, both actually observed -- opens the candidate. A missing row
+// (not-executed, the executor dropped it or the whole call failed schema) is
+// even less evidence than an errored run and must not open one either, or a
+// finding can hold the run on a reproducer nobody ever ran (gh-113). Unlike
+// passed/could-not-run/errored, not-executed is no verdict at all, so it is
+// returned apart from asNotes for executeAndDispose below to retry.
+const disposeCandidates = (candidates, runs, round) => {
+  const opened = [], asNotes = [], notExecuted = []
+  for (const f of candidates) {
+    const row = runs?.get(f.id)
+    const reproducer_run = reproducerRunOf(row, round)
+    if (reproducer_run.outcome === 'passed') asNotes.push({ ...f, reason: 'did-not-reproduce', round, reproducer_run })
+    else if (reproducer_run.outcome === 'could-not-run') asNotes.push({ ...f, reason: 'reproducer-could-not-run', round, reproducer_run })
+    else if (reproducer_run.outcome === 'errored') asNotes.push({ ...f, reason: 'reproducer-errored', round, reproducer_run })
+    else if (reproducer_run.outcome === 'not-executed') notExecuted.push({ ...f, reproducer_run })
+    else opened.push({ ...f, reproducer_run })
+  }
+  return { opened, asNotes, notExecuted }
+}
+
+// Runs `candidates` through executeAtHead under `label`; whatever comes back
+// with no row is retried exactly once, at the same head, as its own
+// executeAtHead call restricted to just those candidates and labelled
+// `${label}:retry` -- the retry-once rule runChecks already applies to a
+// discovered check (#116), extended here to a reproducer nobody measured
+// (gh-113). The retry runs only after the first call fully resolves, so it
+// can never overlap another agent in the worktree, same as every
+// executeAtHead call. Its rows are merged into the first call's before
+// reclassifying the whole batch, so a candidate the retry did measure counts
+// on that verdict and one still missing surfaces in notExecuted for the
+// caller to halt on. A dirty result from the first call has no verdicts to
+// carry (disposeCandidates never ran). A dirty retry is narrower -- the retry
+// only ever covers the notExecuted subset -- so the first call's opened and
+// asNotes, already measured clean at this same head, ride along on the dirty
+// result instead of being dropped; the caller folds them in before turning
+// the result into a dirtyReproducerHalt at its own phase.
+const executeAndDispose = async (candidates, label, round) => {
+  const exec = await executeAtHead(candidates, label)
+  if (exec.dirty) return { dirty: true, exec, opened: [], asNotes: [], notExecuted: [] }
+  const first = disposeCandidates(candidates, exec.runs, round)
+  if (!first.notExecuted.length) return { dirty: false, ...first }
+  const retryIds = new Set(first.notExecuted.map(f => f.id))
+  const retryCandidates = candidates.filter(f => retryIds.has(f.id))
+  const retryExec = await executeAtHead(retryCandidates, `${label}:retry`)
+  if (retryExec.dirty) return { dirty: true, exec: retryExec, ...first }
+  const merged = new Map(exec.runs)
+  for (const [id, row] of retryExec.runs) merged.set(id, row)
+  return { dirty: false, ...disposeCandidates(candidates, merged, round) }
+}
+
+// Reports whatever executeAndDispose still could not measure after its
+// retry. Never handed to a fixer: like unmeasuredChecksHalt above, this is
+// about measurement, not the code, so no fix round should be spent guessing
+// at a reproducer nobody ran. Defined here, before open/notes/round/
+// fixRoundSpend, for the same reason unmeasuredChecksHalt is: it reads only
+// plan, impl, gatesPayload and checksPayload by closure, and every call site passes
+// unresolved_findings, notes, fix_rounds and (once it exists) fix_round_output
+// through extra instead, so calling this from the initial review -- before
+// fixRoundSpend is declared -- is not the TDZ failure the comment above
+// unmeasuredChecksHalt describes.
+const notExecutedHalt = (at, notExecuted, extra) => {
+  const note = `${notExecuted.length} finding(s) could not be measured after ` +
+    `a retry. This halt is about measurement, not the code: the executor did ` +
+    `not run ${notExecuted.length === 1 ? 'this reproducer' : 'these reproducers'}, ` +
+    `so no verdict exists either way.\n` +
+    notExecuted.map(f => `- ${f.id}: ${f.title}`).join('\n')
+  return halted(at, {
+    plan: plan.plan, implemented: impl.summary, gates: gatesPayload(),
+    checks: checksPayload(), ...extra, note,
+  })
+}
+
+let settled = []
+let open = []
+let round = 0
+if (reviewerCount) {
+  const raised = await collapseDuplicates(await reviewOf(impl.commit_range, 'review', lenses))
+  const { candidates, freshNotes } = classifyBatch(raised, null, 0)
+  notes.push(...freshNotes)
+  if (candidates.length) {
+    const disposed = await executeAndDispose(candidates, 'reproduce:review', 0)
+    open.push(...disposed.opened)
+    notes.push(...disposed.asNotes)
+    if (disposed.dirty) { sReview.close(); return await dirtyReproducerHalt('Review', disposed.exec, disposed.notExecuted) }
+    if (disposed.notExecuted.length) {
+      sReview.close()
+      return await notExecutedHalt('Review', disposed.notExecuted, {
+        unresolved_findings: [...open, ...disposed.notExecuted], notes, fix_rounds: round,
+      })
+    }
+  }
+}
+sReview.close()
+
+const sFix = stage('fix')
+// Per round, just the fix agent's own output tokens (the cost this ticket
+// targets), separate from stageSpend.fix which also carries the executor and
+// tail review.
+const fixRoundSpend = []
+
+const fixStopReason = () =>
+  !open.length && !blockingChecksOpen() ? 'every finding and check was resolved'
+  : round >= MAX_REVIEW_ROUNDS
+    ? `the ${MAX_REVIEW_ROUNDS}-round limit was reached; each of these was ` +
+      `checked against the code and is still open`
+  : sFix.over()
+    ? `the fix stage passed its ${Math.round(CEILINGS.fix / 1000)}k output-token ` +
+      `ceiling, so the loop stopped early -- these have not had every round`
+  : outOfBudget()
+    ? 'the run passed its overall token budget, so the loop stopped early'
+  : 'the loop ended without reaching any of its limits, which should not happen'
+
+// Advisory only: a finding's evidence may have moved since it was recorded. One
+// cheap agent checks each against its evidence, not just its file. Skipped only
+// when the loop ran zero rounds, since nothing could have changed then; a loop
+// that stopped on budget after a round already committed is exactly the case
+// this exists for, so it runs regardless of budget. Any rejection degrades to
+// nothing marked, never to losing the halt.
+const markStale = async (findings) => {
+  let staleness = null
+  if (round > 0 && findings.length) {
+    try {
+      staleness = await treeAgent(
+        `For each finding below, report whether the code its evidence ` +
+        `describes has changed since it was recorded, not merely whether its ` +
+        `file has any commit at all. For each one, run: git log -p ` +
+        `<recorded_at>..HEAD -- <file>, substituting that finding's own ` +
+        `recorded_at and file, and read the diff. Return changed=true only if ` +
+        `a commit in that range touches the location or behaviour the ` +
+        `evidence describes; changed=false if the file has no commits in ` +
+        `range, or its commits do not touch what the evidence describes. This ` +
+        `does not judge whether the finding is still valid, only whether the ` +
+        `code it points at moved.\n` +
+        findings.map(f =>
+          `[${f.id}] ${f.file} recorded at ${f.recorded_at}. Evidence: ${f.evidence}`
+        ).join('\n'),
+        { label: 'staleness', schema: STALENESS, model: 'haiku', effort: 'low' })
+    } catch (e) {
+      // A budget refusal must reach the top-level catch, not be swallowed
+      // into "reporting findings unmarked": that would let a halted run
+      // return a normal-looking result instead of stopping.
+      if (runBudgetSpent) throw e
+      log(`staleness probe failed, reporting findings unmarked: ${e?.message ?? e}`)
+    }
+  }
+  const staleIds = new Set(
+    (Array.isArray(staleness?.results) ? staleness.results : [])
+      .filter(r => r?.changed === true && typeof r?.id === 'string')
+      .map(r => stripBrackets(r.id)))
+  return findings.map(f =>
+    staleIds.has(f.id) ? { ...f, code_changed_since_recorded: true } : f)
+}
+
+// A settled finding stays settled only while its reproducer keeps passing.
+// Every head the code moves to after a finding settled re-runs that
+// reproducer, whatever any lens reported: a later round's fix, or the mutation
+// gate's own commits, can undo an earlier fix, and a lens happening to set
+// duplicate_of is not something that check can depend on. A residual note is
+// therefore only ever a note. A missing row counts as regressed, the same
+// "could not measure is not a pass" rule the open list gets. Not gated on
+// budget: trusting a fix nobody re-checked is worse than one cheap dispatch.
+// errored is split out from regressed: a fix nobody could re-measure (the
+// reproducer itself crashed) is not the same claim as one whose reproducer
+// ran clean and still shows the defect, and the two are reported separately.
+const regressedOf = (items, exec, round) => {
+  const regressed = [], errored = []
+  for (const f of items) {
+    const row = exec?.runs?.get(f.id)
+    const reproducer_run = reproducerRunOf(row, round)
+    if (reproducer_run.outcome === 'passed') continue
+    ;(reproducer_run.outcome === 'errored' ? errored : regressed).push({ ...f, reproducer_run })
+  }
+  return { regressed, errored }
+}
+
+while ((open.length || blockingChecksOpen()) && round < MAX_REVIEW_ROUNDS && !outOfBudget() && !sFix.over()) {
+  round++
+  enterPhase('Fix')
+  const fixSpendStart = budget.spent()
+  const fixed = await treeAgent(
+    `Fix ` + (open.length && blockingChecksOpen()
+      ? `these confirmed review findings and the repo's own failing checks below`
+      : open.length ? `these confirmed review findings`
+      : `the repo's own failing checks below`) +
+    ` in the current repo, TDD first, ` +
+    `iterating with the repo's own test command. Commit with ` +
+    `crap-commit.sh ${wt.path} -m "...", which gates and commits in one ` +
+    `call: run it in the foreground with a Bash timeout of 600000, never ` +
+    `background it and wait with sleep, and do not pre-run crap-check.sh. ` +
+    `Never create, edit or delete .crap-gated, ` +
+    `.mutation-gated or .comment-gated on your own initiative: that is the ` +
+    `repo owner's decision, not yours, and a repo without any of them is ` +
+    `simply not gated -- say so and continue. The one exception is a ` +
+    `NEXT_ACTION of UNSUPPORTED_LANGUAGE: halt and report its three options ` +
+    `to the user rather than picking one and editing the marker yourself. Set ` +
+    `unsupported_language=true when you do, and put the three options in note. ` +
+    `Do not push or open a PR.\n` +
+    `${NATIVE_TOOLS} ${GENERATED_FILES}\n` +
+    `Task: ${brief(task)}\n` +
+    `Each finding names the place it was raised against. Work from there. ` +
+    `Read git diff ${impl.commit_range} only when that place cannot tell you ` +
+    `what the change was meant to do -- a finding about scope, an unmet ` +
+    `criterion, or a caller outside the diff.\n` +
+    `Fix what the findings name and no more. If fixing one requires reverting ` +
+    `or weakening a deliberate part of the change that no finding objected to, ` +
+    `say so in note and leave it: an unasked-for revert is how this workflow ` +
+    `has shipped regressions before.\n` +
+    `Return head_sha: the full 40-character SHA of HEAD after your last commit, ` +
+    `or of the unchanged HEAD if you committed nothing. Your commits are ` +
+    `reviewed as <previous head>..<your head_sha>, so a wrong or abbreviated ` +
+    `SHA there is how unreviewed code reaches the PR.\n` +
+    `Return scored=true if crap-commit.sh printed that it scored this round's ` +
+    `commits, scored=false if you committed nothing or it printed nothing to ` +
+    `score. Base this on what it printed, never on whether .crap-gated exists ` +
+    `and never on your own judgement of the change. If it printed its own ` +
+    `gate message, copy it verbatim into gate_note.\n` +
+    (open.length
+      ? `Findings, each at the location its reviewer already read; open that ` +
+        `location directly rather than re-reading the whole commit range for ` +
+        `context. Where a reproduce command is shown, check it exits 0 before ` +
+        `you consider that one fixed; an unmet-criterion finding with none is ` +
+        `judged by the criterion it names instead.\n` +
+        open.map(f => `- ${f.title} (${locusOf(f)}): ${f.claim}` +
+          (f.reproducer?.command ? ` [reproduce: ${f.reproducer.command}]` : '') +
+          (f.reproducer_run?.outcome === 'errored'
+            ? `\n  Its reproducer itself failed to run last round: exit ` +
+              `${f.reproducer_run.exit_code}, no marker line. This is not a ` +
+              `demonstration of the defect; find out why the command failed. ` +
+              `Output:\n${f.reproducer_run.output}`
+            : '')).join('\n') + `\n`
+      : '') +
+    (blockingChecksOpen()
+      ? `The repo's own checks below are failing. Each is a script the repo ` +
+        `already runs and decides the same way every time, not a reviewer's ` +
+        `opinion; make every one pass rather than silencing its output.\n` +
+        redChecks.map(renderCheck).join('\n\n')
+      : ''),
+    { label: `fix:${round}`, schema: FIXED, model: 'sonnet', effort: effortFor.implement })
+  fixRoundSpend.push({ round, output: budget.spent() - fixSpendStart })
+  // Folded before the halt check below, not after: a fixer that committed part
+  // of the work and only then hit the refusal still has a gate result, and the
+  // halt is the only place left to report it.
+  if (fixed?.scored === true) {
+    scored = true
+    if (fixed?.gate_note) scoredNote = fixed.gate_note
+  } else if (fixed?.gate_note) {
+    unscoredNote = fixed.gate_note
+  }
+  // Same reasoning as Implement's check above: without this, a fixer that
+  // reports the halt reads as a normal round and the loop keeps going with
+  // the refused work still uncommitted.
+  if (fixed?.unsupported_language) {
+    sFix.close()
+    return await halted('Fix', {
+      plan: plan.plan, implemented: impl.summary, gates: gatesPayload(),
+      unresolved_findings: await markStale(open), fix_rounds: round,
+      fix_round_output: fixRoundSpend,
+      stopped_because:
+        `the fixer hit a NEXT_ACTION of UNSUPPORTED_LANGUAGE and halted rather ` +
+        `than editing a gate marker, so these findings have not had every round`,
+      notes,
+      checks: checksPayload(),
+      note: fixed.note,
+    })
+  }
+  const head = fixed?.head_sha?.trim()
+  const tailReviewable =
+    reviewerCount && head && head !== reviewedThrough && !outOfBudget()
+  const roundRange = head && head !== reviewedThrough
+    ? `${reviewedThrough}..${head}` : reviewedThrough
+
+  // One at a time, never beside another agent in this worktree. executeAtHead
+  // judges a reproducer by the tree's porcelain before and after its own
+  // commands, so a file anything else writes meanwhile is blamed on a
+  // reproducer: a tail review's own test log once halted a clean run this way.
+  // The open list's call also fetches this round's diff hunks, which the tail
+  // review's fresh findings are classified against below.
+  const settledBefore = [...settled]
+  const execOld = await executeAtHead(open, `reproduce:fix:${round}`, roundRange)
+  if (execOld?.dirty) { sFix.close(); return await dirtyReproducerHalt('Fix', execOld) }
+  const execSettled = settledBefore.length
+    ? await executeAtHead(settledBefore, `reproduce:settled:${round}`)
+    : null
+  if (execSettled?.dirty) { sFix.close(); return await dirtyReproducerHalt('Fix', execSettled) }
+  const freshRaw = tailReviewable
+    ? await reviewOf(roundRange, `review:fix:${round}`, [LENS.correctness], knownForRound())
+    : []
+
+  // For an open finding, fixed means its reproducer exits 0 at this round's
+  // head; anything else stays open, carrying the latest reproducer_run
+  // (never accumulated) so the next fix brief can render it. A missing row
+  // (the agent dropped it) still leaves it open rather than guessing it was
+  // resolved.
+  const stillOpen = []
+  let erroredOpen = 0
+  for (const f of open) {
+    const row = execOld?.runs?.get(f.id)
+    const outcome = outcomeOf(row)
+    if (outcome === 'passed') { settled.push(f); continue }
+    if (outcome === 'errored') erroredOpen++
+    stillOpen.push({ ...f, reproducer_run: reproducerRunOf(row, round) })
+  }
+  open = stillOpen
+  if (erroredOpen) {
+    log(`round ${round}: ${erroredOpen} open finding(s) whose reproducer errored (nonzero, no marker)`)
+  }
+
+  const { regressed, errored: erroredSettled } =
+    execSettled ? regressedOf(settledBefore, execSettled, round) : { regressed: [], errored: [] }
+  if (regressed.length) {
+    const ids = new Set(regressed.map(f => f.id))
+    settled = settled.filter(f => !ids.has(f.id))
+    open = open.concat(regressed)
+    log(`round ${round}: ${regressed.length} earlier fix(es) no longer hold at this head; reopened`)
+  }
+  if (erroredSettled.length) {
+    const ids = new Set(erroredSettled.map(f => f.id))
+    settled = settled.filter(f => !ids.has(f.id))
+    open = open.concat(erroredSettled)
+    log(`round ${round}: ${erroredSettled.length} earlier fix(es) could not be re-measured this ` +
+        `round (reproducer errored, nonzero, no marker); reopened`)
+  }
+
+  if (tailReviewable) {
+    const { candidates, freshNotes } = classifyBatch(freshRaw ?? [], execOld?.hunks ?? null, round)
+    notes.push(...freshNotes)
+    if (candidates.length) {
+      const disposed = await executeAndDispose(candidates, `reproduce:fix:${round}:fresh`, round)
+      if (disposed.opened.length) log(`round ${round}: the fix itself introduced ${disposed.opened.length} new finding(s)`)
+      open = open.concat(disposed.opened)
+      notes.push(...disposed.asNotes)
+      if (disposed.dirty) { sFix.close(); return await dirtyReproducerHalt('Fix', disposed.exec, disposed.notExecuted) }
+      if (disposed.notExecuted.length) {
+        sFix.close()
+        return await notExecutedHalt('Fix', disposed.notExecuted, {
+          unresolved_findings: [...open, ...disposed.notExecuted], notes,
+          fix_rounds: round, fix_round_output: fixRoundSpend,
+        })
+      }
+    }
+    reviewedThrough = head
+  } else if (head) {
+    reviewedThrough = head
+  }
+
+  if (checksBlocking && discoveredChecks.length && head && head !== lastCheckedHead && !outOfBudget()) {
+    ;({ red: redChecks, unmeasured: unmeasuredChecks } = await runChecks())
+    lastCheckedHead = head
+    if (unmeasuredChecks.length) {
+      sFix.close()
+      return await unmeasuredChecksHalt('Fix', {
+        unresolved_findings: open, notes, fix_rounds: round, fix_round_output: fixRoundSpend,
+      })
+    }
+  }
+
+  log(`round ${round}: ${open.length} finding(s) still open` +
+      (discoveredChecks.length ? `, ${redChecks.length} check(s) still red` : ''))
+}
+
+sFix.close()
+
+// A function, not a value computed once here: `scored` and the two notes keep
+// folding in later phases' own reports (the mutation loop below can still add
+// to them), so each halt and the final result call this after whatever has
+// scored by that point rather than freezing it at the end of the fix loop.
+// bypass_blocked is the earlier probe's crapGated answer, unrelated to
+// whether anything scored.
+function gatesPayload() {
+  // scored=false does not mean any one thing -- no commits, a gate that
+  // printed nothing to score, or (unconfirmed) that it never ran -- so the
+  // clause here stays generic and leaves the actual cause to gateNote below,
+  // rather than asserting one. scored=true only means a phase reported that
+  // crap-commit.sh printed a scored pass on its own commits -- an adoption or
+  // a declaration-only pass counts too, and neither measured a function -- so
+  // the true arm claims a pass on a commit, never a count of what it scored.
+  const scoredClause = scored
+    ? 'and passed on a commit in this range'
+    : 'but nothing in this range scored'
+  const bypassClause = crapGated
+    ? 'a raw git commit could not have bypassed it (.crap-gated present at the repo root)'
+    : 'nothing hook-enforced stopped a raw git commit from bypassing it ' +
+      '(.crap-gated absent at the repo root, or its presence could not be confirmed)'
+  const gateNote = scored ? scoredNote : unscoredNote
+  return {
+    measured: scored ? 'scored' : 'nothing scorable',
+    bypass_blocked: crapGated,
+    detail: (`${scored ? 'gates measured' : 'gates ran, nothing scorable'}: ` +
+      `crap-commit.sh runs the dead-code and CRAP gates on every commit ` +
+      `${scoredClause}; separately, ${bypassClause}. ${gateProbe?.detail ?? ''}`
+    ).trim() + (gateNote ? ` ${gateNote}` : ''),
+  }
+}
+
+if (open.length || blockingChecksOpen()) {
+  const reported = await markStale(open)
+  const staleCount = reported.filter(f => f.code_changed_since_recorded).length
+
+  return await halted('Fix', {
+    plan: plan.plan, implemented: impl.summary, gates: gatesPayload(),
+    unresolved_findings: reported, fix_rounds: round, stopped_because: fixStopReason(),
+    fix_round_output: fixRoundSpend,
+    notes,
+    checks: checksPayload(),
+    // Report the round count that actually ran and why the loop ended. This
+    // said "survived MAX_REVIEW_ROUNDS rounds" unconditionally, so a loop that
+    // stopped early on its token ceiling was reported as findings surviving
+    // three rounds it never got. The two need opposite remedies -- raise the
+    // ceiling, or judge the findings -- and the note pointed at the wrong one.
+    note: `${open.length} review finding(s)` +
+          (blockingChecksOpen() ? ` and ${redChecks.length} discovered check(s)` : '') +
+          ` still open after ${round} fix round(s); ${fixStopReason()}. Stopping ` +
+          `before the mutation stage rather than spending it on work that cannot ` +
+          `be marked ready. Judge each finding: fix it, or reject it as wrong.` +
+          (blockingChecksOpen()
+            ? ` A red check is the repo's own verdict, not a judgement call: ` +
+              `${redChecks.map(c => c.id).join(', ')}.`
+            : '') +
+          (staleCount
+            ? ` ${staleCount} of them have code that changed since they were ` +
+              `recorded; re-check those against HEAD before acting on them.`
+            : ''),
+  })
+}
+

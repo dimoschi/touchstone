@@ -30,6 +30,7 @@ bash workflows/test-fix-loop-join.sh
 bash workflows/test-mutation-optin.sh
 bash scripts/check-version-bump.sh
 bash scripts/check-no-private-refs.sh
+bash scripts/build-pipeline.sh --check
 ```
 
 Running one suite, fixture handling, and what CI installs: [docs/testing.md](docs/testing.md).
@@ -49,6 +50,9 @@ Running one suite, fixture handling, and what CI installs: [docs/testing.md](doc
   `PLUGIN_NAME`/`PIPELINE_VERSION` literals moved to match, even in a PR that never
   touches that file: the same check compares those literals to the manifest at HEAD
   unconditionally. See docs/architecture.md's Pipeline version transparency section.
+- **`workflows/deliver-pipeline.js` is generated.** Edit the source parts under
+  `workflows/parts/*.js.part` instead, then run `scripts/build-pipeline.sh` to
+  rebuild it; `scripts/build-pipeline.sh --check` refuses a stale build.
 - **bash 4.0 is the floor.** macOS ships 3.2 as `/bin/bash`. Guard `"${arr[@]}"` on
   possibly-empty arrays under `set -u`, since bash before 4.4 treats that as unbound.
 - **Exit 2 and exit 4 are not passes.** They mean setup problem and could-not-measure.
@@ -60,8 +64,9 @@ Running one suite, fixture handling, and what CI installs: [docs/testing.md](doc
   over growing a shell script.
 - Scripts resolve their own location from `${BASH_SOURCE[0]}`, never the cwd, because
   they run from a version-keyed plugin cache rather than from this checkout.
-- Comments here carry the WHY at unusual density, and most record a specific failure
-  that already happened. Read them before changing the line they sit on.
+- Write a comment only when the reason is not obvious from the code; most existing
+  ones record a specific failure that already happened. Read one before changing the
+  line it sits on, and do not add one that only restates what the code already says.
 - This repo gates itself: `.crap-gated` is committed at the root. `hooks/*.py` and
   `skills/crap-controlled-changes/lib/*.py` are measured by the pytest unit suites under
   `scripts/run-python-tests.sh`, which is what makes them real coverage instead of the

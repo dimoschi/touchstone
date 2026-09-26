@@ -184,8 +184,34 @@ with runtime-provided globals (`agent`, `parallel`, `phase`, `budget`, `log`) pl
 top-level `await` and `return`. CI parses it with `vm.compileFunction` wrapped in an
 async IIFE for exactly that reason. It cannot be run with `node`.
 
+The host needs it as one file, so it is generated: `scripts/build-pipeline.sh`
+concatenates `workflows/parts/*.js.part`, in sorted-name order, into the committed
+`workflows/deliver-pipeline.js`. Edit a part and rebuild; `--check` refuses a stale
+build.
+
 Structure, top to bottom: `meta` (phase titles must match the `phase()` calls exactly),
 argument validation that throws early, `CEILINGS` per stage, then the phases in order.
+
+### Setup: one dispatch for three unrelated facts
+
+Before the worktree is cut, a single `agent()` call labelled `setup` (not a
+`treeAgent`, since there is nothing to point it at yet) answers the ticket fetch, the
+`plugin:version` probe, and the two gate markers together, against the `SETUP` schema.
+Each sub-object (`ticket`, `version`, `markers`) keeps its own found/false fallback, so
+a model that could not resolve one of the three still returns valid JSON for the other
+two. Every git command it runs resolves the repo root itself
+(`dirname $(git rev-parse --path-format=absolute --git-common-dir)`), since no worktree
+path exists to be handed one; its only write is the one `git fetch origin <base>` the
+version check needs. Checks discovery is not part of this call: it needs the worktree
+path, which does not exist until the very next phase, so it rides on the `branch`/
+`branch:existing` call instead (see Check discovery, below).
+
+The run record (`.claude/touchstone-runs/<ticket>.json`) used to be written by a
+dedicated `run-record` dispatch on every exit path. The script has no filesystem
+access, so all it can do is name where the file belongs (`record_file`, sanitizing the
+ticket arg to a safe basename) and hand back the full payload; the invoking session
+(`commands/deliver.md`) writes it, the same session that already appends `run_id` and
+`recorded_on` afterwards.
 
 Two invariants the script exists to hold:
 
@@ -200,6 +226,38 @@ Two invariants the script exists to hold:
 
 `workflows/test-fix-loop-join.sh` drives the real script with stubbed globals, which is
 how the loop logic is tested without spending tokens.
+
+### Triage's involved verdict has to be earned
+
+`involved` triples effort and ceilings against `routine` (see `EFFORT`/`CEILING_SCALE`),
+so the script does not take the word alone: it stands only when `TRIAGE`'s response also
+carries `involved_reason`, `expected_files`, and `expected_call_sites`, all non-empty. A
+recognised `involved` verdict missing any of the three demotes to `routine` and logs why;
+a ticket naming one file and one behaviour is routine unless triage can say otherwise.
+This never touches the separate unrecognised-value fallback (an invalid `complexity`
+string still defaults straight to `involved`), which is not a judgement about difficulty
+at all, so there is nothing to demote it against.
+
+### The run budget
+
+`dispatch()` is the one function that ever calls the runtime's own `agent()`; a static
+check in `test-static.sh` asserts nothing else does. Every `treeAgent` call and every
+direct `agent()`-style call (`setup`, `branch`, `branch:existing`, `collapseDuplicates`'s
+`review:dedup`) goes through it. Before Triage has sized the work, `runBudget` is `null`
+and `dispatch()` never refuses; right after Triage, it is set to `100_000 + 1_500 *
+estimated_loc` output tokens, clamped `150_000..800_000`, or a flat `150_000`/`400_000`
+default by scope when triage gave no estimate, and `args.runBudget` overrides either.
+From there, `dispatch()` refuses any call once `budget.spent()` has reached it.
+
+Everything after that point runs inside one `try`/`catch`, so a refusal anywhere in the
+run unwinds to a single halt rather than needing its own latch at every call site. Two
+places have to re-check the flag explicitly rather than let it propagate on its own:
+`parallel()` (used to run review lenses concurrently) catches each thunk's own throw and
+hands back `null`, which would otherwise read as a lens that legitimately found nothing,
+and `markStale`'s own `try`/`catch` would otherwise log the refusal as a merely failed
+staleness probe. Both re-throw when `runBudgetSpent` is set. A stage still open when the
+throw unwinds past its own `close()` -- the one actually running at the halt -- has its
+spend folded into `stage_spend` by the catch, rather than silently dropped from it.
 
 ### What can hold a run: `classify()` and reproducers
 
@@ -268,7 +326,11 @@ cost of that judgement being wrong is a line in the PR body rather than another 
 
 ### Check discovery
 
-`checks:discover` reads only `${wt.path}/AGENTS.md` (or `CLAUDE.md`) and transcribes
+Folded into the `branch`/`branch:existing` call's own last step (`checks_source` on
+the `BRANCH`/`EXISTING_BRANCH` schema), rather than a separate `checks:discover`
+dispatch: that call already has the worktree path open by the time it can answer,
+since it derives that path itself in an earlier step. It reads only
+`<worktree>/AGENTS.md` (or `CLAUDE.md`) and transcribes
 every `##` heading and the fenced block that follows it verbatim, including its own
 opening and closing marker lines; it chooses, filters and interprets nothing.
 `checksFrom()` then selects the section whose heading is exactly `## Checks` (only
@@ -286,7 +348,10 @@ repeat.
 
 The runner is handed each check's exact Bash invocation
 (`` o=$(mktemp); bash -c 'cd <worktree> && <command>' >"$o" 2>&1; echo "TOUCHSTONE_CHECK_EXIT <id> $?"; tail -c 8192 "$o"; rm -f "$o" ``)
-and must report `command` back verbatim; a row whose command does not match is
+and must report `command` back as it ran it. The full invocation, its inner
+`bash -c '...'`, and the bare declared command are all accepted, because runners
+have reported each of the three in the same run; a row reporting anything else
+(an added `timeout`, a changed flag) is
 not measured, and an unmeasured row is never read as a pass or as evidence of
 the repo's own environment. The `cd` target is quoted only when it needs to be:
 a worktree path made only of letters, digits and `/ . _ - + : @ % = ,` is
@@ -309,7 +374,7 @@ first and followed only by the last 8192 bytes of the log. The Bash tool shows a
 large output as a short preview of its start (this repo's own fix-loop suite
 prints about 56KB), so an exit line printed last was out of the runner's sight,
 and relaying a whole long log verbatim is what runners had already failed at.
-Only the first non-empty line of `output` is read, and it must be a well-formed
+The runner also reports that line on its own in `exit_line`, since runners have dropped it from `output` while relaying the rest; the script reads `exit_line` followed by `output` as one text. Only its first non-empty line is read, and it must be a well-formed
 line naming the check's own id. A later line that looks like one is the check's
 own output. No exit line at all, one that is not first, one naming a different
 id, or a malformed one all come back as their own reason (`no exit line`, `exit
@@ -333,6 +398,44 @@ On a non-blocking (`existingBranch`) run nothing here ever halts; an unmeasured 
 is only reported under `checks.unmeasured`, the same as a red one is reported under
 `checks.red` without blocking.
 
+### Measuring the diff: `size`, lens count, and the ratio halt
+
+The `draft-pr` call also runs a probe command (`diffstatCommandFor`): a `git diff
+--numstat` pass over `impl.commit_range` (after the pre-review checks fix, if one
+landed, folds into that range), then an `awk` pass over `git diff --unified=0` counting,
+per file, added lines whose trimmed text opens a comment: `//` or `/*` anywhere, a bare
+`*` only when it opens a block-comment continuation or close (`* foo`, `*/`, not a Go/C
+pointer write like `*p = v`), and `#` unless it is `#!` (a shebang) or `#[` (a PHP 8
+attribute, e.g. `#[ORM\Column]`). Three markers (`TOUCHSTONE_DIFFSTAT <range>`, `TOUCHSTONE_COMMENT_LINES`,
+`TOUCHSTONE_DIFFSTAT_END`) bound the response so `parseDiffstat` -- a pure function --
+can tell a well-formed one from a truncated or off-range one: the begin line has to name
+the exact range asked about, or the whole response counts as unmeasured, the same as a
+numstat row or a comment-count row that does not match its own regex. Unmeasured gets
+one retry, via a dedicated `size`-labelled call re-running the identical command; still
+unmeasured after that halts at Review as a measurement problem, never reaching a lens.
+
+`sizeOf` classifies each file by path (`test`, `doc`, or `code`; see the function for the
+exact patterns) and aggregates: `code` is a code file's added lines minus its own comment
+lines, `comment` is those subtracted lines, `test`/`doc` are their files' added lines
+as-is, and `codeChurn` is code-file added-plus-removed, which both of the following key
+on. `lensKeysFor(size)` replaces the old implementer-reported `big`/`trivial` split
+(`files_changed`/`insertions`, which went stale the moment a pre-review fix landed after
+them without updating either): no lenses when the diff is a single file under
+`INLINE_LOC` churn, one (`correctness`) under `ONE_LENS_LOC`, three (plus
+`requirements`) over `BIG_LOC` or past `BIG_FILES` code files, two (`correctness`,
+`advocate`) otherwise. `args.reviewers` and `args.devilsAdvocate` still slice and filter
+the result afterward, same as before.
+
+Before any lens runs, when `code >= RATIO_MIN_CODE` and `(test + doc + comment) / code`
+exceeds `MAX_SUPPORT_RATIO` (10, chosen against this repo's own merged history: the last
+20 commits ran 1.0-14.4:1, and every one still at or above the code floor ran 1.2-7.6:1),
+the run halts at Review: support code (tests, docs, and a code file's own comments) far
+outweighing the actual change is not something a lens should spend a token reviewing.
+Below the code floor the ratio never applies, which is what lets an ordinary TDD change
+(support code well over 1:1 against the code it backs) through unaffected.
+`args.supportRatio` raises the limit for a run that knows its own
+ratio is intentional.
+
 ### Pipeline version transparency
 
 A host can persist a snapshot of this script and keep executing it after `main`
@@ -345,22 +448,22 @@ literals for that reason: they travel with the executed bytes, and
 `scripts/check-version-bump.sh` checks them against the manifest at HEAD
 (`scripts/test-version-bump.sh` covers that half).
 
-A single `treeAgent` call labelled `plugin:version`, placed after the worktree exists
+One third of the merged `setup` call (below), placed before the worktree is even cut
 and before Triage, resolves the repository's actual base branch itself and reads its
-manifest exactly once, neither the branch's own working tree nor `wt.base`: a resumed
-branch already carries this run's own earlier version-bump commit as often as not
-(`check-version-bump.sh` forces one onto every `workflows/` change), and reading the
-working tree back would report that bump as drift against itself, while `wt.base`
-becomes the branch under review whenever this run is stacked (`args.base`), whose own
-unmerged version bump would revive the same self-accusation through the base instead.
-The probe also fetches that base fresh before reading it, since neither reuse path in
-Worktree ever runs `git fetch` and a stale remote-tracking ref would let a stale base
-pass as `mismatch: false`. A failed fetch (no network, no auth, a remote needing a
-hardware key) does not by itself count as a missing manifest: `origin/<base>` can
-already hold it from an earlier fetch or the initial clone, so the probe reads it
-anyway rather than reporting the fetch failure as if the manifest were absent. The
-result is a `pipeline_version` object carried on every exit path, a halt at any phase
-included:
+manifest exactly once, neither the branch's own working tree nor `wt.base` (neither
+exists yet at this point in the run): a resumed branch already carries this run's own
+earlier version-bump commit as often as not (`check-version-bump.sh` forces one onto
+every `workflows/` change), and reading the working tree back would report that bump as
+drift against itself, while `wt.base` becomes the branch under review whenever this run
+is stacked (`args.base`), whose own unmerged version bump would revive the same
+self-accusation through the base instead. The probe also fetches that base fresh before
+reading it, since neither reuse path in Worktree ever runs `git fetch` and a stale
+remote-tracking ref would let a stale base pass as `mismatch: false`. A failed fetch (no
+network, no auth, a remote needing a hardware key) does not by itself count as a missing
+manifest: `origin/<base>` can already hold it from an earlier fetch or the initial
+clone, so the probe reads it anyway rather than reporting the fetch failure as if the
+manifest were absent. The result is a `pipeline_version` object carried on every exit
+path, a halt at any phase included:
 
 - `executed` -- `PIPELINE_VERSION`, always present, even on a halt at Worktree
   before the probe has run.
