@@ -303,8 +303,8 @@ const CHECKS = {
 // One row per command, run exactly as discovered. output is what the fix
 // phase is handed verbatim -- never a model's account of it -- and it is
 // also the only place a row's real exit code lives: exitLineOf below reads
-// it from output's own TOUCHSTONE_CHECK_EXIT line, appended by the child
-// shell the check ran in, not from exit_code. exit_code stays required so
+// it from output's own TOUCHSTONE_CHECK_EXIT line, printed first by the
+// shell that ran the check, not from exit_code. exit_code stays required so
 // the schema still has somewhere for a model to answer, but classifyResults
 // never reads it: a summarised or still-running check reporting exit_code: 0
 // must not read as a pass just because the field says so. id is the
@@ -503,7 +503,7 @@ const REPRODUCER = {
 const REPRODUCED_MARKER = 'TOUCHSTONE_DEFECT_REPRODUCED'
 const hasMarkerLine = (output) =>
   String(output ?? '').split(/\r?\n/).some((line) => line.trim() === REPRODUCED_MARKER)
-// Echoed by the child shell after every check invocation (invocationFor
+// Echoed by the shell that ran each check, before its output (invocationFor
 // below), never by the model reporting the result: a check's own exit code
 // is read only from this line, never from a model-filled exit_code field.
 const CHECK_EXIT_MARKER = 'TOUCHSTONE_CHECK_EXIT'
@@ -1576,7 +1576,7 @@ const reproducerRunOf = (row, round) =>
   ({ outcome: outcomeOf(row), exit_code: row?.exit_code ?? null,
      output: truncateOutput(row?.output), round })
 // Splits a run's raw results into a real red list (ran, command matched, a
-// single well-formed exit line naming this check that reads nonzero) and an
+// well-formed first-line exit line naming this check that reads nonzero) and an
 // unmeasured one (nobody reported the id, reported it against a different
 // command, or reported it against the right command but without an exit
 // line classifyResults can trust). Unmeasured is never a pass, but it is also
