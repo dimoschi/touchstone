@@ -119,6 +119,24 @@ const brief = (s) => {
   return t.length <= BRIEF_CHARS ? t : `${t.slice(0, BRIEF_CHARS)}\n[brief truncated]`
 }
 
+// Shared by every prompt that reads or edits code (implement, checks:fix,
+// fix, reviewOf): a phase reaching for grep/sed/cat to read a file, or Bash
+// generally to search one, is the one habit worth naming once rather than
+// repeating per prompt.
+const NATIVE_TOOLS =
+  `Use your native Read, Grep and Edit tools to read, search and edit files; ` +
+  `Bash is for running things (tests, gates, git), never for reading code ` +
+  `with grep, sed, or cat.`
+
+// Shared by every prompt that commits code (implement, checks:fix, fix):
+// worded generically, since these prompts ship to other repos, not just
+// this one -- whose own workflows/deliver-pipeline.js is itself exactly
+// this kind of file.
+const GENERATED_FILES =
+  `A file the repo's AGENTS.md or its own header marks as built from parts ` +
+  `(this plugin's workflows/deliver-pipeline.js is one) is never edited ` +
+  `directly; edit its parts and run the build the repo names.`
+
 // Per-stage token ceilings (output tokens). Tripwires, not aborts: a running
 // agent can't be stopped from here, so over() is read only after the agent has
 // returned. On a single-shot stage that makes the ceiling retrospective -- it
@@ -1433,11 +1451,14 @@ if (inlineMode) {
 
 // Reasoning effort, scaled by the difficulty triage just judged.
 //
-// This is the lever that actually bounds spend, and the only one available
-// before an agent starts. The stage ceilings below cannot do it: they are read
-// after an agent returns, so on a single-shot stage a ceiling spends the tokens
-// and then discards the work, which is why plan and implement deliberately
-// carry none. effort is set on the call.
+// This is the lever that shapes what one call spends, and the only one
+// available before that agent starts. The stage ceilings below cannot do it:
+// they are read after an agent returns, so on a single-shot stage a ceiling
+// spends the tokens and then discards the work, which is why plan and
+// implement deliberately carry none. effort is set on the call. runBudget,
+// derived just below, is the other lever available this early, but it works
+// differently: it refuses a whole call outright once the run has spent past
+// it, rather than shaping how any one call spends.
 //
 // It is also the lever that matters most, for a reason that is not obvious from
 // the token counts. On a measured run of this pipeline, output was 15% of cost
@@ -1883,6 +1904,7 @@ const blockingChecksOpen = () => checksBlocking && redChecks.length > 0
 const sImpl = stage('implement')
 const impl = await treeAgent(
   `Implement this task in the current repo.\n` +
+  `${NATIVE_TOOLS} ${GENERATED_FILES}\n` +
   `Task: ${brief(task)}\nPlan: ${brief(plan.plan)}\n` +
   (plan.acceptance_criteria.length
     ? `Acceptance criteria:\n- ${plan.acceptance_criteria.join('\n- ')}\n`
@@ -2004,6 +2026,7 @@ if (blockingChecksOpen() && !sChecksPost.over()) {
     `do, and put the three options in note; leave head_sha as the ` +
     `unchanged HEAD if you made no commits before hitting it. Do not push ` +
     `or open a PR.\n` +
+    `${NATIVE_TOOLS} ${GENERATED_FILES}\n` +
     `Task: ${brief(task)}\n` +
     redChecks.map(renderCheck).join('\n\n') + `\n` +
     `Return head_sha: the full 40-character SHA of HEAD after your last ` +
@@ -2416,6 +2439,7 @@ const reviewOf = async (range, tag, picked, known = [], knownCharge = '') => {
   const out = await parallel(picked.map((lens) => () =>
     treeAgent(
       `${lens.charge}\n` +
+      `${NATIVE_TOOLS}\n` +
       (lens.needsTicket ? ticketSpec() : '') +
       `Task: ${brief(task)}\n` +
       `Commit range: ${range}\n` +
@@ -2936,6 +2960,7 @@ while ((open.length || blockingChecksOpen()) && round < MAX_REVIEW_ROUNDS && !ou
     `to the user rather than picking one and editing the marker yourself. Set ` +
     `unsupported_language=true when you do, and put the three options in note. ` +
     `Do not push or open a PR.\n` +
+    `${NATIVE_TOOLS} ${GENERATED_FILES}\n` +
     `Task: ${brief(task)}\n` +
     `Each finding names the place it was raised against. Work from there. ` +
     `Read git diff ${impl.commit_range} only when that place cannot tell you ` +

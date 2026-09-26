@@ -227,6 +227,38 @@ Two invariants the script exists to hold:
 `workflows/test-fix-loop-join.sh` drives the real script with stubbed globals, which is
 how the loop logic is tested without spending tokens.
 
+### Triage's involved verdict has to be earned
+
+`involved` triples effort and ceilings against `routine` (see `EFFORT`/`CEILING_SCALE`),
+so the script does not take the word alone: it stands only when `TRIAGE`'s response also
+carries `involved_reason`, `expected_files`, and `expected_call_sites`, all non-empty. A
+recognised `involved` verdict missing any of the three demotes to `routine` and logs why;
+a ticket naming one file and one behaviour is routine unless triage can say otherwise.
+This never touches the separate unrecognised-value fallback (an invalid `complexity`
+string still defaults straight to `involved`), which is not a judgement about difficulty
+at all, so there is nothing to demote it against.
+
+### The run budget
+
+`dispatch()` is the one function that ever calls the runtime's own `agent()`; a static
+check in `test-static.sh` asserts nothing else does. Every `treeAgent` call and every
+direct `agent()`-style call (`setup`, `branch`, `branch:existing`, `collapseDuplicates`'s
+`review:dedup`) goes through it. Before Triage has sized the work, `runBudget` is `null`
+and `dispatch()` never refuses; right after Triage, it is set to `60_000 + 800 *
+estimated_loc` output tokens, clamped `80_000..500_000`, or a flat `80_000`/`300_000`
+default by scope when triage gave no estimate, and `args.runBudget` overrides either.
+From there, `dispatch()` refuses any call once `budget.spent()` has reached it.
+
+Everything after that point runs inside one `try`/`catch`, so a refusal anywhere in the
+run unwinds to a single halt rather than needing its own latch at every call site. Two
+places have to re-check the flag explicitly rather than let it propagate on its own:
+`parallel()` (used to run review lenses concurrently) catches each thunk's own throw and
+hands back `null`, which would otherwise read as a lens that legitimately found nothing,
+and `markStale`'s own `try`/`catch` would otherwise log the refusal as a merely failed
+staleness probe. Both re-throw when `runBudgetSpent` is set. A stage still open when the
+throw unwinds past its own `close()` -- the one actually running at the halt -- has its
+spend folded into `stage_spend` by the catch, rather than silently dropped from it.
+
 ### What can hold a run: `classify()` and reproducers
 
 A lens can raise up to `MAX_FINDINGS_PER_LENS` findings, and every one carries a
@@ -365,6 +397,40 @@ invocation, and the specific reason each of the two attempts could not be measur
 On a non-blocking (`existingBranch`) run nothing here ever halts; an unmeasured check
 is only reported under `checks.unmeasured`, the same as a red one is reported under
 `checks.red` without blocking.
+
+### Measuring the diff: `size`, lens count, and the ratio halt
+
+The `draft-pr` call also runs a probe command (`diffstatCommandFor`): a `git diff
+--numstat` pass over `impl.commit_range` (after the pre-review checks fix, if one
+landed, folds into that range), then an `awk` pass over `git diff --unified=0` counting,
+per file, added lines whose trimmed text opens a comment (`//`, `/*`, `*`, or `#`, never
+`#!`). Three markers (`TOUCHSTONE_DIFFSTAT <range>`, `TOUCHSTONE_COMMENT_LINES`,
+`TOUCHSTONE_DIFFSTAT_END`) bound the response so `parseDiffstat` -- a pure function --
+can tell a well-formed one from a truncated or off-range one: the begin line has to name
+the exact range asked about, or the whole response counts as unmeasured, the same as a
+numstat row or a comment-count row that does not match its own regex. Unmeasured gets
+one retry, via a dedicated `size`-labelled call re-running the identical command; still
+unmeasured after that halts at Review as a measurement problem, never reaching a lens.
+
+`sizeOf` classifies each file by path (`test`, `doc`, or `code`; see the function for the
+exact patterns) and aggregates: `code` is a code file's added lines minus its own comment
+lines, `comment` is those subtracted lines, `test`/`doc` are their files' added lines
+as-is, and `codeChurn` is code-file added-plus-removed, which both of the following key
+on. `lensKeysFor(size)` replaces the old implementer-reported `big`/`trivial` split
+(`files_changed`/`insertions`, which went stale the moment a pre-review fix landed after
+them without updating either): no lenses when the diff is a single file under
+`INLINE_LOC` churn, one (`correctness`) under `ONE_LENS_LOC`, three (plus
+`requirements`) over `BIG_LOC` or past `BIG_FILES` code files, two (`correctness`,
+`advocate`) otherwise. `args.reviewers` and `args.devilsAdvocate` still slice and filter
+the result afterward, same as before.
+
+Before any lens runs, when `code >= RATIO_MIN_CODE` and `(test + doc + comment) / code`
+exceeds `MAX_SUPPORT_RATIO`, the run halts at Review: support code (tests, docs, and a
+code file's own comments) far outweighing the actual change is not something a lens
+should spend a token reviewing. Below the code floor the ratio never applies, which is
+what lets an ordinary TDD change (support code well over 1:1 against the code it backs)
+through unaffected. `args.supportRatio` raises the limit for a run that knows its own
+ratio is intentional.
 
 ### Pipeline version transparency
 

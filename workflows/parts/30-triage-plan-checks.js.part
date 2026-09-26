@@ -105,11 +105,14 @@ if (inlineMode) {
 
 // Reasoning effort, scaled by the difficulty triage just judged.
 //
-// This is the lever that actually bounds spend, and the only one available
-// before an agent starts. The stage ceilings below cannot do it: they are read
-// after an agent returns, so on a single-shot stage a ceiling spends the tokens
-// and then discards the work, which is why plan and implement deliberately
-// carry none. effort is set on the call.
+// This is the lever that shapes what one call spends, and the only one
+// available before that agent starts. The stage ceilings below cannot do it:
+// they are read after an agent returns, so on a single-shot stage a ceiling
+// spends the tokens and then discards the work, which is why plan and
+// implement deliberately carry none. effort is set on the call. runBudget,
+// derived just below, is the other lever available this early, but it works
+// differently: it refuses a whole call outright once the run has spent past
+// it, rather than shaping how any one call spends.
 //
 // It is also the lever that matters most, for a reason that is not obvious from
 // the token counts. On a measured run of this pipeline, output was 15% of cost

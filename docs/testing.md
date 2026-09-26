@@ -45,7 +45,15 @@ bash hooks/test-crap-commit-gate.sh
 bash skills/crap-controlled-changes/test/run-mutation-go.sh
 ```
 
-Neither workflow suite takes a scenario filter; both run every scenario they define.
+`workflows/test-fix-loop-join.sh` is an entry script: it runs every
+`workflows/tests/test-*.sh` in turn, one area (static greps, git premises,
+worktree/checks scenarios, review classification, and so on) per file. Run one
+area directly (`bash workflows/tests/test-worktree-checks.sh`) while iterating
+on it; each sources `workflows/tests/harness.sh` for the JS scenario runner
+they share. `workflows/test-mutation-optin.sh`, `workflows/test-pipeline-version.sh`
+and `workflows/test-unsupported-language-halt.sh` are separate, narrower
+suites at the top level; none of the four takes a scenario filter, so each
+runs every scenario it defines.
 
 `skills/crap-controlled-changes/test/run-repo-arg.sh` covers the optional leading
 `<absolute-repo-path>` argument that `crap-check.sh`, `mutation-check.sh` and

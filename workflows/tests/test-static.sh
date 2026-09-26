@@ -133,4 +133,11 @@ check "that one call site is inside dispatch, not a bare top-level call" \
 check "no separate ticket/plugin:version/gate:opt-in/checks:discover/run-record labels remain" \
   "$(grep -cE "label: '(ticket|plugin:version|gate:opt-in|checks:discover|run-record)'" "$SCRIPT" || true)" 0
 
+echo ""
+echo "== static: gh-118 -- the shared native-tools and generated-files sentences reach every prompt that needs them"
+check "NATIVE_TOOLS reaches implement, checks:fix, fix and reviewOf" \
+  "$(grep -Fc '${NATIVE_TOOLS}' "$SCRIPT" || true)" 4
+check "GENERATED_FILES reaches implement, checks:fix and fix, not reviewOf" \
+  "$(grep -Fc '${GENERATED_FILES}' "$SCRIPT" || true)" 3
+
 finish
