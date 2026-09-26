@@ -4161,6 +4161,7 @@ async function scenarioFH() {
   check('the halt note names the finding by title', (result.note ?? '').includes('Never demonstrated'), true)
   check('the halt note says this is about measurement, not the code',
     (result.note ?? '').includes('about measurement, not the code'), true)
+  check('the halt carries the checks payload', typeof result.checks?.discovered, 'number')
   check('fix_rounds is 0', result.fix_rounds, 0)
   check('notes is carried as an array', Array.isArray(result.notes), true)
   check('the unrelated non-blocking finding is still a note',
@@ -4219,6 +4220,7 @@ async function scenarioFJ() {
     result.unresolved_findings?.some(f => f.title === 'Off-by-one in parser'), true)
   const stuck = result.unresolved_findings?.find(f => f.title === 'Never demonstrated in the fix')
   check('the fresh finding is carried with outcome not-executed', stuck?.reproducer_run?.outcome, 'not-executed')
+  check('the halt carries the checks payload', typeof result.checks?.discovered, 'number')
   check('fix_rounds is 1', result.fix_rounds, 1)
   check('notes is present', Array.isArray(result.notes), true)
   check('the halt note names the fresh finding by title',
@@ -4247,6 +4249,7 @@ async function scenarioFK() {
   check('the fresh finding is carried with outcome not-executed', stuck?.reproducer_run?.outcome, 'not-executed')
   check('the halt note names the finding by title',
     (result.note ?? '').includes('New nil deref in the added test helper'), true)
+  check('the halt carries the checks payload', typeof result.checks?.discovered, 'number')
   check('the residual note from the earlier fix round is still carried',
     result.notes?.filter(n => n.reason === 'residual').length, 1)
 }
@@ -4273,6 +4276,8 @@ async function scenarioFL() {
   check('halted at Review', result.halted_at, 'Review')
   check('the dirty halt still carries the finding the first call reproduced',
     result.unresolved_findings?.some(f => f.title === 'Reproduced on the first call'), true)
+  check('the dirty halt carries the candidate the dirty retry ran',
+    result.unresolved_findings?.some(f => f.title === 'Dropped on the first call'), true)
   check('the dirty halt still carries the first call\'s did-not-reproduce note',
     result.notes?.some(n => n.title === 'Passed on the first call' && n.reason === 'did-not-reproduce'), true)
 }
@@ -4301,6 +4306,8 @@ async function scenarioFM() {
     result.unresolved_findings?.some(f => f.title === 'Off-by-one in parser'), true)
   check('the dirty halt still carries the fresh finding the first call reproduced',
     result.unresolved_findings?.some(f => f.title === 'Reproduced in the fix'), true)
+  check('the dirty halt carries the candidate the dirty retry ran',
+    result.unresolved_findings?.some(f => f.title === 'Dropped in the fix'), true)
   check('the dirty halt still carries the first call\'s did-not-reproduce note',
     result.notes?.some(n => n.title === 'Passed in the fix' && n.reason === 'did-not-reproduce'), true)
   check('fix_rounds is 1', result.fix_rounds, 1)
@@ -4324,6 +4331,8 @@ async function scenarioFN() {
   check('halted at Review', result.halted_at, 'Review')
   check('the dirty halt still carries the finding the first call reproduced',
     result.unresolved_findings?.some(f => f.title === 'Reproduced post-mutation'), true)
+  check('the dirty halt carries the candidate the dirty retry ran',
+    result.unresolved_findings?.some(f => f.title === 'Dropped post-mutation'), true)
   check('the dirty halt still carries the first call\'s did-not-reproduce note',
     result.notes?.some(n => n.title === 'Passed post-mutation' && n.reason === 'did-not-reproduce'), true)
 }

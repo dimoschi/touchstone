@@ -2035,7 +2035,7 @@ const duplicateTargetOf = (f, known) => {
 // handler. The PR was green on every gate and carried a new bug.
 // Stated to every lens: what a reproducer is and who decides on it. Repeated
 // rather than assumed, since a lens that never reads CHECK_RUN's contract has
-// no other way to learn the script judges exit_code alone.
+// no other way to learn the script judges exit_code plus the marker line.
 const REPRODUCER_CONTRACT =
   `A reproducer is one command, run from the worktree root (${wt.path}). It ` +
   `exits 0 when the code is correct. Print ${REPRODUCED_MARKER} on a line of ` +
@@ -2406,13 +2406,13 @@ const disposeCandidates = (candidates, runs, round) => {
 // the result into a dirtyReproducerHalt at its own phase.
 const executeAndDispose = async (candidates, label, round) => {
   const exec = await executeAtHead(candidates, label)
-  if (exec.dirty) return { dirty: true, exec, opened: [], asNotes: [] }
+  if (exec.dirty) return { dirty: true, exec, opened: [], asNotes: [], notExecuted: [] }
   const first = disposeCandidates(candidates, exec.runs, round)
   if (!first.notExecuted.length) return { dirty: false, ...first }
   const retryIds = new Set(first.notExecuted.map(f => f.id))
   const retryCandidates = candidates.filter(f => retryIds.has(f.id))
   const retryExec = await executeAtHead(retryCandidates, `${label}:retry`)
-  if (retryExec.dirty) return { dirty: true, exec: retryExec, opened: first.opened, asNotes: first.asNotes }
+  if (retryExec.dirty) return { dirty: true, exec: retryExec, ...first }
   const merged = new Map(exec.runs)
   for (const [id, row] of retryExec.runs) merged.set(id, row)
   return { dirty: false, ...disposeCandidates(candidates, merged, round) }
@@ -2423,7 +2423,7 @@ const executeAndDispose = async (candidates, label, round) => {
 // about measurement, not the code, so no fix round should be spent guessing
 // at a reproducer nobody ran. Defined here, before open/notes/round/
 // fixRoundSpend, for the same reason unmeasuredChecksHalt is: it reads only
-// plan, impl and gatesPayload by closure, and every call site passes
+// plan, impl, gatesPayload and checksPayload by closure, and every call site passes
 // unresolved_findings, notes, fix_rounds and (once it exists) fix_round_output
 // through extra instead, so calling this from the initial review -- before
 // fixRoundSpend is declared -- is not the TDZ failure the comment above
@@ -2436,7 +2436,7 @@ const notExecutedHalt = (at, notExecuted, extra) => {
     notExecuted.map(f => `- ${f.id}: ${f.title}`).join('\n')
   return halted(at, {
     plan: plan.plan, implemented: impl.summary, gates: gatesPayload(),
-    ...extra, note,
+    checks: checksPayload(), ...extra, note,
   })
 }
 
@@ -2451,7 +2451,7 @@ if (reviewerCount) {
     const disposed = await executeAndDispose(candidates, 'reproduce:review', 0)
     open.push(...disposed.opened)
     notes.push(...disposed.asNotes)
-    if (disposed.dirty) { sReview.close(); return await dirtyReproducerHalt('Review', disposed.exec) }
+    if (disposed.dirty) { sReview.close(); return await dirtyReproducerHalt('Review', disposed.exec, disposed.notExecuted) }
     if (disposed.notExecuted.length) {
       sReview.close()
       return await notExecutedHalt('Review', disposed.notExecuted, {
@@ -2694,7 +2694,7 @@ while ((open.length || blockingChecksOpen()) && round < MAX_REVIEW_ROUNDS && !ou
       if (disposed.opened.length) log(`round ${round}: the fix itself introduced ${disposed.opened.length} new finding(s)`)
       open = open.concat(disposed.opened)
       notes.push(...disposed.asNotes)
-      if (disposed.dirty) { sFix.close(); return await dirtyReproducerHalt('Fix', disposed.exec) }
+      if (disposed.dirty) { sFix.close(); return await dirtyReproducerHalt('Fix', disposed.exec, disposed.notExecuted) }
       if (disposed.notExecuted.length) {
         sFix.close()
         return await notExecutedHalt('Fix', disposed.notExecuted, {
@@ -2975,7 +2975,7 @@ if (reviewerCount && mutHead && mutHead !== reviewedThrough && !outOfBudget()) {
     const disposed = await executeAndDispose(candidates, 'reproduce:mutation:fresh', 'mutation')
     freshOpen = disposed.opened
     notes.push(...disposed.asNotes)
-    if (disposed.dirty) return await dirtyReproducerHalt('Review', disposed.exec, freshOpen)
+    if (disposed.dirty) return await dirtyReproducerHalt('Review', disposed.exec, [...freshOpen, ...disposed.notExecuted])
     if (disposed.notExecuted.length) {
       return await notExecutedHalt('Review', disposed.notExecuted, {
         mutation, unresolved_findings: [...freshOpen, ...disposed.notExecuted],
