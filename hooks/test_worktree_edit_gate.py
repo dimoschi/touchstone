@@ -140,6 +140,22 @@ def test_header_without_a_worktree_line_is_allowed(monkeypatch, tmp_path):
     assert rc == 0
 
 
+def test_an_indented_header_still_counts(monkeypatch, tmp_path):
+    """The real transcript wraps every line of the harness-computed prompt
+    with two leading spaces, so the header and worktree lines are indented,
+    not at column zero."""
+    repo = _repo(tmp_path)
+    wt = _worktree(repo)
+    parent = tmp_path / "s1.jsonl"
+    sub = _subagent_transcript(parent, "a1")
+    indented = "\n".join(f"  {line}" if line else line
+                          for line in _header("implementer", wt).split("\n"))
+    _write_transcript(sub, [{"type": "user", "message": {"content": indented}}])
+    rc = _run(monkeypatch, _payload(
+        path=str(repo / "app.py"), cwd=str(repo), transcript=parent, agent_id="a1"))
+    assert rc == 2
+
+
 def test_a_later_transcript_entry_naming_the_header_does_not_count(monkeypatch, tmp_path):
     """Only the first type=='user' entry is read; a later one quoting the same
     two lines back is the agent's own words, not the dispatch header."""
