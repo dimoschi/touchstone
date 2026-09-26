@@ -25,7 +25,9 @@ try {
   `real requirement. Set premise_ok=false only for a claim you positively ` +
   `contradicted by reading code that says otherwise, never for one you merely ` +
   `could not find.\n` +
-  `2. How large is the real change, in lines?\n` +
+  `2. How large is the real change, in lines? Set estimated_loc to your ` +
+  `estimate of lines added plus removed, tests and docs included: it sets ` +
+  `this run's token budget.\n` +
   `scope is about SIZE only, never about whether the task is a good idea: a ` +
   `wrong premise goes in premise_ok and premise_note, and setting scope from it ` +
   `would route a task that needs rethinking into being built immediately. ` +
@@ -180,18 +182,19 @@ sTriage.close()
 // regardless of it), so a numeric args.runBudget aside, a missing one falls
 // back to a flat default by scope rather than the LOC formula: there is no
 // number to derive from and a change already latched to inline is smaller by
-// definition than a team-scoped one. The figures are set so the healthy
-// runs measured before this existed (about 270k-300k output tokens for
-// 240-450 changed lines) finish with room to spare: a budget halt strands
-// work mid-run, so it is for a run that has gone wrong, not a tight fit.
+// definition than a team-scoped one. The figures are set so healthy runs
+// finish with room to spare (about 270k-300k output tokens for 240-450
+// changed lines, and an inline-sized gate fix that spent 141k in Implement
+// alone): a budget halt strands work mid-run, so it is for a run that has
+// gone wrong, not a tight fit.
 if (typeof args?.runBudget === 'number') {
   runBudget = args.runBudget
   runBudgetNote = `set explicitly via args.runBudget`
 } else if (triage.estimated_loc != null) {
-  runBudget = Math.min(800_000, Math.max(150_000, 100_000 + 1_500 * triage.estimated_loc))
+  runBudget = Math.min(1_000_000, Math.max(300_000, 100_000 + 1_500 * triage.estimated_loc))
   runBudgetNote = `derived from triage's ~${triage.estimated_loc} estimated LOC`
 } else {
-  runBudget = inlineMode ? 150_000 : 400_000
+  runBudget = inlineMode ? 300_000 : 600_000
   runBudgetNote = `triage gave no estimated_loc; using the ${inlineMode ? 'inline' : 'team'} default`
 }
 log(`run budget: ${Math.round(runBudget / 1000)}k output tokens (${runBudgetNote})`)

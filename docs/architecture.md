@@ -245,7 +245,7 @@ check in `test-static.sh` asserts nothing else does. Every `treeAgent` call and 
 direct `agent()`-style call (`setup`, `branch`, `branch:existing`, `collapseDuplicates`'s
 `review:dedup`) goes through it. Before Triage has sized the work, `runBudget` is `null`
 and `dispatch()` never refuses; right after Triage, it is set to `100_000 + 1_500 *
-estimated_loc` output tokens, clamped `150_000..800_000`, or a flat `150_000`/`400_000`
+estimated_loc` output tokens, clamped `300_000..1_000_000`, or a flat `300_000`/`600_000`
 default by scope when triage gave no estimate, and `args.runBudget` overrides either.
 From there, `dispatch()` refuses any call once `budget.spent()` has reached it.
 
