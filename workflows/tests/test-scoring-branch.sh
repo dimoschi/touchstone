@@ -534,7 +534,40 @@ async function scenarioBG() {
   check('it is never doubled', p.includes('origin/origin/'), false)
 }
 
-const SCENARIOS = [scenarioAD, scenarioAE, scenarioAF, scenarioAG, scenarioAH, scenarioAI, scenarioAJ, scenarioAK, scenarioAL, scenarioAM, scenarioAN, scenarioAS, scenarioAT, scenarioAU, scenarioAV, scenarioAW, scenarioAX, scenarioAY, scenarioAO, scenarioAP, scenarioAQ, scenarioAR, scenarioBB, scenarioBC, scenarioBD, scenarioBE, scenarioBF, scenarioBG]
+// Scenario BH -- #125: an edit landing in the main checkout instead of the
+// worktree. The implementer, checks:fix and fix:1 prompts must each carry
+// the worktree's own path next to the native-tools sentence, not just the
+// generic "use your native tools" line every prompt already had.
+async function scenarioBH() {
+  console.log('\n== scenario BH: the implementer, checks:fix and fix:1 prompts all name the worktree next to the native-tools sentence')
+  const { captured } = await run({
+    args: { maxReviewRounds: 1 },
+    discovery: { file: '/repo/AGENTS.md',
+      sections: [{ heading: '## Checks', fence: 'bash scripts/run-tests.sh' }], detail: 'stub' },
+    checkRuns: (attempt) => attempt === 1
+      ? { results: [checkRow('check:1', 'bash scripts/run-tests.sh', 0, 'ok')], dirty: false }
+      : attempt === 2
+      ? { results: [checkRow('check:1', 'bash scripts/run-tests.sh', 1, 'red')], dirty: false }
+      : { results: [checkRow('check:1', 'bash scripts/run-tests.sh', 0, 'ok')], dirty: false },
+    checksFixResult: { head_sha: 'checksfix00000000000000000000000000000003',
+      note: 'fixed', scored: true },
+    initialReview: {
+      correctness: [{ title: 'Unrelated leak', file: 'src/pool.js',
+        claim: 'connection is never released', evidence: 'pool.js:40' }],
+      advocate: [],
+    },
+    verify: () => false,
+    staleness: () => [],
+  })
+  for (const label of ['implementer', 'checks:fix', 'fix:1']) {
+    const p = captured.calls.find(c => c.label === label)?.prompt ?? ''
+    check(`${label}: names the worktree next to the native-tools sentence`,
+      p.includes(`with grep, sed, or cat. Every Read, Grep and Edit path starts with ${STUB_WT_PATH}/, apart from the scratch path under the git directory given above.`),
+      true)
+  }
+}
+
+const SCENARIOS = [scenarioAD, scenarioAE, scenarioAF, scenarioAG, scenarioAH, scenarioAI, scenarioAJ, scenarioAK, scenarioAL, scenarioAM, scenarioAN, scenarioAS, scenarioAT, scenarioAU, scenarioAV, scenarioAW, scenarioAX, scenarioAY, scenarioAO, scenarioAP, scenarioAQ, scenarioAR, scenarioBB, scenarioBC, scenarioBD, scenarioBE, scenarioBF, scenarioBG, scenarioBH]
 JS_EOF
 
 finish

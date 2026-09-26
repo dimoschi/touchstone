@@ -20,6 +20,7 @@ HOOKS = {
     "gate-pipe": "gate-pipe-gate.py",
     "contributing": "contributing-gate.py",
     "generated-file": "generated-file-gate.py",
+    "worktree-edit": "worktree-edit-gate.py",
     "guide-read": "copilot_session_evidence.py",
     "comment-policy": "comment-policy-gate.py",
 }

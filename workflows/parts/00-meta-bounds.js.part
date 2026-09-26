@@ -29,7 +29,7 @@ export const meta = {
 // against the manifest in scripts/check-version-bump.sh, so drift is a
 // gate's job rather than something this script verifies about itself.
 const PLUGIN_NAME = 'touchstone'
-const PIPELINE_VERSION = '0.24.4'
+const PIPELINE_VERSION = '0.25.0'
 
 // Boundaries. Wall-clock deadlines are not expressible here (no Date.now, by
 // design); the bounds are rounds, counts, and token budget instead.
@@ -126,11 +126,16 @@ const brief = (s) => {
 // Shared by every prompt that reads or edits code (implement, checks:fix,
 // fix, reviewOf): a phase reaching for grep/sed/cat to read a file, or Bash
 // generally to search one, is the one habit worth naming once rather than
-// repeating per prompt.
-const NATIVE_TOOLS =
+// repeating per prompt. Takes the worktree path as a parameter (every call
+// site already has wt.path in scope) rather than leaving it implicit, so the
+// same sentence that names the native tools also says where every one of
+// those paths has to start.
+const NATIVE_TOOLS = (worktreePath) =>
   `Use your native Read, Grep and Edit tools to read, search and edit files; ` +
   `Bash is for running things (tests, gates, git), never for reading code ` +
-  `with grep, sed, or cat.`
+  `with grep, sed, or cat. Every Read, Grep and Edit path starts with ` +
+  `${worktreePath}/, apart from the scratch path under the git directory ` +
+  `given above.`
 
 // Shared by every prompt that commits code (implement, checks:fix, fix):
 // worded generically, since these prompts ship to other repos, not just

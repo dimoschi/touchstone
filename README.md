@@ -154,7 +154,7 @@ commands/deliver.md              /touchstone:deliver — parses flags, refuses w
 workflows/deliver-pipeline.js    the nine-phase orchestration
 agents/planner.md                plan-only subagent, has no Edit or Write tool
 skills/crap-controlled-changes/  the gates, their language modules, and their docs
-hooks/                           seven policy gates, with a manifest per host
+hooks/                           eight policy gates, with a manifest per host
 ```
 
 ### The phases
@@ -178,13 +178,14 @@ Four apply only to repos you opted in:
 - `contributing-gate.py` — refuses the first edit until the repo's `CONTRIBUTING.md` has actually been Read this session. A repo shipping no guide is never gated.
 - `comment-policy-gate.py` — flags a newly added comment that matches a rule in the repo's own `.comment-gated` (one regex per line, blank and `#` lines ignored; a rule that itself must start with a literal `#`, such as `#\d+`, needs `\#\d+` instead, or the line reads as a marker comment and is dropped). The plugin ships no default rule, so an absent, empty, or comment-only marker flags nothing. Comment detection is prefix-based per file extension, not a parser: it never sees a block comment or a trailing (same-line) comment, and does not report a line number. It also flags a string literal, heredoc, or docstring line whose first non-space character happens to be the comment prefix, since it cannot tell that apart from a real comment: not a blind spot, the opposite of one.
 
-Three apply everywhere, because each fires only on its own evidence:
+Four apply everywhere, because each fires only on its own evidence:
 
 - `base-branch-commit-gate.py` — refuses a commit on `main`/`master`/etc. Exempts a repo with no remote, since that work cannot reach anyone yet.
 - `gate-pipe-gate.py` — refuses piping a gate anywhere. `$?` after a pipeline is the *last* command's status, so `mutation-check.sh | tail` reports tail's exit 0 however the gate ended, turning a red gate into a reported pass.
 - `generated-file-gate.py` — refuses hand-editing a file whose own header says `@generated` or `DO NOT EDIT`. The marker is the file's consent, so this needs no repo opt-in.
+- `worktree-edit-gate.py` — refuses an `Edit`/`Write`/`MultiEdit` landing in the main checkout while a ticket worktree is active for the acting agent, read off that agent's own transcript rather than a marker it could write itself. Does not cover a Bash command that writes a file (a redirect, `sed -i`, a script): recovering a shell command's write target from its text is out of reach for the same reason `base_branch.shell_tokens` stops short of it.
 
-The same seven run on Claude Code and on Copilot. Each host gets its own manifest
+The same eight run on Claude Code and on Copilot. Each host gets its own manifest
 (`hooks/hooks.json`, `hooks/copilot-hooks.json`) over one set of scripts, because the
 hosts disagree about how a hook is invoked and how it reports a refusal. Copilot
 additionally carries a `PostToolUse` hook on `Read`, which is how `contributing-gate.py`

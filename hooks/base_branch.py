@@ -127,6 +127,16 @@ def base_branch_names(repo):
     return names
 
 
+def git_common_dir(repo):
+    """Absolute path to the repo's shared git directory (`--git-common-dir`).
+
+    Distinct from `repo_common_root`, which is this path's parent: a caller
+    that needs to recognise the git directory itself (ledgers, worktree
+    bookkeeping) rather than the root above it wants this one.
+    """
+    return git(repo, 'rev-parse', '--path-format=absolute', '--git-common-dir')
+
+
 def repo_common_root(repo):
     """Repo root shared by all worktrees, resolved via --git-common-dir.
 
@@ -137,7 +147,7 @@ def repo_common_root(repo):
     `.comment-gated` is the exception: see `worktree_root` for why it needs
     its own resolver instead of this one.
     """
-    gcd = git(repo, 'rev-parse', '--path-format=absolute', '--git-common-dir')
+    gcd = git_common_dir(repo)
     return Path(gcd).parent if gcd else None
 
 

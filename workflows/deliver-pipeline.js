@@ -29,7 +29,7 @@ export const meta = {
 // against the manifest in scripts/check-version-bump.sh, so drift is a
 // gate's job rather than something this script verifies about itself.
 const PLUGIN_NAME = 'touchstone'
-const PIPELINE_VERSION = '0.24.4'
+const PIPELINE_VERSION = '0.25.0'
 
 // Boundaries. Wall-clock deadlines are not expressible here (no Date.now, by
 // design); the bounds are rounds, counts, and token budget instead.
@@ -126,11 +126,16 @@ const brief = (s) => {
 // Shared by every prompt that reads or edits code (implement, checks:fix,
 // fix, reviewOf): a phase reaching for grep/sed/cat to read a file, or Bash
 // generally to search one, is the one habit worth naming once rather than
-// repeating per prompt.
-const NATIVE_TOOLS =
+// repeating per prompt. Takes the worktree path as a parameter (every call
+// site already has wt.path in scope) rather than leaving it implicit, so the
+// same sentence that names the native tools also says where every one of
+// those paths has to start.
+const NATIVE_TOOLS = (worktreePath) =>
   `Use your native Read, Grep and Edit tools to read, search and edit files; ` +
   `Bash is for running things (tests, gates, git), never for reading code ` +
-  `with grep, sed, or cat.`
+  `with grep, sed, or cat. Every Read, Grep and Edit path starts with ` +
+  `${worktreePath}/, apart from the scratch path under the git directory ` +
+  `given above.`
 
 // Shared by every prompt that commits code (implement, checks:fix, fix):
 // worded generically, since these prompts ship to other repos, not just
@@ -1990,7 +1995,7 @@ const blockingChecksOpen = () => checksBlocking && redChecks.length > 0
 const sImpl = stage('implement')
 const impl = await treeAgent(
   `Implement this task in the current repo.\n` +
-  `${NATIVE_TOOLS} ${GENERATED_FILES}\n` +
+  `${NATIVE_TOOLS(wt.path)} ${GENERATED_FILES}\n` +
   `Task: ${brief(task)}\nPlan: ${brief(plan.plan)}\n` +
   (plan.acceptance_criteria.length
     ? `Acceptance criteria:\n- ${plan.acceptance_criteria.join('\n- ')}\n`
@@ -2112,7 +2117,7 @@ if (blockingChecksOpen() && !sChecksPost.over()) {
     `do, and put the three options in note; leave head_sha as the ` +
     `unchanged HEAD if you made no commits before hitting it. Do not push ` +
     `or open a PR.\n` +
-    `${NATIVE_TOOLS} ${GENERATED_FILES}\n` +
+    `${NATIVE_TOOLS(wt.path)} ${GENERATED_FILES}\n` +
     `Task: ${brief(task)}\n` +
     redChecks.map(renderCheck).join('\n\n') + `\n` +
     `Return head_sha: the full 40-character SHA of HEAD after your last ` +
@@ -2536,7 +2541,7 @@ const reviewOf = async (range, tag, picked, known = [], knownCharge = '') => {
   const out = await parallel(picked.map((lens) => () =>
     treeAgent(
       `${lens.charge}\n` +
-      `${NATIVE_TOOLS}\n` +
+      `${NATIVE_TOOLS(wt.path)}\n` +
       (lens.needsTicket ? ticketSpec() : '') +
       decisionsSpec() +
       `Task: ${brief(task)}\n` +
@@ -3058,7 +3063,7 @@ while ((open.length || blockingChecksOpen()) && round < MAX_REVIEW_ROUNDS && !ou
     `to the user rather than picking one and editing the marker yourself. Set ` +
     `unsupported_language=true when you do, and put the three options in note. ` +
     `Do not push or open a PR.\n` +
-    `${NATIVE_TOOLS} ${GENERATED_FILES}\n` +
+    `${NATIVE_TOOLS(wt.path)} ${GENERATED_FILES}\n` +
     `Task: ${brief(task)}\n` +
     `Each finding names the place it was raised against. Work from there. ` +
     `Read git diff ${impl.commit_range} only when that place cannot tell you ` +
