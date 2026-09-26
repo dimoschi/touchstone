@@ -268,7 +268,7 @@ Triage scales reasoning effort to the difficulty it judges, which bounds the out
 share. It does not bound the context re-reads, which are the larger half.
 
 A run budget, derived from the same triage judgement (roughly 100k output tokens
-plus 1,500 per estimated line of change, clamped 150k-800k), refuses any further
+plus 1,500 per estimated line of change, clamped 300k-1M), refuses any further
 dispatch once the run has spent past it, so a ticket whose fix rounds run long
 still stops rather than compounding. `args.runBudget` overrides the derived
 figure. Review also measures the actual diff before choosing reviewer lenses,
