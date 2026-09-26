@@ -37,9 +37,9 @@ After the CRAP table, the helper also runs `gocognit -over <cognitive-complexity
 
 Apply the Decision Policy in `SKILL.md` to the output.
 
-### If `go test ./...` can't pass locally
+### If the changed packages' tests can't pass locally
 
-Coverage comes from `go test ./...` by default, run by the helper rather than by go-crap. In a monorepo where the default package set includes integration suites that need a live service (Postgres, RabbitMQ, and the like), that command fails everywhere, every time, regardless of your change, and there is no trustworthy coverage to score.
+Coverage comes from `go test` on the changed files' packages by default, run by the helper rather than by go-crap. Only those packages are tested: without `-coverpkg`, a package's coverage comes from its own tests alone, so no other package can move a changed function's score. If a changed package's own tests need a live service (Postgres, RabbitMQ, and the like), that command fails everywhere, every time, regardless of your change, and there is no trustworthy coverage to score.
 
 `crap-check-go.sh` treats this as a hard failure, not a silent pass: it exits non-zero and prints the run's stdout/stderr so you can see why. It fails on the coverage command's exit status, not just on an empty profile, because a partly failing suite still writes a profile for the packages that passed and scoring against that would be a false pass. This is also why go-crap is never allowed to run the tests itself: its own run reports every function at 0% coverage when it collects none, prints nothing, and exits 0. Override the test command with `CRAP_GO_TEST_COMMAND` to scope it to packages that can actually run:
 
@@ -48,7 +48,9 @@ CRAP_GO_TEST_COMMAND='go test ./internal/...' \
   crap-check.sh
 ```
 
-Pick a package set that covers the function you changed and excludes anything requiring infrastructure you don't have locally.
+Pick a package set that covers the function you changed and excludes anything requiring infrastructure you don't have locally. `{packages}` in the override is replaced with the changed packages, so a wrapper can keep the narrow default: `CRAP_GO_TEST_COMMAND='some-runner go test {packages}'`.
+
+The HEAD baseline is cached under the git common dir (`crap-check-baseline/`), keyed on HEAD, the changed files, the test command, the go-crap and Go versions, the Go build environment and the gate's own scripts, so a retry against the same HEAD runs the suite once, not twice. The key cannot see services the tests reach: a database that was down when the baseline ran made its tests skip, and the cached rows keep that. After fixing one, run once with `CRAP_BASELINE_CACHE=0`.
 
 ### If the baseline fails to build but HEAD is fine
 
