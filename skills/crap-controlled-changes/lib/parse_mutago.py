@@ -128,7 +128,7 @@ def _split_exempt(doc, prefix, allowed):
     kept, exempt = [], []
     for disk_path, line, m in rows:
         if in_span(spans.get(disk_path), line):
-            loc = f"{disk_path}:{m.get('line', '?')}"
+            loc = f"{disk_path}:{line}"
             exempt.append(f"{loc:<42} {m.get('mutator', '?')}")
             continue
         kept.append((disk_path, m))
