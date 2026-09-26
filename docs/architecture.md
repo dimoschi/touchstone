@@ -210,8 +210,8 @@ The run record (`.claude/touchstone-runs/<ticket>.json`) used to be written by a
 dedicated `run-record` dispatch on every exit path. The script has no filesystem
 access, so all it can do is name where the file belongs (`record_file`, sanitizing the
 ticket arg to a safe basename) and hand back the full payload; the invoking session
-(`commands/deliver.md`) writes it, the same session that already appends `run_id` and
-`recorded_on` afterwards.
+(`commands/deliver.md`) writes it, the same session that already appends `run_id`,
+`models` and `recorded_on` afterwards.
 
 Two invariants the script exists to hold:
 

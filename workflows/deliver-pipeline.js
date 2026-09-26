@@ -29,7 +29,7 @@ export const meta = {
 // against the manifest in scripts/check-version-bump.sh, so drift is a
 // gate's job rather than something this script verifies about itself.
 const PLUGIN_NAME = 'touchstone'
-const PIPELINE_VERSION = '0.24.0'
+const PIPELINE_VERSION = '0.24.1'
 
 // Boundaries. Wall-clock deadlines are not expressible here (no Date.now, by
 // design); the bounds are rounds, counts, and token budget instead.
@@ -71,7 +71,8 @@ if (!ticketMarker) {
 // ticket is what a human looks the run up by. The script no longer writes this
 // file itself (that agent dispatch cost a full round trip for a mkdir and a
 // heredoc); it names the path and hands the payload back, and the invoking
-// session writes it, the same session that already appends run_id afterwards.
+// session writes it, the same session that already appends run_id and models
+// afterwards.
 const runRecordFile = `.claude/touchstone-runs/${String(ticket).replace(/[^A-Za-z0-9_-]/g, '-')}.json`
 // Phase recording goes to agent-eval, a separate optional tool. Default on so a
 // machine that has it keeps its ground truth without opting in every run; the
