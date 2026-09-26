@@ -202,7 +202,7 @@ something the repo's team asked for.
 
 ### Record what happened, before you report it
 
-**Only if [agent-eval](https://github.com/dimoschi/agent-eval) is installed.** It is
+**Only if `agent-eval` is installed.** It is
 an optional companion that stores session outcomes so quality metrics have ground
 truth. If `agent-eval` is not on PATH, skip this whole section: report the run and
 stop. Nothing here affects the work, and the workflow does not depend on it.
