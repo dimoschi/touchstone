@@ -55,7 +55,7 @@ check "the 'left as a draft' wording appears only in prNote" \
 check "no text claims the work cannot open a PR, which the draft already did" \
   "$(grep -Fc 'cannot open a PR' "$SCRIPT" || true)" 0
 check "every note that reports the PR's fate reads the helper" \
-  "$(grep -Fc '${prNote()}' "$SCRIPT" || true)" 5
+  "$(grep -Fc '${prNote()}' "$SCRIPT" || true)" 6
 
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
@@ -106,41 +106,53 @@ function makeAgent(scenario, captured) {
     if (Object.prototype.hasOwnProperty.call(responses, label)) {
       return responses[label]
     }
-    if (label === 'ticket') {
-      return { found: true, summary: 'stub ticket', description: 'd', comments: '' }
+    // Replaces the old separate ticket/plugin:version/gate:opt-in dispatches
+    // (gh-118): one call, before any worktree exists, answers all three.
+    if (label === 'setup') {
+      return {
+        ticket: { found: true, summary: 'stub ticket', description: 'd', comments: '' },
+        version: scenario.versionProbe ?? { found: false, name: '', version: '', detail: 'stub' },
+        markers: { crap_gated: true, mutation_gated: true, detail: 'stub' },
+      }
     }
     if (label === 'branch') {
       return { created: true, branch: 'feat/gh-9-stub', base: 'main',
-        path: '/tmp/stub-worktree', ticket: '9', detail: 'stub' }
-    }
-    if (label === 'plugin:version') {
-      return scenario.versionProbe ?? { found: false, name: '', version: '', detail: 'stub' }
+        path: '/tmp/stub-worktree', ticket: '9', detail: 'stub',
+        checks_source: { file: '', sections: [], detail: 'stub: no repo checks' } }
     }
     if (label === 'triage') {
-      return { scope: 'inline', complexity: 'trivial', complexity_note: 'stub',
+      return { scope: 'inline', complexity: 'trivial', expected_files: [], complexity_note: 'stub',
         premise_ok: true, estimated_loc: 5, evidence: [], premise_note: 'stub' }
-    }
-    if (label === 'gate:opt-in') {
-      return { crap_gated: true, mutation_gated: true, detail: 'stub' }
-    }
-    if (label === 'checks:discover') {
-      return { file: '', sections: [], detail: 'stub: no repo checks' }
     }
     if (label === 'implementer') {
       return scenario.implementer
     }
-    if (label === 'draft-pr') {
+    // draft-pr and size (gh-118): the diffstat probe and its one retry. Every
+    // scenario here defaults args.reviewers to 0, but the diffstat still has
+    // to measure cleanly first -- lensKeysFor only decides how many of its
+    // lenses survive the args.reviewers slice, not whether sizing runs at
+    // all -- so a scenario overriding draftPr's other fields still needs a
+    // diffstat, read straight out of this call's own prompt so it always
+    // names whatever range the script actually asked about.
+    if (label === 'draft-pr' || label === 'size') {
+      const range = (/TOUCHSTONE_DIFFSTAT ([^\n;]+);/.exec(prompt) ?? [])[1]?.trim() ?? ''
+      // Two files, 100 added each: past ONE_LENS_LOC but under BIG_LOC, so
+      // lensKeysFor gives two lenses by default -- the same shape scenarioFixHalts
+      // needs before args.reviewers:1 slices it down to one. A single small
+      // file here would trip the files<=1/totalChurn trivial case and leave
+      // reviewerCount at 0 regardless of args.reviewers.
+      const goodDiffstat = `TOUCHSTONE_DIFFSTAT ${range}\n100\t0\ta.js\n100\t0\tb.js\n` +
+        `TOUCHSTONE_COMMENT_LINES\nTOUCHSTONE_DIFFSTAT_END`
+      if (label === 'size') return { diffstat: goodDiffstat }
       captured.draftPrCalled = true
       // Default has no number, so draftPr stays null and prNote() reports that
       // nothing was opened. A scenario that wants a draft must say so.
-      return scenario.draftPr ?? { opened: false, detail: 'should not be reached' }
+      return { diffstat: goodDiffstat,
+        ...(scenario.draftPr ?? { opened: false, detail: 'should not be reached' }) }
     }
     if (label.startsWith('halt-notice:')) {
       captured.haltAt = label.slice('halt-notice:'.length)
       return true
-    }
-    if (label === 'run-record') {
-      return '/stub/main/.claude/touchstone-runs/9.json'
     }
     if (label.startsWith('fix:')) { captured.fixCalled = true; throw new Error('Fix must not run') }
     if (label.startsWith('mutation:')) { captured.mutationCalled = true; throw new Error('Mutation must not run') }
@@ -152,6 +164,9 @@ function makeAgent(scenario, captured) {
     if (label === 'reproduce:review') {
       const ids = [...prompt.matchAll(/\[(f\d+)\]/g)].map(m => m[1])
       return { results: ids.map(id => ({ id, exit_code: 1, output: 'stub: still reproduces\nTOUCHSTONE_DEFECT_REPRODUCED' })), dirty: false }
+    }
+    if (['ticket', 'plugin:version', 'gate:opt-in', 'checks:discover', 'run-record'].includes(label)) {
+      throw new Error(`agent '${label}' should no longer be dispatched (folded into setup/branch, or dropped)`)
     }
     throw new Error(`unstubbed agent label in test scenario: ${label}`)
   }

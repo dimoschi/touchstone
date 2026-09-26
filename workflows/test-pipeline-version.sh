@@ -4,19 +4,24 @@
 # and PIPELINE_VERSION are literals (the script has no fs to read
 # .claude-plugin/plugin.json at runtime), checked against the manifest by
 # scripts/check-version-bump.sh (scripts/test-version-bump.sh covers that
-# half). This file covers the runtime half: the plugin:version probe resolves
-# the repository's actual base branch itself, never wt.base (which becomes the
-# branch under review on a stacked run), fetches that base fresh, then reads
-# its manifest once before Triage, and every exit path -- a halt at Worktree
-# before the probe has even run, a halt at any later phase, and normal
-# completion -- carries a `pipeline_version` object reporting what it found.
+# half). This file covers the runtime half: the version half of the merged
+# setup call (gh-118 folded the old standalone plugin:version probe into it)
+# resolves the repository's actual base branch itself, never wt.base or
+# baseOverride (both undefined at that point anyway, since setup runs before
+# any worktree exists), fetches that base fresh, then reads its manifest
+# once before Worktree, and every exit path -- a halt at Worktree, a halt at
+# any later phase, and normal completion -- carries a `pipeline_version`
+# object reporting what it found.
 #
 # Checked:
-#   1. Static: the two literals and the MANIFEST_PROBE schema exist, and both
-#      the halt payload and the final result carry pipeline_version.
+#   1. Static: the two literals and the MANIFEST_PROBE schema exist, the
+#      merged setup call is labelled setup and embeds MANIFEST_PROBE as its
+#      version sub-object, and both the halt payload and the final result
+#      carry pipeline_version.
 #   2. Dynamic, against the real script under stubbed globals: a halt at
-#      Worktree, before the probe runs at all, still carries `executed` with
-#      the other two fields null.
+#      Worktree still carries `executed` with the other two fields null (the
+#      default stub's found:false), even though setup -- and so the version
+#      half -- already ran before Worktree, unlike before gh-118.
 #   3. Dynamic: a probe reporting this plugin's name with a different version
 #      sets mismatch=true, base_branch to that version, logs a line naming
 #      both versions, and the run reaches PR rather than halting.
@@ -30,9 +35,9 @@
 #      mismatch=null, but logs a line saying the probe did not respond, so
 #      that silent non-comparison is never indistinguishable from the
 #      ordinary one in check 5.
-#   7. Static: the probe resolves and fetches the repository's base branch
-#      itself rather than trusting wt.base directly, so a stacked run's own
-#      unmerged base is never read back as the comparison target.
+#   7. Static: the setup prompt resolves and fetches the repository's base
+#      branch itself rather than trusting wt.base or baseOverride, neither of
+#      which exists yet at this point in the run.
 #   8. Static: a failed fetch is not by itself instructed to read as a missing
 #      manifest -- the probe is told to attempt the read regardless, since
 #      origin/<base> can already be populated from an earlier fetch or the
@@ -64,26 +69,28 @@ check "PIPELINE_VERSION literal, single-quoted" \
   "$(grep -Ec "^const PIPELINE_VERSION = '[^']*'$" "$SCRIPT" || true)" 1
 check "MANIFEST_PROBE schema declared" \
   "$(grep -Fc 'const MANIFEST_PROBE = {' "$SCRIPT" || true)" 1
-check "the probe is labelled plugin:version" \
-  "$(grep -Fc "label: 'plugin:version'" "$SCRIPT" || true)" 1
+check "the version probe is folded into the merged setup call" \
+  "$(grep -Fc "label: 'setup'" "$SCRIPT" || true)" 1
+check "SETUP embeds MANIFEST_PROBE as its version sub-object" \
+  "$(grep -Fc 'version: MANIFEST_PROBE' "$SCRIPT" || true)" 1
 
 echo "== static: pipeline_version reaches both a halt and the final result"
 check "pipeline_version: pipelineVersion appears in halted()'s payload and the final result" \
   "$(grep -Fc 'pipeline_version: pipelineVersion' "$SCRIPT" || true)" 2
 
-echo "== static: the probe resolves its own base rather than trusting wt.base"
-PROBE_BLOCK="$(awk '/const versionProbe = await treeAgent/,/label: .plugin:version./' "$SCRIPT")"
-check "the probe prompt literal never interpolates wt.base" \
+echo "== static: the setup call resolves its own base rather than trusting wt.base or baseOverride"
+PROBE_BLOCK="$(awk '/const setupResult = await dispatch/,/label: .setup./' "$SCRIPT")"
+check "the setup prompt never interpolates wt.base" \
   "$(printf '%s' "$PROBE_BLOCK" | grep -Fc 'wt.base' || true)" 0
-check "the probe opts out of the envelope's base line" \
-  "$(printf '%s' "$PROBE_BLOCK" | grep -Fc 'omitBase: true' || true)" 1
-check "the probe resolves the base itself off the remote HEAD" \
+check "the setup prompt never interpolates baseOverride" \
+  "$(printf '%s' "$PROBE_BLOCK" | grep -Fc 'baseOverride' || true)" 0
+check "the version half resolves the base itself off the remote HEAD" \
   "$(printf '%s' "$PROBE_BLOCK" | grep -Fc 'symbolic-ref' || true)" 1
-check "the probe fetches the resolved base before reading it" \
+check "the version half fetches the resolved base before reading it" \
   "$(printf '%s' "$PROBE_BLOCK" | grep -Fc 'fetch origin' || true)" 1
 check "a failed fetch is not listed as its own found=false cause" \
   "$(printf '%s' "$PROBE_BLOCK" | grep -Fc 'the fetch fails,' || true)" 0
-check "the probe is told to read the manifest even when the fetch fails" \
+check "the version half is told to read the manifest even when the fetch fails" \
   "$(printf '%s' "$PROBE_BLOCK" | grep -Fc 'read it anyway' || true)" 1
 
 WORK="$(mktemp -d)"
@@ -125,6 +132,13 @@ function baseArgs(overrides) {
   }
 }
 
+// The default diffstat every scenario here gets unless it overrides one:
+// small enough that lensKeysFor would pick a lens, irrelevant since
+// args.reviewers: 0 always slices the lens list to nothing, but it still has
+// to parse cleanly or Review halts on a measurement problem before any of
+// these scenarios reach Draft PR/PR at all.
+const DEFAULT_DIFFSTAT_BODY = '5\t0\ta.js\nTOUCHSTONE_COMMENT_LINES\nTOUCHSTONE_DIFFSTAT_END'
+
 function makeAgent(scenario, captured) {
   const responses = scenario.responses ?? {}
   return async (prompt, opts) => {
@@ -134,43 +148,45 @@ function makeAgent(scenario, captured) {
     if (Object.prototype.hasOwnProperty.call(responses, label)) {
       return responses[label]
     }
-    if (label === 'ticket') {
-      return { found: true, summary: 'stub ticket', description: 'd', comments: '' }
-    }
-    if (label === 'branch') {
-      return scenario.branchResult ??
-        { created: true, branch: 'feat/gh-101-stub', base: 'main',
-          path: '/stub-worktree', ticket: '101', detail: 'stub' }
-    }
-    if (label === 'plugin:version') {
+    // Replaces the old separate ticket/plugin:version/gate:opt-in dispatches
+    // (gh-118): one call, before any worktree exists, answers all three.
+    if (label === 'setup') {
       captured.versionProbeCalled = true
       // ?? would replace an explicit `versionProbe: null` (the "probe
       // returned nothing" scenario) with this default, indistinguishable
       // from never overriding it at all: check the key itself, not its value.
-      return Object.prototype.hasOwnProperty.call(scenario, 'versionProbe')
+      const version = Object.prototype.hasOwnProperty.call(scenario, 'versionProbe')
         ? scenario.versionProbe
         : { found: false, name: '', version: '', detail: 'stub' }
+      return {
+        ticket: { found: true, summary: 'stub ticket', description: 'd', comments: '' },
+        version,
+        markers: { crap_gated: true, mutation_gated: true, detail: 'stub' },
+      }
+    }
+    if (label === 'branch') {
+      return scenario.branchResult ??
+        { created: true, branch: 'feat/gh-101-stub', base: 'main',
+          path: '/stub-worktree', ticket: '101', detail: 'stub',
+          checks_source: { file: '', sections: [], detail: 'stub: no repo checks' } }
     }
     if (label === 'triage') {
       return scenario.triage ??
-        { scope: 'inline', complexity: 'trivial', complexity_note: 'stub',
+        { scope: 'inline', complexity: 'trivial', expected_files: [], complexity_note: 'stub',
           premise_ok: true, estimated_loc: 5, evidence: [], premise_note: 'stub' }
-    }
-    if (label === 'gate:opt-in') {
-      return { crap_gated: true, mutation_gated: true, detail: 'stub' }
-    }
-    if (label === 'checks:discover') {
-      return { file: '', sections: [], detail: 'stub: no repo checks' }
     }
     if (label === 'implementer') {
       return scenario.implementer ??
         { summary: 'implemented the feature', files_changed: ['a.js'],
           commit_range: 'base00000000000000000000000000000000000000..impl0000000000000000000000000000000000000',
-          insertions: 5, scored: true }
+          scored: true }
     }
     if (label === 'draft-pr') {
       captured.draftPrCalled = true
-      return scenario.draftPr ?? { opened: true, url: 'https://example.test/pr/1', number: 1, detail: 'stub' }
+      const range = scenario.implementer?.commit_range ??
+        'base00000000000000000000000000000000000000..impl0000000000000000000000000000000000000'
+      return scenario.draftPr ?? { opened: true, url: 'https://example.test/pr/1', number: 1, detail: 'stub',
+        diffstat: `TOUCHSTONE_DIFFSTAT ${range}\n${DEFAULT_DIFFSTAT_BODY}` }
     }
     if (label.startsWith('mutation:')) {
       return scenario.mutationResult ??
@@ -181,12 +197,11 @@ function makeAgent(scenario, captured) {
       captured.prCalled = true
       return scenario.prResult ?? { opened: true, url: 'https://example.test/pr/1', note: 'stub' }
     }
-    if (label === 'run-record') {
-      captured.runRecordPrompt = prompt
-      return '/stub/main/.claude/touchstone-runs/101.json'
-    }
     if (label.startsWith('review:') || label.startsWith('fix:') || label.startsWith('verify:')) {
       throw new Error(`${label} must not run with reviewers: 0`)
+    }
+    if (['ticket', 'plugin:version', 'gate:opt-in', 'checks:discover', 'run-record'].includes(label)) {
+      throw new Error(`agent '${label}' should no longer be dispatched (folded into setup/branch, or dropped)`)
     }
     throw new Error(`unstubbed agent label in test scenario: ${label}`)
   }
@@ -216,19 +231,20 @@ async function run(scenario) {
 }
 
 async function scenarioWorktreeHaltCarriesExecuted() {
-  console.log('\n== scenario: a halt at Worktree, before the probe ever runs, still carries executed')
+  console.log('\n== scenario: a halt at Worktree still carries executed, even though setup (and the version half) already ran')
   const { result, captured } = await run({
     branchResult: { created: false, branch: '', base: '', path: '', detail: 'no base branch found' },
   })
   check('halted at Worktree', result.halted_at, 'Worktree')
-  check('the probe never ran', captured.versionProbeCalled, false)
+  // Unlike before gh-118: setup runs before Worktree, so it has already run
+  // by the time a branch-creation failure halts here.
+  check('setup (and so the version half) already ran', captured.versionProbeCalled, true)
   check('executed is the script\'s own literal', result.pipeline_version?.executed, SCRIPT_PIPELINE_VERSION)
   check('base_branch is null', result.pipeline_version?.base_branch, null)
   check('mismatch is null', result.pipeline_version?.mismatch, null)
-  // recordRun() is handed the same payload halted() built, so proving it
-  // reached the run-record prompt is proving it reached the written record.
-  check('the run record carries pipeline_version',
-    captured.runRecordPrompt?.includes('"pipeline_version"'), true)
+  // The script no longer writes its own record; it only names where one
+  // belongs, on every exit path including this halt.
+  check('a record_file is still named even on a halt', typeof result.record_file, 'string')
 }
 
 async function scenarioDefaultProbeCompletesNormally() {
@@ -301,18 +317,17 @@ async function scenarioNoManifestFoundIsNull() {
     captured.logs.some(m => /no comparable manifest/i.test(m)), true)
 }
 
-// Asserts the prompt the runtime actually receives, envelope included. The
-// static grep above can only see the prompt literal, so it stays green while
-// treeAgent's own envelope hands the probe the very ref it must not read.
+// Asserts the prompt the runtime actually receives. The static grep above
+// can only see the prompt literal, so it stays green while a future change
+// hands the setup call a stacked base some other way.
 async function scenarioProbeNeverSeesTheStackedBase() {
-  console.log('\n== scenario: the composed probe prompt never carries the stacked base')
+  console.log('\n== scenario: the composed setup prompt never carries a stacked base')
   const stacked = 'feat/gh-100-a-stacked-branch'
   const { captured } = await run({
-    branchResult: { created: true, branch: 'feat/gh-101-stub', base: stacked,
-                    path: '/stub-worktree', ticket: '101', detail: 'stub' },
+    args: { base: stacked },
   })
-  const probe = captured.calls.find(c => c.label === 'plugin:version')?.prompt ?? ''
-  check('the probe was prompted at all', probe.length > 0, true)
+  const probe = captured.calls.find(c => c.label === 'setup')?.prompt ?? ''
+  check('the setup call was prompted at all', probe.length > 0, true)
   check('the composed prompt never names the stacked base', probe.includes(stacked), false)
 }
 
