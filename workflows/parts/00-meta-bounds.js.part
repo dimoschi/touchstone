@@ -104,12 +104,15 @@ const INLINE_LOC = args?.inlineLoc ?? 10
 // support-ratio halt does not apply at all -- a change that is mostly tests
 // by design must not halt on that alone -- and MAX_SUPPORT_RATIO is the
 // limit past it; args.supportRatio raises the limit for a run that knows
-// its own ratio is intentional.
+// its own ratio is intentional. This repo's own last 20 merged commits ran
+// 1.0-14.4:1, and every one still at or above the code floor ran 1.2-7.6:1:
+// a real TDD change with tests routinely clears 3:1, so the limit sits at
+// 10 instead, above that observed range with headroom.
 const ONE_LENS_LOC = 150
 const BIG_LOC = 400
 const BIG_FILES = 5
 const RATIO_MIN_CODE = 20
-const MAX_SUPPORT_RATIO = 3
+const MAX_SUPPORT_RATIO = 10
 
 // Long briefs make agents thorough about the wrong things, and the task text is
 // re-sent to every agent in the pipeline. Clamp what gets forwarded.

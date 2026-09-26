@@ -104,12 +104,15 @@ const INLINE_LOC = args?.inlineLoc ?? 10
 // support-ratio halt does not apply at all -- a change that is mostly tests
 // by design must not halt on that alone -- and MAX_SUPPORT_RATIO is the
 // limit past it; args.supportRatio raises the limit for a run that knows
-// its own ratio is intentional.
+// its own ratio is intentional. This repo's own last 20 merged commits ran
+// 1.0-14.4:1, and every one still at or above the code floor ran 1.2-7.6:1:
+// a real TDD change with tests routinely clears 3:1, so the limit sits at
+// 10 instead, above that observed range with headroom.
 const ONE_LENS_LOC = 150
 const BIG_LOC = 400
 const BIG_FILES = 5
 const RATIO_MIN_CODE = 20
-const MAX_SUPPORT_RATIO = 3
+const MAX_SUPPORT_RATIO = 10
 
 // Long briefs make agents thorough about the wrong things, and the task text is
 // re-sent to every agent in the pipeline. Clamp what gets forwarded.
@@ -2105,14 +2108,16 @@ const DRAFT = {
 }
 // The exact command the diffstat probe runs, and its retry (below) rerun
 // verbatim: a numstat pass for added/removed per file, then an awk pass
-// counting, per file, added lines whose trimmed text opens a comment ("//",
-// "/*", "*", or "#", but never "#!", a shebang is code) -- sizeOf needs that
-// count per file, not one grand total, since only a code file's own comment
-// lines subtract from its own added count. Three markers bound the two
-// sections so parseDiffstat can tell a well-formed response from a
-// truncated or off-range one: the begin line names this exact range, the
-// middle line separates numstat from comment counts, and the end line is
-// the last thing printed.
+// counting, per file, added lines whose trimmed text opens a comment: "//"
+// or "/*" anywhere, a bare "*" only when it opens a block-comment
+// continuation or close ("* foo", "*/", not "*p = v", a Go/C pointer
+// write), and "#" unless it is "#!" (a shebang) or "#[" (a PHP 8 attribute,
+// e.g. #[ORM\Column]) -- sizeOf needs that count per file, not one grand
+// total, since only a code file's own comment lines subtract from its own
+// added count. Three markers bound the two sections so parseDiffstat can
+// tell a well-formed response from a truncated or off-range one: the begin
+// line names this exact range, the middle line separates numstat from
+// comment counts, and the end line is the last thing printed.
 const diffstatCommandFor = (range) =>
   `echo TOUCHSTONE_DIFFSTAT ${range}; ` +
   `git -C ${wt.path} diff --numstat --no-renames ${range}; ` +
@@ -2120,7 +2125,9 @@ const diffstatCommandFor = (range) =>
   `git -C ${wt.path} diff --unified=0 --no-color --no-renames ${range} | awk '` +
   `/^\\+\\+\\+ /{ f=$0; sub(/^\\+\\+\\+ (b\\/)?/, "", f); cur=f; next } ` +
   `/^\\+/{ if (cur=="") next; line=$0; sub(/^\\+/, "", line); t=line; ` +
-  `sub(/^[ \\t]+/, "", t); if (t ~ /^(\\/\\/|\\/\\*|\\*|#)/ && t !~ /^#!/) cnt[cur]++ } ` +
+  `sub(/^[ \\t]+/, "", t); if ((t ~ /^(\\/\\/|\\/\\*)/) || ` +
+  `(t ~ /^\\*($|[ \\t\\/])/) || (t ~ /^#/ && t !~ /^#!/ && ` +
+  `t !~ /^#\\[/)) cnt[cur]++ } ` +
   `END{ for (k in cnt) print cnt[k] "\\t" k }'; ` +
   `echo TOUCHSTONE_DIFFSTAT_END`
 
@@ -3514,10 +3521,15 @@ return result
   // was refused, not just the ones that reached their own close().
   if (runBudgetSpent) {
     const stillOpen = closeOpenStages()
+    // commands/deliver.md tells the invoking session to report the note
+    // verbatim, so the per-stage spend has to live in the note itself, not
+    // only in the stage_spend payload a plain report never surfaces.
+    const byStage = Object.entries(stageSpend)
+      .map(([name, spent]) => `${name} ${Math.round(spent / 1000)}k`).join(', ')
     return await halted(currentPhase, {
       note: `Run budget exhausted (${Math.round(runBudget / 1000)}k output ` +
         `tokens, ${runBudgetNote}). Spend at halt: ` +
-        `${Math.round(runBudgetSpent.spent / 1000)}k output tokens. The ` +
+        `${Math.round(runBudgetSpent.spent / 1000)}k output tokens (${byStage}). The ` +
         `'${runBudgetSpent.refused}' dispatch was refused before it could ` +
         `run` +
         (stillOpen.length

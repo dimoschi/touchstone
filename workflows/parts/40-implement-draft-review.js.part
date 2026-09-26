@@ -202,14 +202,16 @@ const DRAFT = {
 }
 // The exact command the diffstat probe runs, and its retry (below) rerun
 // verbatim: a numstat pass for added/removed per file, then an awk pass
-// counting, per file, added lines whose trimmed text opens a comment ("//",
-// "/*", "*", or "#", but never "#!", a shebang is code) -- sizeOf needs that
-// count per file, not one grand total, since only a code file's own comment
-// lines subtract from its own added count. Three markers bound the two
-// sections so parseDiffstat can tell a well-formed response from a
-// truncated or off-range one: the begin line names this exact range, the
-// middle line separates numstat from comment counts, and the end line is
-// the last thing printed.
+// counting, per file, added lines whose trimmed text opens a comment: "//"
+// or "/*" anywhere, a bare "*" only when it opens a block-comment
+// continuation or close ("* foo", "*/", not "*p = v", a Go/C pointer
+// write), and "#" unless it is "#!" (a shebang) or "#[" (a PHP 8 attribute,
+// e.g. #[ORM\Column]) -- sizeOf needs that count per file, not one grand
+// total, since only a code file's own comment lines subtract from its own
+// added count. Three markers bound the two sections so parseDiffstat can
+// tell a well-formed response from a truncated or off-range one: the begin
+// line names this exact range, the middle line separates numstat from
+// comment counts, and the end line is the last thing printed.
 const diffstatCommandFor = (range) =>
   `echo TOUCHSTONE_DIFFSTAT ${range}; ` +
   `git -C ${wt.path} diff --numstat --no-renames ${range}; ` +
@@ -217,7 +219,9 @@ const diffstatCommandFor = (range) =>
   `git -C ${wt.path} diff --unified=0 --no-color --no-renames ${range} | awk '` +
   `/^\\+\\+\\+ /{ f=$0; sub(/^\\+\\+\\+ (b\\/)?/, "", f); cur=f; next } ` +
   `/^\\+/{ if (cur=="") next; line=$0; sub(/^\\+/, "", line); t=line; ` +
-  `sub(/^[ \\t]+/, "", t); if (t ~ /^(\\/\\/|\\/\\*|\\*|#)/ && t !~ /^#!/) cnt[cur]++ } ` +
+  `sub(/^[ \\t]+/, "", t); if ((t ~ /^(\\/\\/|\\/\\*)/) || ` +
+  `(t ~ /^\\*($|[ \\t\\/])/) || (t ~ /^#/ && t !~ /^#!/ && ` +
+  `t !~ /^#\\[/)) cnt[cur]++ } ` +
   `END{ for (k in cnt) print cnt[k] "\\t" k }'; ` +
   `echo TOUCHSTONE_DIFFSTAT_END`
 

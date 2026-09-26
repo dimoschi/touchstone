@@ -324,10 +324,15 @@ return result
   // was refused, not just the ones that reached their own close().
   if (runBudgetSpent) {
     const stillOpen = closeOpenStages()
+    // commands/deliver.md tells the invoking session to report the note
+    // verbatim, so the per-stage spend has to live in the note itself, not
+    // only in the stage_spend payload a plain report never surfaces.
+    const byStage = Object.entries(stageSpend)
+      .map(([name, spent]) => `${name} ${Math.round(spent / 1000)}k`).join(', ')
     return await halted(currentPhase, {
       note: `Run budget exhausted (${Math.round(runBudget / 1000)}k output ` +
         `tokens, ${runBudgetNote}). Spend at halt: ` +
-        `${Math.round(runBudgetSpent.spent / 1000)}k output tokens. The ` +
+        `${Math.round(runBudgetSpent.spent / 1000)}k output tokens (${byStage}). The ` +
         `'${runBudgetSpent.refused}' dispatch was refused before it could ` +
         `run` +
         (stillOpen.length

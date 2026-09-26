@@ -5,6 +5,38 @@
 # test-fix-loop-join.sh; see harness.sh for the shared scenario runner.
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/harness.sh"
 
+# Real scratch repo for scenario SBW: a PHP 8 attribute and a Go pointer write,
+# neither of which is a comment in a language the gates support.
+COMMENT_REPO="$WORK/comment-heuristic"
+git init -q "$COMMENT_REPO"
+git -C "$COMMENT_REPO" config user.email test@example.com
+git -C "$COMMENT_REPO" config user.name test
+git -C "$COMMENT_REPO" config commit.gpgsign false
+printf 'x\n' > "$COMMENT_REPO/README"
+git -C "$COMMENT_REPO" add -A
+git -C "$COMMENT_REPO" commit -qm "initial"
+mkdir -p "$COMMENT_REPO/src"
+cat > "$COMMENT_REPO/src/Order.php" <<'PHP'
+<?php
+#[ORM\Entity]
+final class Order
+{
+    #[ORM\Id]
+    #[ORM\Column(type: 'integer')]
+    private int $id;
+}
+PHP
+cat > "$COMMENT_REPO/src/set.go" <<'GO'
+package src
+
+func Set(p *int, v int) {
+	*p = v
+}
+GO
+git -C "$COMMENT_REPO" add -A
+git -C "$COMMENT_REPO" commit -qm "add PHP attributes and a Go pointer write"
+export COMMENT_REPO
+
 run_js_scenarios <<'JS_EOF'
 // Scenario SBA -- the formula: 60_000 + 800 * estimated_loc, logged so a run
 // states what it derived and why.
@@ -99,6 +131,13 @@ async function scenarioSBF() {
   check('the open implement stage reached stage_spend', typeof result.stage_spend?.implement, 'number')
   check('the closed triage stage is still reported too', typeof result.stage_spend?.triage, 'number')
   check('the note lists the still-open stage', (result.note ?? '').includes('still in progress'), true)
+  // The note is what commands/deliver.md tells the invoking session to report
+  // verbatim; stage_spend sitting only in the payload leaves the per-stage
+  // spend invisible to whoever reads the note instead.
+  check('the note gives the closed triage stage\'s own spend',
+    new RegExp(`triage \\d+k`).test(result.note ?? ''), true)
+  check('the note gives the still-open implement stage\'s own spend',
+    new RegExp(`implement \\d+k`).test(result.note ?? ''), true)
 }
 
 // Scenario SBG -- gh-118: a budget refusal inside one of two lenses running
@@ -210,14 +249,14 @@ async function scenarioSBN() {
 async function scenarioSBO() {
   console.log('\n== scenario SBO: support code outweighing the actual change halts before any lens runs')
   const { result, captured } = await run({
-    diffstatFiles: [['a.js', 20, 0], ['tests/x.js', 100, 0]],
+    diffstatFiles: [['a.js', 20, 0], ['tests/x.js', 300, 0]],
   })
   check('halted at Review', result.halted_at, 'Review')
   check('no review lens ran', captured.calls.some(c => c.label.startsWith('review:')), false)
   check('the note carries the code count', (result.note ?? '').includes('20 code'), true)
-  check('the note carries the test count', (result.note ?? '').includes('100 test'), true)
-  check('the note carries the computed ratio', (result.note ?? '').includes('5.0:1'), true)
-  check('the note carries the limit', (result.note ?? '').includes('3:1 limit'), true)
+  check('the note carries the test count', (result.note ?? '').includes('300 test'), true)
+  check('the note carries the computed ratio', (result.note ?? '').includes('15.0:1'), true)
+  check('the note carries the limit', (result.note ?? '').includes('10:1 limit'), true)
   check('the note names the override', (result.note ?? '').includes('args.supportRatio'), true)
 }
 
@@ -237,8 +276,8 @@ async function scenarioSBP() {
 async function scenarioSBQ() {
   console.log('\n== scenario SBQ: args.supportRatio raises the ratio limit past what would otherwise halt')
   const { result } = await run({
-    args: { supportRatio: 10 },
-    diffstatFiles: [['a.js', 20, 0], ['tests/x.js', 100, 0]],
+    args: { supportRatio: 20 },
+    diffstatFiles: [['a.js', 20, 0], ['tests/x.js', 300, 0]],
   })
   check('the run does not halt', result.halted_at, undefined)
 }
@@ -326,9 +365,30 @@ async function scenarioSBV() {
   check('the run still reaches the PR phase', result.pr?.opened, true)
 }
 
+// Scenario SBW -- the probe's comment-line count against a real scratch repo:
+// a PHP 8 attribute and a Go pointer write are code, in languages the gates
+// support, and must not be counted as comments. Runs the probe's own command,
+// lifted from its draft-pr prompt, so this exercises the actual awk rather
+// than a JS reimplementation of it.
+async function scenarioSBW() {
+  console.log('\n== scenario SBW: a PHP attribute and a Go pointer write are not counted as comments')
+  const repo = process.env.COMMENT_REPO
+  const git = (...a) => execFileSync('git', ['-C', repo, ...a], { encoding: 'utf8' }).trim()
+  const realRange = `${git('rev-parse', 'HEAD~1')}..${git('rev-parse', 'HEAD')}`
+  const probe = await run({})
+  const draftPrompt = probe.captured.calls.find(c => c.label === 'draft-pr')?.prompt ?? ''
+  const at = draftPrompt.indexOf('echo TOUCHSTONE_DIFFSTAT ')
+  const cmd = draftPrompt.slice(at).split(COMMIT_RANGE).join(realRange)
+    .split('/tmp/stub-worktree').join(repo)
+  const real = execFileSync('bash', ['-c', cmd], { encoding: 'utf8' })
+    .split(realRange).join(COMMIT_RANGE)
+  const { result } = await run({ diffstat: real })
+  check('no comment lines are counted', result.size?.comment, 0)
+}
+
 const SCENARIOS = [scenarioSBA, scenarioSBB, scenarioSBC, scenarioSBD, scenarioSBE, scenarioSBF, scenarioSBG,
   scenarioSBH, scenarioSBI, scenarioSBJ, scenarioSBK, scenarioSBL, scenarioSBM, scenarioSBN, scenarioSBO,
-  scenarioSBP, scenarioSBQ, scenarioSBR, scenarioSBS, scenarioSBT, scenarioSBU, scenarioSBV]
+  scenarioSBP, scenarioSBQ, scenarioSBR, scenarioSBS, scenarioSBT, scenarioSBU, scenarioSBV, scenarioSBW]
 JS_EOF
 
 finish

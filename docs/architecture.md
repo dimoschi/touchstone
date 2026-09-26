@@ -403,8 +403,10 @@ is only reported under `checks.unmeasured`, the same as a red one is reported un
 The `draft-pr` call also runs a probe command (`diffstatCommandFor`): a `git diff
 --numstat` pass over `impl.commit_range` (after the pre-review checks fix, if one
 landed, folds into that range), then an `awk` pass over `git diff --unified=0` counting,
-per file, added lines whose trimmed text opens a comment (`//`, `/*`, `*`, or `#`, never
-`#!`). Three markers (`TOUCHSTONE_DIFFSTAT <range>`, `TOUCHSTONE_COMMENT_LINES`,
+per file, added lines whose trimmed text opens a comment: `//` or `/*` anywhere, a bare
+`*` only when it opens a block-comment continuation or close (`* foo`, `*/`, not a Go/C
+pointer write like `*p = v`), and `#` unless it is `#!` (a shebang) or `#[` (a PHP 8
+attribute, e.g. `#[ORM\Column]`). Three markers (`TOUCHSTONE_DIFFSTAT <range>`, `TOUCHSTONE_COMMENT_LINES`,
 `TOUCHSTONE_DIFFSTAT_END`) bound the response so `parseDiffstat` -- a pure function --
 can tell a well-formed one from a truncated or off-range one: the begin line has to name
 the exact range asked about, or the whole response counts as unmeasured, the same as a
@@ -425,11 +427,13 @@ them without updating either): no lenses when the diff is a single file under
 the result afterward, same as before.
 
 Before any lens runs, when `code >= RATIO_MIN_CODE` and `(test + doc + comment) / code`
-exceeds `MAX_SUPPORT_RATIO`, the run halts at Review: support code (tests, docs, and a
-code file's own comments) far outweighing the actual change is not something a lens
-should spend a token reviewing. Below the code floor the ratio never applies, which is
-what lets an ordinary TDD change (support code well over 1:1 against the code it backs)
-through unaffected. `args.supportRatio` raises the limit for a run that knows its own
+exceeds `MAX_SUPPORT_RATIO` (10, chosen against this repo's own merged history: the last
+20 commits ran 1.0-14.4:1, and every one still at or above the code floor ran 1.2-7.6:1),
+the run halts at Review: support code (tests, docs, and a code file's own comments) far
+outweighing the actual change is not something a lens should spend a token reviewing.
+Below the code floor the ratio never applies, which is what lets an ordinary TDD change
+(support code well over 1:1 against the code it backs) through unaffected.
+`args.supportRatio` raises the limit for a run that knows its own
 ratio is intentional.
 
 ### Pipeline version transparency
