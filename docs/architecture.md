@@ -103,7 +103,7 @@ Python gates that read the tool call on stdin and refuse it. Shared git logic
 differently: `tool_input_path()` reads both `file_path` and `path`, and
 `HookInvocation.host` is one of `claude`, `codex`, `copilot`.
 
-### Seven policy gates, two manifests
+### Eight policy gates, two manifests
 
 The gates are the same on every host. What differs is how a host invokes them and how it
 learns the verdict.
@@ -142,13 +142,14 @@ branch it started from on its own:
 | `mutation-pr-gate.py` | `.mutation-gated` | refuses `gh pr create`, a merge onto a base branch, or a push at one, while the ledger is unverified |
 | `comment-policy-gate.py` | `.comment-gated` | `PostToolUse`, so it cannot refuse; it flags (exit 2, non-blocking) a newly added comment matching one of the marker's own regex rules after the edit has already landed. The plugin ships no default rule |
 
-Three fire everywhere, because each acts on its own evidence rather than on a marker:
+Four fire everywhere, because each acts on its own evidence rather than on a marker:
 
 | Hook | Evidence |
 |---|---|
 | `base-branch-commit-gate.py` | a commit on `main`/`master`/etc. Exempts a repo with no remote |
 | `gate-pipe-gate.py` | a gate piped anywhere |
 | `generated-file-gate.py` | an `@generated` or `DO NOT EDIT` header, which is the file's own consent |
+| `worktree-edit-gate.py` | an `Edit`/`Write`/`MultiEdit` landing in the main checkout while a ticket worktree is active for the acting agent |
 
 `gate-pipe-gate.py` applies while working in this repo too. `$?` after a pipeline is the
 *last* command's status, so `mutation-check.sh | tail` reports tail's exit 0 however the
@@ -159,6 +160,30 @@ gate ended, turning a red gate into a reported pass. Redirect instead:
 ```
 
 then read the file.
+
+### An agent's own transcript is evidence a marker cannot be
+
+`worktree-edit-gate.py` refuses an `Edit`/`Write`/`MultiEdit` that lands under the repo's
+main checkout while a ticket worktree is active for the *acting* agent, so a subagent that
+loses track of `git -C <worktree>` and reaches for a bare relative path cannot silently
+edit the tree another session is using. "Active" is not a marker: a marker here would have
+to be written by the dispatched agent itself, which is exactly the state under
+measurement, not evidence of it. Instead the hook reads the payload's own `agent_id` and
+that subagent's own transcript (`hook_invocation.subagent_transcript`, shared with
+`contributing-gate.py`), and requires its first `type == "user"` entry to open with the
+`[touchstone: <label>]` header and `Repo worktree: <path>` line every `treeAgent` dispatch
+(`workflows/parts/20-setup-worktree.js.part`) stamps on once a worktree exists. A payload
+with no `agent_id` (the invoking session) or a subagent whose transcript is missing or
+never carries that header is waved through rather than refused: there is no opt-in marker
+to fail closed behind, and failing closed on absent evidence would block every subagent's
+first edit in every repo until its transcript happened to exist on disk.
+
+Known gap: a Bash command that writes a file (a redirect, `sed -i`, a script, a test
+fixture writing fixtures of its own) is not covered. `base_branch.shell_tokens`'s own
+docstring already gives the reason a command's write target cannot be recovered from its
+text alone; the `treeAgent` prompt forcing `git -C <worktree>` for every git command, and
+`base-branch-commit-gate.py`'s refusal of a commit on main, are what this hook leans on
+for that path instead of modelling it itself.
 
 ### Guide-read evidence is host-specific
 
