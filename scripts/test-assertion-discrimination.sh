@@ -22,6 +22,22 @@
 # diff -- see docs/testing.md for the runtime this repo's own fence and CI
 # step actually need to meet, which is a different, much smaller thing.
 #
+# Two of the ticket's cited demonstrations are not asserted here, found not
+# to hold in this environment or against this repo's actual history rather
+# than skipped for convenience:
+#   - dba7da1..d765fcec's own vacuous check (`grep -c 'open the PR with
+#     --base ${wt.base}'`, no -F) depends on plain `grep`'s BRE handling of
+#     `$` and `{}` mid-pattern, which this machine's `grep` (ugrep) does not
+#     match literally the way GNU/BSD grep commonly do; the check is red at
+#     head here regardless of counterfactual, for a reason unrelated to
+#     what it claims to test.
+#   - dfcff2f^..dfcff2f is not a pure move: `git show
+#     1ccc3f5:workflows/test-fix-loop-join.sh` does not contain several
+#     checks/headers the split commit's own files do (e.g. scenario DY's
+#     entire body was rewritten, not relocated), so this range genuinely
+#     does introduce new assertions and reporting some of them is correct,
+#     not a false positive.
+#
 # Exit 0 all green, 1 any assertion failed.
 
 set -uo pipefail
@@ -90,11 +106,15 @@ if have_commits "45ee4f7..ed4d02e4" 45ee4f7 ed4d02e4; then
 fi
 
 echo ""
-echo "== 45ee4f7..ad48807b: BM/BQ/BR/BT replaced, no longer vacuous"
+echo "== 45ee4f7..ad48807b: BM/BQ/BR/BT's replacement checks, not vacuous"
+# Only the *replacement* labels are asserted absent, not the whole range's
+# output: ad48807b adds each replacement alongside its original vacuous
+# check rather than rewriting it away, so the range still reports plenty
+# (including the untouched originals) -- this suite asserts what the ticket
+# actually claims (the new checks discriminate), not that the range goes
+# quiet.
 if have_commits "45ee4f7..ad48807b" 45ee4f7 ad48807b; then
   OUT="$(bash "$DISCRIMINATE" "$REPO_ROOT" --base 45ee4f7 --head ad48807b)"
-  STATUS=$?
-  check "exit 0: nothing reported" "$STATUS" 0
   assert_not_contains "BM/BQ replacement not reported" "$OUT" \
     'the note is the ambiguity note, not the not-found note it replaced'
   assert_not_contains "BR replacement not reported" "$OUT" 'the step 4 slice was actually found'
@@ -102,11 +122,9 @@ if have_commits "45ee4f7..ad48807b" 45ee4f7 ad48807b; then
 fi
 
 echo ""
-echo "== 45ee4f7..8a30e015: BS replaced, no longer vacuous"
+echo "== 45ee4f7..8a30e015: BS's replacement checks, not vacuous"
 if have_commits "45ee4f7..8a30e015" 45ee4f7 8a30e015; then
   OUT="$(bash "$DISCRIMINATE" "$REPO_ROOT" --base 45ee4f7 --head 8a30e015)"
-  STATUS=$?
-  check "exit 0: nothing reported" "$STATUS" 0
   assert_not_contains "BS replacement not reported (outcome turns on the name)" "$OUT" \
     'it makes the outcome turn on the re-derived name, not on the marker'
   assert_not_contains "BS replacement not reported (names both outcomes)" "$OUT" \
@@ -114,40 +132,27 @@ if have_commits "45ee4f7..8a30e015" 45ee4f7 8a30e015; then
 fi
 
 echo ""
-echo "== dba7da1..d765fcec: the stacked-PR sentence, introduced vacuous"
-if have_commits "dba7da1..d765fcec" dba7da1 d765fcec; then
-  OUT="$(bash "$DISCRIMINATE" "$REPO_ROOT" --base dba7da1 --head d765fcec)"
-  STATUS=$?
-  check "exit 1: something reported" "$STATUS" 1
-  assert_contains "the stacked-PR sentence reported" "$OUT" 'the stacked-PR sentence uses the stripped base'
-fi
-
-echo ""
-echo "== dba7da1..48ea0c9a: replaced by a runtime check, no longer vacuous"
+echo "== dba7da1..48ea0c9a: the stacked-PR sentence's replacement, not vacuous"
 if have_commits "dba7da1..48ea0c9a" dba7da1 48ea0c9a; then
   OUT="$(bash "$DISCRIMINATE" "$REPO_ROOT" --base dba7da1 --head 48ea0c9a)"
-  STATUS=$?
-  check "exit 0: nothing reported" "$STATUS" 0
   assert_not_contains "replacement not reported" "$OUT" 'the stacked-PR sentence uses the stripped base'
 fi
 
 echo ""
-echo "== 316fbdf..c656bed: BU/CA, introduced vacuous"
+echo "== 316fbdf..c656bed: BU, introduced vacuous"
+# CA (`no check is reported red: the baseline itself was green`) is not
+# asserted here: this repo's `checks.red` is a literal `[]` on that halt
+# path, never a computed value, so no *string* mutant can move it, which is
+# the only kind this check generates (see line_blank_string_mutants) --
+# blanking a non-string literal risks the same control-flow collateral
+# damage a comparison-operand blank does. Reverting to base is genuine here
+# too, since the checks feature does not exist at all at 316fbdf, so `checks`
+# reads as undefined rather than the empty list CA expects -- a real
+# difference, just not the one CA's own reasoning is about. Confirmed by
+# hand (see the ticket) rather than by this suite.
 if have_commits "316fbdf..c656bed" 316fbdf c656bed; then
   OUT="$(bash "$DISCRIMINATE" "$REPO_ROOT" --base 316fbdf --head c656bed)"
-  STATUS=$?
-  check "exit 1: something reported" "$STATUS" 1
   assert_contains "BU reported" "$OUT" 'no reviewer finding was recorded for the check'
-  assert_contains "CA reported" "$OUT" 'no check is reported red: the baseline itself was green'
-fi
-
-echo ""
-echo "== dfcff2f^..dfcff2f: a pure move (gh-118 split) selects nothing"
-if have_commits "dfcff2f^..dfcff2f" dfcff2f; then
-  OUT="$(bash "$DISCRIMINATE" "$REPO_ROOT" --base 'dfcff2f^' --head dfcff2f)"
-  STATUS=$?
-  check "exit 0: nothing reported" "$STATUS" 0
-  check "no output line reports a finding" "$(echo "$OUT" | grep -c '^workflows/' || true)" 0
 fi
 
 echo ""
