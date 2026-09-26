@@ -38,7 +38,7 @@ git -C "$COMMENT_REPO" commit -qm "add PHP attributes and a Go pointer write"
 export COMMENT_REPO
 
 run_js_scenarios <<'JS_EOF'
-// Scenario SBA -- the formula: 60_000 + 800 * estimated_loc, logged so a run
+// Scenario SBA -- the formula: 100_000 + 1_500 * estimated_loc, logged so a run
 // states what it derived and why.
 async function scenarioSBA() {
   console.log('\n== scenario SBA: the run budget follows triage\'s estimated_loc')
@@ -49,14 +49,14 @@ async function scenarioSBA() {
     verify: () => undefined,
     staleness: () => [],
   })
-  check('the derived budget is logged', captured.logs.some(l => /run budget: 300k output tokens \(derived/.test(l)), true)
+  check('the derived budget is logged', captured.logs.some(l => /run budget: 550k output tokens \(derived/.test(l)), true)
 }
 
 // Scenario SBB -- the derived figure is clamped at the floor: a tiny estimate
-// still gets at least 80k, since even a one-line change spends a few calls
+// still gets at least 150k, since even a one-line change spends a few calls
 // on setup, triage, implement and review.
 async function scenarioSBB() {
-  console.log('\n== scenario SBB: a tiny estimated_loc clamps the derived budget to the 80k floor')
+  console.log('\n== scenario SBB: a tiny estimated_loc clamps the derived budget to the 150k floor')
   const { captured } = await run({
     args: { runBudget: undefined },
     triage: { estimated_loc: 1 },
@@ -64,13 +64,13 @@ async function scenarioSBB() {
     verify: () => undefined,
     staleness: () => [],
   })
-  check('the budget is clamped up to 80k', captured.logs.some(l => /run budget: 80k output tokens/.test(l)), true)
+  check('the budget is clamped up to 150k', captured.logs.some(l => /run budget: 150k output tokens/.test(l)), true)
 }
 
 // Scenario SBC -- and clamped at the ceiling: a huge estimate does not buy an
 // unbounded run.
 async function scenarioSBC() {
-  console.log('\n== scenario SBC: a huge estimated_loc clamps the derived budget to the 500k ceiling')
+  console.log('\n== scenario SBC: a huge estimated_loc clamps the derived budget to the 800k ceiling')
   const { captured } = await run({
     args: { runBudget: undefined },
     triage: { estimated_loc: 10000 },
@@ -78,7 +78,7 @@ async function scenarioSBC() {
     verify: () => undefined,
     staleness: () => [],
   })
-  check('the budget is clamped down to 500k', captured.logs.some(l => /run budget: 500k output tokens/.test(l)), true)
+  check('the budget is clamped down to 800k', captured.logs.some(l => /run budget: 800k output tokens/.test(l)), true)
 }
 
 // Scenario SBD -- no estimate at all falls back to a flat default by scope,
@@ -92,8 +92,8 @@ async function scenarioSBD() {
     verify: () => undefined,
     staleness: () => [],
   })
-  check('the inline default (80k) is used, not a formula on a missing number',
-    captured.logs.some(l => /run budget: 80k output tokens \(triage gave no estimated_loc; using the inline default\)/.test(l)), true)
+  check('the inline default (150k) is used, not a formula on a missing number',
+    captured.logs.some(l => /run budget: 150k output tokens \(triage gave no estimated_loc; using the inline default\)/.test(l)), true)
 }
 
 // Scenario SBE -- the team-scoped default is higher, and a numeric

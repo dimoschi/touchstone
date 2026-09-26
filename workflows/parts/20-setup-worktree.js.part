@@ -367,8 +367,8 @@ const wt = args?.existingBranch
   `<that path> status --porcelain: if it is non-empty, return created=false, ` +
   `dirty=true, and say what is dirty. Never stash, reset, or discard the ` +
   `user's work. Otherwise return created=true using that path, note in ` +
-  `detail that the branch was reused rather than created, and stop: do not ` +
-  `fetch, pull, or run any worktree add.\n` +
+  `detail that the branch was reused rather than created, then go straight ` +
+  `to step 11: do not fetch, pull, or run any worktree add.\n` +
   `7. Otherwise check whether the branch exists at all (git show-ref --verify ` +
   `--quiet refs/heads/<name>). If it does, the fetch and cut in step 10 are ` +
   `not needed; go straight to step 8.\n` +

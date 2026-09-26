@@ -229,6 +229,7 @@ const enterPhase = (name) => { currentPhase = name; phase(name) }
 // branch:existing -- is unbounded by it: there is no code yet for a budget to
 // bound.
 let runBudget = null
+let runBudgetNote = null
 // Set only by a refused dispatch, read only by the top-level catch: its
 // presence, not the thrown error's identity, is what tells that catch this
 // throw was the budget's doing rather than a genuine failure to rethrow, since

@@ -611,7 +611,30 @@ async function scenarioGC() {
   check('unmeasured, naming the other id', result.checks?.unmeasured?.[0]?.reason, 'exit line names check:2')
 }
 
-const SCENARIOS = [scenarioDL, scenarioDM, scenarioDN, scenarioDO, scenarioDP, scenarioDQ, scenarioDR, scenarioDS, scenarioDT, scenarioDU, scenarioDV, scenarioDW, scenarioDX, scenarioDY, scenarioDZ, scenarioEA, scenarioEB, scenarioEC, scenarioED, scenarioEE, scenarioEF, scenarioEJ, scenarioEK, scenarioEL, scenarioEM, scenarioEN, scenarioEO, scenarioEG, scenarioGA, scenarioGB, scenarioGC]
+async function scenarioGD() {
+  console.log('\n== scenario GD: an exit_line disagreeing with the exit line in output is unmeasured, never a pass')
+  const { result } = await run({
+    args: { existingBranch: true, openPr: true },
+    discovery: { file: '/repo/AGENTS.md', sections: [{ heading: '## Checks', fence: 'make test' }], detail: 'stub' },
+    checkRuns: () => ({ results: [{ id: 'check:1', command: 'make test', exit_code: 0,
+      exit_line: 'TOUCHSTONE_CHECK_EXIT check:1 0', output: 'TOUCHSTONE_CHECK_EXIT check:1 1\nboom' }], dirty: false }),
+    prResult: { opened: true, url: 'https://example.invalid/pr/118gd', note: 'stub ready' },
+  })
+  check('not a pass: nothing red is not enough', result.checks?.unmeasured?.[0]?.reason, 'exit_line disagrees with output')
+}
+
+async function scenarioGE() {
+  console.log('\n== scenario GE: reusing an existing worktree still reaches the check-discovery step')
+  const { captured } = await run({})
+  const prompt = captured.calls.find(c => c.label === 'branch')?.prompt ?? ''
+  const reuse = prompt.split('\n').find(l => l.includes('reused rather than created, then')) ?? ''
+  check('the reuse step goes on to discovery instead of stopping', /go straight to step 11/.test(prompt), true)
+  check('step 11 is the discovery step', /\n11\. Before you return from the step above: read /.test(prompt), true)
+  check('the reuse step no longer says stop', /reused rather than created, and stop/.test(prompt), false)
+  check('found the reuse line', reuse !== '', true)
+}
+
+const SCENARIOS = [scenarioDL, scenarioDM, scenarioDN, scenarioDO, scenarioDP, scenarioDQ, scenarioDR, scenarioDS, scenarioDT, scenarioDU, scenarioDV, scenarioDW, scenarioDX, scenarioDY, scenarioDZ, scenarioEA, scenarioEB, scenarioEC, scenarioED, scenarioEE, scenarioEF, scenarioEJ, scenarioEK, scenarioEL, scenarioEM, scenarioEN, scenarioEO, scenarioEG, scenarioGA, scenarioGB, scenarioGC, scenarioGD, scenarioGE]
 JS_EOF
 
 finish

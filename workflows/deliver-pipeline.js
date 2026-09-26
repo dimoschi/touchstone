@@ -229,6 +229,7 @@ const enterPhase = (name) => { currentPhase = name; phase(name) }
 // branch:existing -- is unbounded by it: there is no code yet for a budget to
 // bound.
 let runBudget = null
+let runBudgetNote = null
 // Set only by a refused dispatch, read only by the top-level catch: its
 // presence, not the thrown error's identity, is what tells that catch this
 // throw was the budget's doing rather than a genuine failure to rethrow, since
@@ -1158,8 +1159,8 @@ const wt = args?.existingBranch
   `<that path> status --porcelain: if it is non-empty, return created=false, ` +
   `dirty=true, and say what is dirty. Never stash, reset, or discard the ` +
   `user's work. Otherwise return created=true using that path, note in ` +
-  `detail that the branch was reused rather than created, and stop: do not ` +
-  `fetch, pull, or run any worktree add.\n` +
+  `detail that the branch was reused rather than created, then go straight ` +
+  `to step 11: do not fetch, pull, or run any worktree add.\n` +
   `7. Otherwise check whether the branch exists at all (git show-ref --verify ` +
   `--quiet refs/heads/<name>). If it does, the fetch and cut in step 10 are ` +
   `not needed; go straight to step 8.\n` +
@@ -1535,15 +1536,18 @@ sTriage.close()
 // regardless of it), so a numeric args.runBudget aside, a missing one falls
 // back to a flat default by scope rather than the LOC formula: there is no
 // number to derive from and a change already latched to inline is smaller by
-// definition than a team-scoped one.
+// definition than a team-scoped one. The figures are set so the healthy
+// runs measured before this existed (about 270k-300k output tokens for
+// 240-450 changed lines) finish with room to spare: a budget halt strands
+// work mid-run, so it is for a run that has gone wrong, not a tight fit.
 if (typeof args?.runBudget === 'number') {
   runBudget = args.runBudget
   runBudgetNote = `set explicitly via args.runBudget`
 } else if (triage.estimated_loc != null) {
-  runBudget = Math.min(500_000, Math.max(80_000, 60_000 + 800 * triage.estimated_loc))
+  runBudget = Math.min(800_000, Math.max(150_000, 100_000 + 1_500 * triage.estimated_loc))
   runBudgetNote = `derived from triage's ~${triage.estimated_loc} estimated LOC`
 } else {
-  runBudget = inlineMode ? 80_000 : 300_000
+  runBudget = inlineMode ? 150_000 : 400_000
   runBudgetNote = `triage gave no estimated_loc; using the ${inlineMode ? 'inline' : 'team'} default`
 }
 log(`run budget: ${Math.round(runBudget / 1000)}k output tokens (${runBudgetNote})`)
@@ -1783,9 +1787,17 @@ const classifyResults = (checks, results) => {
         expected, reported: row.command, reason: `reported \`${row.command}\`` })
       continue
     }
-    // exit_line first: runners have dropped the line from output while
-    // relaying it, and one short field is easier to copy exactly.
-    const parsed = exitLineOf(`${row.exit_line ?? ''}\n${row.output ?? ''}`, c.id)
+    // Runners have dropped the exit line from output while relaying it, so
+    // exit_line alone can stand in for it. Only the output's copy was printed
+    // by the check's own shell, though: a model-filled exit_line never
+    // overrides a real one there, and the two disagreeing is unmeasured.
+    const fromOutput = exitLineOf(row.output, c.id)
+    const fromField = row.exit_line ? exitLineOf(row.exit_line, c.id) : null
+    const parsed = !fromField ? fromOutput
+      : fromField.reason ? fromField
+      : fromOutput.reason ? fromField
+      : fromField.exit !== fromOutput.exit ? { reason: 'exit_line disagrees with output' }
+      : fromOutput
     if (parsed.reason) {
       unmeasured.push({ id: c.id, command: c.command, exit_code: null,
         output: `not measured: ${parsed.reason}`,

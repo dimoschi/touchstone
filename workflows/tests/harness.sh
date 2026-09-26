@@ -415,7 +415,10 @@ async function run(scenario) {
       : (scenario.budget ?? { total: null, spent: () => 0, remaining: () => Infinity }),
   }
   const ctx = vm.createContext(sandbox)
-  const fn = vm.compileFunction(body, [], { parsingContext: ctx })
+  // Strict, as the host runs it: the script is an ES module (export const
+  // meta), and a sloppy-mode compile lets an undeclared assignment pass here
+  // that throws a ReferenceError on every real run.
+  const fn = vm.compileFunction(`'use strict';\n${body}`, [], { parsingContext: ctx })
   const result = await fn()
   return { result, captured }
 }

@@ -180,15 +180,18 @@ sTriage.close()
 // regardless of it), so a numeric args.runBudget aside, a missing one falls
 // back to a flat default by scope rather than the LOC formula: there is no
 // number to derive from and a change already latched to inline is smaller by
-// definition than a team-scoped one.
+// definition than a team-scoped one. The figures are set so the healthy
+// runs measured before this existed (about 270k-300k output tokens for
+// 240-450 changed lines) finish with room to spare: a budget halt strands
+// work mid-run, so it is for a run that has gone wrong, not a tight fit.
 if (typeof args?.runBudget === 'number') {
   runBudget = args.runBudget
   runBudgetNote = `set explicitly via args.runBudget`
 } else if (triage.estimated_loc != null) {
-  runBudget = Math.min(500_000, Math.max(80_000, 60_000 + 800 * triage.estimated_loc))
+  runBudget = Math.min(800_000, Math.max(150_000, 100_000 + 1_500 * triage.estimated_loc))
   runBudgetNote = `derived from triage's ~${triage.estimated_loc} estimated LOC`
 } else {
-  runBudget = inlineMode ? 80_000 : 300_000
+  runBudget = inlineMode ? 150_000 : 400_000
   runBudgetNote = `triage gave no estimated_loc; using the ${inlineMode ? 'inline' : 'team'} default`
 }
 log(`run budget: ${Math.round(runBudget / 1000)}k output tokens (${runBudgetNote})`)
@@ -428,9 +431,17 @@ const classifyResults = (checks, results) => {
         expected, reported: row.command, reason: `reported \`${row.command}\`` })
       continue
     }
-    // exit_line first: runners have dropped the line from output while
-    // relaying it, and one short field is easier to copy exactly.
-    const parsed = exitLineOf(`${row.exit_line ?? ''}\n${row.output ?? ''}`, c.id)
+    // Runners have dropped the exit line from output while relaying it, so
+    // exit_line alone can stand in for it. Only the output's copy was printed
+    // by the check's own shell, though: a model-filled exit_line never
+    // overrides a real one there, and the two disagreeing is unmeasured.
+    const fromOutput = exitLineOf(row.output, c.id)
+    const fromField = row.exit_line ? exitLineOf(row.exit_line, c.id) : null
+    const parsed = !fromField ? fromOutput
+      : fromField.reason ? fromField
+      : fromOutput.reason ? fromField
+      : fromField.exit !== fromOutput.exit ? { reason: 'exit_line disagrees with output' }
+      : fromOutput
     if (parsed.reason) {
       unmeasured.push({ id: c.id, command: c.command, exit_code: null,
         output: `not measured: ${parsed.reason}`,
