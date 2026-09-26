@@ -180,9 +180,12 @@ this has to happen out here rather than inside the run:
 
 Build `models` from the run's own transcript directory, not by asking an agent which
 model it is: an agent's account of its own model is not evidence, only what the harness
-wrote is. Each agent this run dispatched has a `.meta.json` there naming the alias it was
-given (`haiku`, `sonnet`, `opus`) and an `agent-<id>.jsonl` transcript carrying the model
-ID that alias actually resolved to. Group those by alias into
+wrote is. That directory is `<config dir>/projects/<repo slug>/<this session's id>/subagents/workflows/<wf_id>/`.
+Each agent this run dispatched has an `agent-<id>.meta.json` there whose `model` field is
+the alias it was given (`haiku`, `sonnet`, `opus`), and an `agent-<id>.jsonl` transcript
+whose assistant messages carry, in `message.model`, the model ID that alias resolved to.
+Skip entries whose model is `<synthetic>`: the harness writes those as zero-token
+placeholders, and they are not a model. Group the rest by alias into
 `{ "<alias>": ["<model id>", ...] }`; list more than one ID under an alias if a model
 release landed mid-run and later calls resolved differently than earlier ones. If the
 records cannot be read, write `models` as `{ "unavailable": "<reason>" }` instead of

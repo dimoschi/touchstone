@@ -26,5 +26,9 @@ check "never built by asking an agent which model it is" \
   "$(grep -Fc 'not by asking an agent which' "$DELIVER_MD" || true)" 1
 check "unreadable records are reported, never silently omitted" \
   "$(grep -Fc '{ "unavailable": "<reason>" }' "$DELIVER_MD" || true)" 1
+check "it names where the per-agent records live" \
+  "$(grep -Fc 'subagents/workflows/<wf_id>/' "$DELIVER_MD" || true)" 1
+check "it excludes the harness's <synthetic> placeholder entries" \
+  "$(grep -Fc '<synthetic>' "$DELIVER_MD" || true)" 1
 
 finish
