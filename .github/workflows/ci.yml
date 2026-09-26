@@ -176,6 +176,8 @@ jobs:
         run: bash scripts/check-version-bump.sh
       - name: deliver-pipeline.js matches its parts
         run: bash scripts/build-pipeline.sh --check
+      - name: No new workflow test assertion that cannot fail
+        run: bash scripts/check-assertions-discriminate.sh
 
   manifests:
     runs-on: ubuntu-latest

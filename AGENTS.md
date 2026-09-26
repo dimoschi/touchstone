@@ -27,7 +27,9 @@ bash scripts/run-go-tests.sh            # the skill's Go-toolchain suites; needs
 bash scripts/run-php-python-tests.sh    # the skill's PHP/uv suites; needs a live PHP ^8.3 + infection + phpunit, and uv
 bash scripts/run-python-tests.sh        # needs pytest + coverage>=7.13.1 (or CRAP_PY_RUN)
 bash workflows/test-fix-loop-join.sh
+bash workflows/test-harness-footer.sh
 bash workflows/test-mutation-optin.sh
+bash scripts/check-assertions-discriminate.sh
 bash scripts/check-version-bump.sh
 bash scripts/check-no-private-refs.sh
 bash scripts/build-pipeline.sh --check
