@@ -67,6 +67,12 @@ if (!ticketMarker) {
     `(216, #216) nor a Jira key (PROJ-4821). Refusing rather than guessing: ` +
     `the branch marker is the only record of which tracker the work came from.`)
 }
+// Keyed by ticket, not run id: a script is never told its own run id, and the
+// ticket is what a human looks the run up by. The script no longer writes this
+// file itself (that agent dispatch cost a full round trip for a mkdir and a
+// heredoc); it names the path and hands the payload back, and the invoking
+// session writes it, the same session that already appends run_id afterwards.
+const runRecordFile = `.claude/touchstone-runs/${String(ticket).replace(/[^A-Za-z0-9_-]/g, '-')}.json`
 // Phase recording goes to agent-eval, a separate optional tool. Default on so a
 // machine that has it keeps its ground truth without opting in every run; the
 // prompt tells each phase to skip a missing command rather than halt, so this
@@ -109,11 +115,13 @@ const brief = (s) => {
 // both halt before any code exists, so tripping them forfeits nothing.
 // null means uncapped; args.stageBudgets can set a number to opt one back in.
 const CEILINGS = {
+  // No ceiling: it runs once, before any code exists, so tripping one here
+  // would forfeit nothing but also bound nothing real.
+  setup: null,
   triage: 15_000,
   branch: 10_000,
   plan: null,
   implement: null,
-  gate: 120_000,
   // Two separate windows share this ceiling: discovery+baseline before
   // Implement, and the post-Implement run plus its one pre-review fix
   // round. stage_spend.checks sums both; each is bounded on its own.
@@ -172,47 +180,24 @@ const prNote = () => draftPr
   ? `The PR was left as a draft`
   : `No PR was opened, because the draft could not be opened earlier in this run`
 
-// Keyed by ticket, not run id: a script is never told its own run id, and the
-// ticket is what a human looks the run up by.
-const recordRun = async (record) => {
-  const key = String(ticket).replace(/[^A-Za-z0-9_-]/g, '-')
-  const written = await agent(
-    `Write one file, then STOP. Do not stage it, commit it or push, and do ` +
-    `not touch anything else.\n` +
-    `1. Resolve the main checkout: git rev-parse --path-format=absolute ` +
-    `--git-common-dir, then take that directory's parent. Write there, not in ` +
-    `this worktree, which is removed once the work lands.\n` +
-    `2. mkdir -p <main>/.claude/touchstone-runs\n` +
-    `3. Write the JSON below to <main>/.claude/touchstone-runs/${key}.json ` +
-    `byte for byte, with a quoted heredoc (cat > path <<'TOUCHSTONE_EOF'). Do ` +
-    `not reformat it, re-indent it, summarise it or add fields. It is a record, ` +
-    `not a draft.\n` +
-    `Return the absolute path you wrote.\n\n` +
-    JSON.stringify(record, null, 2),
-    { label: 'run-record', model: 'haiku', effort: 'low' })
-  log(written
-    ? `run record written to .claude/touchstone-runs/${key}.json`
-    : `run record could not be written; this run survives only in the transcript`)
-  return typeof written === 'string' ? written : null
-}
-
 // A halt is a result, not an absence of one, and the run record is where it
 // survives the session. It used to be posted as a comment on the draft PR too.
 // That put the run's internal state -- which phase stopped, which findings a
 // lens raised -- on the repository's public record, where a reviewer cannot act
 // on it and someone has to delete it by hand. Opening the PR is this workflow's
-// only write to GitHub. Async because recordRun is, and every call site is
-// `return await`.
+// only write to GitHub. record_file only names where the invoking session
+// should write this payload (commands/deliver.md does that); the script has
+// no fs and cannot write it itself. Not async: nothing here dispatches an
+// agent, but every call site still says `return await` from when it did.
 const halted = async (at, extra) => {
   const payload = {
     task, halted_at: at, pipeline_version: pipelineVersion, stage_spend: stageSpend,
-    needs_user: true, ...extra,
+    needs_user: true, record_file: runRecordFile, ...extra,
   }
   if (draftPr?.number) {
     log(`halt at ${at}: draft PR ${draftPr.url} left as it is; the reason is in ` +
         `this run's result and record`)
   }
-  payload.record_path = await recordRun(payload)
   return payload
 }
 

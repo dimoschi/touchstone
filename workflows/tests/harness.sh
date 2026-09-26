@@ -185,19 +185,33 @@ function makeAgent(scenario, captured) {
     const label = opts.label
     captured.calls.push({ label, prompt, schema: opts.schema })
 
-    if (label === 'ticket') {
-      return scenario.ticketResult ?? { found: true, summary: 'stub ticket', description: 'd', comments: '' }
+    // Replaces the old separate ticket/plugin:version/gate:opt-in dispatches
+    // (gh-118): one call, before any worktree exists, answers all three.
+    // Each scenario field keeps its old name and meaning; only the label and
+    // the object shape they arrive under changed.
+    if (label === 'setup') {
+      return {
+        ticket: scenario.ticketResult ?? { found: true, summary: 'stub ticket', description: 'd', comments: '' },
+        version: scenario.versionProbe ?? { found: false, name: '', version: '', detail: 'stub' },
+        markers: scenario.gateProbeFails ? null : { crap_gated: scenario.crapGated ?? true,
+          mutation_gated: scenario.mutationGated ?? false, detail: 'stub' },
+      }
     }
+    // checks_source used to come back from a separate checks:discover call;
+    // it now rides on the same branch/branch:existing response, folded in
+    // here so the ~30 scenarios that set scenario.discovery or
+    // scenario.discoveryFails need no change beyond the label they attach to.
+    const checksSourceFor = () => scenario.discoveryFails ? null :
+      (scenario.discovery ?? { file: '', sections: [], detail: 'stub: no repo checks' })
     if (label === 'branch') {
-      return scenario.branchResult ?? { created: true, branch: 'feat/gh-21-stub', base: 'main',
-        path: '/tmp/stub-worktree', ticket: '21', detail: 'stub' }
+      return { checks_source: checksSourceFor(),
+        ...(scenario.branchResult ?? { created: true, branch: 'feat/gh-21-stub', base: 'main',
+          path: '/tmp/stub-worktree', ticket: '21', detail: 'stub' }) }
     }
     if (label === 'branch:existing') {
-      return scenario.existingBranchResult ?? { created: true, branch: 'feat/gh-21-stub', base: 'main',
-        path: '/tmp/stub-worktree', ticket: '21', detail: 'stub' }
-    }
-    if (label === 'plugin:version') {
-      return scenario.versionProbe ?? { found: false, name: '', version: '', detail: 'stub' }
+      return { checks_source: checksSourceFor(),
+        ...(scenario.existingBranchResult ?? { created: true, branch: 'feat/gh-21-stub', base: 'main',
+          path: '/tmp/stub-worktree', ticket: '21', detail: 'stub' }) }
     }
     if (label === 'triage') {
       // scope: 'inline' skips the Plan phase, which this test has no reason
@@ -225,10 +239,13 @@ function makeAgent(scenario, captured) {
     if (label.startsWith('halt-notice:') || label === 'regression-notice') {
       throw new Error(`agent '${label}' posts to GitHub; the workflow must not`)
     }
-    if (label === 'run-record') {
-      captured.runRecordPrompt = prompt
-      if (scenario.runRecordFails) return null
-      return '/stub/main/.claude/touchstone-runs/21.json'
+    // ticket, plugin:version, gate:opt-in and checks:discover folded into
+    // 'setup' (or, for checks:discover, into branch/branch:existing) and
+    // run-record dropped outright (gh-118): a script dispatching any of
+    // these five again is a regression the suite must catch, not silently
+    // stub.
+    if (['ticket', 'plugin:version', 'gate:opt-in', 'checks:discover', 'run-record'].includes(label)) {
+      throw new Error(`agent '${label}' should no longer be dispatched`)
     }
     if (label === 'review:dedup') {
       captured.dedupPrompt = prompt
@@ -298,15 +315,6 @@ function makeAgent(scenario, captured) {
     if (base === 'reproduce:mutation:fresh') {
       return reproduceResponse(prompt, scenario, (id) => exitFor(scenario, id, 'mutation', retry))
     }
-    if (label === 'gate:opt-in') {
-      if (scenario.gateProbeFails) return null
-      return { crap_gated: scenario.crapGated ?? true,
-        mutation_gated: scenario.mutationGated ?? false, detail: 'stub' }
-    }
-    if (label === 'checks:discover') {
-      if (scenario.discoveryFails) return null
-      return scenario.discovery ?? { file: '', sections: [], detail: 'stub: no repo checks' }
-    }
     if (label.startsWith('checks:run:')) {
       const attempt = Number(label.slice('checks:run:'.length))
       return (scenario.checkRuns ?? (() => ({ results: [] })))(attempt)
@@ -339,7 +347,7 @@ function makeAgent(scenario, captured) {
 }
 
 async function run(scenario) {
-  const captured = { calls: [], runRecordPrompt: null, dedupPrompt: null, logs: [], spans: [] }
+  const captured = { calls: [], dedupPrompt: null, logs: [], spans: [] }
   // Charged per agent call, not per read, so a spend assertion states "one
   // agent ran inside this window" rather than "the script read the budget
   // twice"; an added outOfBudget() check would otherwise break it silently.

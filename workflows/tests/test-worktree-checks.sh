@@ -526,7 +526,7 @@ async function scenarioCB() {
 async function scenarioBW() {
   console.log('\n== scenario BW: discovery finding no repo checks is logged, not a halt')
   const { result, captured } = await run({})
-  check('discovery ran exactly once', callCount(captured, 'checks:discover'), 1)
+  check('checks:discover is never dispatched as its own call', callCount(captured, 'checks:discover'), 0)
   check('no check-run call was made', callCount(captured, 'checks:run:1'), 0)
   check('the run does not halt', result.halted_at, undefined)
   check('discovery finding nothing is logged',

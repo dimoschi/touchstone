@@ -578,11 +578,13 @@ async function scenarioY() {
     result.unresolved_findings?.length, 1)
 }
 
-// Scenario Z -- the halt exits must write the record, since a halt is the case
-// that most needs one, and it must be keyed and located so a later session can
-// find it: by ticket, under the main checkout, not the worktree that goes away.
+// Scenario Z -- gh-118: the script no longer writes the run record itself
+// (that cost a full agent round trip for a mkdir and a heredoc); it names
+// where the record belongs and the invoking session writes it. A halt is the
+// case that most needs the name, since it is the one outcome record-session-
+// outcome tooling has nothing else to go on for.
 async function scenarioZ() {
-  console.log('\n== scenario Z: a halt writes the run record into the repo')
+  console.log('\n== scenario Z: a halt names record_file; nothing dispatches run-record')
   const { result, captured } = await run({
     args: { maxReviewRounds: 1 },
     initialReview: {
@@ -594,23 +596,16 @@ async function scenarioZ() {
     fixHead: () => 'fix00000000000000000000000000000000000001',
     staleness: () => [],
   })
-  const p = captured.runRecordPrompt ?? ''
   check('halted at Fix', result.halted_at, 'Fix')
-  check('the record was written once', callCount(captured, 'run-record'), 1)
-  check('its path is reported back in the payload',
-    result.record_path, '/stub/main/.claude/touchstone-runs/21.json')
-  check('it is keyed by ticket', p.includes('touchstone-runs/21.json'), true)
-  check('it is written to the main checkout, not the worktree',
-    p.includes('--git-common-dir'), true)
-  check('the record carries the unresolved finding',
-    p.includes('connection is never released'), true)
-  check('the record carries the halt phase', p.includes('"halted_at": "Fix"'), true)
+  check('run-record is never dispatched', callCount(captured, 'run-record'), 0)
+  check('record_file is keyed by ticket, under the main checkout\'s .claude/',
+    result.record_file, '.claude/touchstone-runs/21.json')
 }
 
-// Scenario AA -- the green path writes it too. A run that opened a PR is the
-// one a later session is most likely to come back to.
+// Scenario AA -- the green path names the same file. No agent call either
+// way, so there is nothing here for a dead record agent to take down.
 async function scenarioAA() {
-  console.log('\n== scenario AA: a green run writes the run record')
+  console.log('\n== scenario AA: a green run also names record_file, with no agent dispatch')
   const { result, captured } = await run({
     args: { openPr: true },
     prResult: { opened: true, url: 'https://example.invalid/pr/23', note: 'stub ready' },
@@ -619,25 +614,27 @@ async function scenarioAA() {
     staleness: () => [],
   })
   check('halted_at is absent', result.halted_at, undefined)
-  check('the record was written once', callCount(captured, 'run-record'), 1)
-  check('the record carries the PR url',
-    (captured.runRecordPrompt ?? '').includes('https://example.invalid/pr/23'), true)
+  check('run-record is never dispatched', callCount(captured, 'run-record'), 0)
+  check('record_file is named on the green path too',
+    result.record_file, '.claude/touchstone-runs/21.json')
 }
 
-// Scenario AB -- the write is best-effort. A dead record agent must not take
-// down a run whose work is already committed.
+// Scenario AB -- the key sanitizes whatever is not alphanumeric, underscore or
+// hyphen in the ticket arg, the same way markerFor sanitizes it for the
+// branch name, so a caller passing "#216" (gh accepts either form) still gets
+// one predictable, filesystem-safe path.
 async function scenarioAB() {
-  console.log('\n== scenario AB: a failed record write does not take the run down')
+  console.log('\n== scenario AB: record_file sanitizes a ticket arg carrying a leading #')
   const { result } = await run({
-    args: { openPr: true },
-    runRecordFails: true,
+    args: { openPr: true, ticket: '#216' },
     prResult: { opened: true, url: 'https://example.invalid/pr/23', note: 'stub ready' },
     initialReview: { correctness: [], advocate: [] },
     verify: () => undefined,
     staleness: () => [],
   })
   check('the run still returns its result', result.pr?.opened, true)
-  check('record_path is null rather than missing', result.record_path, null)
+  check('record_file replaces the leading # rather than carrying it verbatim',
+    result.record_file, '.claude/touchstone-runs/-216.json')
 }
 
 // Scenario AC -- ceilings follow the same judgement as effort. A trivial change

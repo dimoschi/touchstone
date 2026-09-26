@@ -309,6 +309,6 @@ const result = {
   unresolved_findings: open,
   pr,
   needs_user: args?.openPr !== false && !pr?.opened,
+  record_file: runRecordFile,
 }
-result.record_path = await recordRun(result)
 return result

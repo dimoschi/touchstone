@@ -236,36 +236,43 @@ async function scenarioDX() {
     runPrompt.includes('check:4'), false)
 }
 
-// Scenario DY -- #109: the discover prompt names the worktree's own AGENTS.md
-// and CLAUDE.md by absolute path, never the --git-common-dir root the gate
-// markers use.
+// Scenario DY -- gh-118: checks discovery is folded into the branch prompt
+// itself (its own last step) rather than a separate checks:discover
+// dispatch, since the worktree path the discovery step needs is one that
+// agent derives in an earlier step of the same call, not one the script
+// already knows. The gate markers, by contrast, still resolve from
+// --git-common-dir, and now live in the merged 'setup' call.
 async function scenarioDY() {
-  console.log('\n== scenario DY: the checks:discover prompt names the worktree path, never git-common-dir')
+  console.log('\n== scenario DY: discovery lives in the branch prompt; git-common-dir is only in setup')
   const { captured } = await run({
     discovery: { file: '', sections: [], detail: 'stub' },
   })
-  const discoverPrompt = captured.calls.find(c => c.label === 'checks:discover')?.prompt ?? ''
-  check('it names the worktree AGENTS.md by absolute path', discoverPrompt.includes(`${STUB_WT_PATH}/AGENTS.md`), true)
-  check('it names the worktree CLAUDE.md by absolute path', discoverPrompt.includes(`${STUB_WT_PATH}/CLAUDE.md`), true)
-  check('it never mentions git-common-dir', discoverPrompt.includes('git-common-dir'), false)
-  const gateOptInPrompt = captured.calls.find(c => c.label === 'gate:opt-in')?.prompt ?? ''
-  check('the gate opt-in probe still resolves from git-common-dir', gateOptInPrompt.includes('git-common-dir'), true)
+  check('checks:discover is never dispatched as its own call', callCount(captured, 'checks:discover'), 0)
+  const branchPrompt = captured.calls.find(c => c.label === 'branch')?.prompt ?? ''
+  check('the branch prompt reads AGENTS.md', branchPrompt.includes('AGENTS.md'), true)
+  check('the branch prompt reads CLAUDE.md', branchPrompt.includes('CLAUDE.md'), true)
+  check('the branch prompt populates checks_source itself',
+    branchPrompt.includes('checks_source.sections'), true)
+  const setupPrompt = captured.calls.find(c => c.label === 'setup')?.prompt ?? ''
+  check('the markers probe in setup still resolves from git-common-dir', setupPrompt.includes('git-common-dir'), true)
 }
 
-// Scenario DZ -- #109: existingBranch resumes a worktree at a path distinct
-// from the default stub path; the discover prompt must name that path, not
-// a hardcoded one.
+// Scenario DZ -- gh-118: branch:existing folds the same discovery step into
+// its own last step, pointed at whichever path steps 4-6 matched -- again a
+// path the agent derives, never one the script could name literally here.
 async function scenarioDZ() {
-  console.log('\n== scenario DZ: existingBranch at a distinct worktree path is named in the discover prompt')
+  console.log('\n== scenario DZ: existingBranch folds discovery into its own last step, not a separate call')
   const { captured } = await run({
     args: { existingBranch: true },
     existingBranchResult: { created: true, branch: 'feat/gh-21-stub', base: 'main',
       path: '/tmp/distinct-worktree', ticket: '21', detail: 'stub' },
     discovery: { file: '', sections: [], detail: 'stub' },
   })
-  const discoverPrompt = captured.calls.find(c => c.label === 'checks:discover')?.prompt ?? ''
-  check('it names the distinct worktree\'s AGENTS.md path', discoverPrompt.includes('/tmp/distinct-worktree/AGENTS.md'), true)
-  check('it never mentions git-common-dir', discoverPrompt.includes('git-common-dir'), false)
+  check('checks:discover is never dispatched as its own call', callCount(captured, 'checks:discover'), 0)
+  const bxPrompt = captured.calls.find(c => c.label === 'branch:existing')?.prompt ?? ''
+  check('the branch:existing prompt reads AGENTS.md', bxPrompt.includes('AGENTS.md'), true)
+  check('the branch:existing prompt populates checks_source itself',
+    bxPrompt.includes('checks_source.sections'), true)
 }
 
 // Scenario EA -- #109: two identical command lines are two distinct checks,

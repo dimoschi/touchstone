@@ -333,15 +333,17 @@ async function scenarioAY() {
     (result.gates?.detail ?? '').includes('no staged source files'), true)
 }
 
-// Scenario AO -- one gate-opt-in probe answers both the CRAP and mutation
-// markers; the mutation phase must not ask the repo a second time.
+// Scenario AO -- one merged setup call answers the CRAP and mutation markers
+// together with the ticket and version probe; the mutation phase must not
+// ask the repo a second time, and no separate gate:opt-in call must exist.
 async function scenarioAO() {
-  console.log('\n== scenario AO: the gate opt-in probe is called exactly once for both markers')
+  console.log('\n== scenario AO: the merged setup call answers both markers; nothing dispatches gate:opt-in separately')
   const { result, captured } = await run(convergedWithSuspect({
     crapGated: true,
     mutationGated: false,
   }))
-  check('gate:opt-in was called exactly once', callCount(captured, 'gate:opt-in'), 1)
+  check('setup was called exactly once', callCount(captured, 'setup'), 1)
+  check('gate:opt-in is never dispatched as its own call', callCount(captured, 'gate:opt-in'), 0)
   check('mutation gate honoured the merged probe\'s answer',
     (result.mutation?.detail ?? '').includes('skipped'), true)
 }

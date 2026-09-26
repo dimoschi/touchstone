@@ -161,16 +161,21 @@ the older one. A `mismatch` of `false` or `null` needs no mention, unless
 refresh the base first, so an agreement may be with a stale ref rather than with
 the base branch as it stands.
 
-### Add the run id to the run record
+### Write the run record
 
-The workflow writes its own record to `.claude/touchstone-runs/<ticket>.json` in the
-main checkout, and returns the path as `record_path`. It cannot include the run id:
-the id reaches you only after the run has started, so nothing inside can be told it.
+The workflow has no filesystem access, so it cannot write its own record; it returns
+the payload itself plus the path it belongs at, as `record_file`, relative to the main
+checkout (the parent of `--git-common-dir`, not the worktree, which is removed once
+the work lands).
 
-Add it yourself, along with the date, by editing that file's JSON:
+Write it yourself: `mkdir -p` the parent directory, then write the returned payload as
+JSON to `<main checkout>/<record_file>`, with `run_id` (the `wf_` id the Workflow tool
+returned) and `recorded_on` (today's date) added. The run id reaches you only after the
+run has started, so nothing inside the workflow can be told it, which is why this has
+to happen out here rather than inside the run:
 
 ```
-{ "run_id": "<the wf_ id the Workflow tool returned>", "recorded_on": "<today>" }
+{ ...the returned payload..., "run_id": "<the wf_ id the Workflow tool returned>", "recorded_on": "<today>" }
 ```
 
 Without the id the record cannot be resumed from, which is most of its value: resume

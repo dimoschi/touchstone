@@ -214,73 +214,21 @@ if (sPlan.over()) {
 }
 }
 
-// The Fix, Mutation and final-result payloads below all report a `gates`
-// field, and the Mutation phase further down needs the mutation opt-in
-// marker. One probe answers both here, before either marker is needed.
-//
+// gates below reports crapGated/mutationGated (from the merged setup call)
+// separately rather than folding them into one "enforced" claim:
 // crap-commit-gate.py's PreToolUse hook only blocks a raw `git commit` when
 // .crap-gated exists at the repo root; crap-commit.sh itself runs the CRAP
 // and dead-code gates on every commit it makes regardless of that marker. So
 // the marker answers one question only -- could a raw commit have bypassed
-// the wrapper -- not whether the gates ran, and `gates` below reports both
-// separately rather than folding them into one "enforced" claim.
-//
-// The two markers take opposite fail-safe defaults on an unconfirmed answer.
-// Mutation: unknown counts as gated, which only costs an extra mutation run.
-// CRAP: unknown must NOT count as gated, because that would assert a raw
-// commit could not have bypassed the wrapper when nobody confirmed the
-// marker is there -- the false assertion this ticket exists to remove. So
-// crap_gated counts only a confirmed `true`; everything else, including a
-// probe that returned nothing, is reported as unconfirmed.
-const sGate = stage('gate')
-const gateProbe = await treeAgent(
-  `[touchstone: gate opt-in]\n` +
-  `Report whether this repo opts into CRAP-gated commits and into mutation ` +
-  `gating, then STOP. Run no tests, no gate tooling, and change nothing.\n` +
-  `1. Find the repo root: dirname "$(git rev-parse --path-format=absolute ` +
-  `--git-common-dir)".\n` +
-  `2. Test for a file named exactly .crap-gated at that root, and separately ` +
-  `for one named exactly .mutation-gated.\n` +
-  `3. Return crap_gated=true only if .crap-gated is there; crap_gated=false ` +
-  `otherwise, whether it is confirmed absent or you could not tell -- an ` +
-  `unconfirmed CRAP marker must never be reported as gated. Return ` +
-  `mutation_gated=true if .mutation-gated is there or you could not ` +
-  `determine either way, mutation_gated=false only if you confirmed it is ` +
-  `absent -- an unconfirmed mutation marker should still run the gate, which ` +
-  `only costs a run rather than dropping a real one.\n` +
-  `Report the paths you checked in detail.`,
-  { label: 'gate:opt-in', schema: MARKERS, model: 'haiku', effort: 'low' })
-sGate.close()
-
-const crapGated = gateProbe?.crap_gated === true
-const mutationGated = gateProbe?.mutation_gated !== false
-if (!gateProbe) {
-  log(`gate opt-in probe returned nothing; treating CRAP gating as ` +
-      `unconfirmed (reported as not hook-enforced) and mutation gating as ` +
-      `opted-in (safe default: costs an extra run rather than dropping a real gate)`)
-}
+// the wrapper -- not whether the gates ran.
 
 const sChecksPre = stage('checks')
 phase('Implement')
-const discovery = await treeAgent(
-  `[touchstone: checks:discover]\n` +
-  `Transcribe this repo's own heading structure, then STOP. Read only; run ` +
-  `nothing and change nothing. Do not choose, filter, reorder, trim, or ` +
-  `interpret anything below -- a later step decides what any of it means.\n` +
-  `1. Read ${wt.path}/AGENTS.md; if it does not exist, read ` +
-  `${wt.path}/CLAUDE.md instead (it is conventionally a symlink to ` +
-  `AGENTS.md). Return file as the absolute path you read, or '' if neither ` +
-  `exists.\n` +
-  `2. If a file was read, find every line starting with "##" that sits ` +
-  `outside a fenced code block. For each, return heading as that full line ` +
-  `verbatim, "#" characters included, and fence as the first fenced code ` +
-  `block that follows it and precedes the next such heading line, verbatim ` +
-  `and whole -- its opening marker line (\`\`\` or ~~~, with any info ` +
-  `string after it) and its closing marker line included -- or '' if there ` +
-  `is none before the next heading or the file's end. Return sections in ` +
-  `the file's own order.`,
-  { label: 'checks:discover', schema: CHECKS, model: 'haiku', effort: 'low' })
-const { checks: sourceChecks, note: discoveryNote } = checksFrom(discovery)
+// wt.checks_source came back from the branch/branch:existing call itself
+// (its last step, done only when created=true), replacing a separate
+// checks:discover dispatch now that the worktree it needs to read is
+// already open by the time that call answers.
+const { checks: sourceChecks, note: discoveryNote } = checksFrom(wt.checks_source)
 let discoveredChecks = sourceChecks
 log(discoveredChecks.length
   ? `checks discovered: ${discoveredChecks.map(c => c.id).join(', ')}`
@@ -541,7 +489,7 @@ function checksPayload() {
           : '')
       : `advisory only: existingBranch has no clean base tree to classify ` +
         `checks against, so a red one here is reported but never blocks. `
-    ) + (discoveryNote || discovery?.detail || ''),
+    ) + (discoveryNote || wt.checks_source?.detail || ''),
   }
 }
 // Red but not blocking (existingBranch) reaches the fixer as nothing at

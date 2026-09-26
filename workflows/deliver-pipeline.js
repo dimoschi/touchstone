@@ -67,6 +67,12 @@ if (!ticketMarker) {
     `(216, #216) nor a Jira key (PROJ-4821). Refusing rather than guessing: ` +
     `the branch marker is the only record of which tracker the work came from.`)
 }
+// Keyed by ticket, not run id: a script is never told its own run id, and the
+// ticket is what a human looks the run up by. The script no longer writes this
+// file itself (that agent dispatch cost a full round trip for a mkdir and a
+// heredoc); it names the path and hands the payload back, and the invoking
+// session writes it, the same session that already appends run_id afterwards.
+const runRecordFile = `.claude/touchstone-runs/${String(ticket).replace(/[^A-Za-z0-9_-]/g, '-')}.json`
 // Phase recording goes to agent-eval, a separate optional tool. Default on so a
 // machine that has it keeps its ground truth without opting in every run; the
 // prompt tells each phase to skip a missing command rather than halt, so this
@@ -109,11 +115,13 @@ const brief = (s) => {
 // both halt before any code exists, so tripping them forfeits nothing.
 // null means uncapped; args.stageBudgets can set a number to opt one back in.
 const CEILINGS = {
+  // No ceiling: it runs once, before any code exists, so tripping one here
+  // would forfeit nothing but also bound nothing real.
+  setup: null,
   triage: 15_000,
   branch: 10_000,
   plan: null,
   implement: null,
-  gate: 120_000,
   // Two separate windows share this ceiling: discovery+baseline before
   // Implement, and the post-Implement run plus its one pre-review fix
   // round. stage_spend.checks sums both; each is bounded on its own.
@@ -172,47 +180,24 @@ const prNote = () => draftPr
   ? `The PR was left as a draft`
   : `No PR was opened, because the draft could not be opened earlier in this run`
 
-// Keyed by ticket, not run id: a script is never told its own run id, and the
-// ticket is what a human looks the run up by.
-const recordRun = async (record) => {
-  const key = String(ticket).replace(/[^A-Za-z0-9_-]/g, '-')
-  const written = await agent(
-    `Write one file, then STOP. Do not stage it, commit it or push, and do ` +
-    `not touch anything else.\n` +
-    `1. Resolve the main checkout: git rev-parse --path-format=absolute ` +
-    `--git-common-dir, then take that directory's parent. Write there, not in ` +
-    `this worktree, which is removed once the work lands.\n` +
-    `2. mkdir -p <main>/.claude/touchstone-runs\n` +
-    `3. Write the JSON below to <main>/.claude/touchstone-runs/${key}.json ` +
-    `byte for byte, with a quoted heredoc (cat > path <<'TOUCHSTONE_EOF'). Do ` +
-    `not reformat it, re-indent it, summarise it or add fields. It is a record, ` +
-    `not a draft.\n` +
-    `Return the absolute path you wrote.\n\n` +
-    JSON.stringify(record, null, 2),
-    { label: 'run-record', model: 'haiku', effort: 'low' })
-  log(written
-    ? `run record written to .claude/touchstone-runs/${key}.json`
-    : `run record could not be written; this run survives only in the transcript`)
-  return typeof written === 'string' ? written : null
-}
-
 // A halt is a result, not an absence of one, and the run record is where it
 // survives the session. It used to be posted as a comment on the draft PR too.
 // That put the run's internal state -- which phase stopped, which findings a
 // lens raised -- on the repository's public record, where a reviewer cannot act
 // on it and someone has to delete it by hand. Opening the PR is this workflow's
-// only write to GitHub. Async because recordRun is, and every call site is
-// `return await`.
+// only write to GitHub. record_file only names where the invoking session
+// should write this payload (commands/deliver.md does that); the script has
+// no fs and cannot write it itself. Not async: nothing here dispatches an
+// agent, but every call site still says `return await` from when it did.
 const halted = async (at, extra) => {
   const payload = {
     task, halted_at: at, pipeline_version: pipelineVersion, stage_spend: stageSpend,
-    needs_user: true, ...extra,
+    needs_user: true, record_file: runRecordFile, ...extra,
   }
   if (draftPr?.number) {
     log(`halt at ${at}: draft PR ${draftPr.url} left as it is; the reason is in ` +
         `this run's result and record`)
   }
-  payload.record_path = await recordRun(payload)
   return payload
 }
 
@@ -233,6 +218,33 @@ const PLAN = {
     conflict_note: { type: 'string' },
   },
 }
+// Discovery source: AGENTS.md/CLAUDE.md read from the worktree, not the
+// --git-common-dir root the merged setup call resolves the gate markers
+// from -- a check list is branch content the ticket can change, while the
+// gate markers are repo-wide policy no phase of this run writes. The agent
+// transcribes every "##" heading and the first fenced block under it
+// verbatim, marker lines included, choosing and interpreting nothing.
+// Selecting the check heading, dropping the fence's own marker lines,
+// splitting the rest and assigning ids is script code (checksFrom below): a
+// check list runs again after every step that commits, so what runs must
+// come from parsing, never a model's account of it. Declared before BRANCH,
+// which embeds it as checks_source, since a const cannot be read before its
+// own declaration.
+const CHECKS = {
+  type: 'object', additionalProperties: false, required: ['file', 'sections', 'detail'],
+  properties: {
+    file: { type: 'string' },
+    sections: {
+      type: 'array',
+      items: {
+        type: 'object', additionalProperties: false, required: ['heading', 'fence'],
+        properties: { heading: { type: 'string' }, fence: { type: 'string' } },
+      },
+    },
+    detail: { type: 'string' },
+  },
+}
+
 // Scalars first, prose last. A required integer serialized after a long
 // free-text field is where the value drifts into the prose and validation
 // fails; premise_note is explicitly asked to be discursive. estimated_loc is
@@ -250,6 +262,11 @@ const BRANCH = {
     ticket: { type: 'string' },
     detail: { type: 'string' },
     dirty: { type: 'boolean' },
+    // Optional: only meaningful when created=true, the one case where a
+    // worktree exists to read AGENTS.md/CLAUDE.md out of. checksFrom() reads
+    // this instead of a separate checks:discover call, since the branch
+    // agent already has the worktree open by the time it can answer.
+    checks_source: CHECKS,
   },
 }
 
@@ -279,30 +296,6 @@ const MARKERS = {
   },
 }
 
-// Discovery source: AGENTS.md/CLAUDE.md read from the worktree (wt.path), not
-// the --git-common-dir root the gate:opt-in probe resolves -- a check list is
-// branch content the ticket can change, while the gate markers are repo-wide
-// policy no phase of this run writes. The agent transcribes every "##"
-// heading and the first fenced block under it verbatim, marker lines
-// included, choosing and interpreting nothing. Selecting the check heading,
-// dropping the fence's own marker lines, splitting the rest and assigning
-// ids is script code (checksFrom below): a check list runs again after every
-// step that commits, so what runs must come from parsing, never a model's
-// account of it.
-const CHECKS = {
-  type: 'object', additionalProperties: false, required: ['file', 'sections', 'detail'],
-  properties: {
-    file: { type: 'string' },
-    sections: {
-      type: 'array',
-      items: {
-        type: 'object', additionalProperties: false, required: ['heading', 'fence'],
-        properties: { heading: { type: 'string' }, fence: { type: 'string' } },
-      },
-    },
-    detail: { type: 'string' },
-  },
-}
 // One row per command, run exactly as discovered. output is what the fix
 // phase is handed verbatim -- never a model's account of it -- and it is
 // also the only place a row's real exit code lives: exitLineOf below reads
@@ -675,6 +668,21 @@ const MANIFEST_PROBE = {
   },
 }
 
+// One dispatch answering three unrelated questions before a worktree exists:
+// the ticket's own text, the repo's base-branch manifest, and its two gate
+// markers. Each sub-object keeps its own found/false fallback, so a model
+// that could not resolve one of the three still returns valid JSON for the
+// other two, rather than the whole call failing schema together.
+const SETUP = {
+  type: 'object', additionalProperties: false,
+  required: ['ticket', 'version', 'markers'],
+  properties: {
+    ticket: TICKET,
+    version: MANIFEST_PROBE,
+    markers: MARKERS,
+  },
+}
+
 // Worktree before triage, not just before planning. Triage often routes small
 // work back to be done inline, and that work still needs to land somewhere
 // named: without the jira-/gh- marker the session is reported untracked
@@ -707,24 +715,65 @@ const RECORD = (label) => !recordPhases ? '' :
   `metrics and has no bearing on the work. Report any other error verbatim, ` +
   `and never set CLAUDE_CONFIG_DIR to make it work.`
 
-// One fetch, before anything reads the envelope. A failed fetch is not a halt:
-// the ticket is required to exist as a reference, but its prose is enrichment,
-// and a Jira outage is not a reason to refuse to do the work.
-const fetched = await agent(
-  `[touchstone: ticket]\n` +
-  `Fetch the details of ticket ${ticket} and STOP. Do not plan, implement, ` +
-  `branch, or comment on anything.\n` +
-  `A key like PROJ-4821 or ABC-36 is a Jira issue: read it with the Atlassian ` +
-  `tools, which you can find via ToolSearch. A bare number like 216 is a ` +
-  `GitHub issue in the repo you are currently in: read it with ` +
-  `gh issue view <number> --json title,body,comments.\n` +
-  `Return found=true with summary (the title), description, and comments ` +
-  `(concatenated, newest last, each prefixed with its author; empty string if ` +
-  `none). Return found=false with empty strings if the ticket cannot be read ` +
-  `at all: say why in summary. Do not invent or infer any field.` +
-  RECORD('ticket'),
-  { label: 'ticket', schema: TICKET, model: 'haiku', effort: 'low' })
+// One dispatch, before anything reads the envelope, answering three questions
+// that share nothing but their timing: none needs a worktree, and each used
+// to cost its own haiku round trip (ticket, plugin:version, gate:opt-in). Not
+// a treeAgent -- there is no worktree yet, so every git command below
+// resolves the repo root itself (dirname of --git-common-dir) rather than
+// being pointed at one, and the prompt never names wt.base or baseOverride,
+// both unset at this point regardless. Its only write is the one
+// `git fetch origin <base>` the version check needs.
+const sSetup = stage('setup')
+const setupResult = await agent(
+  `[touchstone: setup]\n` +
+  `Gather three unrelated facts, then STOP. Do not plan, implement, branch, ` +
+  `commit, or comment on anything.\n\n` +
+  `1. TICKET. A key like PROJ-4821 or ABC-36 is a Jira issue: read it with ` +
+  `the Atlassian tools, which you can find via ToolSearch. A bare number ` +
+  `like 216 is a GitHub issue in the repo you are currently in: read it ` +
+  `with gh issue view <number> --json title,body,comments. Fetch ticket ` +
+  `${ticket}. Return ticket.found=true with ticket.summary (the title), ` +
+  `ticket.description, and ticket.comments (concatenated, newest last, ` +
+  `each prefixed with its author; empty string if none). Return ` +
+  `ticket.found=false with empty strings if the ticket cannot be read at ` +
+  `all: say why in ticket.summary. Do not invent or infer any field.\n\n` +
+  `2. VERSION. Find the repo root: dirname "$(git rev-parse ` +
+  `--path-format=absolute --git-common-dir)". Resolve the repo's actual ` +
+  `base branch: git -C <repo root> symbolic-ref --short refs/remotes/` +
+  `origin/HEAD, which prints an origin/-prefixed name; strip that prefix, ` +
+  `falling back to whichever of main or master exists when there is no ` +
+  `remote-tracking HEAD. Then run git -C <repo root> fetch origin <that ` +
+  `base> to refresh the remote-tracking ref before reading it -- this ` +
+  `checkout can be sessions old. If that fetch fails (no network, no auth, ` +
+  `a remote needing a hardware key), that is not by itself a missing ` +
+  `manifest: origin/<that base> can already hold it from an earlier fetch ` +
+  `or the initial clone, so read it anyway. Then read git -C <repo root> ` +
+  `show origin/<that base>:.claude-plugin/plugin.json. This fetch is the ` +
+  `only change to make anywhere in this task; do not touch a working tree, ` +
+  `commit, or push. Return version.found=true with version.name and ` +
+  `version.version set from that file's "name" and "version" fields, or ` +
+  `version.found=false with empty strings if the base cannot be resolved, ` +
+  `the ref still cannot be resolved even after attempting the read, or the ` +
+  `file is missing, unreadable, or has no such fields. A failed fetch does ` +
+  `not force version.found=false on its own. Do not invent either value. ` +
+  `Set version.refreshed=true only if that fetch actually succeeded, and ` +
+  `false if it failed, was refused, or you did not run it. Set ` +
+  `version.detail to one line saying which case applied.\n\n` +
+  `3. MARKERS. At the same repo root, test for a file named exactly ` +
+  `.crap-gated, and separately for one named exactly .mutation-gated. ` +
+  `Return markers.crap_gated=true only if .crap-gated is there; ` +
+  `markers.crap_gated=false otherwise, whether it is confirmed absent or ` +
+  `you could not tell -- an unconfirmed CRAP marker must never be reported ` +
+  `as gated. Return markers.mutation_gated=true if .mutation-gated is ` +
+  `there or you could not determine either way, markers.mutation_gated=` +
+  `false only if you confirmed it is absent -- an unconfirmed mutation ` +
+  `marker should still run the gate, which only costs a run rather than ` +
+  `dropping a real one. Report the paths you checked in markers.detail.` +
+  RECORD('setup'),
+  { label: 'setup', schema: SETUP, model: 'haiku', effort: 'low' })
+sSetup.close()
 
+const fetched = setupResult?.ticket
 const ticketDetail = fetched?.found
   ? fetched
   : { found: false, summary: fetched?.summary ?? 'not fetched', description: '', comments: '' }
@@ -747,6 +796,65 @@ if (!task) {
   log(`no task given; using ticket summary: ${task}`)
 }
 
+// executed never changes; base_branch and mismatch stay null until this
+// probe has something to report, which is why a halt at Worktree carries the
+// executed value with the other two still null. mismatch is null rather than
+// false when the probe found no comparable manifest (found:false, or a
+// different plugin's name) -- the ordinary case for every repo this runs
+// against except touchstone's own, but it is logged too, distinct from a real
+// mismatch. A probe that returns nothing at all leaves the same null/null
+// pair, but is logged separately again, since that case means the comparison
+// did not run, not that there was nothing to compare.
+const versionProbe = setupResult?.version
+if (versionProbe == null) {
+  log(`the plugin:version probe returned nothing, so pipeline_version could ` +
+      `not be compared against the repository's base branch`)
+} else if (versionProbe.found && versionProbe.name === PLUGIN_NAME) {
+  const drift = versionProbe.version !== PIPELINE_VERSION
+  pipelineVersion = {
+    executed: PIPELINE_VERSION, base_branch: versionProbe.version, mismatch: drift,
+    base_refreshed: versionProbe.refreshed !== false,
+  }
+  if (drift) {
+    // Names both and orders neither: the executed snapshot is the newer one
+    // whenever the base was reverted or the plugin was built locally.
+    log(`this run is executing pipeline ${PIPELINE_VERSION}; the repository's ` +
+        `base branch's plugin.json names ${versionProbe.version}`)
+  }
+  if (versionProbe.refreshed === false) {
+    // Without this the fetch failing produces mismatch:false and silence,
+    // which is the stale agreement the fetch was added to rule out.
+    log(`the base branch's manifest was read from a remote-tracking ref this ` +
+        `run could not refresh, so its version may predate the base branch's ` +
+        `real state (${versionProbe.detail})`)
+  }
+} else {
+  // The probe answered but did not confirm a comparable manifest -- the
+  // ordinary case for every repo this pipeline delivers into other than
+  // touchstone's own, but logged regardless: an answer that came back
+  // uncomparable must not collapse into the same silence as a comparison
+  // that never ran at all (the branch above).
+  log(`the plugin:version probe found no comparable manifest on the ` +
+      `repository's base branch (${versionProbe.detail}), so pipeline_version ` +
+      `stays uncompared`)
+}
+
+// The two markers take opposite fail-safe defaults on an unconfirmed answer.
+// Mutation: unknown counts as gated, which only costs an extra mutation run.
+// CRAP: unknown must NOT count as gated, because that would assert a raw
+// commit could not have bypassed the wrapper when nobody confirmed the
+// marker is there -- the false assertion this ticket exists to remove. So
+// crap_gated counts only a confirmed `true`; everything else, including a
+// probe that returned nothing, is reported as unconfirmed.
+const gateProbe = setupResult?.markers
+const crapGated = gateProbe?.crap_gated === true
+const mutationGated = gateProbe?.mutation_gated !== false
+if (!gateProbe) {
+  log(`gate opt-in probe returned nothing; treating CRAP gating as ` +
+      `unconfirmed (reported as not hook-enforced) and mutation gating as ` +
+      `opted-in (safe default: costs an extra run rather than dropping a real gate)`)
+}
+
 phase('Worktree')
 const sBranch = stage('branch')
 
@@ -758,6 +866,28 @@ const sBranch = stage('branch')
 // Re-running the same ticket is normal, not an error, and git will not let a
 // branch be checked out twice: both prompts below must find an existing
 // branch or worktree and reuse it rather than treat a collision as a halt.
+
+// Shared by both worktree-creation prompts below: transcribing the same repo
+// file the same way, whichever path found the worktree. Read only; chooses,
+// filters and interprets nothing, since checksFrom() (used once wt exists)
+// is what decides what any of it means. Folded into the worktree prompt
+// itself rather than a separate checks:discover call after it, since that
+// agent already has the worktree path open by the time it can answer this.
+const checksDiscoveryStep = (n, whichPath) =>
+  `${n}. Before you return from the step above: read ${whichPath}/AGENTS.md; ` +
+  `if it does not exist, read ${whichPath}/CLAUDE.md instead (conventionally ` +
+  `a symlink to it). Set checks_source.file to the absolute path you read, ` +
+  `or '' if neither exists. If a file was read, find every line starting ` +
+  `with "##" that sits outside a fenced code block. For each, set ` +
+  `checks_source.sections[].heading to that full line verbatim, "#" ` +
+  `characters included, and .fence to the first fenced code block that ` +
+  `follows it and precedes the next such heading line, verbatim and whole ` +
+  `-- its opening marker line (\`\`\` or ~~~, with any info string after ` +
+  `it) and its closing marker line included -- or '' if there is none ` +
+  `before the next heading or the file's end. List sections in the file's ` +
+  `own order. Do not choose, filter, reorder, trim, or interpret any of ` +
+  `it; a later step decides what it means. Set checks_source.detail to one ` +
+  `line saying what you found.`
 
 // existingBranch is for follow-up work on an open PR: review feedback, or scope
 // added to a ticket already in flight. Cutting a fresh branch there strands the
@@ -870,7 +1000,8 @@ const wt = args?.existingBranch
       `record. Note in detail whether the match came from the ticket lookup ` +
       `(step 4), the worktree-less branch (step 5), or the fallback (step 6), ` +
       `whether that path is the main checkout or a linked worktree, and ` +
-      `whether the branch name carries a jira- or gh- marker.` +
+      `whether the branch name carries a jira- or gh- marker.\n` +
+      checksDiscoveryStep(9, 'that path') +
       RECORD('branch:existing'),
       { label: 'branch:existing', schema: EXISTING_BRANCH, model: 'haiku', effort: 'low' })
   // A worktree is a separate checkout, so the main tree's state is irrelevant
@@ -951,6 +1082,7 @@ const wt = args?.existingBranch
       `separate checkout, cut straight from the fetched remote ref.\n`) +
   `Do not check out the new branch in this working tree; the worktree is a ` +
   `separate checkout.\n` +
+  checksDiscoveryStep(11, 'the worktree path from step 5 (or the reused path from step 6)') + `\n` +
   `Return the branch you created or reused, the base you cut it from (or ` +
   (baseOverride ? `${baseOverride}` : `the repo's base branch`) +
   ` if the branch already existed), and the absolute worktree path.` +
@@ -1115,86 +1247,6 @@ const treeAgent = (prompt, { omitBase = false, ...opts }) =>
     opts)
 
 const headOf = (range) => range.includes('..') ? range.split('..')[1].trim() : range.trim()
-
-// Read once, here, rather than folded into gate:opt-in below: comparing
-// against the repository's actual base branch rather than this worktree is
-// what makes the comparison safe on a resumed branch. The worktree's own
-// manifest already carries this run's own version-bump commit whenever one
-// landed in an earlier session -- the ordinary case on touchstone itself,
-// since check-version-bump.sh forces every workflows/ change to carry one --
-// and reading that back would report the run's own progress as drift against
-// itself. The probe must not just read origin/wt.base either: wt.base
-// becomes the branch under review whenever this run is stacked (baseOverride,
-// set above from args.base), and that branch's own manifest can carry its own
-// unmerged version bump, reviving the same self-accusation against a version
-// that never shipped. The probe resolves the real base itself instead, then
-// fetches it fresh -- nothing else in this workflow is guaranteed to have
-// refreshed that remote-tracking ref on a resumed run, so a stale fetch could
-// let a stale base pass as mismatch=false.
-const versionProbe = await treeAgent(
-  `[touchstone: plugin:version]\n` +
-  `Read .claude-plugin/plugin.json off the repository's actual base branch, ` +
-  `never this run's own working tree and never any stacked branch this work ` +
-  `sits on. Resolve that base yourself, the same way branch creation does: ` +
-  `git -C ${wt.path} symbolic-ref --short refs/remotes/origin/HEAD, which ` +
-  `prints an origin/-prefixed name; strip that prefix, falling back to ` +
-  `whichever of main or master exists when there is no remote-tracking HEAD. ` +
-  `This is not necessarily ${wt.branch}'s own base: ignore what branch ${wt.branch} ` +
-  `was actually cut from. Then run ` +
-  `git -C ${wt.path} fetch origin <that base> to refresh the remote-tracking ` +
-  `ref before reading it -- this worktree can be sessions old. If that fetch ` +
-  `fails (no network, no auth, a remote needing a hardware key), that is not ` +
-  `by itself a missing manifest: origin/<that base> can already hold it from ` +
-  `an earlier fetch or the initial clone, so read it anyway. Then read ` +
-  `git -C ${wt.path} show origin/<that base>:.claude-plugin/plugin.json. ` +
-  `Then STOP: the fetch is the only change to make; do not touch the working ` +
-  `tree, commit, or push.\n` +
-  `Return found=true with name and version set from that file's "name" and ` +
-  `"version" fields, or found=false with empty strings if the base cannot be ` +
-  `resolved, the ref still cannot be resolved even after attempting the read, ` +
-  `or the file is missing, unreadable, or has no such fields. A failed fetch ` +
-  `does not force found=false on its own. Do not invent either value. Set ` +
-  `refreshed=true only if that fetch actually succeeded, and false if it ` +
-  `failed, was refused, or you did not run it: false says the version you ` +
-  `read may predate the base branch's real state, so it must be reported ` +
-  `rather than assumed. Set detail to one line saying which case applied.`,
-  { label: 'plugin:version', omitBase: true, schema: MANIFEST_PROBE,
-    model: 'haiku', effort: 'low' })
-if (versionProbe == null) {
-  // Distinct from the found:false/wrong-name case below: this means the
-  // probe never answered at all, so pipeline_version's null/null does not
-  // mean "nothing to compare" here, it means the comparison did not run.
-  log(`the plugin:version probe returned nothing, so pipeline_version could ` +
-      `not be compared against the repository's base branch`)
-} else if (versionProbe.found && versionProbe.name === PLUGIN_NAME) {
-  const drift = versionProbe.version !== PIPELINE_VERSION
-  pipelineVersion = {
-    executed: PIPELINE_VERSION, base_branch: versionProbe.version, mismatch: drift,
-    base_refreshed: versionProbe.refreshed !== false,
-  }
-  if (drift) {
-    // Names both and orders neither: the executed snapshot is the newer one
-    // whenever the base was reverted or the plugin was built locally.
-    log(`this run is executing pipeline ${PIPELINE_VERSION}; the repository's ` +
-        `base branch's plugin.json names ${versionProbe.version}`)
-  }
-  if (versionProbe.refreshed === false) {
-    // Without this the fetch failing produces mismatch:false and silence,
-    // which is the stale agreement the fetch was added to rule out.
-    log(`the base branch's manifest was read from a remote-tracking ref this ` +
-        `run could not refresh, so its version may predate the base branch's ` +
-        `real state (${versionProbe.detail})`)
-  }
-} else {
-  // The probe answered but did not confirm a comparable manifest -- the
-  // ordinary case for every repo this pipeline delivers into other than
-  // touchstone's own, but logged regardless: an answer that came back
-  // uncomparable must not collapse into the same silence as a comparison
-  // that never ran at all (the branch above).
-  log(`the plugin:version probe found no comparable manifest on the ` +
-      `repository's base branch (${versionProbe.detail}), so pipeline_version ` +
-      `stays uncompared`)
-}
 
 // Latch 1. The premise checks that matter most are usually one grep, and a task
 // whose stated facts are wrong must not be planned around. Buying that check
@@ -1411,73 +1463,21 @@ if (sPlan.over()) {
 }
 }
 
-// The Fix, Mutation and final-result payloads below all report a `gates`
-// field, and the Mutation phase further down needs the mutation opt-in
-// marker. One probe answers both here, before either marker is needed.
-//
+// gates below reports crapGated/mutationGated (from the merged setup call)
+// separately rather than folding them into one "enforced" claim:
 // crap-commit-gate.py's PreToolUse hook only blocks a raw `git commit` when
 // .crap-gated exists at the repo root; crap-commit.sh itself runs the CRAP
 // and dead-code gates on every commit it makes regardless of that marker. So
 // the marker answers one question only -- could a raw commit have bypassed
-// the wrapper -- not whether the gates ran, and `gates` below reports both
-// separately rather than folding them into one "enforced" claim.
-//
-// The two markers take opposite fail-safe defaults on an unconfirmed answer.
-// Mutation: unknown counts as gated, which only costs an extra mutation run.
-// CRAP: unknown must NOT count as gated, because that would assert a raw
-// commit could not have bypassed the wrapper when nobody confirmed the
-// marker is there -- the false assertion this ticket exists to remove. So
-// crap_gated counts only a confirmed `true`; everything else, including a
-// probe that returned nothing, is reported as unconfirmed.
-const sGate = stage('gate')
-const gateProbe = await treeAgent(
-  `[touchstone: gate opt-in]\n` +
-  `Report whether this repo opts into CRAP-gated commits and into mutation ` +
-  `gating, then STOP. Run no tests, no gate tooling, and change nothing.\n` +
-  `1. Find the repo root: dirname "$(git rev-parse --path-format=absolute ` +
-  `--git-common-dir)".\n` +
-  `2. Test for a file named exactly .crap-gated at that root, and separately ` +
-  `for one named exactly .mutation-gated.\n` +
-  `3. Return crap_gated=true only if .crap-gated is there; crap_gated=false ` +
-  `otherwise, whether it is confirmed absent or you could not tell -- an ` +
-  `unconfirmed CRAP marker must never be reported as gated. Return ` +
-  `mutation_gated=true if .mutation-gated is there or you could not ` +
-  `determine either way, mutation_gated=false only if you confirmed it is ` +
-  `absent -- an unconfirmed mutation marker should still run the gate, which ` +
-  `only costs a run rather than dropping a real one.\n` +
-  `Report the paths you checked in detail.`,
-  { label: 'gate:opt-in', schema: MARKERS, model: 'haiku', effort: 'low' })
-sGate.close()
-
-const crapGated = gateProbe?.crap_gated === true
-const mutationGated = gateProbe?.mutation_gated !== false
-if (!gateProbe) {
-  log(`gate opt-in probe returned nothing; treating CRAP gating as ` +
-      `unconfirmed (reported as not hook-enforced) and mutation gating as ` +
-      `opted-in (safe default: costs an extra run rather than dropping a real gate)`)
-}
+// the wrapper -- not whether the gates ran.
 
 const sChecksPre = stage('checks')
 phase('Implement')
-const discovery = await treeAgent(
-  `[touchstone: checks:discover]\n` +
-  `Transcribe this repo's own heading structure, then STOP. Read only; run ` +
-  `nothing and change nothing. Do not choose, filter, reorder, trim, or ` +
-  `interpret anything below -- a later step decides what any of it means.\n` +
-  `1. Read ${wt.path}/AGENTS.md; if it does not exist, read ` +
-  `${wt.path}/CLAUDE.md instead (it is conventionally a symlink to ` +
-  `AGENTS.md). Return file as the absolute path you read, or '' if neither ` +
-  `exists.\n` +
-  `2. If a file was read, find every line starting with "##" that sits ` +
-  `outside a fenced code block. For each, return heading as that full line ` +
-  `verbatim, "#" characters included, and fence as the first fenced code ` +
-  `block that follows it and precedes the next such heading line, verbatim ` +
-  `and whole -- its opening marker line (\`\`\` or ~~~, with any info ` +
-  `string after it) and its closing marker line included -- or '' if there ` +
-  `is none before the next heading or the file's end. Return sections in ` +
-  `the file's own order.`,
-  { label: 'checks:discover', schema: CHECKS, model: 'haiku', effort: 'low' })
-const { checks: sourceChecks, note: discoveryNote } = checksFrom(discovery)
+// wt.checks_source came back from the branch/branch:existing call itself
+// (its last step, done only when created=true), replacing a separate
+// checks:discover dispatch now that the worktree it needs to read is
+// already open by the time that call answers.
+const { checks: sourceChecks, note: discoveryNote } = checksFrom(wt.checks_source)
 let discoveredChecks = sourceChecks
 log(discoveredChecks.length
   ? `checks discovered: ${discoveredChecks.map(c => c.id).join(', ')}`
@@ -1738,7 +1738,7 @@ function checksPayload() {
           : '')
       : `advisory only: existingBranch has no clean base tree to classify ` +
         `checks against, so a red one here is reported but never blocks. `
-    ) + (discoveryNote || discovery?.detail || ''),
+    ) + (discoveryNote || wt.checks_source?.detail || ''),
   }
 }
 // Red but not blocking (existingBranch) reaches the fixer as nothing at
@@ -3179,6 +3179,6 @@ const result = {
   unresolved_findings: open,
   pr,
   needs_user: args?.openPr !== false && !pr?.opened,
+  record_file: runRecordFile,
 }
-result.record_path = await recordRun(result)
 return result

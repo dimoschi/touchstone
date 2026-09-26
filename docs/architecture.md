@@ -192,6 +192,27 @@ build.
 Structure, top to bottom: `meta` (phase titles must match the `phase()` calls exactly),
 argument validation that throws early, `CEILINGS` per stage, then the phases in order.
 
+### Setup: one dispatch for three unrelated facts
+
+Before the worktree is cut, a single `agent()` call labelled `setup` (not a
+`treeAgent`, since there is nothing to point it at yet) answers the ticket fetch, the
+`plugin:version` probe, and the two gate markers together, against the `SETUP` schema.
+Each sub-object (`ticket`, `version`, `markers`) keeps its own found/false fallback, so
+a model that could not resolve one of the three still returns valid JSON for the other
+two. Every git command it runs resolves the repo root itself
+(`dirname $(git rev-parse --path-format=absolute --git-common-dir)`), since no worktree
+path exists to be handed one; its only write is the one `git fetch origin <base>` the
+version check needs. Checks discovery is not part of this call: it needs the worktree
+path, which does not exist until the very next phase, so it rides on the `branch`/
+`branch:existing` call instead (see Check discovery, below).
+
+The run record (`.claude/touchstone-runs/<ticket>.json`) used to be written by a
+dedicated `run-record` dispatch on every exit path. The script has no filesystem
+access, so all it can do is name where the file belongs (`record_file`, sanitizing the
+ticket arg to a safe basename) and hand back the full payload; the invoking session
+(`commands/deliver.md`) writes it, the same session that already appends `run_id` and
+`recorded_on` afterwards.
+
 Two invariants the script exists to hold:
 
 - **Every run needs a ticket**, and the marker (`gh-216` vs `jira-PROJ-4821`) is decided
@@ -273,7 +294,11 @@ cost of that judgement being wrong is a line in the PR body rather than another 
 
 ### Check discovery
 
-`checks:discover` reads only `${wt.path}/AGENTS.md` (or `CLAUDE.md`) and transcribes
+Folded into the `branch`/`branch:existing` call's own last step (`checks_source` on
+the `BRANCH`/`EXISTING_BRANCH` schema), rather than a separate `checks:discover`
+dispatch: that call already has the worktree path open by the time it can answer,
+since it derives that path itself in an earlier step. It reads only
+`<worktree>/AGENTS.md` (or `CLAUDE.md`) and transcribes
 every `##` heading and the fenced block that follows it verbatim, including its own
 opening and closing marker lines; it chooses, filters and interprets nothing.
 `checksFrom()` then selects the section whose heading is exactly `## Checks` (only
@@ -353,22 +378,22 @@ literals for that reason: they travel with the executed bytes, and
 `scripts/check-version-bump.sh` checks them against the manifest at HEAD
 (`scripts/test-version-bump.sh` covers that half).
 
-A single `treeAgent` call labelled `plugin:version`, placed after the worktree exists
+One third of the merged `setup` call (below), placed before the worktree is even cut
 and before Triage, resolves the repository's actual base branch itself and reads its
-manifest exactly once, neither the branch's own working tree nor `wt.base`: a resumed
-branch already carries this run's own earlier version-bump commit as often as not
-(`check-version-bump.sh` forces one onto every `workflows/` change), and reading the
-working tree back would report that bump as drift against itself, while `wt.base`
-becomes the branch under review whenever this run is stacked (`args.base`), whose own
-unmerged version bump would revive the same self-accusation through the base instead.
-The probe also fetches that base fresh before reading it, since neither reuse path in
-Worktree ever runs `git fetch` and a stale remote-tracking ref would let a stale base
-pass as `mismatch: false`. A failed fetch (no network, no auth, a remote needing a
-hardware key) does not by itself count as a missing manifest: `origin/<base>` can
-already hold it from an earlier fetch or the initial clone, so the probe reads it
-anyway rather than reporting the fetch failure as if the manifest were absent. The
-result is a `pipeline_version` object carried on every exit path, a halt at any phase
-included:
+manifest exactly once, neither the branch's own working tree nor `wt.base` (neither
+exists yet at this point in the run): a resumed branch already carries this run's own
+earlier version-bump commit as often as not (`check-version-bump.sh` forces one onto
+every `workflows/` change), and reading the working tree back would report that bump as
+drift against itself, while `wt.base` becomes the branch under review whenever this run
+is stacked (`args.base`), whose own unmerged version bump would revive the same
+self-accusation through the base instead. The probe also fetches that base fresh before
+reading it, since neither reuse path in Worktree ever runs `git fetch` and a stale
+remote-tracking ref would let a stale base pass as `mismatch: false`. A failed fetch (no
+network, no auth, a remote needing a hardware key) does not by itself count as a missing
+manifest: `origin/<base>` can already hold it from an earlier fetch or the initial
+clone, so the probe reads it anyway rather than reporting the fetch failure as if the
+manifest were absent. The result is a `pipeline_version` object carried on every exit
+path, a halt at any phase included:
 
 - `executed` -- `PIPELINE_VERSION`, always present, even on a halt at Worktree
   before the probe has run.

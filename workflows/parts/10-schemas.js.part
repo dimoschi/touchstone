@@ -1,3 +1,30 @@
+// Discovery source: AGENTS.md/CLAUDE.md read from the worktree, not the
+// --git-common-dir root the merged setup call resolves the gate markers
+// from -- a check list is branch content the ticket can change, while the
+// gate markers are repo-wide policy no phase of this run writes. The agent
+// transcribes every "##" heading and the first fenced block under it
+// verbatim, marker lines included, choosing and interpreting nothing.
+// Selecting the check heading, dropping the fence's own marker lines,
+// splitting the rest and assigning ids is script code (checksFrom below): a
+// check list runs again after every step that commits, so what runs must
+// come from parsing, never a model's account of it. Declared before BRANCH,
+// which embeds it as checks_source, since a const cannot be read before its
+// own declaration.
+const CHECKS = {
+  type: 'object', additionalProperties: false, required: ['file', 'sections', 'detail'],
+  properties: {
+    file: { type: 'string' },
+    sections: {
+      type: 'array',
+      items: {
+        type: 'object', additionalProperties: false, required: ['heading', 'fence'],
+        properties: { heading: { type: 'string' }, fence: { type: 'string' } },
+      },
+    },
+    detail: { type: 'string' },
+  },
+}
+
 // Scalars first, prose last. A required integer serialized after a long
 // free-text field is where the value drifts into the prose and validation
 // fails; premise_note is explicitly asked to be discursive. estimated_loc is
@@ -15,6 +42,11 @@ const BRANCH = {
     ticket: { type: 'string' },
     detail: { type: 'string' },
     dirty: { type: 'boolean' },
+    // Optional: only meaningful when created=true, the one case where a
+    // worktree exists to read AGENTS.md/CLAUDE.md out of. checksFrom() reads
+    // this instead of a separate checks:discover call, since the branch
+    // agent already has the worktree open by the time it can answer.
+    checks_source: CHECKS,
   },
 }
 
@@ -44,30 +76,6 @@ const MARKERS = {
   },
 }
 
-// Discovery source: AGENTS.md/CLAUDE.md read from the worktree (wt.path), not
-// the --git-common-dir root the gate:opt-in probe resolves -- a check list is
-// branch content the ticket can change, while the gate markers are repo-wide
-// policy no phase of this run writes. The agent transcribes every "##"
-// heading and the first fenced block under it verbatim, marker lines
-// included, choosing and interpreting nothing. Selecting the check heading,
-// dropping the fence's own marker lines, splitting the rest and assigning
-// ids is script code (checksFrom below): a check list runs again after every
-// step that commits, so what runs must come from parsing, never a model's
-// account of it.
-const CHECKS = {
-  type: 'object', additionalProperties: false, required: ['file', 'sections', 'detail'],
-  properties: {
-    file: { type: 'string' },
-    sections: {
-      type: 'array',
-      items: {
-        type: 'object', additionalProperties: false, required: ['heading', 'fence'],
-        properties: { heading: { type: 'string' }, fence: { type: 'string' } },
-      },
-    },
-    detail: { type: 'string' },
-  },
-}
 // One row per command, run exactly as discovered. output is what the fix
 // phase is handed verbatim -- never a model's account of it -- and it is
 // also the only place a row's real exit code lives: exitLineOf below reads
@@ -437,6 +445,21 @@ const MANIFEST_PROBE = {
     name: { type: 'string' },
     version: { type: 'string' },
     detail: { type: 'string' },
+  },
+}
+
+// One dispatch answering three unrelated questions before a worktree exists:
+// the ticket's own text, the repo's base-branch manifest, and its two gate
+// markers. Each sub-object keeps its own found/false fallback, so a model
+// that could not resolve one of the three still returns valid JSON for the
+// other two, rather than the whole call failing schema together.
+const SETUP = {
+  type: 'object', additionalProperties: false,
+  required: ['ticket', 'version', 'markers'],
+  properties: {
+    ticket: TICKET,
+    version: MANIFEST_PROBE,
+    markers: MARKERS,
   },
 }
 
