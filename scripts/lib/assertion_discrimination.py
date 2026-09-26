@@ -25,6 +25,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+from collections import Counter
 from dataclasses import dataclass
 
 # Suite files this check judges. A file move between the two (gh-118 split
@@ -143,6 +144,65 @@ def _top_quote(stack: list[str], quote_chars: str) -> str | None:
     return stack[-1] if stack[-1] in quote_chars else None
 
 
+_REGEX_DISALLOWED_BEFORE_RE = re.compile(r'[\w$)\]]$')
+
+
+def _regex_literal_starts_at(text: str, i: int) -> bool:
+    """Whether the top-level `/` at `text[i]` opens a JS regex literal rather
+    than division: false only when immediately preceded (whitespace aside) by
+    an identifier character, `$`, `)`, or `]` -- the usual heuristic for
+    telling the two apart without a full parser."""
+    before = text[:i].rstrip()
+    return not before or not _REGEX_DISALLOWED_BEFORE_RE.search(before)
+
+
+def _is_top_level_regex_start(stack: list[str], c: str, text: str, i: int) -> bool:
+    return not stack and c == '/' and _regex_literal_starts_at(text, i)
+
+
+def _scan_js_regex_body(text: str, start: int) -> int:
+    """Index just past a JS regex literal's closing, unescaped `/`, opening
+    at `text[start]`. A `[...]` character class is tracked so a `/` inside
+    one (never needing escape there) does not close the literal early."""
+    n = len(text)
+    i = start + 1
+    in_class = False
+    while i < n:
+        c = text[i]
+        if c == '\\':
+            i += 2
+            continue
+        if c == '/' and not in_class:
+            return i + 1
+        if c in '[]':
+            in_class = c == '['
+        i += 1
+    return i
+
+
+def _skip_js_regex_flags(text: str, i: int) -> int:
+    n = len(text)
+    while i < n and text[i].isalpha():
+        i += 1
+    return i
+
+
+def _scan_js_regex_literal(text: str, start: int) -> int:
+    """Index just past a JS regex literal's closing `/` and any flag letters,
+    opening at `text[start]`."""
+    return _skip_js_regex_flags(text, _scan_js_regex_body(text, start))
+
+
+def _push_or_pop_bracket(c: str, quote_chars: str, bracket_pairs: dict[str, str],
+                          closers: set[str], stack: list[str]) -> None:
+    if c in quote_chars:
+        stack.append(c)
+    elif c in bracket_pairs:
+        stack.append(bracket_pairs[c])
+    elif _is_matching_closer(c, closers, stack):
+        stack.pop()
+
+
 def _advance_split(text: str, i: int, quote_chars: str, bracket_pairs: dict[str, str],
                     closers: set[str], stack: list[str]) -> int:
     """One character's worth of `_split_top_level`'s bookkeeping outside any
@@ -153,12 +213,13 @@ def _advance_split(text: str, i: int, quote_chars: str, bracket_pairs: dict[str,
     c = text[i]
     if c == '\\':
         return i + 2
-    if c in quote_chars:
-        stack.append(c)
-    elif c in bracket_pairs:
-        stack.append(bracket_pairs[c])
-    elif _is_matching_closer(c, closers, stack):
-        stack.pop()
+    if _is_top_level_regex_start(stack, c, text, i):
+        # A regex literal's own commas (e.g. `/one at a time, in order/`)
+        # are not argument separators; only `_split_top_level`'s callers
+        # ever hand this JS source, so this is unconditional rather than
+        # gated on `quote_chars`/`bracket_pairs` being the JS set.
+        return _scan_js_regex_literal(text, i)
+    _push_or_pop_bracket(c, quote_chars, bracket_pairs, closers, stack)
     return i + 1
 
 
@@ -321,6 +382,44 @@ def _nearest_header(headers: tuple[list[int], list[str]], offset: int) -> str | 
     positions, texts = headers
     idx = bisect.bisect_right(positions, offset) - 1
     return texts[idx] if idx >= 0 else None
+
+
+def _blank_to_newline(out: list[str], source: str, i: int) -> int:
+    """Overwrites `out` with spaces from `i` through the end of its line
+    (exclusive); returns that line's own end index."""
+    n = len(source)
+    while i < n and source[i] != '\n':
+        out[i] = ' '
+        i += 1
+    return i
+
+
+def _blank_bash_comments(source: str) -> str:
+    """`source` with every bash comment (a `#` starting a word, outside any
+    quote, through the end of its line) replaced by spaces, so `_BASH_CHECK_RE`
+    never matches the word `check` inside one -- comments are not blanked
+    ahead of that regex the way a heredoc body already is.
+
+    Reuses `_skip_bash_word` to walk real words (quotes and `$(...)` included)
+    rather than re-implementing that scanning here.
+    """
+    out = list(source)
+    n = len(source)
+    i = 0
+    at_word_start = True
+    while i < n:
+        c = source[i]
+        if c in ' \t':
+            i += 1
+        elif c == '\n':
+            i += 1
+            at_word_start = True
+        elif c == '#' and at_word_start:
+            i = _blank_to_newline(out, source, i)
+        else:
+            i = _skip_bash_word(source, i)
+            at_word_start = False
+    return ''.join(out)
 
 
 def _parse_bash_calls(file: str, source: str, headers: tuple[list[int], list[str]]) -> list[Call]:
@@ -540,18 +639,37 @@ def _parse_js_calls(file: str, source: str) -> list[Call]:
     return calls
 
 
-def select_candidates(head_calls: list[Call], base_texts: set[str]) -> list[Call]:
+def select_candidates(head_calls: list[Call], base_counts: 'Counter[str]') -> list[Call]:
     """New-or-changed, deliver-pipeline.js-dependent calls: this ticket's scope.
 
-    "New or changed" is decided by whether `call.text` (already
-    whitespace-collapsed) appears anywhere in `base_texts`, gathered from
-    every suite file at the base revision regardless of which file it came
-    from -- so a call moved verbatim to a new file (gh-118 split its 4651-line
-    suite into workflows/tests/*.sh) still matches and is excluded, rather
-    than being reported as new because the file it now lives in did not
-    exist at base.
+    "New or changed" is decided per exact call text (already whitespace-
+    collapsed), counted globally across every suite file rather than per
+    file -- so a call moved verbatim to a new file (gh-118 split its
+    4651-line suite into workflows/tests/*.sh) still matches and is
+    excluded, rather than being reported as new because the file it now
+    lives in did not exist at base.
+
+    A text repeated more often among `head_calls` than `base_counts` says it
+    was at base is a boilerplate check copy-pasted into a new scenario:
+    plain set membership would drop every copy as "unchanged", so the
+    excess occurrences -- the last ones in (file, start_line) order, since a
+    copy is typically appended after the original -- are reported as new.
     """
-    return [c for c in head_calls if c.dependent and c.text not in base_texts]
+    dependent = [c for c in head_calls if c.dependent]
+    head_counts = Counter(c.text for c in dependent)
+    candidates = []
+    for text, head_count in head_counts.items():
+        excess = head_count - base_counts.get(text, 0)
+        if excess > 0:
+            candidates.extend(_last_occurrences(dependent, text, excess))
+    return candidates
+
+
+def _last_occurrences(calls: list[Call], text: str, count: int) -> list[Call]:
+    """The last `count` of `calls` whose text is `text`, in (file, start_line)
+    order -- a copy is typically appended after the original it duplicates."""
+    occurrences = sorted((c for c in calls if c.text == text), key=lambda c: (c.file, c.start_line))
+    return occurrences[-count:]
 
 
 # ---------------------------------------------------------------------------
@@ -571,27 +689,104 @@ def extract_statuses(stdout: str) -> list[tuple[str, str]]:
     return out
 
 
+def _resolve_loop_gap(gap_calls: list[Call], gap_statuses: list[tuple[str, str]]) -> dict[Call, str | None]:
+    """Assigns `gap_statuses` to `gap_calls` (a run of consecutive calls whose
+    label could not be verified) by cycling through `gap_calls` in order: a
+    `for` loop around a `check` call prints its label fresh each iteration
+    (so it cannot be verified statically), but still prints its whole body
+    once per iteration, in the same order every time. A call gets 'FAIL' if
+    any iteration of it failed, else 'ok' if any iteration reached it, else
+    None (never reached at all).
+    """
+    k = len(gap_calls)
+    per_call: dict[Call, list[str]] = {c: [] for c in gap_calls}
+    for i, (status, _rest) in enumerate(gap_statuses):
+        per_call[gap_calls[i % k]].append(status)
+    result: dict[Call, str | None] = {}
+    for call in gap_calls:
+        seen = per_call[call]
+        if not seen:
+            result[call] = None
+        elif 'FAIL' in seen:
+            result[call] = 'FAIL'
+        else:
+            result[call] = 'ok'
+    return result
+
+
 def match_call_status(calls: list[Call], stdout: str) -> dict[Call, str | None]:
     """`calls` (one scenario's or one bash section's, in source order) mapped
     to the status ('ok'/'FAIL') its line printed in `stdout`, or None if
     execution never reached it.
 
-    Matching is positional: the n-th status line is assumed to be the n-th
-    call in source order, since every scenario examined here is a
+    Matching is positional wherever a call's label is a known literal: the
+    next status line must carry it, since every scenario examined here is a
     straight-line function with no branch around a `check` call itself --
     what a run actually executes is always a prefix of the full list, cut
-    short only by an early throw or return. Once a label does not match at a
-    position, matching stops rather than guessing a realignment.
+    short only by an early throw or return. Once a literal label does not
+    match at a position, matching stops rather than guessing a realignment.
+
+    A run of calls whose label could not be evaluated statically (a `for`
+    loop's body, where the label is built from the loop variable) is handled
+    differently: such a loop prints its body's labels once per iteration, so
+    the n-th status is no longer the n-th call. `_resolve_loop_gap` cycles
+    the gap's own calls against however many statuses sit between the last
+    confirmed position and the next literal label (or the end of `stdout`),
+    which is exactly the loop's total printed output.
     """
     statuses = extract_statuses(stdout)
     result: dict[Call, str | None] = {}
-    for call, (status, rest) in zip(calls, statuses):
-        if call.label is not None and not rest.startswith(call.label + ' ('):
+    call_idx = 0
+    status_idx = 0
+    while call_idx < len(calls) and status_idx < len(statuses):
+        call = calls[call_idx]
+        if call.label is None:
+            gap_end, gap_stop = _find_label_gap(calls, call_idx, statuses, status_idx)
+            result.update(_resolve_loop_gap(calls[call_idx:gap_end], statuses[status_idx:gap_stop]))
+            call_idx, status_idx = gap_end, gap_stop
+            continue
+        status, rest = statuses[status_idx]
+        if not rest.startswith(call.label + ' ('):
             break
         result[call] = status
+        call_idx += 1
+        status_idx += 1
     for call in calls[len(result):]:
         result[call] = None
     return result
+
+
+def _label_gap_end(calls: list[Call], call_idx: int) -> int:
+    """The end of this run of label-less calls in `calls`, starting at
+    `call_idx`."""
+    gap_end = call_idx
+    while gap_end < len(calls) and calls[gap_end].label is None:
+        gap_end += 1
+    return gap_end
+
+
+def _label_gap_stop(statuses: list[tuple[str, str]], status_idx: int, next_label: str | None) -> int:
+    """The end of a label-less run's printed output in `statuses`, starting
+    at `status_idx`: up to the first status carrying `next_label`, or the
+    end of `statuses` if there is none."""
+    gap_stop = status_idx
+    while gap_stop < len(statuses) and (next_label is None or
+                                         not statuses[gap_stop][1].startswith(next_label + ' (')):
+        gap_stop += 1
+    return gap_stop
+
+
+def _find_label_gap(calls: list[Call], call_idx: int, statuses: list[tuple[str, str]],
+                     status_idx: int) -> tuple[int, int]:
+    """From `call_idx`/`status_idx` (`calls[call_idx].label` already known to
+    be unverifiable): the end of this run of label-less calls in `calls`, and
+    of its printed output in `statuses` -- up to the first status carrying
+    the next call's own literal label, or the end of either list.
+    """
+    gap_end = _label_gap_end(calls, call_idx)
+    next_label = calls[gap_end].label if gap_end < len(calls) else None
+    gap_stop = _label_gap_stop(statuses, status_idx, next_label)
+    return gap_end, gap_stop
 
 
 # ---------------------------------------------------------------------------
@@ -853,9 +1048,10 @@ def _build_head_index(repo: str, head: str) -> HeadIndex:
 
 
 def _collect_candidates(repo: str, base: str, head: str) -> tuple[HeadIndex, list[Call]]:
-    base_texts = {c.text for f in list_suite_files(repo, base) for c in _parse_calls_at(repo, base, f)}
+    base_counts = Counter(c.text for f in list_suite_files(repo, base) for c in _parse_calls_at(repo, base, f))
     head_index = _build_head_index(repo, head)
-    candidates = [c for calls in head_index.calls.values() for c in select_candidates(calls, base_texts)]
+    all_head_calls = [c for calls in head_index.calls.values() for c in calls]
+    candidates = select_candidates(all_head_calls, base_counts)
     return head_index, candidates
 
 
@@ -882,9 +1078,40 @@ def _run_mutant_sweep(repo: str, base: str, head: str, tmp: str, head_tree: str,
     return pending
 
 
+_JS_BARE_LITERAL_RE = re.compile(r'^(?:true|false|null|-?\d+(?:\.\d+)?)$')
+
+
+def _is_bare_literal(call: Call) -> bool:
+    """Whether both sides of `call` are hardcoded, with no reference to
+    anything the suite captured or computed: comparing two constants can
+    never discriminate, so it is provably vacuous with no counterfactual at
+    all -- unlike a call that merely lacks one to prove it either way.
+    """
+    if call.kind == 'bash':
+        return '$' not in call.got_src and '$' not in call.want_src
+
+    def is_js_literal(expr: str) -> bool:
+        expr = expr.strip()
+        return bool(_JS_BARE_LITERAL_RE.match(expr)) or _eval_js_string_literal(expr) is not None
+
+    return is_js_literal(call.got_src) and is_js_literal(call.want_src)
+
+
+def _bare_literal_survivors(pending: list[Call]) -> list[Call]:
+    """Of `pending`, the calls provably vacuous with no counterfactual at all
+    (see `_is_bare_literal`) -- what a test-only diff falls back to, since a
+    revert is a no-op and there are no added lines to mutate."""
+    return [c for c in pending if _is_bare_literal(c)]
+
+
 def _run_counterfactuals(repo: str, base: str, head: str, tmp: str, head_tree: str,
                           head_index: HeadIndex, pending: list[Call]) -> list[Call]:
     base_script = git_show(repo, base, PIPELINE_SCRIPT)
+    head_script = git_show(repo, head, PIPELINE_SCRIPT)
+    if base_script == head_script:
+        # gh-96: a test-only PR adding real coverage must not have every new,
+        # production-dependent assertion reported for lack of evidence.
+        return _bare_literal_survivors(pending)
     if pending and base_script is not None:
         pending = _try_counterfactual(tmp, 'revert', head_tree, base_script, head_index, pending)
     if pending:
@@ -922,6 +1149,7 @@ def parse_suite_source(file: str, source: str) -> list[Call]:
         bash_source = bash_source[:body_start] + \
             re.sub(r'[^\n]', ' ', bash_source[body_start:body_end]) + \
             bash_source[body_end:]
+    bash_source = _blank_bash_comments(bash_source)
     bash_headers = _bash_headers(source, heredocs)
     calls = _parse_bash_calls(file, bash_source, bash_headers) + _parse_js_calls(file, source)
     calls.sort(key=lambda c: c.start_line)
