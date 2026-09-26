@@ -75,3 +75,20 @@ def test_main_accepts_optional_root_argument(monkeypatch, tmp_path, capsys):
     monkeypatch.setattr("sys.argv", ["parse_infection.py", str(report), str(tmp_path)])
     parse_infection.main()
     assert capsys.readouterr().out == ""
+
+
+def test_total_count_reads_stats_total_mutants_count():
+    doc = {"stats": {"totalMutantsCount": 7}, "escaped": [], "uncovered": []}
+    assert parse_infection.total_count(doc) == 7
+
+
+def test_total_count_defaults_to_zero_without_stats():
+    assert parse_infection.total_count({}) == 0
+
+
+def test_main_total_flag_prints_count_from_report(monkeypatch, tmp_path, capsys):
+    report = tmp_path / "report.json"
+    report.write_text(json.dumps({"stats": {"totalMutantsCount": 3}}))
+    monkeypatch.setattr("sys.argv", ["parse_infection.py", "--total", str(report)])
+    parse_infection.main()
+    assert capsys.readouterr().out == "3\n"

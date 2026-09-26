@@ -108,5 +108,10 @@ rows="$(python3 "$SKILL_LIB/parse_infection.py" "$REPORT" "$PWD")"
 if [ -n "$rows" ]; then
   printf '%s\n' "$rows"
 else
-  echo "mutation-check[php]: all mutants on changed lines were killed (or nothing mutable changed)."
+  total="$(python3 "$SKILL_LIB/parse_infection.py" --total "$REPORT")"
+  if [ "$total" -gt 0 ]; then
+    echo "mutation-check[php]: generated $total mutant(s) on changed lines, all killed."
+  else
+    echo "mutation-check[php]: generated no mutants on changed lines; nothing was measured, so this is not a pass."
+  fi
 fi

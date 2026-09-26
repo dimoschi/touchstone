@@ -33,7 +33,22 @@ def rows(entries, root):
                 print(f"    {line}")
 
 
+def total_count(doc):
+    """Mutants infection actually generated, per its own stats block.
+
+    escaped/uncovered being empty is not evidence of a killed run: it is the
+    same shape as a run that generated nothing, so the caller needs this count
+    to tell the two apart.
+    """
+    return (doc.get('stats') or {}).get('totalMutantsCount', 0)
+
+
 def main():
+    if len(sys.argv) > 2 and sys.argv[1] == '--total':
+        with open(sys.argv[2]) as f:
+            doc = json.load(f)
+        print(total_count(doc))
+        return
     with open(sys.argv[1]) as f:
         doc = json.load(f)
     root = sys.argv[2] if len(sys.argv) > 2 else ''

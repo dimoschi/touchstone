@@ -122,8 +122,8 @@ if [ -d "$MUTATION_GOCACHE" ]; then
 fi
 export GOCACHE="$MUTATION_GOCACHE"
 
-MUTAGO_ARGS=(--git-diff-lines --git-diff-base="$MUTATION_BASE" --logger-agentic-json --quiet
-             --workers="$WORKERS")
+MUTAGO_ARGS=(--git-diff-lines --git-diff-base="$MUTATION_BASE" --logger-agentic-json
+             --logger-summary-json --quiet --workers="$WORKERS")
 if [ -n "${MUTATION_GO_TEST_FLAGS:-}" ]; then
   # `=` is required: go-flags reads `--test-flags -short` as two options and refuses,
   # so the space form passed no value at all. Several flags in one string are fine.
@@ -188,6 +188,7 @@ if [ -n "$UNANALYSED" ]; then
 fi
 
 total_rows=0
+total_generated=0
 for mod in ${MODS[@]+"${MODS[@]}"}; do
   status=0
   TARGETS=()
@@ -225,6 +226,10 @@ for mod in ${MODS[@]+"${MODS[@]}"}; do
   prefix=""
   [ "$mod" != "." ] && prefix="$mod/"
   rows="$(python3 "$SKILL_LIB/parse_mutago.py" "$REPORT" "$prefix" "${TARGETS[@]}")"
+  SUMMARY="$mod/mutago-summary.json"
+  if [ -f "$SUMMARY" ]; then
+    total_generated=$((total_generated + $(python3 "$SKILL_LIB/parse_mutago.py" --total "$SUMMARY")))
+  fi
   rm -f "$mod"/mutago-agentic.json "$mod"/report.json "$mod"/mutago-summary.json
   if [ -n "$rows" ]; then
     printf '%s\n' "$rows"
@@ -233,5 +238,9 @@ for mod in ${MODS[@]+"${MODS[@]}"}; do
 done
 
 if [ "$total_rows" -eq 0 ]; then
-  echo "mutation-check[go]: all mutants on changed lines were killed (or nothing mutable changed)."
+  if [ "$total_generated" -gt 0 ]; then
+    echo "mutation-check[go]: generated $total_generated mutant(s) on changed lines, all killed."
+  else
+    echo "mutation-check[go]: generated no mutants on changed lines; nothing was measured, so this is not a pass."
+  fi
 fi

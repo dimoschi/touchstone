@@ -90,6 +90,7 @@ OUT="$("$SCRIPT" 2>&1)" || RC=$?
 echo "$OUT"
 [ "$RC" -eq 0 ] || { echo "FAIL: expected exit 0, got $RC"; exit 1; }
 echo "$OUT" | grep -q 'MUTATION_OK' || { echo "FAIL: no MUTATION_OK"; exit 1; }
+echo "$OUT" | grep -qE "generated [0-9]+ mutant\(s\) for the changed functions, all killed" || { echo "FAIL: expected the all-killed message with a nonzero count"; exit 1; }
 
 echo "--- unit: module path derivation ---"
 python3 -c "

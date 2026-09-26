@@ -82,25 +82,37 @@ if [ "$status" -ne 0 ] || grep -q 'nothing matches' "$RAW"; then
   exit "$EXIT_UNMEASURABLE"
 fi
 
+matched=0
 survivors=0
 while IFS=: read -r name state; do
   name="$(tr -d ' ' <<< "$name")"
   state="$(sed 's/^ *//' <<< "$state")"
-  case "$state" in survived|'no tests') ;; *) continue ;; esac
   while IFS=$'\t' read -r pat file line qual; do
     # shellcheck disable=SC2254
     case "$name" in
       $pat)
-        printf '%-42s %-26s SURVIVED  id=%s\n' "$file:$line" "$qual" "$name"
-        $MUTATION_PY_RUN mutmut show "$name" 2>/dev/null \
-          | grep -E '^[+-]' | grep -vE '^(\+\+\+|---)' | sed 's/^/    /' || true
-        survivors=$((survivors + 1))
+        matched=$((matched + 1))
+        case "$state" in
+          survived|'no tests')
+            printf '%-42s %-26s SURVIVED  id=%s\n' "$file:$line" "$qual" "$name"
+            $MUTATION_PY_RUN mutmut show "$name" 2>/dev/null \
+              | grep -E '^[+-]' | grep -vE '^(\+\+\+|---)' | sed 's/^/    /' || true
+            survivors=$((survivors + 1))
+            ;;
+        esac
         break
         ;;
     esac
   done <<< "$TSV"
-done < <($MUTATION_PY_RUN mutmut results 2>/dev/null)
+# --all=true: plain `mutmut results` omits killed mutants entirely, so counting
+# matches against it can only ever see survivors, never a genuine kill. `--all`
+# with no value is rejected: mutmut's click option wants an explicit argument.
+done < <($MUTATION_PY_RUN mutmut results --all=true 2>/dev/null)
 
 if [ "$survivors" -eq 0 ]; then
-  echo "mutation-check[python]: all mutants on changed functions were killed."
+  if [ "$matched" -gt 0 ]; then
+    echo "mutation-check[python]: generated $matched mutant(s) for the changed functions, all killed."
+  else
+    echo "mutation-check[python]: generated no mutants for the changed functions; nothing was measured, so this is not a pass."
+  fi
 fi

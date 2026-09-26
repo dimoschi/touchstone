@@ -79,6 +79,22 @@ def test_main_exempts_mutants_inside_main_span(monkeypatch, tmp_path, capsys):
     assert "main.go:12" in err
 
 
+def test_main_total_flag_prints_total_mutants_count(monkeypatch, tmp_path, capsys):
+    summary = tmp_path / "mutago-summary.json"
+    summary.write_text(json.dumps({"totalMutantsCount": 5, "killedCount": 5}))
+    monkeypatch.setattr("sys.argv", ["parse_mutago.py", "--total", str(summary)])
+    parse_mutago.main()
+    assert capsys.readouterr().out == "5\n"
+
+
+def test_main_total_flag_defaults_to_zero_without_the_field(monkeypatch, tmp_path, capsys):
+    summary = tmp_path / "mutago-summary.json"
+    summary.write_text(json.dumps({}))
+    monkeypatch.setattr("sys.argv", ["parse_mutago.py", "--total", str(summary)])
+    parse_mutago.main()
+    assert capsys.readouterr().out == "0\n"
+
+
 def test_main_handles_missing_or_non_numeric_line(monkeypatch, tmp_path, capsys):
     report = _write_report(tmp_path, [{"file": "a.go", "line": None, "mutator": "M1", "id": "id1"}])
     monkeypatch.setattr(parse_mutago, "main_func_spans", lambda paths: {"a.go": (1, 5)})

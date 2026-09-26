@@ -69,13 +69,19 @@ def main_func_spans(paths):
     return spans
 
 
-def main():
-    path = sys.argv[1]
-    prefix = sys.argv[2] if len(sys.argv) > 2 else ''
-    allowed = {a.removeprefix('./') for a in sys.argv[3:]}
-    with open(path) as f:
-        doc = json.load(f)
+def total_mutants_count(summary_path):
+    """mutago-summary.json's totalMutantsCount.
 
+    Not the agentic report: the agentic report lists escaped mutants only, so
+    it cannot say whether zero escaped means everything was killed or nothing
+    was generated.
+    """
+    with open(summary_path) as f:
+        summary = json.load(f)
+    return summary.get('totalMutantsCount', 0)
+
+
+def collect_rows(doc, prefix, allowed):
     rows = []
     for m in doc.get('mutants') or []:
         # Targets go to mutago as ./path and come back that way; strip it so a
@@ -88,7 +94,33 @@ def main():
         except (TypeError, ValueError):
             line = None
         rows.append((f"{prefix}{f_name}", line, m))
+    return rows
 
+
+def print_survivor(disk_path, m):
+    loc = f"{disk_path}:{m.get('line', '?')}"
+    print(f"{loc:<42} {m.get('mutator', '?'):<26} SURVIVED  id={m.get('id', '')}")
+    if m.get('description'):
+        print(f"    {m['description']}")
+    if m.get('kill_hint'):
+        print(f"    kill hint: {m['kill_hint']}")
+
+
+def print_exempt(exempt):
+    # stderr so the row capture in mutation-check-go.sh stays clean. Never
+    # silent: an exemption the user cannot see is a gate that shrank without
+    # telling anyone.
+    print(f"mutation-check[go]: {len(exempt)} mutant(s) exempted, inside func main():",
+          file=sys.stderr)
+    for row in exempt:
+        print(f"    {row}", file=sys.stderr)
+
+
+def report_survivors(path, prefix, allowed):
+    with open(path) as f:
+        doc = json.load(f)
+
+    rows = collect_rows(doc, prefix, allowed)
     spans = main_func_spans(sorted({r[0] for r in rows}))
 
     exempt = []
@@ -98,20 +130,20 @@ def main():
         if span and line is not None and span[0] <= line <= span[1]:
             exempt.append(f"{loc:<42} {m.get('mutator', '?')}")
             continue
-        print(f"{loc:<42} {m.get('mutator', '?'):<26} SURVIVED  id={m.get('id', '')}")
-        if m.get('description'):
-            print(f"    {m['description']}")
-        if m.get('kill_hint'):
-            print(f"    kill hint: {m['kill_hint']}")
+        print_survivor(disk_path, m)
 
     if exempt:
-        # stderr so the row capture in mutation-check-go.sh stays clean. Never
-        # silent: an exemption the user cannot see is a gate that shrank without
-        # telling anyone.
-        print(f"mutation-check[go]: {len(exempt)} mutant(s) exempted, inside func main():",
-              file=sys.stderr)
-        for row in exempt:
-            print(f"    {row}", file=sys.stderr)
+        print_exempt(exempt)
+
+
+def main():
+    if len(sys.argv) > 2 and sys.argv[1] == '--total':
+        print(total_mutants_count(sys.argv[2]))
+        return
+    path = sys.argv[1]
+    prefix = sys.argv[2] if len(sys.argv) > 2 else ''
+    allowed = {a.removeprefix('./') for a in sys.argv[3:]}
+    report_survivors(path, prefix, allowed)
 
 
 if __name__ == '__main__':
