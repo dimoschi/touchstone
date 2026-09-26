@@ -123,4 +123,50 @@ OUT="$(MUTATION_BASE=main MUTATION_FILES=src/Calc.php MUTATION_PHP_INFECTION="$W
 echo "$OUT" | grep -q "NOT a pass" || { echo "FAIL: missing the not-a-pass warning"; exit 1; }
 echo "  ok: empty report reported as unmeasurable"
 
+echo "--- e2e: mutants generated and all killed is distinct from none generated ---"
+# Same empty escaped[]/uncovered[] shape both times; only stats.totalMutantsCount
+# differs, which is the one signal that tells the two outcomes apart.
+cat > "$WORK/stub-infection-killed" <<'STUB'
+#!/usr/bin/env bash
+set -euo pipefail
+CFG=""
+prev=""
+for a in "$@"; do
+  case "$prev" in -c|--configuration) CFG="$a" ;; esac
+  prev="$a"
+done
+REPORT="$(python3 -c "import json,sys;print(json.load(open(sys.argv[1]))['logs']['json'])" "$CFG")"
+cat > "$REPORT" <<'JSON'
+{"stats":{"totalMutantsCount":3}, "escaped":[], "uncovered":[]}
+JSON
+STUB
+chmod +x "$WORK/stub-infection-killed"
+RC=0
+OUT="$(MUTATION_BASE=main MUTATION_FILES=src/Calc.php MUTATION_PHP_INFECTION="$WORK/stub-infection-killed" "$MODULE" 2>&1)" || RC=$?
+[ "$RC" -eq 0 ] || { echo "FAIL: expected exit 0, got $RC"; echo "$OUT"; exit 1; }
+echo "$OUT" | grep -qE "generated 3 mutant\(s\) on changed lines, all killed" || { echo "FAIL: expected the all-killed message with the count"; echo "$OUT"; exit 1; }
+echo "  ok: all-killed run names its count"
+
+cat > "$WORK/stub-infection-empty" <<'STUB'
+#!/usr/bin/env bash
+set -euo pipefail
+CFG=""
+prev=""
+for a in "$@"; do
+  case "$prev" in -c|--configuration) CFG="$a" ;; esac
+  prev="$a"
+done
+REPORT="$(python3 -c "import json,sys;print(json.load(open(sys.argv[1]))['logs']['json'])" "$CFG")"
+cat > "$REPORT" <<'JSON'
+{"stats":{"totalMutantsCount":0}, "escaped":[], "uncovered":[]}
+JSON
+STUB
+chmod +x "$WORK/stub-infection-empty"
+RC=0
+OUT="$(MUTATION_BASE=main MUTATION_FILES=src/Calc.php MUTATION_PHP_INFECTION="$WORK/stub-infection-empty" "$MODULE" 2>&1)" || RC=$?
+[ "$RC" -eq 0 ] || { echo "FAIL: expected exit 0, got $RC"; echo "$OUT"; exit 1; }
+echo "$OUT" | grep -q "generated no mutants on changed lines" || { echo "FAIL: expected the no-mutants message"; echo "$OUT"; exit 1; }
+echo "$OUT" | grep -q "killed" && { echo "FAIL: a zero-mutant run must not read as a kill"; echo "$OUT"; exit 1; }
+echo "  ok: zero-mutant run is worded distinctly from all-killed"
+
 echo "MUTATION PHP CONFIG OK"

@@ -82,7 +82,7 @@ commit -m "feat: add Triple"
 echo "--- phase 1: baseline, no flags, every mutant is killed ---"
 run ""
 [ "$RC" -eq 0 ] || { echo "FAIL: expected exit 0 with no flags, got $RC"; echo "$OUT"; exit 1; }
-echo "$OUT" | grep -q "all mutants on changed lines were killed" || { echo "FAIL: expected all killed"; echo "$OUT"; exit 1; }
+echo "$OUT" | grep -qE "generated [0-9]+ mutant\(s\) on changed lines, all killed" || { echo "FAIL: expected all killed with a nonzero count"; echo "$OUT"; exit 1; }
 echo "  ok: green without flags"
 
 echo "--- phase 2: one flag value reaches go test and changes the verdict ---"

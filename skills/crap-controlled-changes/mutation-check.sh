@@ -10,8 +10,9 @@
 # before opening a PR. Not wired into the commit hook: a full mutation run
 # costs one test-suite run per mutant.
 #
-# Exit codes: 0 no survivors (MUTATION_OK), 1 survivors (KILL_SURVIVORS),
-# 2 setup problem, 4 could not measure, 5 --verify found unrecorded paths.
+# Exit codes: 0 no survivors (MUTATION_OK, or MUTATION_UNMEASURED when nothing
+# was actually generated to kill), 1 survivors (KILL_SURVIVORS), 2 setup
+# problem, 4 could not measure, 5 --verify found unrecorded paths.
 #
 # MUTATION_BASE overrides the diff base (default: origin/HEAD, then main,
 # then master).
@@ -102,10 +103,14 @@ LOG="$(git rev-parse --path-format=absolute --git-common-dir)/mutation-check.log
 
 echo "mutation-check: repo $REPO_ROOT branch $BRANCH"
 
+# Flips to 1 once a module's own "this is not a pass" line is seen, so the
+# final verdict below does not read a zero-mutant run as MUTATION_OK.
+ZERO_MUTANTS_RUN=0
+
 summarise() {
   local code=$? verdict
   case "$code" in
-    0) verdict=MUTATION_OK ;;
+    0) if [ "$ZERO_MUTANTS_RUN" -eq 1 ]; then verdict=MUTATION_UNMEASURED; else verdict=MUTATION_OK; fi ;;
     1) verdict=KILL_SURVIVORS ;;
     2) verdict=SETUP_FAILURE ;;
     *) verdict="see the output above" ;;
@@ -371,6 +376,13 @@ fi
 printf '%s\n' "$MUTATION_PATHS" | head_pairs HEAD \
   | python3 "$LIB_DIR/scored_ledger.py" record "$LEDGER" "$BRANCH" \
     --commit "$(git rev-parse HEAD)" --tools "$TOOLS" >/dev/null
-echo "MUTATION_OK"
+if grep -q 'this is not a pass' "$CAPTURE"; then
+  ZERO_MUTANTS_RUN=1
+  echo "MUTATION_UNMEASURED: no mutants were generated on the changed lines/functions;"
+  echo "see the module output above for which ones. This is not the same as a kill;"
+  echo "narrow MUTATION_BASE or MUTATION_ONLY, or accept that nothing here is mutable."
+else
+  echo "MUTATION_OK"
+fi
 sed -n 's/^accepted=/  user-accepted equivalent mutant: /p' <<< "$FILTERED"
 exit 0

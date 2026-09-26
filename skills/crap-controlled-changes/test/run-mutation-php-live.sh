@@ -166,7 +166,7 @@ run
 echo "$OUT"
 [ "$RC" -eq 0 ] || { echo "FAIL: expected exit 0, got $RC"; exit 1; }
 echo "$OUT" | grep -q "SURVIVED" && { echo "FAIL: survivors remain after precise assertions"; exit 1; }
-echo "$OUT" | grep -q "all mutants on changed lines were killed" || { echo "FAIL: expected the all-killed message"; exit 1; }
+echo "$OUT" | grep -qE "generated [0-9]+ mutant\(s\) on changed lines, all killed" || { echo "FAIL: expected the all-killed message with a nonzero count"; exit 1; }
 
 echo "--- phase 3: no merged config left in the repo ---"
 ls -1 . | grep -q "infection-gate" && { echo "FAIL: merged config left behind"; exit 1; }

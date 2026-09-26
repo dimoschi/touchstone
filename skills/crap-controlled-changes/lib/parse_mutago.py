@@ -69,13 +69,19 @@ def main_func_spans(paths):
     return spans
 
 
-def main():
-    path = sys.argv[1]
-    prefix = sys.argv[2] if len(sys.argv) > 2 else ''
-    allowed = {a.removeprefix('./') for a in sys.argv[3:]}
-    with open(path) as f:
-        doc = json.load(f)
+def total_mutants_count(summary_path):
+    """mutago-summary.json's totalMutantsCount.
 
+    Not the agentic report: the agentic report lists escaped mutants only, so
+    it cannot say whether zero escaped means everything was killed or nothing
+    was generated.
+    """
+    with open(summary_path) as f:
+        summary = json.load(f)
+    return summary.get('totalMutantsCount', 0)
+
+
+def collect_rows(doc, prefix, allowed):
     rows = []
     for m in doc.get('mutants') or []:
         # Targets go to mutago as ./path and come back that way; strip it so a
@@ -88,30 +94,89 @@ def main():
         except (TypeError, ValueError):
             line = None
         rows.append((f"{prefix}{f_name}", line, m))
+    return rows
 
+
+def print_survivor(disk_path, m):
+    loc = f"{disk_path}:{m.get('line', '?')}"
+    print(f"{loc:<42} {m.get('mutator', '?'):<26} SURVIVED  id={m.get('id', '')}")
+    if m.get('description'):
+        print(f"    {m['description']}")
+    if m.get('kill_hint'):
+        print(f"    kill hint: {m['kill_hint']}")
+
+
+def in_span(span, line):
+    return span is not None and line is not None and span[0] <= line <= span[1]
+
+
+def print_exempt(exempt):
+    # stderr so the row capture in mutation-check-go.sh stays clean. Never
+    # silent: an exemption the user cannot see is a gate that shrank without
+    # telling anyone.
+    print(f"mutation-check[go]: {len(exempt)} mutant(s) exempted, inside func main():",
+          file=sys.stderr)
+    for row in exempt:
+        print(f"    {row}", file=sys.stderr)
+
+
+def _split_exempt(doc, prefix, allowed):
+    """rows, exempt: rows not inside func main(), and the formatted exempt lines."""
+    rows = collect_rows(doc, prefix, allowed)
     spans = main_func_spans(sorted({r[0] for r in rows}))
 
-    exempt = []
+    kept, exempt = [], []
     for disk_path, line, m in rows:
-        loc = f"{disk_path}:{m.get('line', '?')}"
-        span = spans.get(disk_path)
-        if span and line is not None and span[0] <= line <= span[1]:
+        if in_span(spans.get(disk_path), line):
+            loc = f"{disk_path}:{line}"
             exempt.append(f"{loc:<42} {m.get('mutator', '?')}")
             continue
-        print(f"{loc:<42} {m.get('mutator', '?'):<26} SURVIVED  id={m.get('id', '')}")
-        if m.get('description'):
-            print(f"    {m['description']}")
-        if m.get('kill_hint'):
-            print(f"    kill hint: {m['kill_hint']}")
+        kept.append((disk_path, m))
+    return kept, exempt
 
+
+def report_survivors(path, prefix, allowed):
+    with open(path) as f:
+        doc = json.load(f)
+    kept, exempt = _split_exempt(doc, prefix, allowed)
+    for disk_path, m in kept:
+        print_survivor(disk_path, m)
     if exempt:
-        # stderr so the row capture in mutation-check-go.sh stays clean. Never
-        # silent: an exemption the user cannot see is a gate that shrank without
-        # telling anyone.
-        print(f"mutation-check[go]: {len(exempt)} mutant(s) exempted, inside func main():",
-              file=sys.stderr)
-        for row in exempt:
-            print(f"    {row}", file=sys.stderr)
+        print_exempt(exempt)
+
+
+def exempt_count(path, prefix, allowed):
+    """How many mutants report_survivors dropped as inside func main().
+
+    mutago's totalMutantsCount (see total_mutants_count) counts these too, so
+    a caller comparing the two can tell "all real mutants killed" apart from
+    "everything generated here was exempted".
+    """
+    with open(path) as f:
+        doc = json.load(f)
+    _, exempt = _split_exempt(doc, prefix, allowed)
+    return len(exempt)
+
+
+def _path_prefix_allowed(argv):
+    path = argv[0]
+    prefix = argv[1] if len(argv) > 1 else ''
+    allowed = {a.removeprefix('./') for a in argv[2:]}
+    return path, prefix, allowed
+
+
+FLAGS = {
+    '--total': lambda argv: print(total_mutants_count(argv[0])),
+    '--exempt-count': lambda argv: print(exempt_count(*_path_prefix_allowed(argv))),
+}
+
+
+def main():
+    argv = sys.argv[1:]
+    if argv and argv[0] in FLAGS:
+        FLAGS[argv[0]](argv[1:])
+        return
+    report_survivors(*_path_prefix_allowed(argv))
 
 
 if __name__ == '__main__':
