@@ -529,3 +529,140 @@ def test_main_exact_no_reports_message(monkeypatch, capsys):
     monkeypatch.setattr(ad, 'find_reports', lambda repo, base, head: [])
     ad.main(['.', 'b', 'h'])
     assert capsys.readouterr().out == 'assertion-discrimination: no non-discriminating new assertion found\n'
+
+
+def test_label_of_cuts_at_the_first_parenthesis_not_the_last():
+    from assertion_discrimination import _label_of
+    assert _label_of('carries the ticket (problem section) (true)') == 'carries the ticket'
+
+
+def test_is_diff_header_noise_is_true_only_for_the_file_header_lines():
+    from assertion_discrimination import _is_diff_header_noise
+    assert _is_diff_header_noise('+++ b/workflows/deliver-pipeline.js') is True
+    assert _is_diff_header_noise('--- a/workflows/deliver-pipeline.js') is True
+    assert _is_diff_header_noise('+const X = 1') is False
+
+
+def test_require_records_names_the_silent_file():
+    import pytest
+    from assertion_discrimination import NoRecordsError, _require_records
+    with pytest.raises(NoRecordsError) as e:
+        _require_records({'a.sh': [Record('a.sh', None, 'x', 1, True)], 'b.sh': []})
+    assert e.value.file == 'b.sh'
+    assert str(e.value) == 'b.sh printed no check records when run at head'
+
+
+def test_changed_suite_files_uses_the_exact_git_diff_command(monkeypatch):
+    import assertion_discrimination as ad
+    seen = {}
+
+    def fake_run(argv, **kwargs):
+        seen['argv'], seen['kwargs'] = argv, kwargs
+        return subprocess.CompletedProcess(argv, 0, 'workflows/tests/test-a.sh\nREADME.md\nworkflows/test-fix-loop-join.sh\n', '')
+
+    monkeypatch.setattr(ad.subprocess, 'run', fake_run)
+    assert ad.changed_suite_files('/r', 'B', 'H') == ['workflows/tests/test-a.sh', 'workflows/test-fix-loop-join.sh']
+    assert seen['argv'] == ['git', '-C', '/r', 'diff', '--name-only', '--no-renames', 'B', 'H']
+    assert seen['kwargs'] == {'capture_output': True, 'text': True, 'check': True}
+
+
+def _fake_scripts(monkeypatch, base_script, head_script):
+    import assertion_discrimination as ad
+    calls = []
+
+    def fake_show(repo, rev, path):
+        calls.append((repo, rev, path))
+        return {'B': base_script, 'H': head_script}[rev]
+
+    monkeypatch.setattr(ad, 'git_show', fake_show)
+    monkeypatch.setattr(ad, '_mutant_contents', lambda script, repo, base, head: [f'mutant of {script}'])
+    return calls
+
+
+def test_counterfactual_scripts_are_the_base_script_then_the_mutants(monkeypatch):
+    import assertion_discrimination as ad
+    calls = _fake_scripts(monkeypatch, 'base js', 'head js')
+    assert list(ad._counterfactual_scripts('/r', 'B', 'H')) == ['base js', 'mutant of head js']
+    assert calls == [('/r', 'B', ad.PIPELINE_SCRIPT), ('/r', 'H', ad.PIPELINE_SCRIPT)]
+
+
+def test_counterfactual_scripts_skip_a_base_without_the_script(monkeypatch):
+    import assertion_discrimination as ad
+    _fake_scripts(monkeypatch, None, 'head js')
+    assert list(ad._counterfactual_scripts('/r', 'B', 'H')) == ['mutant of head js']
+
+
+def test_counterfactual_scripts_are_none_when_head_has_no_script(monkeypatch):
+    import assertion_discrimination as ad
+    _fake_scripts(monkeypatch, 'base js', None)
+    assert list(ad._counterfactual_scripts('/r', 'B', 'H')) == []
+
+
+def test_judge_keeps_a_candidate_whose_file_the_counterfactual_run_lacks(monkeypatch, tmp_path):
+    import assertion_discrimination as ad
+    head_tree = tmp_path / 'head'
+    (head_tree / 'workflows').mkdir(parents=True)
+    monkeypatch.setattr(ad, '_counterfactual_scripts', lambda repo, base, head: iter(['js']))
+    monkeypatch.setattr(ad, 'run_suites', lambda tree, files: {})
+    work = tmp_path / 'work'
+    work.mkdir()
+    monkeypatch.chdir(tmp_path)
+    pending = [Record('a.sh', None, 'x', 1, True)]
+    assert ad._judge('/r', 'B', 'H', str(work), str(head_tree), pending) == pending
+    assert sorted(p.name for p in tmp_path.iterdir()) == ['head', 'work']
+
+
+def test_candidates_in_archives_base_and_head_under_tmp(monkeypatch, tmp_path):
+    import assertion_discrimination as ad
+    archived = []
+    monkeypatch.setattr(ad, 'archive_tree', lambda repo, rev, dest: archived.append((rev, dest)))
+    monkeypatch.setattr(ad, 'run_suites', lambda tree, files: {'a.sh': [Record('a.sh', None, 'x', 1, True)]})
+    _, head_tree = ad._candidates_in('/r', 'B', 'H', ['a.sh'], str(tmp_path))
+    assert archived == [('B', str(tmp_path / 'base')), ('H', str(tmp_path / 'head'))]
+    assert head_tree == str(tmp_path / 'head')
+
+
+def test_reports_are_sorted_by_file_then_header_then_label_with_the_reason():
+    from assertion_discrimination import Report, _reports
+    pending = [Record('b.sh', None, 'z', 1, True),
+               Record('a.sh', 'h2', 'a', 1, True),
+               Record('a.sh', 'h1', 'b', 1, True),
+               Record('a.sh', None, 'c', 1, True)]
+    reason = 'no counterfactual production script makes this assertion fail'
+    assert _reports(pending) == [Report('a.sh', None, 'c', reason), Report('a.sh', 'h1', 'b', reason),
+                                 Report('a.sh', 'h2', 'a', reason), Report('b.sh', None, 'z', reason)]
+
+
+def test_find_reports_uses_a_touchstone_prefixed_temp_dir(monkeypatch):
+    import assertion_discrimination as ad
+    seen = {}
+
+    class FakeTmp:
+        def __init__(self, prefix):
+            seen['prefix'] = prefix
+
+        def __enter__(self):
+            return '/tmp/x'
+
+        def __exit__(self, *a):
+            return False
+
+    monkeypatch.setattr(ad, 'changed_suite_files', lambda repo, base, head: ['a.sh'])
+    monkeypatch.setattr(ad, 'git_show', lambda repo, rev, path: rev)
+    monkeypatch.setattr(ad.tempfile, 'TemporaryDirectory', FakeTmp)
+    monkeypatch.setattr(ad, '_candidates_in', lambda *a: ([], '/tmp/x/head'))
+    monkeypatch.setattr(ad, '_judge', lambda *a: [])
+    assert ad.find_reports('/r', 'B', 'H') == []
+    assert seen['prefix'] == 'touchstone-assertion-discrimination-'
+
+
+def test_print_report_omits_the_brackets_without_a_header(capsys):
+    from assertion_discrimination import Report, _print_report
+    _print_report(Report('a.sh', None, 'x', 'why'))
+    assert capsys.readouterr().out == 'a.sh: "x": why\n'
+
+
+def test_main_prints_the_exact_usage_message(capsys):
+    import assertion_discrimination as ad
+    ad.main(['only-one-arg'])
+    assert capsys.readouterr().err == 'usage: assertion_discrimination.py <repo> <base-sha> <head-sha>\n'

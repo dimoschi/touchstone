@@ -80,7 +80,7 @@ def _label_of(rest: str) -> str:
     and a label can itself carry parentheses, so cutting at the first one is
     the only cut both lines of the same assertion agree on.
     """
-    return rest.split(' (', 1)[0].strip()
+    return rest.partition(' (')[0].strip()
 
 
 def records_of(file: str, stdout: str) -> list[Record]:
@@ -180,8 +180,8 @@ def line_blank_string_mutants(content: str, line_no: int) -> list[str]:
     line = lines[idx]
     mutants = []
     for m in _STRING_LIT_RE.finditer(line):
-        q = m.group(0)[0]
-        if m.group(0) == q + q:
+        q = m.group()[0]
+        if m.group() == q + q:
             continue
         if _is_comparison_operand(line, m.start()):
             continue
@@ -354,10 +354,10 @@ def _parse_args(argv: list[str]) -> tuple[str, str, str] | str:
     return repo, argv[1], argv[2]
 
 
-def _gather_reports(repo: str, base: str, head: str) -> tuple[list[Report] | None, int]:
-    """`(reports, 0)`, or `(None, exit-code)` after printing why."""
+def _gather_reports(repo: str, base: str, head: str) -> tuple[list[Report] | None, int | None]:
+    """`(reports, None)`, or `(None, exit-code)` after printing why."""
     try:
-        return find_reports(repo, base, head), 0
+        return find_reports(repo, base, head), None
     except NoRecordsError as e:
         print(f'assertion-discrimination: {e}', file=sys.stderr)
         return None, 4
