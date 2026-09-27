@@ -37,7 +37,7 @@ They live in the committed marker rather than in environment variables on purpos
 
 1. **TDD first** (see the EXTREMELY-IMPORTANT block above). Do not proceed past this point until `superpowers:test-driven-development` has been invoked for this change.
 2. **While writing**, apply the Signal A heuristics below to shape each function as you go.
-3. **Iterate with the repo's own test command**, not with the gate. The gate is not a test runner: it runs the whole suite *twice* per invocation, a baseline and your change, because that is how it attributes coverage to the diff. Use `go test ./...`, `pytest`, `phpunit`, whatever the repo uses, while you work.
+3. **Iterate with the repo's own test command**, not with the gate. The gate is not a test runner: it runs the suite *twice* per invocation, a baseline and your change, because that is how it attributes coverage to the diff (the Go gate runs only the changed packages' tests and reuses a cached baseline on a retry against the same HEAD). Use `go test ./...`, `pytest`, `phpunit`, whatever the repo uses, while you work.
 4. **To commit, run `crap-commit.sh`.** It runs the gates itself, so running `crap-check.sh` first is a second full double-suite run that buys nothing: when the gate is red the wrapper prints that same output, `== NEXT_ACTION ==` included, and refuses to commit. Run `crap-check.sh` alone only to see the score without attempting a commit. It auto-detects the languages of your staged files; for language-specific setup and gotchas see `go.md` (Go), `php.md` (PHP), or `python.md` (Python) in this skill directory.
 5. **Do exactly what the `== NEXT_ACTION ==` block says** (see Signal B below).
 

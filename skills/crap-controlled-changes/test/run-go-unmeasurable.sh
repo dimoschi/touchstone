@@ -132,7 +132,12 @@ GO
 }
 
 echo "case A: unmeasurable (no override) must not exit 0"
+# The default command tests only the changed packages, so the failing suite has
+# to sit in the changed package itself for the default run to hit it.
 stage_function_change
+cp test/integration/integration_test.go internal/needsdb_test.go
+sed -i.orig 's/^package integration$/package calc/' internal/needsdb_test.go
+rm -f internal/needsdb_test.go.orig
 run_check ""
 printf '%s\n' "$OUT" | sed 's/^/    | /'
 expect_status "non-zero exit" 4
@@ -144,6 +149,7 @@ expect_contains "denies being a pass"       "NOT a pass"
 expect_contains "denies being a flake"      "NOT a flake"
 
 git reset --hard -q HEAD
+git clean -qfd
 
 echo "case B: override measures the same change"
 stage_function_change

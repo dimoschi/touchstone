@@ -13,10 +13,19 @@
 # leaves the changes stashed with the tree looking clean. This touches no shared
 # state, so concurrent runs in different worktrees cannot interfere.
 #
-# CRAP_GO_TEST_COMMAND overrides the command used to produce coverage.
-# It defaults to `go test ./...`; repos whose default package set needs
-# live services (Postgres, RabbitMQ) must narrow it, e.g.
+# CRAP_GO_TEST_COMMAND overrides the command used to produce coverage. By
+# default it is `go test` on the changed files' packages only: without
+# -coverpkg a package's coverage comes from its own tests alone, so the rest of
+# the module cannot move a score. An override runs as given, with {packages}
+# replaced by those packages, e.g.
 #   CRAP_GO_TEST_COMMAND='go test ./internal/...'
+#   CRAP_GO_TEST_COMMAND='some-runner go test {packages}'
+#
+# The baseline depends only on HEAD, the change set and the build
+# configuration, so it is cached under the common git dir and a retry against
+# the same HEAD measures only the change. CRAP_BASELINE_CACHE=0 measures it
+# anyway. The key cannot see services the suite reaches (a Postgres that was
+# down makes its tests skip), so rerun with the cache off after fixing one.
 
 set -euo pipefail
 
@@ -48,7 +57,7 @@ source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/tool-versions.sh"
 GOCRAP_VERSION="${CRAP_GO_GOCRAP_VERSION:-$GOCRAP_VERSION_DEFAULT}"
 GOCRAP_PKG="github.com/padiazg/go-crap"
 GOCRAP=(go run "$GOCRAP_PKG@$GOCRAP_VERSION" scan)
-GO_TEST_COMMAND="${CRAP_GO_TEST_COMMAND:-go test ./...}"
+GO_TEST_COMMAND="${CRAP_GO_TEST_COMMAND:-}"
 
 # go-crap selects whole packages, so the per-file excludes that the staged-file
 # globs apply have to be repeated here: generated mocks and sqlc output are not
@@ -66,8 +75,12 @@ GOCRAP_EXCLUDES=(--exclude '.*mock_.*\.go' --exclude '.*_mock\.go' --exclude '.*
 # which repos needing live services depend on. So the profile is generated here,
 # checked for content, and passed in with --coverage-profile.
 gen_coverage() {
-  local dir="$1" prof="$2" phase="$3" status=0 body
-  ( cd "$dir" && eval "$GO_TEST_COMMAND" -coverprofile="$prof" -covermode=set ) \
+  local dir="$1" prof="$2" phase="$3" status=0 body cmd="$GO_TEST_COMMAND" pkgs
+  shift 3
+  [ -n "$cmd" ] || cmd='go test {packages}'
+  pkgs="$(printf '%q ' "$@")"
+  cmd="${cmd//\{packages\}/${pkgs% }}"
+  ( cd "$dir" && eval "$cmd" -coverprofile="$prof" -covermode=set ) \
     >"$RAW_OUT" 2>"$RAW_ERR" || status=$?
   body="$(grep -cv '^mode:' "$prof" 2>/dev/null)" || body=0
   # A failed run still writes a profile for whichever packages did pass, so size
@@ -136,14 +149,23 @@ report_unmeasurable() {
     echo "  test that failed: fix that, then re-run. Do not read the output"
     echo "  through a filter that can drop the '--- FAIL:' line."
     echo ""
-    echo "  Coverage comes from \`go test ./...\` by default. If that package set"
-    echo "  cannot pass here (integration suites needing live Postgres, RabbitMQ,"
-    echo "  etc.) it emits no report. Re-run with a package set that can pass:"
+    echo "  Coverage comes from \`go test\` on the changed packages by default. If"
+    echo "  those cannot pass here (integration suites needing live Postgres,"
+    echo "  RabbitMQ, etc.) it emits no report. Re-run with a package set that can pass:"
     echo ""
     echo "    CRAP_GO_TEST_COMMAND='go test ./internal/...' \\"
     echo "      $(dirname "$SKILL_LIB")/crap-check.sh"
     echo ""
   } >&2
+}
+
+# pkg_pattern prints pkgdir as a package pattern relative to module mod, the
+# directory go test and go-crap are invoked from.
+pkg_pattern() {
+  local mod="$1" pkgdir="$2" pattern
+  if [ "$mod" = "." ]; then pattern="./$pkgdir"; else pattern="./${pkgdir#"$mod"/}"; fi
+  [ "$pkgdir" = "$mod" ] && pattern="."
+  printf '%s\n' "${pattern%/.}"
 }
 
 # Run go-crap filtered to the changed files and emit
@@ -174,10 +196,14 @@ measure() {
 
   # One coverage run per module, then a cheap scan per changed package: profiles
   # are module-wide, so re-running the suite per package would be waste.
-  local mod status prof pkgdir pattern base bases
+  local mod status prof pkgdir pattern base bases patterns
   while IFS= read -r mod; do
+    patterns=()
+    while IFS= read -r pkgdir; do
+      patterns+=("$(pkg_pattern "$mod" "$pkgdir")")
+    done < <(awk -F'\t' -v m="$mod" '$1 == m { print $2 }' "$grouped" | sort -u)
     prof="$(mktemp)"
-    if ! gen_coverage "$root/$mod" "$prof" "$phase"; then
+    if ! gen_coverage "$root/$mod" "$prof" "$phase" "${patterns[@]}"; then
       rm -f "$prof"
       return "$EXIT_UNMEASURABLE"
     fi
@@ -185,10 +211,7 @@ measure() {
     while IFS= read -r pkgdir; do
       [ -n "$pkgdir" ] || continue
 
-      # Package pattern relative to the module go-crap is invoked from.
-      if [ "$mod" = "." ]; then pattern="./$pkgdir"; else pattern="./${pkgdir#"$mod"/}"; fi
-      [ "$pkgdir" = "$mod" ] && pattern="."
-      pattern="${pattern%/.}"
+      pattern="$(pkg_pattern "$mod" "$pkgdir")"
 
       bases=()
       while IFS= read -r f; do
@@ -232,11 +255,40 @@ clean_target() {
 cleanup() { rm -f "$BASE" "$CUR" "$RAW_OUT" "$RAW_ERR"; clean_target; teardown_base_tree; }
 trap cleanup EXIT
 
+# Everything the baseline's rows depend on. The scripts are in it so an edit to
+# how rows are produced never reads rows produced the old way.
+baseline_key() {
+  {
+    git rev-parse HEAD
+    printf '%s\n' "${CHANGED[@]}" | sort
+    printf 'cmd=%s\n' "${GO_TEST_COMMAND:-<changed packages>}"
+    printf 'gocrap=%s\n' "$GOCRAP_VERSION"
+    go version
+    go env GOFLAGS CGO_ENABLED GOOS GOARCH GOEXPERIMENT
+    git hash-object "$SKILL_LIB/crap-check-go.sh" "$SKILL_LIB/parse_gocrap.py" "$SKILL_LIB/go_modules.py"
+  } | git hash-object --stdin
+}
+
+BASELINE_CACHE_DIR="$(git rev-parse --path-format=absolute --git-common-dir)/crap-check-baseline"
+CACHED_BASE=""
+[ "${CRAP_BASELINE_CACHE:-1}" = 0 ] || CACHED_BASE="$BASELINE_CACHE_DIR/$(baseline_key).tsv"
+
 # Baseline at HEAD, in its own worktree. Failing here is fatal too: without a
-# baseline every function would be mistagged "new".
-setup_base_tree
-measure "$BASE" "$PHASE_BASELINE" "$BASE_TREE" || exit $?
-teardown_base_tree
+# baseline every function would be mistagged "new". Only a successful
+# measurement is cached, and it is renamed into place so a concurrent run never
+# reads half a file.
+if [ -n "$CACHED_BASE" ] && [ -f "$CACHED_BASE" ]; then
+  cp "$CACHED_BASE" "$BASE"
+else
+  setup_base_tree
+  measure "$BASE" "$PHASE_BASELINE" "$BASE_TREE" || exit $?
+  teardown_base_tree
+  if [ -n "$CACHED_BASE" ]; then
+    mkdir -p "$BASELINE_CACHE_DIR"
+    find "$BASELINE_CACHE_DIR" -name '*.tsv' -mtime +14 -delete 2>/dev/null || true
+    cp "$BASE" "$CACHED_BASE.$$" && mv "$CACHED_BASE.$$" "$CACHED_BASE"
+  fi
+fi
 
 # Current state: the real working tree, with its index untouched throughout.
 measure "$CUR" "$PHASE_CURRENT" "$REPO_ROOT" || exit $?
