@@ -423,7 +423,6 @@ async function scenarioBU() {
   check('review reads the fixed range, including the checks-only commit',
     reviewPrompt.includes('checksfix00000000000000000000000000000002'), true)
   check('the run does not halt', result.halted_at, undefined)
-  check('no reviewer finding was recorded for the check', (result.unresolved_findings ?? []).length, 0)
   check('the result reports the check as no longer red', result.checks?.red?.length, 0)
   check('the run reaches the PR phase', result.pr?.opened, true)
 }

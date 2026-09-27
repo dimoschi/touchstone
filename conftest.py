@@ -30,8 +30,9 @@ from types import ModuleType
 ROOT = Path(__file__).resolve().parent
 HOOKS_DIR = ROOT / "hooks"
 LIB_DIR = ROOT / "skills" / "crap-controlled-changes" / "lib"
+SCRIPTS_LIB_DIR = ROOT / "scripts" / "lib"
 
-for directory in (HOOKS_DIR, LIB_DIR):
+for directory in (HOOKS_DIR, LIB_DIR, SCRIPTS_LIB_DIR):
     path_str = str(directory)
     if path_str not in sys.path:
         sys.path.insert(0, path_str)
@@ -44,7 +45,7 @@ def _dotted_name(path: Path) -> str:
 
 def _gated_modules() -> dict[str, Path]:
     found = {}
-    for directory in (HOOKS_DIR, LIB_DIR):
+    for directory in (HOOKS_DIR, LIB_DIR, SCRIPTS_LIB_DIR):
         for file in sorted(directory.glob("*.py")):
             if file.name.startswith("test_") or file.name == "conftest.py":
                 continue

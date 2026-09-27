@@ -29,7 +29,7 @@ export const meta = {
 // against the manifest in scripts/check-version-bump.sh, so drift is a
 // gate's job rather than something this script verifies about itself.
 const PLUGIN_NAME = 'touchstone'
-const PIPELINE_VERSION = '0.26.0'
+const PIPELINE_VERSION = '0.26.1'
 
 // Boundaries. Wall-clock deadlines are not expressible here (no Date.now, by
 // design); the bounds are rounds, counts, and token budget instead.
@@ -440,6 +440,9 @@ const CHECK_RUN = {
 // that commits, so listing it must be a deliberate, exact choice, not a
 // heading that merely resembles it.
 const CHECKS_HEADING = '## Checks'
+// Run once before the PR and reported there as notes, never blocking: a
+// check that can be wrong about good code must not send a fixer after it.
+const ADVISORY_CHECKS_HEADING = '## Advisory checks'
 
 // Strips an unquoted '#' at the start of a line or after whitespace, and
 // everything after it. Tracks single and double quotes only, with no
@@ -465,7 +468,7 @@ function stripComment(line) {
 // Duplicate commands stay separate entries -- checksFrom assigns by
 // position, never dedupes -- because two identical lines is the repo saying
 // to run the command twice, not a transcription accident to collapse.
-function checksFrom(source) {
+function checksFrom(source, heading = CHECKS_HEADING, idPrefix = 'check') {
   if (!source) {
     return { checks: [], note: 'discovery returned nothing' }
   }
@@ -474,12 +477,12 @@ function checksFrom(source) {
     return { checks: [], note: 'neither AGENTS.md nor CLAUDE.md exists at the worktree root' }
   }
   const sections = Array.isArray(source?.sections) ? source.sections : []
-  const section = sections.find(s => s?.heading?.trimEnd() === CHECKS_HEADING)
+  const section = sections.find(s => s?.heading?.trimEnd() === heading)
   if (!section) {
     const hasCommands = sections.some(s => /^##\s+commands\s*$/i.test(s?.heading?.trimEnd() ?? ''))
     return {
       checks: [],
-      note: `${file} has no '${CHECKS_HEADING}' heading` +
+      note: `${file} has no '${heading}' heading` +
         (hasCommands
           ? `; ${file} has a ## Commands heading, which is no longer read as ` +
             `checks. Only an exact ${CHECKS_HEADING} heading is, because every ` +
@@ -507,9 +510,9 @@ function checksFrom(source) {
   const commands = fenceLines
     .map(stripComment).map(l => l.trim()).filter(l => l.length > 0)
   if (!commands.length) {
-    return { checks: [], note: `${file}'s '${CHECKS_HEADING}' section has no fence, or no command lines in it` }
+    return { checks: [], note: `${file}'s '${heading}' section has no fence, or no command lines in it` }
   }
-  return { checks: commands.map((command, i) => ({ id: `check:${i + 1}`, command })), note: '' }
+  return { checks: commands.map((command, i) => ({ id: `${idPrefix}:${i + 1}`, command })), note: '' }
 }
 
 const TRIAGE = {
@@ -3501,6 +3504,21 @@ if (reviewerCount && mutHead && mutHead !== reviewedThrough && !outOfBudget()) {
   reviewedThrough = mutHead
 } else if (mutHead) {
   reviewedThrough = mutHead
+}
+
+const { checks: advisoryChecks } = checksFrom(wt.checks_source, ADVISORY_CHECKS_HEADING, 'advisory')
+if (advisoryChecks.length && !outOfBudget()) {
+  const advisory = await executeChecks(advisoryChecks)
+  const { red, unmeasured } = classifyResults(advisoryChecks, advisory?.results)
+  for (const c of red) {
+    const report = String(c.output ?? '').split(/\r?\n/)
+      .filter(l => !l.trim().startsWith(`${CHECK_EXIT_MARKER} `)).join('\n').trim()
+    notes.push({ category: 'advisory', reason: 'advisory', title: `Advisory check \`${c.command}\` reported`,
+      claim: report || `exit ${c.exit_code}, no output` })
+  }
+  if (unmeasured.length) {
+    log(`advisory checks: ${unmeasured.map(c => c.id).join(', ')} not measured; nothing reported for them`)
+  }
 }
 
 // Reaching here means every gate is green: the Gate, Fix and Mutation halts

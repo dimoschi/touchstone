@@ -497,7 +497,12 @@ run_js_scenarios() {
     printf '%s\n' "$area_js"
     cat <<'FOOTER_EOF'
 for (const scenario of SCENARIOS) {
-  await scenario()
+  try {
+    await scenario()
+  } catch (e) {
+    console.log(`  ABORTED: ${scenario.name}: ${e.message}`)
+    failures++
+  }
 }
 
 console.log('')

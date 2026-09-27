@@ -2,3 +2,4 @@
 source =
     hooks
     skills/crap-controlled-changes/lib
+    scripts/lib

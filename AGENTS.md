@@ -27,6 +27,7 @@ bash scripts/run-go-tests.sh            # the skill's Go-toolchain suites; needs
 bash scripts/run-php-python-tests.sh    # the skill's PHP/uv suites; needs a live PHP ^8.3 + infection + phpunit, and uv
 bash scripts/run-python-tests.sh        # needs pytest + coverage>=7.13.1 (or CRAP_PY_RUN)
 bash workflows/test-fix-loop-join.sh
+bash workflows/test-harness-footer.sh
 bash workflows/test-mutation-optin.sh
 bash scripts/check-version-bump.sh
 bash scripts/check-no-private-refs.sh
@@ -34,6 +35,18 @@ bash scripts/build-pipeline.sh --check
 ```
 
 Running one suite, fixture handling, and what CI installs: [docs/testing.md](docs/testing.md).
+
+## Advisory checks
+
+Every line in the fence below is run once by the delivery pipeline before it
+opens the PR, and whatever it reports goes into the PR as a note. It never
+blocks a run and no fixer is asked to satisfy it: this check reports a new
+assertion that guards behaviour older than the change as unable to fail,
+which it can, so its report is for a human to judge.
+
+```bash
+bash scripts/check-assertions-discriminate.sh
+```
 
 ## Rules that are easy to break by habit
 
