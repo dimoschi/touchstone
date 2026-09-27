@@ -1077,6 +1077,16 @@ def test_bash_headers_excludes_a_header_looking_line_at_a_heredocs_own_start():
     assert texts == []
 
 
+def test_bash_headers_keeps_a_header_landing_exactly_at_a_heredocs_own_end():
+    # A heredoc's own end offset is the first character after it, so the span is half-open.
+    from assertion_discrimination import _bash_headers
+    prefix = 'before\n'
+    source = prefix + 'echo "== right after"\n'
+    heredocs = [(0, len(prefix), 1)]
+    _positions, texts = _bash_headers(source, heredocs)
+    assert texts == ['== right after']
+
+
 def test_js_header_texts_ordered_follows_the_scenarios_array_order():
     from assertion_discrimination import _js_header_texts_ordered, _heredoc_spans
     source = (
@@ -1400,6 +1410,29 @@ def test_parse_calls_at_tags_calls_with_the_given_file_path(tmp_path):
     assert calls[0].file == 'workflows/tests/test-static.sh'
 
 
+def test_parse_calls_at_parses_a_file_missing_at_that_rev_as_empty_source(monkeypatch):
+    import assertion_discrimination as ad
+    monkeypatch.setattr(ad, 'git_show', lambda repo, rev, file: None)
+    seen = {}
+
+    def fake_parse(file, source):
+        seen['source'] = source
+        return []
+
+    monkeypatch.setattr(ad, 'parse_suite_source', fake_parse)
+    ad._parse_calls_at('/repo', 'HEAD', 'missing.sh')
+    assert seen['source'] == ''
+
+
+def test_build_head_index_treats_a_file_missing_at_head_as_empty_source(monkeypatch):
+    import assertion_discrimination as ad
+    monkeypatch.setattr(ad, 'list_suite_files', lambda repo, head: ['a.sh'])
+    monkeypatch.setattr(ad, 'git_show', lambda repo, rev, file: None)
+    monkeypatch.setattr(ad, 'parse_suite_source', lambda file, source: [])
+    head_index = ad._build_head_index('/repo', 'HEAD')
+    assert head_index.sources == {'a.sh': ''}
+
+
 def test_try_counterfactual_copies_the_tree_under_the_given_tmp_dir(monkeypatch, tmp_path):
     import pathlib
     import assertion_discrimination as ad
@@ -1422,6 +1455,36 @@ def test_try_counterfactual_copies_the_tree_under_the_given_tmp_dir(monkeypatch,
     assert seen['tree'] == str(tmp / 'revert')
     assert seen['script'] == 'NEW_SCRIPT'
     assert not (tmp / 'revert').exists()
+
+
+def test_run_mutant_sweep_treats_a_pipeline_script_missing_at_head_as_empty(monkeypatch):
+    import assertion_discrimination as ad
+    monkeypatch.setattr(ad, 'git_show', lambda repo, rev, file: None)
+    seen = {}
+
+    def fake_mutant_contents(head_script, repo, base, head):
+        seen['head_script'] = head_script
+        return []
+
+    monkeypatch.setattr(ad, '_mutant_contents', fake_mutant_contents)
+    result = ad._run_mutant_sweep('/repo', 'BASE', 'HEAD', '/tmp', '/tree', object(), ['pending'])
+    assert seen['head_script'] == ''
+    assert result == ['pending']
+
+
+def test_run_counterfactuals_names_the_revert_tree_revert(monkeypatch):
+    import assertion_discrimination as ad
+    monkeypatch.setattr(ad, 'git_show', lambda repo, rev, file: {'BASE': 'old', 'HEAD': 'new'}[rev])
+    seen = {}
+
+    def fake_try_counterfactual(tmp, name, head_tree, script_content, head, pending):
+        seen['name'] = name
+        return pending
+
+    monkeypatch.setattr(ad, '_try_counterfactual', fake_try_counterfactual)
+    monkeypatch.setattr(ad, '_run_mutant_sweep', lambda *a: a[-1])
+    ad._run_counterfactuals('/repo', 'BASE', 'HEAD', '/tmp', '/tree', object(), ['pending'])
+    assert seen['name'] == 'revert'
 
 
 def test_is_bare_literal_checks_want_src_for_a_dollar_sign_specifically():
@@ -1475,6 +1538,32 @@ def test_find_reports_reports_every_field_correctly_and_sorted_by_file_then_line
     assert first.label == 'no NEVER_B reference remains'
     assert second.label == 'no NEVER_A reference remains'
     assert first.reason == 'no counterfactual production script makes this assertion fail'
+
+
+def test_find_reports_archives_head_under_a_touchstone_prefixed_tmp_dir(monkeypatch):
+    import os
+    import assertion_discrimination as ad
+    seen = {}
+    monkeypatch.setattr(ad, 'archive_tree', lambda repo, rev, dest: seen.setdefault('dest', dest))
+    monkeypatch.setattr(ad, '_collect_candidates', lambda repo, base, head: (object(), ['candidate']))
+    monkeypatch.setattr(ad, '_passing_at_head', lambda tree, head, candidates: candidates)
+    monkeypatch.setattr(ad, '_run_counterfactuals', lambda *a: [])
+    ad.find_reports('/repo', 'BASE', 'HEAD')
+    assert os.path.basename(seen['dest']) == 'head'
+    assert os.path.basename(os.path.dirname(seen['dest'])).startswith('touchstone-assertion-discrimination-')
+
+
+def test_find_reports_reports_the_label_source_text_when_no_literal_label_is_known(monkeypatch):
+    import assertion_discrimination as ad
+    call = Call(kind='js', file='f.sh', start_line=1, end_line=1, scenario=None,
+                label_src='dynamicLabel', label=None, got_src='true', want_src='true',
+                text='check(dynamicLabel, true, true)', dependent=True)
+    monkeypatch.setattr(ad, 'archive_tree', lambda repo, rev, dest: None)
+    monkeypatch.setattr(ad, '_collect_candidates', lambda repo, base, head: (object(), [call]))
+    monkeypatch.setattr(ad, '_passing_at_head', lambda tree, head, candidates: candidates)
+    monkeypatch.setattr(ad, '_run_counterfactuals', lambda *a: [call])
+    reports = ad.find_reports('/repo', 'BASE', 'HEAD')
+    assert reports[0].label == 'dynamicLabel'
 
 
 def test_parse_suite_source_blanks_heredoc_bodies_so_a_bash_check_word_inside_is_not_parsed():
@@ -1611,3 +1700,43 @@ def test_run_groups_looks_up_each_groups_own_block_by_its_own_scenario(tmp_path)
     for _file, group, statuses, _saw_record in results:
         for c in group:
             assert statuses[c] == 'ok'
+
+
+def test_run_groups_defaults_to_an_empty_block_for_a_scenario_the_run_never_printed(tmp_path):
+    from assertion_discrimination import _run_groups, HeadIndex, Call
+    rel = 'workflows/tests/test-groups.sh'
+    (tmp_path / 'workflows' / 'tests').mkdir(parents=True)
+    (tmp_path / rel).write_text(_TWO_SECTION_SUITE)
+    orphan = Call(kind='bash', file=rel, start_line=1, end_line=1,
+                  scenario='== a scenario the suite never prints',
+                  label_src='"orphan"', label='orphan', got_src='"1"', want_src='"1"',
+                  text='orphan', dependent=False)
+    head = HeadIndex(calls={rel: [orphan]}, sources={rel: _TWO_SECTION_SUITE})
+    results = _run_groups(str(tmp_path), head, [orphan])
+    [(_file, group, statuses, _saw_record)] = results
+    assert group == [orphan]
+    assert statuses[orphan] is None
+
+
+def test_passing_at_head_saw_record_tracks_each_files_own_history(monkeypatch):
+    # gh-96: crafts two _run_groups entries for the same file with differing
+    # this_run_had_records, which real _run_groups output never does (every
+    # entry for one file shares one run's saw_any_record) -- the only way to
+    # exercise saw_record's own merge instead of always seeing it as a no-op.
+    import assertion_discrimination as ad
+    call_a = Call(kind='bash', file='f', start_line=1, end_line=1, scenario='s1',
+                  label_src='"a"', label='a', got_src='"1"', want_src='"1"',
+                  text='a', dependent=False)
+    call_b = Call(kind='bash', file='f', start_line=2, end_line=2, scenario='s2',
+                  label_src='"b"', label='b', got_src='"1"', want_src='"1"',
+                  text='b', dependent=False)
+
+    def fake_run_groups(tree, head, calls):
+        return [
+            ('f', [call_a], {call_a: 'ok'}, True),
+            ('f', [call_b], {call_b: 'ok'}, False),
+        ]
+
+    monkeypatch.setattr(ad, '_run_groups', fake_run_groups)
+    passing = ad._passing_at_head('tree', object(), [call_a, call_b])
+    assert passing == [call_a, call_b]
