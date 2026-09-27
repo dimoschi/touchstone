@@ -714,3 +714,900 @@ def test_split_top_level_keeps_a_comma_inside_a_flagged_regex_literal():
     from assertion_discrimination import _split_top_level, _JS_QUOTES, _JS_BRACKETS
     parts = _split_top_level("/a,b/gi.test(x), true", ',', _JS_QUOTES, _JS_BRACKETS)
     assert len(parts) == 2
+
+
+def test_no_records_error_keeps_the_file_it_was_given():
+    from assertion_discrimination import NoRecordsError
+    assert NoRecordsError('workflows/tests/test-static.sh').file == 'workflows/tests/test-static.sh'
+
+
+def test_collapse_ws_folds_a_run_of_whitespace_to_one_space():
+    from assertion_discrimination import _collapse_ws
+    assert _collapse_ws('a   b\tc') == 'a b c'
+
+
+def test_line_of_counts_only_newlines_before_the_given_index():
+    # A newline at index 0 must count; starting the scan at index 1 (rather
+    # than 0) would silently drop it and under-report the line number.
+    from assertion_discrimination import _line_of
+    assert _line_of('\nabc', 4) == 2
+
+
+def test_advance_in_quote_treats_a_backslash_as_an_escape():
+    from assertion_discrimination import _advance_in_quote
+    stack = ['"']
+    assert _advance_in_quote('\\"x', 0, '"', stack) == 2
+    assert stack == ['"']  # the escaped quote must not have closed it
+
+
+def test_advance_balanced_treats_a_backslash_as_an_escape_outside_any_quote():
+    from assertion_discrimination import _advance_balanced
+    stack = ['(']
+    assert _advance_balanced('\\)', 0, '(', ')', "'\"", stack) == 2
+    assert stack == ['(']  # the escaped ')' must not have closed the bracket
+
+
+def test_scan_balanced_stops_cleanly_at_an_unterminated_bracket():
+    from assertion_discrimination import _scan_balanced
+    assert _scan_balanced('(', 0, '(', ')', '') == 1
+
+
+def test_is_matching_closer_is_false_for_a_non_closer_that_happens_to_match_the_stack_top():
+    from assertion_discrimination import _is_matching_closer
+    assert _is_matching_closer('x', {')'}, ['x']) is False
+
+
+def test_top_quote_is_none_when_the_stack_top_is_a_bracket_not_a_quote():
+    from assertion_discrimination import _top_quote
+    assert _top_quote(['('], "'\"") is None
+
+
+def test_regex_literal_starts_at_is_false_right_after_an_identifier():
+    from assertion_discrimination import _regex_literal_starts_at
+    assert _regex_literal_starts_at('a/', 1) is False
+
+
+def test_regex_literal_starts_at_looks_past_trailing_whitespace_before_the_slash():
+    from assertion_discrimination import _regex_literal_starts_at
+    assert _regex_literal_starts_at('a  /', 3) is False
+
+
+def test_scan_js_regex_body_treats_a_backslash_as_a_two_character_escape():
+    from assertion_discrimination import _scan_js_regex_body
+    assert _scan_js_regex_body(r'/\//', 0) == 4
+
+
+def test_scan_js_regex_body_stops_cleanly_at_an_unterminated_literal():
+    from assertion_discrimination import _scan_js_regex_body
+    assert _scan_js_regex_body('/abc', 0) == 4
+
+
+def test_scan_js_regex_body_escape_skips_exactly_the_escaped_character():
+    from assertion_discrimination import _scan_js_regex_body
+    assert _scan_js_regex_body(r'/\y/Z/', 0) == 4
+
+
+def test_scan_js_regex_body_a_slash_inside_a_character_class_does_not_close_it():
+    from assertion_discrimination import _scan_js_regex_body
+    assert _scan_js_regex_body('/[/]/', 0) == 5
+
+
+def test_scan_js_regex_body_only_a_real_bracket_opens_a_character_class():
+    # A literal 'X' in the body must never be mistaken for '[' or ']'.
+    from assertion_discrimination import _scan_js_regex_body
+    assert _scan_js_regex_body('/[X/]/', 0) == 6
+
+
+def test_skip_js_regex_flags_stops_cleanly_at_the_end_of_text():
+    from assertion_discrimination import _skip_js_regex_flags
+    assert _skip_js_regex_flags('g', 0) == 1
+
+
+def test_advance_split_treats_a_backslash_as_a_two_character_escape():
+    from assertion_discrimination import _advance_split
+    assert _advance_split('\\x', 0, "'\"`", {'(': ')'}, {')'}, []) == 2
+
+
+def test_advance_split_does_not_start_a_regex_literal_inside_an_open_bracket():
+    from assertion_discrimination import _advance_split
+    assert _advance_split('(/x/)', 1, "'\"`", {'(': ')'}, {')'}, ['(']) == 2
+
+
+def test_split_top_level_resets_start_to_right_after_the_separator():
+    from assertion_discrimination import _split_top_level
+    assert _split_top_level('a,b', ',', '', {}) == ['a', 'b']
+
+
+def test_split_top_level_advances_by_exactly_one_past_the_separator():
+    from assertion_discrimination import _split_top_level
+    assert _split_top_level('a,,b', ',', '', {}) == ['a', '', 'b']
+
+
+def test_scan_single_quote_finds_the_match_starting_right_after_the_opener():
+    from assertion_discrimination import _scan_single_quote
+    assert _scan_single_quote("''", 0) == 2
+
+
+def test_scan_double_quote_stops_cleanly_at_an_unterminated_quote():
+    from assertion_discrimination import _scan_double_quote
+    assert _scan_double_quote('"abc', 0) == 4
+
+
+def test_scan_double_quote_escape_skips_exactly_the_escaped_character():
+    from assertion_discrimination import _scan_double_quote
+    assert _scan_double_quote('"\\"x"', 0) == 5
+
+
+def test_scan_double_quote_escape_advance_is_relative_to_the_backslash():
+    from assertion_discrimination import _scan_double_quote
+    assert _scan_double_quote('"\\z"W"', 0) == 4
+
+
+def test_skip_bash_whitespace_stops_cleanly_at_the_end_of_text():
+    from assertion_discrimination import _skip_bash_whitespace
+    assert _skip_bash_whitespace(' ', 0) == 1
+
+
+def test_skip_bash_whitespace_does_not_treat_x_as_whitespace():
+    from assertion_discrimination import _skip_bash_whitespace
+    assert _skip_bash_whitespace('X', 0) == 0
+
+
+def test_skip_bash_whitespace_line_continuation_advances_by_exactly_two():
+    from assertion_discrimination import _skip_bash_whitespace
+    assert _skip_bash_whitespace('\\\nz', 0) == 2
+
+
+def test_skip_one_bash_token_treats_a_backslash_as_a_two_character_escape():
+    from assertion_discrimination import _skip_one_bash_token
+    assert _skip_one_bash_token('\\x', 0) == 2
+
+
+def test_skip_one_bash_token_command_substitution_starts_scanning_right_after_the_paren():
+    from assertion_discrimination import _skip_one_bash_token
+    assert _skip_one_bash_token('$(a)', 0) == 4
+
+
+def test_skip_one_bash_token_command_substitution_closes_only_on_a_real_close_paren():
+    from assertion_discrimination import _skip_one_bash_token
+    assert _skip_one_bash_token('$(a)b', 0) == 4
+
+
+def test_skip_bash_word_stops_cleanly_at_the_end_of_text():
+    from assertion_discrimination import _skip_bash_word
+    assert _skip_bash_word('a', 0) == 1
+
+
+def test_skip_bash_word_does_not_treat_x_as_a_word_terminator():
+    from assertion_discrimination import _skip_bash_word
+    assert _skip_bash_word('X', 0) == 1
+
+
+def test_skip_to_newline_stops_cleanly_at_the_end_of_text():
+    from assertion_discrimination import _skip_to_newline
+    assert _skip_to_newline('a', 0) == 1
+
+
+def test_skip_to_newline_advances_by_exactly_one_each_step():
+    from assertion_discrimination import _skip_to_newline
+    assert _skip_to_newline('abc', 0) == 3
+
+
+def test_skip_to_newline_advance_does_not_jump_back_to_a_fixed_index():
+    from assertion_discrimination import _skip_to_newline
+    assert _skip_to_newline('a\nbcZ', 3) == 5
+
+
+def test_read_bash_call_stops_at_exactly_three_words():
+    from assertion_discrimination import _read_bash_call
+    words, _end = _read_bash_call('a b c d\n', 0)
+    assert words == ['a', 'b', 'c']
+
+
+def test_read_bash_call_stops_cleanly_at_trailing_whitespace_with_no_third_word():
+    from assertion_discrimination import _read_bash_call
+    words, _end = _read_bash_call('a b  ', 0)
+    assert words == ['a', 'b']
+
+
+def test_read_bash_call_a_bare_newline_ends_the_call_even_with_fewer_than_three_words():
+    from assertion_discrimination import _read_bash_call
+    words, _end = _read_bash_call('a b\nc', 0)
+    assert words == ['a', 'b']
+
+
+def test_is_quoted_with_is_false_when_only_the_closing_quote_matches():
+    from assertion_discrimination import _is_quoted_with
+    assert _is_quoted_with('xq', 'q') is False
+
+
+def test_is_quoted_with_is_true_for_a_minimal_two_character_quoted_word():
+    from assertion_discrimination import _is_quoted_with
+    assert _is_quoted_with('""', '"') is True
+
+
+def test_blank_to_newline_writes_a_single_space_and_stops_cleanly_at_the_end():
+    from assertion_discrimination import _blank_to_newline
+    out = list('a')
+    assert _blank_to_newline(out, 'a', 0) == 1
+    assert out == [' ']
+
+
+def test_blank_bash_comments_blanks_a_comment_starting_at_the_very_first_character():
+    from assertion_discrimination import _blank_bash_comments
+    assert _blank_bash_comments('#x\n') == '  \n'
+
+
+def test_blank_bash_comments_does_not_treat_a_literal_x_as_whitespace():
+    from assertion_discrimination import _blank_bash_comments
+    assert _blank_bash_comments('X#c\n') == 'X#c\n'
+
+
+def test_blank_bash_comments_a_hash_after_a_word_and_space_is_not_a_comment():
+    # at_word_start only goes back to True at a newline (or the very start),
+    # never merely because whitespace followed a word.
+    from assertion_discrimination import _blank_bash_comments
+    assert _blank_bash_comments('ab #c\n') == 'ab #c\n'
+
+
+def test_parse_bash_calls_skips_a_malformed_call_but_keeps_scanning():
+    from assertion_discrimination import _parse_bash_calls
+    calls = _parse_bash_calls('f.sh', 'check bad\ncheck "good" "x" "y"\n', ([], []))
+    assert len(calls) == 1
+    assert calls[0].label == 'good'
+    assert calls[0].label_src == '"good"'
+    assert 'good' in calls[0].text
+
+
+def test_parse_bash_calls_dependent_flag_also_checks_want_src():
+    from assertion_discrimination import _parse_bash_calls
+    calls = _parse_bash_calls('f.sh', 'check "label" "x" "$SCRIPT"\n', ([], []))
+    assert calls[0].dependent is True
+
+
+def test_heredoc_spans_finds_the_real_multiline_closing_delimiter():
+    from assertion_discrimination import _heredoc_spans
+    source = "x\nrun_js_scenarios <<'EOF'\nbody\nEOF\nafter\n"
+    spans = _heredoc_spans(source)
+    assert len(spans) == 1
+    body_start, body_end, first_line = spans[0]
+    assert source[body_end:].startswith('EOF\nafter\n')
+    assert first_line == 3
+
+
+def test_heredoc_spans_search_for_the_closer_starts_at_the_body_not_the_whole_source():
+    from assertion_discrimination import _heredoc_spans
+    source = "EOF\nrun_js_scenarios <<'EOF'\nbody\nEOF\nafter\n"
+    spans = _heredoc_spans(source)
+    body_start, body_end, _first_line = spans[0]
+    assert body_end > body_start
+    assert source[body_end:].startswith('EOF\nafter\n')
+
+
+def test_heredoc_spans_an_unterminated_heredoc_extends_to_the_end_of_source():
+    from assertion_discrimination import _heredoc_spans
+    source = "run_js_scenarios <<'EOF'\nbody without a closing delimiter\n"
+    spans = _heredoc_spans(source)
+    _body_start, body_end, _first_line = spans[0]
+    assert body_end == len(source)
+
+
+def test_js_scenario_at_is_none_before_any_scenario_function():
+    from assertion_discrimination import _js_scenario_at
+    assert _js_scenario_at('some text with no scenario def', 5) is None
+
+
+def test_scenario_calls_run_is_false_without_a_scenario_name():
+    from assertion_discrimination import _scenario_calls_run
+    assert _scenario_calls_run('anything', None) is False
+
+
+def test_scenario_calls_run_finds_the_function_even_when_not_first_in_the_body():
+    from assertion_discrimination import _scenario_calls_run
+    body = "// comment\nasync function scenarioX() {\n  await run()\n}\n"
+    assert _scenario_calls_run(body, 'scenarioX') is True
+
+
+def test_scenario_calls_run_is_false_when_the_named_function_is_not_found():
+    from assertion_discrimination import _scenario_calls_run
+    assert _scenario_calls_run('async function other() {}\n', 'scenarioX') is False
+
+
+def test_scenario_calls_run_does_not_see_past_its_own_closing_brace():
+    from assertion_discrimination import _scenario_calls_run
+    body = "async function scenarioX() {\n  console.log(1)\n}\nawait run()\n"
+    assert _scenario_calls_run(body, 'scenarioX') is False
+
+
+def test_is_bare_js_literal_is_true_for_a_minimal_two_character_literal():
+    from assertion_discrimination import _is_bare_js_literal
+    assert _is_bare_js_literal("''") is True
+
+
+def test_unescape_js_string_a_trailing_backslash_is_kept_literal():
+    from assertion_discrimination import _unescape_js_string
+    assert _unescape_js_string('\\') == '\\'
+
+
+def test_unescape_js_string_escape_advance_is_exactly_two():
+    from assertion_discrimination import _unescape_js_string
+    assert _unescape_js_string('\\n') == '\n'
+
+
+def test_unescape_js_string_an_unmapped_escape_falls_back_to_itself():
+    from assertion_discrimination import _unescape_js_string
+    assert _unescape_js_string('\\q') == 'q'
+
+
+def test_unescape_js_string_unmapped_escape_fallback_is_the_escaped_char_not_an_earlier_one():
+    from assertion_discrimination import _unescape_js_string
+    assert _unescape_js_string('a\\q') == 'aq'
+
+
+def test_unescape_js_string_unmapped_escape_fallback_is_not_a_later_char():
+    from assertion_discrimination import _unescape_js_string
+    assert _unescape_js_string('\\qZ') == 'qZ'
+
+
+def test_unescape_js_string_escape_advance_is_relative_not_absolute():
+    from assertion_discrimination import _unescape_js_string
+    assert _unescape_js_string('a\\n') == 'a\n'
+
+
+def test_scenario_header_texts_does_not_attribute_a_later_functions_header_to_an_earlier_one():
+    from assertion_discrimination import _scenario_header_texts
+    body = (
+        "async function scenarioA() {\n"
+        "  doSomething()\n"
+        "}\n"
+        "async function scenarioB() {\n"
+        "  console.log('\\n== scenario B')\n"
+        "}\n"
+    )
+    result = _scenario_header_texts(body)
+    assert 'scenarioA' not in result
+    assert result['scenarioB'] == '== scenario B'
+
+
+def test_bash_headers_excludes_a_header_looking_line_at_a_heredocs_own_start():
+    from assertion_discrimination import _bash_headers, _heredoc_spans
+    source = "run_js_scenarios <<'EOF'\necho \"== fake header inside heredoc\"\nEOF\n"
+    heredocs = _heredoc_spans(source)
+    _positions, texts = _bash_headers(source, heredocs)
+    assert texts == []
+
+
+def test_js_header_texts_ordered_follows_the_scenarios_array_order():
+    from assertion_discrimination import _js_header_texts_ordered, _heredoc_spans
+    source = (
+        "run_js_scenarios <<'EOF'\n"
+        "async function scenarioA() {\n"
+        "  console.log('\\n== A')\n"
+        "}\n"
+        "async function scenarioB() {\n"
+        "  console.log('\\n== B')\n"
+        "}\n"
+        "const SCENARIOS = [scenarioB, scenarioA]\n"
+        "EOF\n"
+    )
+    heredocs = _heredoc_spans(source)
+    assert _js_header_texts_ordered(heredocs, source) == ['== B', '== A']
+
+
+def test_parse_js_calls_skips_a_malformed_call_but_keeps_scanning():
+    from assertion_discrimination import _parse_js_calls
+    source = (
+        "run_js_scenarios <<'EOF'\n"
+        "async function scenarioX() {\n"
+        "  check('only one arg')\n"
+        "  check('good', 1, 1)\n"
+        "}\n"
+        "EOF\n"
+    )
+    calls = _parse_js_calls('f.sh', source)
+    assert len(calls) == 1
+    assert calls[0].label == 'good'
+    assert calls[0].file == 'f.sh'
+    assert calls[0].label_src == "'good'"
+    assert 'good' in calls[0].text
+
+
+def test_parse_js_calls_line_numbers_account_for_the_heredocs_own_offset():
+    from assertion_discrimination import _parse_js_calls
+    source = (
+        "x\n"
+        "run_js_scenarios <<'EOF'\n"
+        "async function scenarioY() {\n"
+        "  check('solo',\n"
+        "    1, 1)\n"
+        "}\n"
+        "EOF\n"
+    )
+    calls = _parse_js_calls('f.sh', source)
+    assert len(calls) == 1
+    assert calls[0].start_line == 4
+    assert calls[0].end_line == 5
+
+
+def test_resolve_loop_gap_marks_a_never_reached_call_as_none_not_empty_string():
+    from assertion_discrimination import _resolve_loop_gap
+    calls = _loop_suite_calls()
+    gap_calls = calls[:2]
+    result = _resolve_loop_gap(gap_calls, [('ok', 'a one (true)')])
+    assert result[gap_calls[1]] is None
+
+
+_SUITE3 = 'source harness.sh\ncheck "first" "1" "1"\ncheck "second" "1" "1"\ncheck "third" "1" "1"\n'
+
+
+def test_match_call_status_stops_cleanly_once_every_call_is_matched():
+    from assertion_discrimination import match_call_status
+    calls = parse_suite_source('f.sh', _SUITE3)
+    stdout = "  ok:   first (1)\n  ok:   second (1)\n  ok:   third (1)\n  ok:   an extra trailing status (1)\n"
+    statuses = match_call_status(calls, stdout)
+    assert len(statuses) == 3
+    assert statuses[calls[2]] == 'ok'
+
+
+def test_match_call_status_break_on_mismatch_leaves_the_rest_marked_none():
+    from assertion_discrimination import match_call_status
+    calls = parse_suite_source('f.sh', _SUITE3)
+    stdout = "  ok:   first (1)\n  ok:   unexpected (1)\n  ok:   third (1)\n"
+    statuses = match_call_status(calls, stdout)
+    assert statuses[calls[0]] == 'ok'
+    assert calls[1] in statuses and statuses[calls[1]] is None
+    assert calls[2] in statuses and statuses[calls[2]] is None
+
+
+def test_match_call_status_counters_advance_by_exactly_one():
+    from assertion_discrimination import match_call_status
+    calls = parse_suite_source('f.sh', _SUITE3)
+    stdout = "  ok:   first (1)\n  ok:   second (1)\n  ok:   third (1)\n"
+    statuses = match_call_status(calls, stdout)
+    assert statuses[calls[0]] == 'ok'
+    assert statuses[calls[1]] == 'ok'
+    assert statuses[calls[2]] == 'ok'
+
+
+def test_label_gap_end_stops_cleanly_when_every_call_is_label_less():
+    from assertion_discrimination import _label_gap_end
+    gap_only = _loop_suite_calls()[:2]
+    assert _label_gap_end(gap_only, 0) == 2
+
+
+def test_label_gap_end_stops_at_the_first_labeled_call():
+    from assertion_discrimination import _label_gap_end
+    calls = _loop_suite_calls()
+    assert _label_gap_end(calls, 0) == 2
+
+
+_LOOP3_SUITE = '''#!/usr/bin/env bash
+source harness.sh
+run_js_scenarios <<'JS_EOF'
+async function scenarioLoop3() {
+  console.log('\\n== scenario Loop3')
+  for (const label of ['a']) {
+    check(`${label} one`, true, true)
+    check(`${label} two`, true, true)
+    check(`${label} three`, true, true)
+  }
+  check('after the loop', true, true)
+}
+const SCENARIOS = [scenarioLoop3]
+JS_EOF
+finish
+'''
+
+
+def test_label_gap_end_advances_by_exactly_one_over_a_longer_run():
+    from assertion_discrimination import _label_gap_end
+    calls = [c for c in parse_suite_source('f.sh', _LOOP3_SUITE) if c.scenario == '== scenario Loop3']
+    assert _label_gap_end(calls, 0) == 3
+
+
+def test_label_gap_stop_consumes_every_remaining_status_without_a_next_label():
+    from assertion_discrimination import _label_gap_stop
+    assert _label_gap_stop([('ok', 'a'), ('ok', 'b')], 0, None) == 2
+
+
+def test_label_gap_stop_stops_at_the_first_status_carrying_the_next_label():
+    from assertion_discrimination import _label_gap_stop
+    assert _label_gap_stop([('ok', 'x (1)'), ('ok', 'y (1)')], 0, 'y') == 1
+
+
+def test_label_gap_stop_advances_by_exactly_one():
+    from assertion_discrimination import _label_gap_stop
+    assert _label_gap_stop([('ok', 'a'), ('ok', 'b'), ('ok', 'c')], 0, None) == 3
+
+
+def test_find_label_gap_next_label_is_none_when_the_gap_reaches_the_end_of_calls():
+    from assertion_discrimination import _find_label_gap
+    calls = _loop_suite_calls()[:2]
+    gap_end, _gap_stop = _find_label_gap(calls, 0, [('ok', 'a one (true)'), ('ok', 'a two (true)')], 0)
+    assert gap_end == 2
+
+
+def test_is_diff_header_noise_is_true_for_a_plus_plus_plus_line_alone():
+    from assertion_discrimination import _is_diff_header_noise
+    assert _is_diff_header_noise('+++ b/file') is True
+
+
+def test_is_diff_header_noise_is_true_for_a_dash_dash_dash_line_alone():
+    from assertion_discrimination import _is_diff_header_noise
+    assert _is_diff_header_noise('--- a/file') is True
+
+
+def test_line_blank_string_mutants_keeps_scanning_past_an_already_empty_literal():
+    from assertion_discrimination import line_blank_string_mutants
+    assert len(line_blank_string_mutants("x = '' + 'real'\n", 1)) == 1
+
+
+def test_line_blank_string_mutants_keeps_scanning_past_a_comparison_operand():
+    from assertion_discrimination import line_blank_string_mutants
+    assert len(line_blank_string_mutants("check(x === 'ambiguous', 'real')\n", 1)) == 1
+
+
+def test_git_show_uses_the_exact_git_show_command(monkeypatch):
+    import assertion_discrimination as ad
+    calls = []
+
+    class FakeProc:
+        returncode = 0
+        stdout = 'content\n'
+
+    def fake_run(cmd, **kwargs):
+        calls.append((cmd, kwargs))
+        return FakeProc()
+
+    monkeypatch.setattr(ad.subprocess, 'run', fake_run)
+    result = ad.git_show('/repo', 'HEAD', 'a/b.txt')
+    assert calls == [(['git', '-C', '/repo', 'show', 'HEAD:a/b.txt'],
+                       {'capture_output': True, 'text': True})]
+    assert result == 'content\n'
+
+
+def test_git_show_returns_none_when_git_show_fails(monkeypatch):
+    import assertion_discrimination as ad
+
+    class FakeProc:
+        returncode = 1
+        stdout = 'should-be-ignored'
+
+    monkeypatch.setattr(ad.subprocess, 'run', lambda *a, **k: FakeProc())
+    assert ad.git_show('/repo', 'HEAD', 'missing.txt') is None
+
+
+def test_list_suite_files_uses_the_exact_ls_tree_command(monkeypatch):
+    import assertion_discrimination as ad
+    calls = []
+
+    class FakeProc:
+        returncode = 0
+        stdout = 'workflows/tests/test-a.sh\nREADME.md\n'
+
+    def fake_run(cmd, **kwargs):
+        calls.append((cmd, kwargs))
+        return FakeProc()
+
+    monkeypatch.setattr(ad.subprocess, 'run', fake_run)
+    result = ad.list_suite_files('/repo', 'HEAD')
+    assert calls == [(['git', '-C', '/repo', 'ls-tree', '-r', '--name-only', 'HEAD'],
+                       {'capture_output': True, 'text': True, 'check': True})]
+    assert result == ['workflows/tests/test-a.sh']
+
+
+def test_archive_tree_uses_the_exact_git_archive_and_tar_commands(monkeypatch, tmp_path):
+    import io
+    import assertion_discrimination as ad
+    calls = {}
+
+    class FakePopen:
+        def __init__(self, cmd, stdout=None):
+            calls['popen_cmd'] = cmd
+            self.stdout = io.BytesIO()
+
+        def wait(self):
+            return 0
+
+    class FakeCompleted:
+        returncode = 0
+        stderr = ''
+
+    def fake_run(cmd, **kwargs):
+        calls['run_cmd'] = cmd
+        calls['run_kwargs'] = kwargs
+        return FakeCompleted()
+
+    monkeypatch.setattr(ad.subprocess, 'Popen', FakePopen)
+    monkeypatch.setattr(ad.subprocess, 'run', fake_run)
+    dest = tmp_path / 'out'
+    ad.archive_tree('/repo', 'HEAD', str(dest))
+    assert calls['popen_cmd'] == ['git', '-C', '/repo', 'archive', 'HEAD']
+    assert calls['run_cmd'] == ['tar', '-x', '-C', str(dest)]
+    assert calls['run_kwargs']['capture_output'] is True
+    assert calls['run_kwargs']['text'] is True
+
+
+def test_archive_tree_raises_when_git_archive_fails_even_if_tar_exits_zero(tmp_path):
+    from assertion_discrimination import archive_tree
+    _init_scratch_repo(tmp_path)
+    (tmp_path / 'a.txt').write_text('hi\n')
+    _commit_all(tmp_path, 'seed')
+    dest = tmp_path / 'out'
+    import pytest
+    with pytest.raises(RuntimeError) as exc_info:
+        archive_tree(str(tmp_path), 'no-such-rev', str(dest))
+    message = str(exc_info.value)
+    assert 'no-such-rev' in message
+    assert str(tmp_path) in message
+
+
+def test_run_suite_uses_the_exact_bash_command(monkeypatch):
+    import assertion_discrimination as ad
+    calls = {}
+
+    class FakeProc:
+        returncode = 0
+        stdout = 'out'
+        stderr = 'err'
+
+    def fake_run(cmd, **kwargs):
+        calls['cmd'] = cmd
+        calls['kwargs'] = kwargs
+        return FakeProc()
+
+    monkeypatch.setattr(ad.subprocess, 'run', fake_run)
+    stdout, rc = ad.run_suite('/path/to/suite.sh')
+    assert calls['cmd'] == ['bash', '/path/to/suite.sh']
+    assert calls['kwargs'] == {'capture_output': True, 'text': True}
+    assert stdout == 'outerr'
+    assert rc == 0
+
+
+def test_diff_added_lines_uses_the_exact_git_diff_command(monkeypatch):
+    import assertion_discrimination as ad
+    calls = {}
+
+    class FakeProc:
+        stdout = ''
+
+    def fake_run(cmd, **kwargs):
+        calls['cmd'] = cmd
+        calls['kwargs'] = kwargs
+        return FakeProc()
+
+    monkeypatch.setattr(ad.subprocess, 'run', fake_run)
+    ad.diff_added_lines('/repo', 'base', 'head', 'path/to/file.js')
+    assert calls['cmd'] == ['git', '-C', '/repo', 'diff', '-U0', 'base', 'head', '--', 'path/to/file.js']
+    assert calls['kwargs'] == {'capture_output': True, 'text': True}
+
+
+def test_group_by_scenario_per_file_keys_by_the_calls_own_scenario():
+    from assertion_discrimination import _group_by_scenario_per_file
+    calls = parse_suite_source('workflows/tests/test-static.sh', BASH_SUITE)
+    grouped = _group_by_scenario_per_file(calls)
+    file_groups = grouped['workflows/tests/test-static.sh']
+    assert set(file_groups.keys()) == {calls[0].scenario, calls[1].scenario}
+
+
+def test_parse_calls_at_tags_calls_with_the_given_file_path(tmp_path):
+    from assertion_discrimination import _parse_calls_at
+    _init_scratch_repo(tmp_path)
+    (tmp_path / 'workflows' / 'tests').mkdir(parents=True)
+    (tmp_path / 'workflows' / 'tests' / 'test-static.sh').write_text(BASH_SUITE)
+    head = _commit_all(tmp_path, 'seed')
+    calls = _parse_calls_at(str(tmp_path), head, 'workflows/tests/test-static.sh')
+    assert calls[0].file == 'workflows/tests/test-static.sh'
+
+
+def test_try_counterfactual_copies_the_tree_under_the_given_tmp_dir(monkeypatch, tmp_path):
+    import pathlib
+    import assertion_discrimination as ad
+    head_tree = tmp_path / 'head'
+    (head_tree / 'workflows').mkdir(parents=True)
+    (head_tree / 'workflows' / 'deliver-pipeline.js').write_text('old\n')
+    tmp = tmp_path / 'work'
+    tmp.mkdir()
+    seen = {}
+
+    def fake_survivors(tree, head, pending):
+        # observed before _try_counterfactual's own cleanup removes `tree`
+        seen['tree'] = tree
+        seen['script'] = pathlib.Path(tree, 'workflows', 'deliver-pipeline.js').read_text()
+        return pending
+
+    monkeypatch.setattr(ad, '_survivors_of_counterfactual', fake_survivors)
+    result = ad._try_counterfactual(str(tmp), 'revert', str(head_tree), 'NEW_SCRIPT', object(), ['pending'])
+    assert result == ['pending']
+    assert seen['tree'] == str(tmp / 'revert')
+    assert seen['script'] == 'NEW_SCRIPT'
+    assert not (tmp / 'revert').exists()
+
+
+def test_is_bare_literal_checks_want_src_for_a_dollar_sign_specifically():
+    from assertion_discrimination import _is_bare_literal
+    calls = parse_suite_source('f.sh', 'check "label" "1" "$FOO"\n')
+    assert _is_bare_literal(calls[0]) is False
+
+
+def test_is_bare_literal_recognizes_a_bare_js_boolean_or_number_via_the_regex():
+    from assertion_discrimination import _is_bare_literal
+    source = (
+        "run_js_scenarios <<'EOF'\n"
+        "async function scenarioZ() {\n"
+        "  check('x', true, 123)\n"
+        "}\n"
+        "const SCENARIOS = [scenarioZ]\n"
+        "EOF\n"
+    )
+    calls = parse_suite_source('f.sh', source)
+    assert _is_bare_literal(calls[0]) is True
+
+
+def test_find_reports_reports_every_field_correctly_and_sorted_by_file_then_line(tmp_path):
+    from assertion_discrimination import find_reports
+
+    _init_scratch_repo(tmp_path)
+    (tmp_path / 'workflows' / 'tests').mkdir(parents=True)
+    (tmp_path / 'workflows' / 'deliver-pipeline.js').write_text("const NOTE = 'ok'\n")
+    (tmp_path / 'workflows' / 'tests' / 'test-static.sh').write_text(_SUITE_TEMPLATE.format(
+        checks='check "a pre-existing check" "$(grep -c \'NOTE\' "$SCRIPT" || true)" 1'
+    ))
+    base = _commit_all(tmp_path, 'base')
+
+    (tmp_path / 'workflows' / 'deliver-pipeline.js').write_text(
+        "const NOTE = 'ok'\nconst SECOND = 'x'\nconst THIRD = 'y'\n"
+    )
+    (tmp_path / 'workflows' / 'tests' / 'test-static.sh').write_text(_SUITE_TEMPLATE.format(
+        checks='check "a pre-existing check" "$(grep -c \'NOTE\' "$SCRIPT" || true)" 1\n'
+               'echo "== a real section"\n'
+               'check "no NEVER_B reference remains" "$(grep -c \'NEVER_B\' "$SCRIPT" || true)" 0\n'
+               'check "no NEVER_A reference remains" "$(grep -c \'NEVER_A\' "$SCRIPT" || true)" 0'
+    ))
+    head = _commit_all(tmp_path, 'head')
+
+    reports = find_reports(str(tmp_path), base, head)
+    assert len(reports) == 2
+    first, second = reports
+    assert first.file == second.file == 'workflows/tests/test-static.sh'
+    assert first.line < second.line
+    assert first.scenario == '== a real section' == second.scenario
+    assert first.label == 'no NEVER_B reference remains'
+    assert second.label == 'no NEVER_A reference remains'
+    assert first.reason == 'no counterfactual production script makes this assertion fail'
+
+
+def test_parse_suite_source_blanks_heredoc_bodies_so_a_bash_check_word_inside_is_not_parsed():
+    source = (
+        "run_js_scenarios <<'EOF'\n"
+        '// check "a" "b" "c"\n'
+        "async function scenarioX() { check('x', 1, 1) }\n"
+        "EOF\n"
+    )
+    calls = parse_suite_source('f.sh', source)
+    assert len(calls) == 1
+    assert calls[0].kind == 'js'
+
+
+def test_parse_suite_source_blanking_preserves_positions_for_header_lookup_after_a_heredoc():
+    source = (
+        "run_js_scenarios <<'EOF'\n"
+        "async function scenarioX() { check('x', 1, 1) }\n"
+        "EOF\n"
+        'echo "== first real header"\n'
+        'check "after the heredoc" "1" "1"\n'
+        'echo "== second real header"\n'
+    )
+    calls = parse_suite_source('f.sh', source)
+    bash_call = next(c for c in calls if c.kind == 'bash')
+    assert bash_call.scenario == '== first real header'
+
+
+def test_parse_suite_source_tags_js_calls_with_the_given_file_path():
+    calls = parse_suite_source('workflows/tests/test-worktree-checks.sh', JS_SUITE)
+    js_calls = [c for c in calls if c.kind == 'js']
+    assert js_calls
+    assert all(c.file == 'workflows/tests/test-worktree-checks.sh' for c in js_calls)
+
+
+def test_suite_ordered_groups_passes_heredocs_through_to_bash_headers():
+    from assertion_discrimination import suite_ordered_groups
+    assert suite_ordered_groups('echo "== only a header"\n') == [None, '== only a header']
+
+
+def test_suite_ordered_groups_passes_source_through_to_js_header_texts_ordered():
+    from assertion_discrimination import suite_ordered_groups
+    source = (
+        "run_js_scenarios <<'EOF'\n"
+        "async function scenarioX() {\n"
+        "  console.log('\\n== js header')\n"
+        "}\n"
+        "const SCENARIOS = [scenarioX]\n"
+        "EOF\n"
+    )
+    assert suite_ordered_groups(source) == [None, '== js header']
+
+
+def test_print_report_omits_the_scenario_bracket_when_there_is_none(capsys):
+    from assertion_discrimination import _print_report, Report
+    r = Report(file='f.sh', line=1, scenario=None, label='x', reason='y')
+    _print_report(r)
+    assert capsys.readouterr().out == 'f.sh:1: "x": y\n'
+
+
+def test_parse_args_usage_message_is_exact():
+    from assertion_discrimination import _parse_args
+    assert _parse_args([]) == 'usage: assertion_discrimination.py <repo> <base-sha> <head-sha>'
+
+
+def test_gather_reports_returns_exit_code_zero_on_success(monkeypatch):
+    import assertion_discrimination as ad
+    monkeypatch.setattr(ad, 'find_reports', lambda repo, base, head: [])
+    _reports, code = ad._gather_reports('.', 'b', 'h')
+    assert code == 0
+
+
+def test_main_argv_default_slices_off_only_the_program_name(monkeypatch):
+    import assertion_discrimination as ad
+    monkeypatch.setattr(ad.sys, 'argv', ['prog', '.', 'BASE_A', 'HEAD_A'])
+    captured = {}
+
+    def fake_find_reports(repo, base, head):
+        captured['args'] = (repo, base, head)
+        return []
+
+    monkeypatch.setattr(ad, 'find_reports', fake_find_reports)
+    ad.main()
+    assert captured['args'] == ('.', 'BASE_A', 'HEAD_A')
+
+
+def test_main_prints_the_actual_usage_message_to_stderr_not_stdout(capsys):
+    import assertion_discrimination as ad
+    rc = ad.main(['only-one-arg'])
+    assert rc == 2
+    out = capsys.readouterr()
+    assert 'usage:' in out.err
+    assert 'usage:' not in out.out
+
+
+def test_main_exact_no_reports_message(monkeypatch, capsys):
+    import assertion_discrimination as ad
+    monkeypatch.setattr(ad, 'find_reports', lambda repo, base, head: [])
+    ad.main(['.', 'b', 'h'])
+    assert capsys.readouterr().out == 'assertion-discrimination: no non-discriminating new assertion found\n'
+
+
+def test_require_records_raises_with_the_actual_file_name():
+    from assertion_discrimination import _require_records, NoRecordsError
+    import pytest
+    with pytest.raises(NoRecordsError) as exc_info:
+        _require_records({'workflows/tests/test-static.sh': False})
+    assert exc_info.value.file == 'workflows/tests/test-static.sh'
+
+
+_TWO_SECTION_SUITE = (
+    '#!/usr/bin/env bash\n'
+    'failures=0\n'
+    'check() { local label="$1" got="$2" want="$3"; if [ "$got" = "$want" ]; then '
+    'echo "  ok:   $label ($got)"; else echo "  FAIL: $label (got $got, want $want)"; '
+    'failures=$((failures+1)); fi; }\n'
+    'echo "== section A"\n'
+    'check "a" "1" "1"\n'
+    'echo "== section B"\n'
+    'check "b" "1" "1"\n'
+    'echo ""\n'
+    'if [ "$failures" -eq 0 ]; then exit 0; else exit 1; fi\n'
+)
+
+
+def test_run_groups_looks_up_each_groups_own_block_by_its_own_scenario(tmp_path):
+    from assertion_discrimination import _run_groups, HeadIndex
+    rel = 'workflows/tests/test-groups.sh'
+    (tmp_path / 'workflows' / 'tests').mkdir(parents=True)
+    (tmp_path / rel).write_text(_TWO_SECTION_SUITE)
+    calls = parse_suite_source(rel, _TWO_SECTION_SUITE)
+    head = HeadIndex(calls={rel: calls}, sources={rel: _TWO_SECTION_SUITE})
+    results = _run_groups(str(tmp_path), head, calls)
+    for _file, group, statuses, _saw_record in results:
+        for c in group:
+            assert statuses[c] == 'ok'
