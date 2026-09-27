@@ -603,13 +603,13 @@ def test_judge_keeps_a_candidate_whose_file_the_counterfactual_run_lacks(monkeyp
     head_tree = tmp_path / 'head'
     (head_tree / 'workflows').mkdir(parents=True)
     monkeypatch.setattr(ad, '_counterfactual_scripts', lambda repo, base, head: iter(['js']))
-    monkeypatch.setattr(ad, 'run_suites', lambda tree, files: {})
+    trees = []
+    monkeypatch.setattr(ad, 'run_suites', lambda tree, files: trees.append(tree) or {})
     work = tmp_path / 'work'
     work.mkdir()
-    monkeypatch.chdir(tmp_path)
     pending = [Record('a.sh', None, 'x', 1, True)]
     assert ad._judge('/r', 'B', 'H', str(work), str(head_tree), pending) == pending
-    assert sorted(p.name for p in tmp_path.iterdir()) == ['head', 'work']
+    assert trees == [str(work / 'counterfactual-0')]
 
 
 def test_candidates_in_archives_base_and_head_under_tmp(monkeypatch, tmp_path):
@@ -627,10 +627,12 @@ def test_reports_are_sorted_by_file_then_header_then_label_with_the_reason():
     pending = [Record('b.sh', None, 'z', 1, True),
                Record('a.sh', 'h2', 'a', 1, True),
                Record('a.sh', 'h1', 'b', 1, True),
-               Record('a.sh', None, 'c', 1, True)]
+               Record('a.sh', None, 'c', 1, True),
+               Record('a.sh', 'A', 'd', 1, True)]
     reason = 'no counterfactual production script makes this assertion fail'
-    assert _reports(pending) == [Report('a.sh', None, 'c', reason), Report('a.sh', 'h1', 'b', reason),
-                                 Report('a.sh', 'h2', 'a', reason), Report('b.sh', None, 'z', reason)]
+    assert _reports(pending) == [Report('a.sh', None, 'c', reason), Report('a.sh', 'A', 'd', reason),
+                                 Report('a.sh', 'h1', 'b', reason), Report('a.sh', 'h2', 'a', reason),
+                                 Report('b.sh', None, 'z', reason)]
 
 
 def test_find_reports_uses_a_touchstone_prefixed_temp_dir(monkeypatch):
