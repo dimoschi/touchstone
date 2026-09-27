@@ -1,23 +1,28 @@
-"""Find a `check()` assertion in the workflow test suites that no counterfactual
-production script makes fail.
+"""Report a new `check()` assertion in the workflow test suites that no
+counterfactual production script makes fail.
 
-A suite here is either a plain bash script (`check "label" "$got" "$want"`,
-one `[` `]`-free string comparison) or a bash script that hands a block of JS
-to `workflows/tests/harness.sh`'s `run_js_scenarios` (`check(label, got,
-want)`, evaluated with `JSON.stringify`). Both print `ok:` or `FAIL:` lines in
-the same shape, so a suite's real pass/fail signal for a given assertion is
-read off its own stdout rather than re-implemented here.
+Works from what the suites print, never from their source. Every suite prints
+a `== ...` header before each scenario or section and one `ok:`/`FAIL:` line
+per assertion, carrying its label; that is the record, for today's suites and
+for historical revisions alike. An assertion is identified by its header, its
+label and its occurrence under that header, not by file, so a scenario moved
+between suite files is not new.
 
-This module owns parsing (finding every `check` call, its source span, and
-the scenario or section it sits in) and classification (is a given call new
-or changed between two revisions, and does it discriminate). Running suites
-against a git tree and generating mutants is scripts/check-assertions-discriminate.sh's
-job, via `run_suite` and `git_show`/`git_archive` below.
+An assertion is a candidate when it passes at head and has no record in the
+base revision's run of the same suites. It discriminates when some
+counterfactual run fails it: the base revision's deliver-pipeline.js swapped
+into head, or a mutant blanking one string literal on a line the range added
+to it. A candidate missing from a counterfactual run (its scenario threw
+first) is not evidence either way. Two known limits: an assertion whose got
+or want changed while its header and label did not is not a candidate, and a
+range that leaves deliver-pipeline.js untouched has no counterfactual, so
+nothing in it is judged.
+
+scripts/check-assertions-discriminate.sh resolves the range and calls main().
 """
 
 from __future__ import annotations
 
-import bisect
 import fnmatch
 import os
 import re
@@ -28,770 +33,86 @@ import tempfile
 from collections import Counter
 from dataclasses import dataclass
 
-# Suite files this check judges. A file move between the two (gh-118 split
-# test-fix-loop-join.sh into workflows/tests/test-*.sh) needs no special
-# case: select_candidates already drops a call whose text is unchanged,
-# wherever it now lives.
 SUITE_GLOBS = ('workflows/tests/test-*.sh', 'workflows/test-fix-loop-join.sh')
 
-# Relative to the repo root, the one file every counterfactual swaps.
 PIPELINE_SCRIPT = 'workflows/deliver-pipeline.js'
+
+
+@dataclass(frozen=True)
+class Record:
+    file: str
+    header: str | None
+    label: str
+    n: int
+    passed: bool
+
+    @property
+    def key(self) -> tuple[str | None, str, int]:
+        return (self.header, self.label, self.n)
 
 
 @dataclass(frozen=True)
 class Report:
     file: str
-    line: int
-    scenario: str | None
+    header: str | None
     label: str
     reason: str
 
 
 class NoRecordsError(Exception):
-    """A suite with at least one candidate assertion printed no ok/FAIL line
-    at all when run at head: a setup problem in that suite, not a verdict on
-    any assertion in it."""
+    """A suite the range changed printed no ok/FAIL line at all when run at
+    head: a setup problem in that suite, not a verdict on any assertion."""
 
     def __init__(self, file: str):
         super().__init__(f'{file} printed no check records when run at head')
         self.file = file
 
 
-@dataclass(frozen=True)
-class Call:
-    kind: str            # 'bash' or 'js'
-    file: str             # suite-relative path, forward slashes
-    start_line: int        # 1-based, inclusive
-    end_line: int          # 1-based, inclusive
-    scenario: str | None    # JS: enclosing `async function scenarioXxx`; bash: the last `== ...` echo header
-    label_src: str
-    label: str | None       # the label's runtime string value, or None if it is not a literal (or literal concatenation)
-    got_src: str
-    want_src: str
-    text: str                 # the whole call's source, whitespace-collapsed, for identity matching across revisions
-    dependent: bool           # can this call's outcome plausibly depend on deliver-pipeline.js at all?
-
-
-def _collapse_ws(s: str) -> str:
-    return re.sub(r'\s+', ' ', s).strip()
-
-
-def _line_of(source: str, index: int) -> int:
-    return source.count('\n', 0, index) + 1
-
-
-def _advance_in_quote(text: str, i: int, top: str, stack: list[str]) -> int:
-    """One character's worth of bookkeeping while `top` (the innermost open
-    quote) is still open; returns the next index. Shared by `_scan_balanced`
-    and `_split_top_level`'s bookkeeping, since both track the same quote
-    stack the same way once a quote is open.
-
-    Treats a backslash as escaping whatever follows it (skipped verbatim,
-    even inside a quote a real shell/JS would not let you escape in -- close
-    enough for the shapes these suites actually use).
-    """
-    c = text[i]
-    if c == '\\':
-        return i + 2
-    if c == top:
-        stack.pop()
-    return i + 1
-
-
-def _advance_balanced(source: str, i: int, open_ch: str, close_ch: str,
-                       quote_chars: str, stack: list[str]) -> int:
-    """One character's worth of `_scan_balanced`'s bookkeeping outside any
-    open quote; returns the next index."""
-    c = source[i]
-    top = stack[-1]
-    if top in quote_chars:
-        return _advance_in_quote(source, i, top, stack)
-    if c == '\\':
-        return i + 2
-    if c in quote_chars:
-        stack.append(c)
-    elif c == open_ch:
-        stack.append(c)
-    elif c == close_ch:
-        stack.pop()
-    return i + 1
-
-
-def _scan_balanced(source: str, start: int, open_ch: str, close_ch: str,
-                    quote_chars: str) -> int:
-    """Index just past the `close_ch` matching the `open_ch` at `start`.
-
-    Generic bracket/quote scanner shared by the bash and JS call readers:
-    tracks a stack of open quotes and brackets via `_advance_balanced`.
-    """
-    assert source[start] == open_ch
-    stack = [open_ch]
-    i = start + 1
-    n = len(source)
-    while i < n and stack:
-        i = _advance_balanced(source, i, open_ch, close_ch, quote_chars, stack)
-    return i
-
-
-def _is_matching_closer(c: str, closers: set[str], stack: list[str]) -> bool:
-    return c in closers and bool(stack) and stack[-1] == c
-
-
-def _top_quote(stack: list[str], quote_chars: str) -> str | None:
-    """The innermost open quote, or None if the stack is empty or its top is a bracket."""
-    if not stack:
-        return None
-    return stack[-1] if stack[-1] in quote_chars else None
-
-
-_REGEX_DISALLOWED_BEFORE_RE = re.compile(r'[\w$)\]]$')
-
-
-def _regex_literal_starts_at(text: str, i: int) -> bool:
-    """Whether the top-level `/` at `text[i]` opens a JS regex literal rather
-    than division: false only when immediately preceded (whitespace aside) by
-    an identifier character, `$`, `)`, or `]` -- the usual heuristic for
-    telling the two apart without a full parser."""
-    before = text[:i].rstrip()
-    return not before or not _REGEX_DISALLOWED_BEFORE_RE.search(before)
-
-
-def _is_top_level_regex_start(stack: list[str], c: str, text: str, i: int) -> bool:
-    return not stack and c == '/' and _regex_literal_starts_at(text, i)
-
-
-def _scan_js_regex_body(text: str, start: int) -> int:
-    """Index just past a JS regex literal's closing, unescaped `/`, opening
-    at `text[start]`. A `[...]` character class is tracked so a `/` inside
-    one (never needing escape there) does not close the literal early."""
-    n = len(text)
-    i = start + 1
-    in_class = False
-    while i < n:
-        c = text[i]
-        if c == '\\':
-            i += 2
-            continue
-        if c == '/' and not in_class:
-            return i + 1
-        if c in '[]':
-            in_class = c == '['
-        i += 1
-    return i
-
-
-def _skip_js_regex_flags(text: str, i: int) -> int:
-    n = len(text)
-    while i < n and text[i].isalpha():
-        i += 1
-    return i
-
-
-def _scan_js_regex_literal(text: str, start: int) -> int:
-    """Index just past a JS regex literal's closing `/` and any flag letters,
-    opening at `text[start]`."""
-    return _skip_js_regex_flags(text, _scan_js_regex_body(text, start))
-
-
-def _push_or_pop_bracket(c: str, quote_chars: str, bracket_pairs: dict[str, str],
-                          closers: set[str], stack: list[str]) -> None:
-    if c in quote_chars:
-        stack.append(c)
-    elif c in bracket_pairs:
-        stack.append(bracket_pairs[c])
-    elif _is_matching_closer(c, closers, stack):
-        stack.pop()
-
-
-def _advance_split(text: str, i: int, quote_chars: str, bracket_pairs: dict[str, str],
-                    closers: set[str], stack: list[str]) -> int:
-    """One character's worth of `_split_top_level`'s bookkeeping outside any
-    open quote; returns the next index."""
-    top = _top_quote(stack, quote_chars)
-    if top is not None:
-        return _advance_in_quote(text, i, top, stack)
-    c = text[i]
-    if c == '\\':
-        return i + 2
-    if _is_top_level_regex_start(stack, c, text, i):
-        # A regex literal's own commas (e.g. `/one at a time, in order/`)
-        # are not argument separators; only `_split_top_level`'s callers
-        # ever hand this JS source, so this is unconditional rather than
-        # gated on `quote_chars`/`bracket_pairs` being the JS set.
-        return _scan_js_regex_literal(text, i)
-    _push_or_pop_bracket(c, quote_chars, bracket_pairs, closers, stack)
-    return i + 1
-
-
-def _split_top_level(text: str, sep: str, quote_chars: str, bracket_pairs: dict[str, str]) -> list[str]:
-    """Split `text` on a single-character `sep` that sits outside every quote and bracket.
-
-    `sep` itself never collides with a quote or bracket character in any
-    caller here, so checking it ahead of `_advance_split` (which only ever
-    runs while the stack is empty, same condition) cannot skip a real
-    quote-open or bracket-open on the same character.
-    """
-    parts = []
-    stack: list[str] = []
-    start = 0
-    i = 0
-    n = len(text)
-    closers = set(bracket_pairs.values())
-    while i < n:
-        if not stack and text[i] == sep:
-            parts.append(text[start:i])
-            start = i + 1
-            i += 1
-            continue
-        i = _advance_split(text, i, quote_chars, bracket_pairs, closers, stack)
-    parts.append(text[start:])
-    return parts
-
-
-# ---------------------------------------------------------------------------
-# Bash `check "label" "$got" "$want"` calls, outside any JS heredoc.
-# ---------------------------------------------------------------------------
-
-_BASH_CHECK_RE = re.compile(r'(?<![\w.])check[ \t]+', re.MULTILINE)
-_BASH_QUOTES = "'\""
-
-
-def _scan_single_quote(source: str, i: int) -> int:
-    """`i` points at the opening `'`; the index just past its match.
-
-    No escapes are recognized inside a single-quoted shell string, so this
-    is a plain search for the next `'`, unlike every other quote handled
-    here.
-    """
-    return source.index("'", i + 1) + 1
-
-
-def _at_dollar_paren(source: str, i: int) -> bool:
-    return source[i] == '$' and source[i + 1:i + 2] == '('
-
-
-def _scan_double_quote(source: str, i: int) -> int:
-    """`i` points at the opening `"`; the index just past its match.
-
-    A `$(...)` inside is its own nested, quote-resetting region: bash lets
-    an unescaped `"` reappear inside a command substitution even while the
-    outer double quote is still open (`test-static.sh`'s own
-    `"$(grep -c "required: ..." "$SCRIPT")"` relies on exactly this).
-    """
-    n = len(source)
-    i += 1
-    while i < n:
-        c = source[i]
-        if c == '\\':
-            i += 2
-        elif c == '"':
-            return i + 1
-        elif _at_dollar_paren(source, i):
-            i = _scan_balanced(source, i + 1, '(', ')', _BASH_QUOTES)
-        else:
-            i += 1
-    return i
-
-
-def _skip_bash_whitespace(source: str, i: int) -> int:
-    """Advances past top-level spaces/tabs and backslash-newline continuations.
-
-    A backslash-newline is a line continuation bash removes outright, so at
-    top level it is whitespace like any other, never part of a word.
-    """
-    n = len(source)
-    while i < n:
-        if source[i] in ' \t':
-            i += 1
-        elif source[i] == '\\' and source[i + 1:i + 2] == '\n':
-            i += 2
-        else:
-            break
-    return i
-
-
-def _skip_one_bash_token(source: str, i: int) -> int:
-    c = source[i]
-    if c == '\\':
-        return i + 2
-    if c == "'":
-        return _scan_single_quote(source, i)
-    if c == '"':
-        return _scan_double_quote(source, i)
-    if _at_dollar_paren(source, i):
-        return _scan_balanced(source, i + 1, '(', ')', _BASH_QUOTES)
-    return i + 1
-
-
-def _skip_bash_word(source: str, i: int) -> int:
-    """Advances past one top-level shell word: a run of non-whitespace,
-    honoring `'...'`, `"...with $(...) inside..."`, and a bare `$(...)`."""
-    n = len(source)
-    while i < n and source[i] not in ' \t\n':
-        i = _skip_one_bash_token(source, i)
-    return i
-
-
-def _skip_to_newline(source: str, i: int) -> int:
-    n = len(source)
-    while i < n and source[i] != '\n':
-        i += 1
-    return i
-
-
-def _read_bash_call(source: str, args_start: int) -> tuple[list[str], int]:
-    """Reads up to 3 whitespace-separated shell words starting at `args_start`.
-
-    The call itself ends at the first top-level, unescaped newline once 3
-    words have been read (bash `check` never takes a 4th argument here);
-    `_skip_to_newline` covers the case where the 3rd word is followed by
-    nothing but that newline, so `text`/`end_line` still span the whole call.
-    """
-    words: list[str] = []
-    i = args_start
-    n = len(source)
-    while len(words) < 3 and i < n:
-        i = _skip_bash_whitespace(source, i)
-        if i >= n or source[i] == '\n':
-            break
-        start = i
-        i = _skip_bash_word(source, i)
-        words.append(source[start:i])
-    return words, _skip_to_newline(source, i)
-
-
-def _is_quoted_with(word: str, q: str) -> bool:
-    return len(word) >= 2 and word[0] == q and word[-1] == q
-
-
-def _strip_shell_word(word: str) -> str:
-    """The literal value of a single- or double-quoted shell word with no
-    expansion inside (a plain label); returns the word unchanged otherwise."""
-    if _is_quoted_with(word, "'"):
-        return word[1:-1]
-    if _is_quoted_with(word, '"') and '$' not in word:
-        return re.sub(r'\\(.)', r'\1', word[1:-1])
-    return word
-
-
-_BASH_HEADER_RE = re.compile(r'^[ \t]*echo\s+"(==[^"]*)"', re.MULTILINE)
-
-
-def _nearest_header(headers: tuple[list[int], list[str]], offset: int) -> str | None:
-    """The text of the last header at or before `offset`, or None before the first one."""
-    positions, texts = headers
-    idx = bisect.bisect_right(positions, offset) - 1
-    return texts[idx] if idx >= 0 else None
-
-
-def _blank_to_newline(out: list[str], source: str, i: int) -> int:
-    """Overwrites `out` with spaces from `i` through the end of its line
-    (exclusive); returns that line's own end index."""
-    n = len(source)
-    while i < n and source[i] != '\n':
-        out[i] = ' '
-        i += 1
-    return i
-
-
-def _blank_bash_comments(source: str) -> str:
-    """`source` with every bash comment (a `#` starting a word, outside any
-    quote, through the end of its line) replaced by spaces, so `_BASH_CHECK_RE`
-    never matches the word `check` inside one -- comments are not blanked
-    ahead of that regex the way a heredoc body already is.
-
-    Reuses `_skip_bash_word` to walk real words (quotes and `$(...)` included)
-    rather than re-implementing that scanning here.
-    """
-    out = list(source)
-    n = len(source)
-    i = 0
-    at_word_start = True
-    while i < n:
-        c = source[i]
-        if c in ' \t':
-            i += 1
-        elif c == '\n':
-            i += 1
-            at_word_start = True
-        elif c == '#' and at_word_start:
-            i = _blank_to_newline(out, source, i)
-        else:
-            i = _skip_bash_word(source, i)
-            at_word_start = False
-    return ''.join(out)
-
-
-def _parse_bash_calls(file: str, source: str, headers: tuple[list[int], list[str]]) -> list[Call]:
-    calls = []
-    for m in _BASH_CHECK_RE.finditer(source):
-        args_start = m.end()
-        words, end = _read_bash_call(source, args_start)
-        if len(words) != 3:
-            continue
-        label_src, got_src, want_src = words
-        text = source[m.start():end]
-        calls.append(Call(
-            kind='bash', file=file,
-            start_line=_line_of(source, m.start()), end_line=_line_of(source, end),
-            scenario=_nearest_header(headers, m.start()),
-            label_src=label_src, label=_strip_shell_word(label_src),
-            got_src=got_src, want_src=want_src,
-            text=_collapse_ws(text),
-            dependent='$SCRIPT' in got_src or '$SCRIPT' in want_src,
-        ))
-    return calls
-
-
-# ---------------------------------------------------------------------------
-# JS `check(label, got, want)` calls inside a JS heredoc: `run_js_scenarios
-# <<'EOF'` (workflows/tests/harness.sh, gh-118 onward) or the older, one-heredoc-
-# per-file `cat > "$WORK/harness.mjs" <<'EOF'` it replaced, needed to judge an
-# assertion against a revision from before that split.
-# ---------------------------------------------------------------------------
-
-_HEREDOC_START_RE = re.compile(
-    r'(?:run_js_scenarios|cat > "\$WORK/harness\.mjs")[ \t]*<<[ \t]*[\'"]?(\w+)[\'"]?[ \t]*\n')
-# Excludes the historical heredoc's own `function check(label, got, want) {`
-# definition (harness.sh's equivalent lives outside every suite file's own
-# source, so this only ever matches in the pre-split, one-heredoc-per-file form).
-_JS_CHECK_RE = re.compile(r'(?<![\w.])(?<!function )check\(')
-_JS_SCENARIO_RE = re.compile(r'^async function (scenario\w+)\s*\(', re.MULTILINE)
-_JS_QUOTES = "'\"`"
-_JS_BRACKETS = {'(': ')', '[': ']', '{': '}'}
-
-
-def _heredoc_spans(source: str) -> list[tuple[int, int, int]]:
-    """(body_start, body_end, first_line_of_body) for each run_js_scenarios heredoc."""
-    spans = []
-    for m in _HEREDOC_START_RE.finditer(source):
-        delim = m.group(1)
-        body_start = m.end()
-        close_re = re.compile(r'^' + re.escape(delim) + r'\s*$', re.MULTILINE)
-        close_m = close_re.search(source, body_start)
-        body_end = close_m.start() if close_m else len(source)
-        spans.append((body_start, body_end, _line_of(source, body_start)))
-    return spans
-
-
-def _js_scenario_at(body: str, before: int) -> str | None:
-    name = None
-    for m in _JS_SCENARIO_RE.finditer(body[:before]):
-        name = m.group(1)
-    return name
-
-
-def _scenario_calls_run(body: str, scenario: str | None) -> bool:
-    """Whether `scenario`'s own function body calls harness.sh's run() at all.
-
-    A scenario that never does exercises nothing about deliver-pipeline.js,
-    so none of its checks are candidates: swapping deliver-pipeline.js out
-    for any counterfactual can only ever be a no-op for them.
-    """
-    if scenario is None:
-        return False
-    m = re.search(r'^async function ' + re.escape(scenario) + r'\s*\([^)]*\)\s*\{', body, re.MULTILINE)
-    if not m:
-        return False
-    end = _scan_balanced(body, m.end() - 1, '{', '}', _JS_QUOTES)
-    return 'await run(' in body[m.start():end]
-
-
-_JS_ESCAPES = {'n': '\n', 't': '\t', "'": "'", '"': '"', '`': '`', '\\': '\\'}
-
-
-def _is_bare_js_literal(lit: str) -> bool:
-    return len(lit) >= 2 and lit[0] in _JS_QUOTES and lit[-1] == lit[0]
-
-
-def _unescape_js_string(inner: str) -> str:
-    out = []
-    i = 0
-    n = len(inner)
-    while i < n:
-        c = inner[i]
-        if c == '\\' and i + 1 < n:
-            out.append(_JS_ESCAPES.get(inner[i + 1], inner[i + 1]))
-            i += 2
-        else:
-            out.append(c)
-            i += 1
-    return ''.join(out)
-
-
-def _eval_js_string_literal(lit: str) -> str | None:
-    lit = lit.strip()
-    if not _is_bare_js_literal(lit):
-        return None
-    inner = lit[1:-1]
-    if '${' in inner:
-        return None  # template interpolation: not a literal we can evaluate
-    return _unescape_js_string(inner)
-
-
-def _eval_js_label(expr: str) -> str | None:
-    """A label built from string literals and top-level `+` concatenation."""
-    parts = _split_top_level(expr, '+', _JS_QUOTES, _JS_BRACKETS)
-    values = [_eval_js_string_literal(p) for p in parts]
-    if any(v is None for v in values):
-        return None
-    return ''.join(values)
-
-
-_CONSOLE_LOG_RE = re.compile(r'console\.log\(')
-
-
-def _js_header_at(source: str, open_paren: int) -> str | None:
-    """The header text of a `console.log('\\n==...')` call whose `(` is at
-    `open_paren`, or None if its argument is not a bare `'\\n==...'` literal
-    (a plain progress message, not a section/scenario header)."""
-    close = _scan_balanced(source, open_paren, '(', ')', _JS_QUOTES)
-    arg = source[open_paren + 1:close - 1].strip()
-    if not _is_bare_js_literal(arg):
-        return None
-    value = _unescape_js_string(arg[1:-1])
-    if not value.startswith('\n=='):
-        return None
-    return value[1:]
-
-
-_JS_SCENARIO_DEF_RE = re.compile(r'^async function (scenario\w+)\s*\([^)]*\)\s*\{', re.MULTILINE)
-# Modern form (workflows/tests/harness.sh onward): `const SCENARIOS = [...]`,
-# run by a separate footer loop. Historical form (predating that split): the
-# footer loops directly `for (const scenario of [...])`, no intermediate name.
-_SCENARIOS_ARRAY_RE = re.compile(
-    r'(?:const SCENARIOS\s*=|for\s*\(\s*const\s+scenario\s+of)\s*\[([^\]]*)\]')
-
-
-def _scenario_header_texts(body: str) -> dict[str, str]:
-    """Function name -> its own header text, for every `async function
-    scenarioXxx` in `body` whose first `console.log` is a bare `\n==...` header."""
-    result = {}
-    for m in _JS_SCENARIO_DEF_RE.finditer(body):
-        end = _scan_balanced(body, m.end() - 1, '{', '}', _JS_QUOTES)
-        log_m = _CONSOLE_LOG_RE.search(body, m.end(), end)
-        if log_m:
-            text = _js_header_at(body, log_m.end() - 1)
-            if text is not None:
-                result[m.group(1)] = text
-    return result
-
-
-def _scenario_execution_order(body: str) -> list[str]:
-    """Function names in `const SCENARIOS = [...]` order: the order they run
-    in, which need not be the order they are defined in the file."""
-    m = _SCENARIOS_ARRAY_RE.search(body)
-    if not m:
-        return []
-    return [name.strip() for name in m.group(1).split(',') if name.strip()]
-
-
-def _bash_headers(source: str, heredocs: list[tuple[int, int, int]]) -> tuple[list[int], list[str]]:
-    """(positions, texts) of every bash `echo "==..."` header outside every
-    heredoc, in source order (which is execution order for bash)."""
-    found = [(m.start(), m.group(1)) for m in _BASH_HEADER_RE.finditer(source)
-             if not any(s <= m.start() < e for s, e, _ in heredocs)]
-    return [p for p, _ in found], [t for _, t in found]
-
-
-def _js_header_texts_ordered(heredocs: list[tuple[int, int, int]], source: str) -> list[str]:
-    """Every heredoc's own scenario headers, in `const SCENARIOS = [...]`
-    order (which need not match the order the `async function`s are
-    defined in), heredocs themselves taken in source order."""
-    texts = []
-    for body_start, body_end, _ in heredocs:
-        body = source[body_start:body_end]
-        by_name = _scenario_header_texts(body)
-        texts.extend(by_name[name] for name in _scenario_execution_order(body) if name in by_name)
-    return texts
-
-
-def _parse_js_calls(file: str, source: str) -> list[Call]:
-    calls = []
-    for body_start, body_end, first_line in _heredoc_spans(source):
-        body = source[body_start:body_end]
-        # A call's `scenario` is its own function's header text, looked up by
-        # name, never by position: `const SCENARIOS = [...]` can run functions
-        # in a different order than they are defined in, so a call's real
-        # source offset does not, in general, fall between the right two
-        # headers' offsets (see _scenario_execution_order).
-        header_by_function = _scenario_header_texts(body)
-        for m in _JS_CHECK_RE.finditer(body):
-            open_paren = m.end() - 1
-            close = _scan_balanced(body, open_paren, '(', ')', _JS_QUOTES)
-            args_src = body[open_paren + 1:close - 1]
-            args = _split_top_level(args_src, ',', _JS_QUOTES, _JS_BRACKETS)
-            if len(args) != 3:
-                continue
-            label_src, got_src, want_src = (a.strip() for a in args)
-            function_name = _js_scenario_at(body, m.start())
-            text = body[m.start():close]
-            calls.append(Call(
-                kind='js', file=file,
-                start_line=first_line - 1 + _line_of(body, m.start()),
-                end_line=first_line - 1 + _line_of(body, close),
-                scenario=header_by_function.get(function_name),
-                label_src=label_src, label=_eval_js_label(label_src),
-                got_src=got_src, want_src=want_src,
-                text=_collapse_ws(text),
-                dependent=_scenario_calls_run(body, function_name),
-            ))
-    return calls
-
-
-def select_candidates(head_calls: list[Call], base_counts: 'Counter[str]') -> list[Call]:
-    """New-or-changed, deliver-pipeline.js-dependent calls: this ticket's scope.
-
-    "New or changed" is decided per exact call text (already whitespace-
-    collapsed), counted globally across every suite file rather than per
-    file -- so a call moved verbatim to a new file (gh-118 split its
-    4651-line suite into workflows/tests/*.sh) still matches and is
-    excluded, rather than being reported as new because the file it now
-    lives in did not exist at base.
-
-    A text repeated more often among `head_calls` than `base_counts` says it
-    was at base is a boilerplate check copy-pasted into a new scenario:
-    plain set membership would drop every copy as "unchanged", so the
-    excess occurrences -- the last ones in (file, start_line) order, since a
-    copy is typically appended after the original -- are reported as new.
-    """
-    dependent = [c for c in head_calls if c.dependent]
-    head_counts = Counter(c.text for c in dependent)
-    candidates = []
-    for text, head_count in head_counts.items():
-        excess = head_count - base_counts.get(text, 0)
-        if excess > 0:
-            candidates.extend(_last_occurrences(dependent, text, excess))
-    return candidates
-
-
-def _last_occurrences(calls: list[Call], text: str, count: int) -> list[Call]:
-    """The last `count` of `calls` whose text is `text`, in (file, start_line)
-    order -- a copy is typically appended after the original it duplicates."""
-    occurrences = sorted((c for c in calls if c.text == text), key=lambda c: (c.file, c.start_line))
-    return occurrences[-count:]
-
-
-# ---------------------------------------------------------------------------
-# Reading a suite run's own stdout back into a verdict per call.
-# ---------------------------------------------------------------------------
-
 _STATUS_LINE_RE = re.compile(r'^\s*(ok|FAIL):\s+(.*)$')
 
+_HEADER_RE = re.compile(r'^\s*(==\s.*?)\s*$')
 
-def extract_statuses(stdout: str) -> list[tuple[str, str]]:
-    """Every `ok:`/`FAIL:` line in `stdout`, in the order printed."""
-    out = []
+
+def _label_of(rest: str) -> str:
+    """The label part of an ok/FAIL line: everything before its first ` (`.
+
+    An `ok:` line appends ` (<value>)` and a `FAIL:` line ` (got ..., want ...)`,
+    and a label can itself carry parentheses, so cutting at the first one is
+    the only cut both lines of the same assertion agree on.
+    """
+    return rest.split(' (', 1)[0].strip()
+
+
+def records_of(file: str, stdout: str) -> list[Record]:
+    """Every assertion `stdout` records, in the order printed."""
+    records = []
+    header = None
+    seen: Counter = Counter()
     for line in stdout.splitlines():
-        m = _STATUS_LINE_RE.match(line)
-        if m:
-            out.append((m.group(1), m.group(2)))
-    return out
-
-
-def _resolve_loop_gap(gap_calls: list[Call], gap_statuses: list[tuple[str, str]]) -> dict[Call, str | None]:
-    """Assigns `gap_statuses` to `gap_calls` (a run of consecutive calls whose
-    label could not be verified) by cycling through `gap_calls` in order: a
-    `for` loop around a `check` call prints its label fresh each iteration
-    (so it cannot be verified statically), but still prints its whole body
-    once per iteration, in the same order every time. A call gets 'FAIL' if
-    any iteration of it failed, else 'ok' if any iteration reached it, else
-    None (never reached at all).
-    """
-    k = len(gap_calls)
-    per_call: dict[Call, list[str]] = {c: [] for c in gap_calls}
-    for i, (status, _rest) in enumerate(gap_statuses):
-        per_call[gap_calls[i % k]].append(status)
-    result: dict[Call, str | None] = {}
-    for call in gap_calls:
-        seen = per_call[call]
-        if not seen:
-            result[call] = None
-        elif 'FAIL' in seen:
-            result[call] = 'FAIL'
-        else:
-            result[call] = 'ok'
-    return result
-
-
-def match_call_status(calls: list[Call], stdout: str) -> dict[Call, str | None]:
-    """`calls` (one scenario's or one bash section's, in source order) mapped
-    to the status ('ok'/'FAIL') its line printed in `stdout`, or None if
-    execution never reached it.
-
-    Matching is positional wherever a call's label is a known literal: the
-    next status line must carry it, since every scenario examined here is a
-    straight-line function with no branch around a `check` call itself --
-    what a run actually executes is always a prefix of the full list, cut
-    short only by an early throw or return. Once a literal label does not
-    match at a position, matching stops rather than guessing a realignment.
-
-    A run of calls whose label could not be evaluated statically (a `for`
-    loop's body, where the label is built from the loop variable) is handled
-    differently: such a loop prints its body's labels once per iteration, so
-    the n-th status is no longer the n-th call. `_resolve_loop_gap` cycles
-    the gap's own calls against however many statuses sit between the last
-    confirmed position and the next literal label (or the end of `stdout`),
-    which is exactly the loop's total printed output.
-    """
-    statuses = extract_statuses(stdout)
-    result: dict[Call, str | None] = {}
-    call_idx = 0
-    status_idx = 0
-    while call_idx < len(calls) and status_idx < len(statuses):
-        call = calls[call_idx]
-        if call.label is None:
-            gap_end, gap_stop = _find_label_gap(calls, call_idx, statuses, status_idx)
-            result.update(_resolve_loop_gap(calls[call_idx:gap_end], statuses[status_idx:gap_stop]))
-            call_idx, status_idx = gap_end, gap_stop
+        h = _HEADER_RE.match(line)
+        if h:
+            header = h.group(1)
             continue
-        status, rest = statuses[status_idx]
-        if not rest.startswith(call.label + ' ('):
-            break
-        result[call] = status
-        call_idx += 1
-        status_idx += 1
-    for call in calls[len(result):]:
-        result[call] = None
-    return result
+        m = _STATUS_LINE_RE.match(line)
+        if not m:
+            continue
+        label = _label_of(m.group(2))
+        seen[(header, label)] += 1
+        records.append(Record(file, header, label, seen[(header, label)], m.group(1) == 'ok'))
+    return records
 
 
-def _label_gap_end(calls: list[Call], call_idx: int) -> int:
-    """The end of this run of label-less calls in `calls`, starting at
-    `call_idx`."""
-    gap_end = call_idx
-    while gap_end < len(calls) and calls[gap_end].label is None:
-        gap_end += 1
-    return gap_end
+def candidates_of(base: list[Record], head: list[Record]) -> list[Record]:
+    """Head records that pass and whose identity the base run never printed."""
+    base_keys = {r.key for r in base}
+    return [r for r in head if r.passed and r.key not in base_keys]
 
 
-def _label_gap_stop(statuses: list[tuple[str, str]], status_idx: int, next_label: str | None) -> int:
-    """The end of a label-less run's printed output in `statuses`, starting
-    at `status_idx`: up to the first status carrying `next_label`, or the
-    end of `statuses` if there is none."""
-    gap_stop = status_idx
-    while gap_stop < len(statuses) and (next_label is None or
-                                         not statuses[gap_stop][1].startswith(next_label + ' (')):
-        gap_stop += 1
-    return gap_stop
+def surviving(pending: list[Record], run: list[Record]) -> list[Record]:
+    """`pending` minus every candidate `run` recorded as failing."""
+    failed = {r.key for r in run if not r.passed}
+    return [c for c in pending if c.key not in failed]
 
-
-def _find_label_gap(calls: list[Call], call_idx: int, statuses: list[tuple[str, str]],
-                     status_idx: int) -> tuple[int, int]:
-    """From `call_idx`/`status_idx` (`calls[call_idx].label` already known to
-    be unverifiable): the end of this run of label-less calls in `calls`, and
-    of its printed output in `statuses` -- up to the first status carrying
-    the next call's own literal label, or the end of either list.
-    """
-    gap_end = _label_gap_end(calls, call_idx)
-    next_label = calls[gap_end].label if gap_end < len(calls) else None
-    gap_stop = _label_gap_stop(statuses, status_idx, next_label)
-    return gap_end, gap_stop
-
-
-# ---------------------------------------------------------------------------
-# Bounding a mutant search to what base..head actually added to a file.
-# ---------------------------------------------------------------------------
 
 _HUNK_RE = re.compile(r'^@@ -\d+(?:,\d+)? \+(\d+)(?:,\d+)? @@')
 
@@ -869,12 +190,6 @@ def line_blank_string_mutants(content: str, line_no: int) -> list[str]:
     return mutants
 
 
-# ---------------------------------------------------------------------------
-# Git and process plumbing. Every tree this check runs against is a
-# `git archive` extraction, never the repo's own worktree or .git: the
-# fence this feeds requires a read-only, deterministic check.
-# ---------------------------------------------------------------------------
-
 def git_show(repo: str, rev: str, path: str) -> str | None:
     """`path`'s content at `rev`, or None if it does not exist there."""
     proc = subprocess.run(['git', '-C', repo, 'show', f'{rev}:{path}'],
@@ -902,13 +217,7 @@ def archive_tree(repo: str, rev: str, dest: str) -> None:
 
 
 def run_suite(suite_path: str) -> tuple[str, int]:
-    """Runs one suite file as its own process, the whole file every time.
-
-    Always the whole file: a counterfactual tree's deliver-pipeline.js is
-    the only thing that differs from head, and `_ordered_groups` and
-    `_split_output_by_group` match assertions by their position in the
-    whole run.
-    """
+    """Runs one suite file as its own process: its combined output and exit code."""
     proc = subprocess.run(['bash', suite_path], capture_output=True, text=True)
     return proc.stdout + proc.stderr, proc.returncode
 
@@ -919,88 +228,26 @@ def diff_added_lines(repo: str, base: str, head: str, path: str) -> list[int]:
     return added_lines(proc.stdout)
 
 
-# ---------------------------------------------------------------------------
-# Orchestration: which of `select_candidates`' calls does no counterfactual
-# make fail.
-# ---------------------------------------------------------------------------
-
-def _group_by_scenario_per_file(calls: list[Call]) -> dict[str, dict[str | None, list[Call]]]:
-    by_file: dict[str, dict[str | None, list[Call]]] = {}
-    for c in calls:
-        by_file.setdefault(c.file, {}).setdefault(c.scenario, []).append(c)
-    return by_file
-
-
-def _is_header_line(line: str) -> bool:
-    return line.lstrip().startswith('==')
+def changed_suite_files(repo: str, base: str, head: str) -> list[str]:
+    """Suite files the range adds, changes, moves or deletes: the only ones a
+    new assertion, or the base record of a moved one, can sit in."""
+    # --no-renames: a moved file must list its old path too, or its base
+    # records are never run and everything in it reads as new.
+    proc = subprocess.run(['git', '-C', repo, 'diff', '--name-only', '--no-renames', base, head],
+                          capture_output=True, text=True, check=True)
+    return [p for p in proc.stdout.splitlines()
+            if any(fnmatch.fnmatch(p, pat) for pat in SUITE_GLOBS)]
 
 
-def _split_output_by_group(stdout: str, ordered_groups: list[str | None]) -> dict[str | None, str]:
-    """`stdout` split at each `== ...` header line, the blocks zipped
-    positionally against `ordered_groups` (see `suite_ordered_groups`): index
-    0 is whatever precedes the first header, then one block per header,
-    whether or not it turns out to own any call -- which is what keeps this
-    aligned even when a section/scenario earlier in the file has no checks
-    of its own (a header that owns none still consumes one block of output).
-    """
-    if ordered_groups == [None]:
-        return {None: stdout}
-    blocks: list[list[str]] = [[]]
-    for line in stdout.splitlines():
-        if _is_header_line(line):
-            blocks.append([line])
-        else:
-            blocks[-1].append(line)
-    return {g: '\n'.join(block) for g, block in zip(ordered_groups, blocks)}
-
-
-def _run_groups(tree: str, head: HeadIndex,
-                 calls: list[Call]) -> list[tuple[str, list[Call], dict[Call, str | None], bool]]:
-    """Runs `calls`, one process per file, sharing that plumbing between
-    `_passing_at_head` and `_survivors_of_counterfactual`: both need the same
-    files run and matched against `tree`, only the verdict they read off the
-    result differs."""
-    results = []
-    for f, groups in _group_by_scenario_per_file(calls).items():
-        all_calls_in_file = head.calls[f]
-        stdout, _ = run_suite(os.path.join(tree, f))
-        blocks = _split_output_by_group(stdout, suite_ordered_groups(head.sources[f]))
-        saw_any_record = bool(extract_statuses(stdout))
-        for scenario, group in groups.items():
-            all_in_group = [c for c in all_calls_in_file if c.scenario == scenario]
-            statuses = match_call_status(all_in_group, blocks.get(scenario, ''))
-            results.append((f, group, statuses, saw_any_record))
-    return results
-
-
-def _require_records(saw_record: dict[str, bool]) -> None:
-    for f, had_records in saw_record.items():
-        if not had_records:
-            raise NoRecordsError(f)
-
-
-def _passing_at_head(tree: str, head: HeadIndex, candidates: list[Call]) -> list[Call]:
-    """Of `candidates`, the ones that actually pass when `tree` is run as-is.
-
-    A candidate already failing (or unreached) at head is a different,
-    pre-existing problem; this check only judges whether a passing assertion
-    could ever have failed. Raises `NoRecordsError` for any file with a
-    candidate whose run printed no record at all: a setup problem in that
-    file, not a verdict on the candidate.
-    """
-    passing = []
-    saw_record: dict[str, bool] = {}
-    for f, group, statuses, this_run_had_records in _run_groups(tree, head, candidates):
-        saw_record[f] = saw_record.get(f, False) or this_run_had_records
-        passing.extend(c for c in group if statuses.get(c) == 'ok')
-    _require_records(saw_record)
-    return passing
-
-
-def _survivors_of_counterfactual(tree: str, head: HeadIndex, pending: list[Call]) -> list[Call]:
-    """Of `pending`, the calls this one counterfactual tree did NOT fail."""
-    return [c for _, group, statuses, _ in _run_groups(tree, head, pending)
-            for c in group if statuses.get(c) != 'FAIL']
+def run_suites(tree: str, files: list[str]) -> dict[str, list[Record]]:
+    """Each of `files` that exists under `tree`, run, mapped to its records."""
+    out = {}
+    for f in files:
+        path = os.path.join(tree, f)
+        if os.path.exists(path):
+            stdout, _ = run_suite(path)
+            out[f] = records_of(f, stdout)
+    return out
 
 
 def _mutant_contents(head_script: str, repo: str, base: str, head: str) -> list[str]:
@@ -1025,153 +272,76 @@ def _mutant_contents(head_script: str, repo: str, base: str, head: str) -> list[
     return contents
 
 
-@dataclass(frozen=True)
-class HeadIndex:
-    """Head's own suite files, parsed once and kept for the whole run: every
-    counterfactual tree still carries head's suite files unchanged (only
-    `PIPELINE_SCRIPT` is swapped), so re-parsing them per counterfactual
-    would just repeat the same answer."""
-    calls: dict[str, list[Call]]
-    sources: dict[str, str]
-
-
-def _parse_calls_at(repo: str, rev: str, file: str) -> list[Call]:
-    return parse_suite_source(file, git_show(repo, rev, file) or '')
-
-
-def _build_head_index(repo: str, head: str) -> HeadIndex:
-    sources = {f: git_show(repo, head, f) or '' for f in list_suite_files(repo, head)}
-    calls = {f: parse_suite_source(f, src) for f, src in sources.items()}
-    return HeadIndex(calls=calls, sources=sources)
-
-
-def _collect_candidates(repo: str, base: str, head: str) -> tuple[HeadIndex, list[Call]]:
-    base_counts = Counter(c.text for f in list_suite_files(repo, base) for c in _parse_calls_at(repo, base, f))
-    head_index = _build_head_index(repo, head)
-    all_head_calls = [c for calls in head_index.calls.values() for c in calls]
-    candidates = select_candidates(all_head_calls, base_counts)
-    return head_index, candidates
-
-
-def _try_counterfactual(tmp: str, name: str, head_tree: str, script_content: str,
-                         head: HeadIndex, pending: list[Call]) -> list[Call]:
-    """Copies `head_tree`, swaps in `script_content`, and returns whichever of
-    `pending` survive a run against it (see `_survivors_of_counterfactual`)."""
-    tree = os.path.join(tmp, name)
-    shutil.copytree(head_tree, tree)
-    with open(os.path.join(tree, PIPELINE_SCRIPT), 'w') as fh:
-        fh.write(script_content)
-    survivors = _survivors_of_counterfactual(tree, head, pending)
-    shutil.rmtree(tree)
-    return survivors
-
-
-def _run_mutant_sweep(repo: str, base: str, head: str, tmp: str, head_tree: str,
-                       head_index: HeadIndex, pending: list[Call]) -> list[Call]:
-    head_script = git_show(repo, head, PIPELINE_SCRIPT) or ''
-    for i, mutated in enumerate(_mutant_contents(head_script, repo, base, head)):
-        if not pending:
-            break
-        pending = _try_counterfactual(tmp, f'mutant-{i}', head_tree, mutated, head_index, pending)
-    return pending
-
-
-_JS_BARE_LITERAL_RE = re.compile(r'^(?:true|false|null|-?\d+(?:\.\d+)?)$')
-
-
-def _is_bare_literal(call: Call) -> bool:
-    """Whether both sides of `call` are hardcoded, with no reference to
-    anything the suite captured or computed: comparing two constants can
-    never discriminate, so it is provably vacuous with no counterfactual at
-    all -- unlike a call that merely lacks one to prove it either way.
-    """
-    if call.kind == 'bash':
-        return '$' not in call.got_src and '$' not in call.want_src
-
-    def is_js_literal(expr: str) -> bool:
-        expr = expr.strip()
-        return bool(_JS_BARE_LITERAL_RE.match(expr)) or _eval_js_string_literal(expr) is not None
-
-    return is_js_literal(call.got_src) and is_js_literal(call.want_src)
-
-
-def _bare_literal_survivors(pending: list[Call]) -> list[Call]:
-    """Of `pending`, the calls provably vacuous with no counterfactual at all
-    (see `_is_bare_literal`) -- what a test-only diff falls back to, since a
-    revert is a no-op and there are no added lines to mutate."""
-    return [c for c in pending if _is_bare_literal(c)]
-
-
-def _run_counterfactuals(repo: str, base: str, head: str, tmp: str, head_tree: str,
-                          head_index: HeadIndex, pending: list[Call]) -> list[Call]:
+def _counterfactual_scripts(repo: str, base: str, head: str):
+    """Base's deliver-pipeline.js (when it exists and differs), then every mutant."""
     base_script = git_show(repo, base, PIPELINE_SCRIPT)
     head_script = git_show(repo, head, PIPELINE_SCRIPT)
-    if base_script == head_script:
-        # gh-96: a test-only PR adding real coverage must not have every new,
-        # production-dependent assertion reported for lack of evidence.
-        return _bare_literal_survivors(pending)
-    if pending and base_script is not None:
-        pending = _try_counterfactual(tmp, 'revert', head_tree, base_script, head_index, pending)
-    if pending:
-        pending = _run_mutant_sweep(repo, base, head, tmp, head_tree, head_index, pending)
+    if head_script is None or base_script == head_script:
+        return
+    if base_script is not None:
+        yield base_script
+    yield from _mutant_contents(head_script, repo, base, head)
+
+
+def _judge(repo: str, base: str, head: str, tmp: str, head_tree: str,
+           pending: list[Record]) -> list[Record]:
+    for i, script in enumerate(_counterfactual_scripts(repo, base, head)):
+        if not pending:
+            break
+        tree = os.path.join(tmp, f'counterfactual-{i}')
+        shutil.copytree(head_tree, tree)
+        with open(os.path.join(tree, PIPELINE_SCRIPT), 'w') as fh:
+            fh.write(script)
+        files = sorted({c.file for c in pending})
+        runs = run_suites(tree, files)
+        pending = surviving(pending, [r for f in files for r in runs.get(f, [])])
+        shutil.rmtree(tree)
     return pending
 
 
-def find_reports(repo: str, base: str, head: str) -> list[Report]:
-    head_index, candidates = _collect_candidates(repo, base, head)
-    if not candidates:
-        return []
+def _require_records(head_runs: dict[str, list[Record]]) -> None:
+    for f, records in head_runs.items():
+        if not records:
+            raise NoRecordsError(f)
 
-    with tempfile.TemporaryDirectory(prefix='touchstone-assertion-discrimination-') as tmp:
-        head_tree = os.path.join(tmp, 'head')
-        archive_tree(repo, head, head_tree)
-        pending = _passing_at_head(head_tree, head_index, candidates)
-        pending = _run_counterfactuals(repo, base, head, tmp, head_tree, head_index, pending)
 
+def _flatten(runs: dict[str, list[Record]]) -> list[Record]:
+    return [r for records in runs.values() for r in records]
+
+
+def _candidates_in(repo: str, base: str, head: str, files: list[str],
+                   tmp: str) -> tuple[list[Record], str]:
+    """The range's candidates and the head tree they were found in."""
+    base_tree, head_tree = os.path.join(tmp, 'base'), os.path.join(tmp, 'head')
+    archive_tree(repo, base, base_tree)
+    archive_tree(repo, head, head_tree)
+    base_runs = run_suites(base_tree, files)
+    head_runs = run_suites(head_tree, files)
+    _require_records(head_runs)
+    return candidates_of(_flatten(base_runs), _flatten(head_runs)), head_tree
+
+
+def _reports(pending: list[Record]) -> list[Report]:
     return sorted(
-        (Report(file=c.file, line=c.start_line, scenario=c.scenario,
-                label=c.label if c.label is not None else c.label_src,
-                reason='no counterfactual production script makes this assertion fail')
-         for c in pending),
-        key=lambda r: (r.file, r.line),
+        (Report(c.file, c.header, c.label,
+                'no counterfactual production script makes this assertion fail') for c in pending),
+        key=lambda r: (r.file, r.header or '', r.label),
     )
 
 
-def parse_suite_source(file: str, source: str) -> list[Call]:
-    """Every `check` call in one suite file's source, bash and JS alike."""
-    heredocs = _heredoc_spans(source)
-    bash_source = source
-    for body_start, body_end, _ in heredocs:
-        # Blank out heredoc bodies (preserving line count) so the bash-call
-        # regex never fires on a `check(` inside one.
-        bash_source = bash_source[:body_start] + \
-            re.sub(r'[^\n]', ' ', bash_source[body_start:body_end]) + \
-            bash_source[body_end:]
-    bash_source = _blank_bash_comments(bash_source)
-    bash_headers = _bash_headers(source, heredocs)
-    calls = _parse_bash_calls(file, bash_source, bash_headers) + _parse_js_calls(file, source)
-    calls.sort(key=lambda c: c.start_line)
-    return calls
-
-
-def suite_ordered_groups(source: str) -> list[str | None]:
-    """Every section/scenario a suite's source declares, in the order its
-    header prints at runtime: `None` for whatever precedes the first header
-    (usually nothing), then every bash section (source order), then every JS
-    scenario (heredoc by heredoc, each in its own `SCENARIOS` order) -- a
-    header that owns no `check` call of its own still gets an entry, since it
-    still consumes one block of a real run's output (see `_split_output_by_group`),
-    and bash content is always outside, and before, every heredoc in a suite
-    that has one at all.
-    """
-    heredocs = _heredoc_spans(source)
-    _, bash_texts = _bash_headers(source, heredocs)
-    return [None] + bash_texts + _js_header_texts_ordered(heredocs, source)
+def find_reports(repo: str, base: str, head: str) -> list[Report]:
+    files = changed_suite_files(repo, base, head)
+    if not files or git_show(repo, head, PIPELINE_SCRIPT) == git_show(repo, base, PIPELINE_SCRIPT):
+        return []
+    with tempfile.TemporaryDirectory(prefix='touchstone-assertion-discrimination-') as tmp:
+        pending, head_tree = _candidates_in(repo, base, head, files, tmp)
+        pending = _judge(repo, base, head, tmp, head_tree, pending)
+    return _reports(pending)
 
 
 def _print_report(r: Report) -> None:
-    scenario = f'[{r.scenario}] ' if r.scenario else ''
-    print(f'{r.file}:{r.line}: {scenario}"{r.label}": {r.reason}')
+    header = f'[{r.header}] ' if r.header else ''
+    print(f'{r.file}: {header}"{r.label}": {r.reason}')
 
 
 def _parse_args(argv: list[str]) -> tuple[str, str, str] | str:
