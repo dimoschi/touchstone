@@ -142,10 +142,6 @@ Optional:
 - **Jira** via the Atlassian MCP server, for `PROJ-1234`-style keys. A bare number
   is read as a GitHub issue instead. A ticket that cannot be fetched is not fatal:
   the pipeline proceeds without its prose.
-- **agent-eval**, an optional local tool, records phase and
-  outcome metrics so the gates have ground truth to be judged against. If it is
-  not installed, every phase skips recording and carries on. Pass
-  `{record: false}` to silence the instruction entirely.
 
 ## What it installs
 

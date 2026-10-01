@@ -85,7 +85,6 @@ function baseArgs(overrides) {
   return {
     ticket: '9',
     task: 'test task for the unsupported-language halt',
-    record: false,
     openPr: false,
     maxReviewRounds: 3,
     maxGateAttempts: 1,
