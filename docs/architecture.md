@@ -287,6 +287,13 @@ staleness probe. Both re-throw when `runBudgetSpent` is set. A stage still open 
 throw unwinds past its own `close()` -- the one actually running at the halt -- has its
 spend folded into `stage_spend` by the catch, rather than silently dropped from it.
 
+The catch also reports whatever work and review state the run had reached: plan, checks,
+implementation and gates, open findings, notes, fix rounds and their output, and the
+mutation result, the same fields any other halt at that phase carries. It cannot read the
+`try`'s own `let` bindings, so `budgetHaltState`, declared just above the `try`, is a
+closure each phase widens with `widenBudgetHaltState()` once the state it adds exists. A
+field the run never reached is absent from the halt rather than guessed.
+
 ### What can hold a run: `classify()` and reproducers
 
 A lens can raise up to `MAX_FINDINGS_PER_LENS` findings, and every one carries a

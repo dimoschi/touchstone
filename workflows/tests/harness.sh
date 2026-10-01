@@ -381,6 +381,9 @@ async function run(scenario) {
   // twice"; an added outOfBudget() check would otherwise break it silently.
   let agentCalls = 0
   let clock = 0
+  // scenario.spendAllAfter names a label: once that agent returns, the budget
+  // reads as spent, so the very next dispatch is the one refused.
+  let spentAll = false
   const stubAgent = makeAgent(scenario, captured)
   const sandbox = {
     args: baseArgs(scenario.args),
@@ -393,6 +396,7 @@ async function run(scenario) {
       captured.spans.push(span)
       const r = await stubAgent(prompt, opts)
       span.end = clock++
+      if (opts.label === scenario.spendAllAfter) spentAll = true
       return r
     },
     // JSON round-tripped, not returned as-is: the real parallel() serializes
@@ -409,7 +413,9 @@ async function run(scenario) {
     workflow: async () => { throw new Error('workflow() not stubbed for this test') },
     phase: () => {},
     log: (m) => captured.logs.push(m),
-    budget: scenario.budgetPerAgentCall
+    budget: scenario.spendAllAfter
+      ? { total: null, spent: () => spentAll ? 10_000_000 : 0, remaining: () => Infinity }
+      : scenario.budgetPerAgentCall
       ? { total: null, spent: () => agentCalls * scenario.budgetPerAgentCall,
           remaining: () => Infinity }
       : (scenario.budget ?? { total: null, spent: () => 0, remaining: () => Infinity }),
