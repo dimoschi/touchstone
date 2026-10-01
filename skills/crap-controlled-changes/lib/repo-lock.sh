@@ -16,6 +16,26 @@
 # CRAP_LOCK_WAIT overrides the seconds to wait before giving up (default 900).
 
 CRAP_LOCK_DIR=""
+LOCK_OWNER=""
+
+# take_lock_dir <dir> <stale-message>: 0 once <dir> is ours, 1 while a live
+# process holds it (its pid left in LOCK_OWNER). A holder whose pid is gone is
+# reported with <stale-message> and cleared, then the take is retried.
+take_lock_dir() {
+  local dir="$1" stale_msg="$2" owner
+  while ! mkdir "$dir" 2>/dev/null; do
+    owner="$(cat "$dir/pid" 2>/dev/null || true)"
+    if [ -n "$owner" ] && [ "$owner" -eq "$owner" ] 2>/dev/null \
+       && ! kill -0 "$owner" 2>/dev/null; then
+      echo "$stale_msg $owner" >&2
+      rm -rf "$dir"
+      continue
+    fi
+    LOCK_OWNER="$owner"
+    return 1
+  done
+  echo "$$" > "$dir/pid"
+}
 
 acquire_repo_lock() {
   local label="$1" waited=0 owner common
@@ -29,14 +49,9 @@ acquire_repo_lock() {
     exit 2
   }
   CRAP_LOCK_DIR="$common/crap-check-stash.lock"
-  while ! mkdir "$CRAP_LOCK_DIR" 2>/dev/null; do
-    owner="$(cat "$CRAP_LOCK_DIR/pid" 2>/dev/null || true)"
-    if [ -n "$owner" ] && [ "$owner" -eq "$owner" ] 2>/dev/null \
-       && ! kill -0 "$owner" 2>/dev/null; then
-      echo "crap-check[$label]: clearing a baseline lock left by dead pid $owner" >&2
-      rm -rf "$CRAP_LOCK_DIR"
-      continue
-    fi
+  while ! take_lock_dir "$CRAP_LOCK_DIR" \
+            "crap-check[$label]: clearing a baseline lock left by dead pid"; do
+    owner="$LOCK_OWNER"
     if [ "$waited" -ge "${CRAP_LOCK_WAIT:-900}" ]; then
       {
         echo "crap-check[$label]: gave up waiting for the baseline lock after ${waited}s."
@@ -54,7 +69,6 @@ acquire_repo_lock() {
     sleep 1
     waited=$((waited + 1))
   done
-  echo "$$" > "$CRAP_LOCK_DIR/pid"
 }
 
 # Release only after the stash has been popped: the lock is what guarantees the
