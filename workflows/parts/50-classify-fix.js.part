@@ -326,6 +326,11 @@ let settled = []
 let open = []
 let round = 0
 widenBudgetHaltState(() => ({ unresolved_findings: open, notes, fix_rounds: round }))
+scopeSplit = () => {
+  const split = { ticket: 0, addition: 0, unattributed: 0 }
+  for (const f of [...settled, ...open]) split[f.scope]++
+  return split
+}
 if (reviewerCount) {
   const raised = await collapseDuplicates(await reviewOf(impl.commit_range, 'review', lenses))
   const { candidates, freshNotes } = classifyBatch(raised, null, 0)

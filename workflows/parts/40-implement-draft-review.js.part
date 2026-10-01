@@ -7,6 +7,12 @@ const impl = await treeAgent(
     ? `Acceptance criteria:\n- ${plan.acceptance_criteria.join('\n- ')}\n`
     : `Acceptance criteria: none were supplied with this plan. Derive them from ` +
       `it before you write anything, and state them in your summary.\n`) +
+  (planAdditions.length
+    ? `Beyond the ticket, the plan adds the work below, each because it judged ` +
+      `the ticket cannot be done right without it. None is a decision the ` +
+      `ticket made: build each only as far as its stated reason needs, and ` +
+      `name each in your summary.\n${additionsLines()}\n`
+    : '') +
   `Follow the crap-controlled-changes skill: TDD first, iterating with the ` +
   `repo's own test command. Commit with crap-commit.sh ${wt.path} -m "...", ` +
   `which runs the gate itself and refuses if it is red; do not run ` +
@@ -551,6 +557,12 @@ const reviewOf = async (range, tag, picked, known = [], knownCharge = '') => {
       `${NATIVE_TOOLS(wt.path)}\n` +
       (lens.needsTicket ? ticketSpec() : '') +
       decisionsSpec() +
+      (planAdditions.length
+        ? `Beyond the ticket, the plan added the work below, each with the ` +
+          `reason it gave:\n${additionsLines()}\nSet scope on every finding: ` +
+          `addition when the defect sits in that added work, ticket when it ` +
+          `sits in what the ticket asked for.\n`
+        : '') +
       `Task: ${brief(task)}\n` +
       `Commit range: ${range}\n` +
       `You are given the range, not an account of what was done, on purpose: ` +
@@ -609,7 +621,11 @@ const reviewOf = async (range, tag, picked, known = [], knownCharge = '') => {
           `${findings.length - MAX_FINDINGS_PER_LENS}`)
     }
     return findings.slice(0, MAX_FINDINGS_PER_LENS)
-  }).map(f => ({ ...f, id: `f${++findingSeq}`, recorded_at: headOf(range) }))
+  }).map(f => ({ ...f, id: `f${++findingSeq}`, recorded_at: headOf(range),
+    // With no additions there is nothing else a finding could sit in. With
+    // some, a missing or invalid scope is counted apart, never guessed.
+    scope: !planAdditions.length ? 'ticket'
+      : (f.scope === 'ticket' || f.scope === 'addition') ? f.scope : 'unattributed' }))
   // A finding with no span reaches the fixer as a bare filename, and the
   // brief no longer points at the range either, so it arrives with less than
   // it used to. Counted so that drift shows up instead of being argued about.

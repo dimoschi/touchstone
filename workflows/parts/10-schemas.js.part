@@ -355,6 +355,9 @@ const FINDINGS = {
           // the script can check it is actually there rather than trusting
           // the claim.
           criterion_quote: { type: 'string' },
+          // Asked for only when the plan has additions; reviewOf overwrites it
+          // with what the script can stand behind.
+          scope: { type: 'string', enum: ['ticket', 'addition'] },
         },
       },
     },

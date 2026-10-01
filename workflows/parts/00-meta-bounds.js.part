@@ -29,7 +29,7 @@ export const meta = {
 // against the manifest in scripts/check-version-bump.sh, so drift is a
 // gate's job rather than something this script verifies about itself.
 const PLUGIN_NAME = 'touchstone'
-const PIPELINE_VERSION = '0.26.3'
+const PIPELINE_VERSION = '0.27.0'
 
 // Boundaries. Wall-clock deadlines are not expressible here (no Date.now, by
 // design); the bounds are rounds, counts, and token budget instead.
@@ -296,10 +296,18 @@ const prNote = () => draftPr
 // should write this payload (commands/deliver.md does that); the script has
 // no fs and cannot write it itself. Not async: nothing here dispatches an
 // agent, but every call site still says `return await` from when it did.
+// Set once the plan is known, and once findings can exist. Both are read by
+// halted(), which is defined long before either.
+let planAdditions = null
+let scopeSplit = () => null
 const halted = async (at, extra) => {
+  const split = scopeSplit()
   const payload = {
     task, halted_at: at, pipeline_version: pipelineVersion, stage_spend: stageSpend,
-    needs_user: true, record_file: runRecordFile, size, ...extra,
+    needs_user: true, record_file: runRecordFile, size,
+    ...(planAdditions ? { plan_additions: planAdditions } : {}),
+    ...(split ? { scope_split: split } : {}),
+    ...extra,
   }
   if (draftPr?.number) {
     log(`halt at ${at}: draft PR ${draftPr.url} left as it is; the reason is in ` +
@@ -316,9 +324,20 @@ const halted = async (at, extra) => {
 const PLAN = {
   type: 'object', additionalProperties: false,
   required: ['plan', 'acceptance_criteria', 'risky_areas',
-             'task_demands_implementation'],
+             'task_demands_implementation', 'additions'],
   properties: {
     plan: { type: 'string' },
+    // Work the plan believes the ticket needs but does not ask for, kept out
+    // of `plan` so it reaches the implementer and reviewers as a decision
+    // rather than an unmarked line. Two runs grew this way, and every finding
+    // left at their halts was in the part nobody asked for.
+    additions: {
+      type: 'array',
+      items: {
+        type: 'object', additionalProperties: false, required: ['item', 'consequence'],
+        properties: { item: { type: 'string' }, consequence: { type: 'string' } },
+      },
+    },
     acceptance_criteria: { type: 'array', items: { type: 'string' } },
     risky_areas: { type: 'array', items: { type: 'string' } },
     task_demands_implementation: { type: 'boolean' },

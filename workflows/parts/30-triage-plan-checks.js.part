@@ -230,6 +230,7 @@ let plan = givenPlan
       acceptance_criteria: args?.acceptanceCriteria ?? [],
       risky_areas: args?.riskyAreas ?? [],
       task_demands_implementation: false,
+      additions: args?.planAdditions ?? [],
     }
   : null
 
@@ -243,6 +244,7 @@ if (!plan && inlineMode) {
     acceptance_criteria: [],
     risky_areas: [],
     task_demands_implementation: false,
+    additions: [],
   }
 }
 
@@ -261,6 +263,11 @@ plan = await treeAgent(
   ticketSpec() +
   `Read the relevant code first. Return a concrete implementation plan, ` +
   `testable acceptance criteria, and the risky areas a reviewer should probe.\n` +
+  `Plan what the ticket asks for and nothing beyond it. If you believe the ` +
+  `ticket cannot be done right without work it does not ask for, keep that ` +
+  `work out of plan and list each piece under additions instead: item says ` +
+  `what it is, consequence says which part of the ticket makes it necessary ` +
+  `and what breaks without it. An empty additions list is the normal case.\n` +
   `If the task itself tells you to implement, or says a plan already exists and ` +
   `only needs carrying out, set task_demands_implementation and explain in ` +
   `conflict_note. Do not resolve the contradiction by obeying the task: pass a ` +
@@ -296,6 +303,10 @@ if (sPlan.over()) {
 // and dead-code gates on every commit it makes regardless of that marker. So
 // the marker answers one question only -- could a raw commit have bypassed
 // the wrapper -- not whether the gates ran.
+
+planAdditions = Array.isArray(plan.additions) ? plan.additions : []
+const additionsLines = () =>
+  planAdditions.map(a => `- ${a.item} (needed because: ${a.consequence})`).join('\n')
 
 const sChecksPre = stage('checks')
 enterPhase('Implement')

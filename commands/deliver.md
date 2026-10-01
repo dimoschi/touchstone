@@ -57,7 +57,9 @@ Workflow({ name: 'touchstone:deliver-pipeline', args: { ticket: "...", plan: "<t
 ```
 
 The run then skips Plan and Challenge and starts at Implement. Optionally pass
-`acceptanceCriteria` and `riskyAreas` as arrays if the earlier run produced them.
+`acceptanceCriteria` and `riskyAreas` as arrays if the earlier run produced them, and
+`planAdditions` as its `plan_additions` array, so the work it took on beyond the ticket
+stays marked as such.
 
 Never put a plan in `task` with an instruction to carry it out. `task` is handed to
 the planner, whose one rule is that it must not implement, so a task saying "the
