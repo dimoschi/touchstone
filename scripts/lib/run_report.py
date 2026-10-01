@@ -122,9 +122,8 @@ def _summary_of(recs):
 
 
 def _version_key(version):
-    if version == 'unknown':
-        return (1, [])
-    return (0, [int(p) if p.isdigit() else -1 for p in version.split('.')])
+    parts = version.split('.')
+    return (not all(p.isdigit() for p in parts), [int(p) for p in parts if p.isdigit()])
 
 
 def summarise(records):

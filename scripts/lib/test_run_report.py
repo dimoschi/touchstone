@@ -56,6 +56,10 @@ def test_version_of_is_none_for_a_record_from_before_the_field():
     assert version_of(record(pipeline_version={'base_branch': '0.2'})) is None
 
 
+def test_version_of_is_none_for_a_version_that_is_not_a_string():
+    assert version_of(record(pipeline_version={'executed': 26})) is None
+
+
 def test_output_tokens_sums_every_stage():
     assert output_tokens(record()) == 10000
 
@@ -75,8 +79,13 @@ def test_changed_lines_is_none_without_a_usable_size():
     assert changed_lines(record(size={'files': 2})) is None
 
 
+def test_changed_lines_counts_a_single_changed_line():
+    assert changed_lines(record(size={'totalChurn': 1})) == 1
+
+
 @pytest.mark.parametrize('state,want', [
     ({'state': 'MERGED', 'mergedAt': '2026-09-01T00:00:00Z'}, 'merged'),
+    ({'state': 'MERGED'}, 'merged'),
     ({'state': 'CLOSED', 'mergedAt': None}, 'closed'),
     ({'state': 'OPEN', 'mergedAt': None}, 'open'),
     ({'state': 'WEIRD'}, None),
@@ -96,9 +105,15 @@ def test_summarise_groups_by_version_and_counts_runs():
     assert summary['unknown']['runs'] == 1
 
 
-def test_summarise_orders_versions_numerically():
-    recs = [record(pipeline_version='0.10.0'), record(pipeline_version='0.9.0')]
-    assert list(summarise(recs)) == ['0.9.0', '0.10.0']
+def test_summarise_orders_versions_numerically_and_unknown_last():
+    recs = [without(record(), 'pipeline_version'), record(pipeline_version='0.10.0'),
+            record(pipeline_version='0.9.0')]
+    assert list(summarise(recs)) == ['0.9.0', '0.10.0', 'unknown']
+
+
+def test_summarise_sorts_a_version_that_is_not_dotted_integers_after_the_rest():
+    recs = [record(pipeline_version='1.x'), record(pipeline_version='0.9.0')]
+    assert list(summarise(recs)) == ['0.9.0', '1.x']
 
 
 def test_summarise_counts_outcomes_and_missing_ones():
@@ -123,6 +138,11 @@ def test_summarise_takes_medians_and_counts_what_it_could_not_measure():
     s = summarise(recs)['0.26.1']
     assert s['tokens_per_line'] == {'median': 300.0, 'measured': 3, 'missing': 1}
     assert s['fix_rounds'] == {'median': 1.0, 'measured': 3, 'missing': 1}
+
+
+def test_summarise_counts_fix_rounds_that_are_not_a_number_as_missing():
+    s = summarise([record(fix_rounds='two'), record(fix_rounds=2)])['0.26.1']
+    assert s['fix_rounds'] == {'median': 2, 'measured': 1, 'missing': 1}
 
 
 def test_summarise_has_no_median_when_nothing_was_measured():
@@ -152,6 +172,14 @@ def test_render_prints_every_measure_per_version():
         '  fix rounds: median 1 (2 measured, 0 missing)\n'
         '  blocking findings 1 (0 missing), notes 0 (0 missing)\n'
     )
+
+
+def test_render_lists_several_halt_stages_and_versions():
+    recs = [record(halted_at='Fix'), record(halted_at='Review'), record(pipeline_version='0.27.0')]
+    out = render(summarise(recs))
+    assert '  halted: Fix 1, Review 1\n' in out
+    assert out.count('pipeline ') == 2
+    assert '0 missing)\npipeline 0.27.0: 1 run(s)\n' in out
 
 
 def test_render_says_none_for_no_halts_and_no_median():
@@ -191,7 +219,7 @@ def test_refresh_open_rewrites_an_open_record_from_gh(tmp_path):
     refresh_open(path, rec, lambda n: asked.append(n) or {'state': 'MERGED', 'mergedAt': 'x'})
     assert asked == [12]
     assert rec['outcome'] == 'merged'
-    assert json.loads(path.read_text())['outcome'] == 'merged'
+    assert path.read_text() == json.dumps(rec, indent=2) + '\n'
 
 
 def test_refresh_open_leaves_a_settled_record_alone(tmp_path):
@@ -230,12 +258,14 @@ def test_gh_view_parses_what_gh_prints(monkeypatch, tmp_path):
     def fake_run(cmd, **kwargs):
         seen['cmd'] = cmd
         seen['cwd'] = kwargs.get('cwd')
+        seen['kwargs'] = kwargs
         return subprocess.CompletedProcess(cmd, 0, stdout='{"state": "OPEN", "mergedAt": null}', stderr='')
 
     monkeypatch.setattr(subprocess, 'run', fake_run)
     assert gh_view(tmp_path, 12) == {'state': 'OPEN', 'mergedAt': None}
     assert seen['cmd'] == ['gh', 'pr', 'view', '12', '--json', 'state,mergedAt']
     assert seen['cwd'] == tmp_path
+    assert seen['kwargs'] == {'cwd': tmp_path, 'capture_output': True, 'text': True}
 
 
 def test_gh_view_is_none_when_gh_fails(monkeypatch, tmp_path):
@@ -257,11 +287,12 @@ def test_main_refreshes_and_prints_the_report(tmp_path, capsys):
     runs.mkdir(parents=True)
     write(runs, '1.json', record(outcome='open', pr_number=3))
     (runs / '2.json').write_text('{broken')
+    (runs / '3.json').write_text('{broken')
     rc = main([str(tmp_path)], view=lambda repo, n: {'state': 'CLOSED', 'mergedAt': None})
     out = capsys.readouterr().out
     assert rc == 0
     assert 'outcome: merged 0, closed 1, open 0, none 0, missing 0' in out
-    assert 'unreadable: 2.json' in out
+    assert 'unreadable: 2.json, 3.json\n' in out
 
 
 def test_main_defaults_to_the_current_directory(tmp_path, capsys, monkeypatch):
