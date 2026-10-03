@@ -5,6 +5,7 @@ An entry is `{"value": true|false|<number>, "evidence": str}` or
 and every string is cut to LIMIT characters.
 """
 
+import codecs
 import os
 import re
 from posixpath import basename
@@ -98,12 +99,12 @@ def _combine(parts, precedence, otherwise, empty_evidence):
     return measured(otherwise, _join(parts, 'evidence'))
 
 
-def combine_any(parts, empty_evidence):
+def combine_any(parts, empty_evidence=None):
     """True if any part is true, else unmeasured if any is, else false."""
     return _combine(parts, (True, 'unmeasured'), False, empty_evidence)
 
 
-def combine_all(parts, empty_evidence):
+def combine_all(parts, empty_evidence=None):
     """False if any part is false, else unmeasured if any is, else true."""
     return _combine(parts, (False, 'unmeasured'), True, empty_evidence)
 
@@ -132,8 +133,7 @@ def header_path(line):
     """
     name = line[4:].rstrip('\t')
     if name.startswith('"'):
-        name = name[1:-1].encode('ascii').decode('unicode_escape').encode('latin-1').decode(
-            errors='replace')
+        name = codecs.escape_decode(name[1:-1].encode())[0].decode(errors='replace')
     return name[2:] if name.startswith('b/') else None
 
 

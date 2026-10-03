@@ -63,4 +63,4 @@ def semantic_noop_signal(repo, base, head, statuses):
     gap = missing('difft')
     with tempfile.TemporaryDirectory() as tmp:
         parts = [file_part(repo, base, head, p, statuses[p], tmp, gap) for p in sorted(statuses)]
-    return combine_all(parts, NO_SOURCE_CHANGED)
+    return combine_all(parts)

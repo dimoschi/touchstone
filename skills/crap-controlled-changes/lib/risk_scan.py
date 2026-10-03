@@ -24,4 +24,4 @@ def scan_head(handlers, what, repo, head, groups, added):
         head_root = unpack(repo, head, tmp)
         parts = [handler_part(handlers, what, lang, head_root, paths, added)
                  for lang, paths in sorted(groups.items())]
-    return combine_any(parts, NO_SOURCE_CHANGED)
+    return combine_any(parts)
