@@ -59,6 +59,15 @@ and `workflows/test-unsupported-language-halt.sh` are separate, narrower
 suites at the top level; none of the four takes a scenario filter, so each
 runs every scenario it defines.
 
+`skills/crap-controlled-changes/test/run-risk-signals.sh` drives `risk-signals.sh` end to end:
+the three-line contract, hand-counted git signals in a scratch repo, every tool-backed signal
+reading `unmeasured` (naming the tool) under a PATH that holds only what the script needs,
+fake `difft` and `bandit` proving the wiring, and exit 2 with nothing on stdout for a bad
+argument. The Python side (`test_risk_*.py`, `test_crap_rows.py`) puts fake tools ahead of
+PATH with the `install_tool` fixture and hides real ones with `hide_tool`, so a machine that
+has gosec installed passes the same tests. `run-scored-ledger.sh` also asserts that a green
+`crap-check.sh` leaves per-function rows for the staged tree.
+
 `skills/crap-controlled-changes/test/run-repo-arg.sh` covers the optional leading
 `<absolute-repo-path>` argument that `crap-check.sh`, `mutation-check.sh` and
 `deadcode-check.sh` accept (matching `crap-commit.sh`'s existing one): given a

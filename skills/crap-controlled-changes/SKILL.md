@@ -164,6 +164,18 @@ caps the wait (default 900s). Do not add your own locking around gate runs.
 
 Env knobs: `MUTATION_GO_TEST_FLAGS`, `MUTATION_PHP_INFECTION`, `MUTATION_PHP_CONFIG`, `MUTATION_PHP_THREADS`, `MUTATION_PY_RUN`. The Go run is CPU-bounded to `cores/4` parallel mutants at `GOMAXPROCS=2` each, since mutago's own default is one worker per core and each worker runs a full `go test`; raise with `MUTATION_GO_WORKERS` / `MUTATION_GO_MAXPROCS` on a machine that can take it. Go mutation runs also queue one at a time per machine (`MUTATION_GO_CONCURRENCY` raises that), refuse with exit 2 below `MUTATION_MIN_FREE_MB` free (default 4096) on the cache or temp volume, and reset the mutant build cache when it is over `MUTATION_GOCACHE_MAX_MB` (default 8192) at the start or the end of a run. A run that prints `waiting...` is queued behind another, not hung.
 
+## Change-risk signals (measurement, not a gate)
+
+`risk-signals.sh [<absolute-repo-path>] <base>..<head>` prints three lines: a begin marker
+naming the range, one JSON line with thirteen signals (lines added and removed, files and
+directories touched, dependency manifests, semantic no-op, broken API, security findings on
+added lines, highest CRAP and lowest coverage of the changed functions, reachability from a
+main package, files with an earlier reproduced defect), and an end marker. Each is a measured
+value with its evidence, or `unmeasured` with the reason (a missing tool, a language no tool
+supports). It never blocks a commit and asks nothing of you: the delivery pipeline records it
+per run. The CRAP figures it reports come from `crap-check-rows.json`, which `crap-check.sh`
+writes under the git common dir on every green run. See `docs/architecture.md`.
+
 ## Out of Scope
 
 - CI enforcement: not in v1.
