@@ -60,6 +60,16 @@ LEGACY_ARGS=()
 [ "$LEGACY_LEDGER" != "$LEDGER" ] && [ -f "$LEGACY_LEDGER" ] &&
   LEGACY_ARGS=(--legacy "$LEGACY_LEDGER")
 
+# A green run's whole report, keyed by the tree the commit will carry:
+# next_action.py keeps only failing rows, so a function that passed otherwise
+# leaves no complexity or coverage behind. Reads the rows from stdin. A failure
+# here must never change the gate's verdict.
+ROWS_FILE="$(git rev-parse --git-common-dir)/crap-check-rows.json"
+record_rows() {
+  python3 "$LIB_DIR/crap_rows.py" record "$ROWS_FILE" --tree "$(git write-tree)" ||
+    echo "crap-check: could not record the per-function figures; the verdict is unchanged" >&2
+}
+
 if [ "${1:-}" = "--accept" ]; then
   [ -n "${2:-}" ] || { echo "usage: crap-check.sh --accept '<function-id>'" >&2; exit 2; }
   exec python3 "$LIB_DIR/next_action.py" --state-file "$STATE_FILE" --branch "$BRANCH" --accept "$2"
@@ -230,6 +240,7 @@ if [ "$ran_any" -eq 1 ]; then
   if [ "$NA_STATUS" -eq 0 ]; then
     printf '%s\n' "$GO_FILES" "$PHP_FILES" "$PY_FILES" | staged_pairs \
       | python3 "$LIB_DIR/scored_ledger.py" record "$LEDGER" "$BRANCH" measured >/dev/null
+    record_rows < "$CAPTURE"
   fi
   exit "$NA_STATUS"
 fi
@@ -244,6 +255,7 @@ resolve_branch_pairs
 
 if [ -z "$PAIRS" ]; then
   echo "crap-check: no staged source files in supported languages (go, php, python)"
+  record_rows </dev/null
   exit 0
 fi
 
@@ -267,6 +279,7 @@ if [ "$VERDICT" -eq 0 ]; then
     echo "  borrowed: scored on a reachable commit, same blob and analyzer:"
     printf '%s\n' "$BORROWED"
   fi
+  record_rows </dev/null
   exit 0
 fi
 
