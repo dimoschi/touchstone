@@ -44,6 +44,29 @@ def test_a_function_the_commit_did_not_edit_is_left_out_of_the_figures(repo):
     assert cov['value'] == 100.0
 
 
+def test_a_function_the_commit_only_removed_lines_from_stays_in_the_figures(repo):
+    base = repo.commit({'a.py': 'def f(x):\n    if x is None:\n        raise ValueError\n'
+                                '    return x\n\n\ndef g():\n    return 1\n'})
+    head = repo.commit({'a.py': 'def f(x):\n    return x\n\n\ndef g():\n    return 2\n'})
+    record_for(repo, head, [row('a.py::f', 2.0, 0.0, 6.0), row('a.py::g', 1.0, 100.0, 1.0)])
+    crap, cov = risk_history.crap_signals(str(repo.path), f'{base}..{head}')
+    assert crap['value'] == 6.0
+    assert cov['value'] == 0.0
+
+
+def test_a_method_on_a_generic_type_stays_in_the_figures(repo):
+    stack = ('package calc\n\ntype Stack[T any] struct{ items []T }\n\n'
+             'func (s *Stack[T]) Push(v T) {\n%s\ts.items = append(s.items, v)\n}\n\n'
+             'func Plain(a int) int {\n\treturn a + %d\n}\n')
+    base = repo.commit({'calc.go': stack % ('', 1)})
+    head = repo.commit({'calc.go': stack % ('\tif len(s.items) > 10 {\n\t\treturn\n\t}\n', 2)})
+    record_for(repo, head, [row('calc.Stack[T].Push', 2.0, 0.0, 6.0),
+                            row('calc.Plain', 1.0, 100.0, 1.0)])
+    crap, cov = risk_history.crap_signals(str(repo.path), f'{base}..{head}')
+    assert crap['value'] == 6.0
+    assert cov['value'] == 0.0
+
+
 def test_a_commit_that_edits_no_scored_function_is_unmeasured(repo):
     base = repo.commit({'a.py': py_funcs(), 'b.py': 'import os\n'})
     head = repo.commit({'b.py': 'import os\nimport sys\n'})

@@ -84,6 +84,14 @@ func Generic[T any](v T) T {
 
 func (t Tree[T]) Walk() {
 }
+
+func (s *Stack[U]) Push(v U) {
+\ts.n++
+}
+
+func (p Pair[K, V]) Get() {
+\t_ = p
+}
 '''
 
 
@@ -96,7 +104,15 @@ def test_go_ids_name_a_function_by_package_and_a_method_by_its_receiver_type():
     assert go_ids(12) == {'calc.Box.Open'}
     assert go_ids(15) == {'calc.Box.Close'}
     assert go_ids(18) == {'calc.Generic'}
-    assert go_ids(21) == {'calc.Tree.Walk'}
+
+
+def test_go_ids_keep_the_type_parameter_of_a_generic_receiver_as_written():
+    assert go_ids(21) == {'calc.Tree[T].Walk'}
+    assert go_ids(25) == {'calc.Stack[U].Push'}
+
+
+def test_go_ids_name_a_receiver_with_several_type_parameters_the_way_go_crap_does():
+    assert go_ids(29) == {'calc.<unknown>.Get'}
 
 
 def test_go_ids_count_the_signature_line_and_leave_out_a_line_outside_every_function():
@@ -172,6 +188,34 @@ def test_changed_ids_reads_the_lines_a_commit_added_to_each_source_file(repo):
     head = repo.commit({'lib.py': 'def keep():\n    return 1\n\n\ndef edit():\n    return 3\n',
                         'README.md': 'b\n', 'notes.sh': 'echo hi\n'})
     assert risk_changed.changed_ids(str(repo.path), head) == {'lib.py::edit'}
+
+
+def test_changed_ids_counts_a_python_function_the_commit_only_removed_lines_from(repo):
+    repo.commit({'lib.py': 'def risky(a):\n    if a is None:\n        raise ValueError\n'
+                           '    return a\n\n\ndef keep():\n    return 1\n'})
+    head = repo.commit({'lib.py': 'def risky(a):\n    return a\n\n\ndef keep():\n    return 1\n'})
+    assert risk_changed.changed_ids(str(repo.path), head) == {'lib.py::risky'}
+
+
+def test_changed_ids_counts_a_function_whose_last_line_the_commit_removed(repo):
+    repo.commit({'lib.py': 'def a():\n    x = 1\n    return x\n\n\ndef b():\n    return 2\n'})
+    head = repo.commit({'lib.py': 'def a():\n    x = 1\n\n\ndef b():\n    return 2\n'})
+    assert risk_changed.changed_ids(str(repo.path), head) == {'lib.py::a'}
+
+
+def test_changed_ids_counts_a_go_function_the_commit_only_removed_lines_from(repo):
+    repo.commit({'a.go': 'package a\n\nfunc F(n int) int {\n\tif n < 0 {\n\t\treturn 0\n\t}\n'
+                         '\treturn n\n}\n\nfunc G() int {\n\treturn 1\n}\n'})
+    head = repo.commit({'a.go': 'package a\n\nfunc F(n int) int {\n\treturn n\n}\n\n'
+                                'func G() int {\n\treturn 1\n}\n'})
+    assert risk_changed.changed_ids(str(repo.path), head) == {'a.F'}
+
+
+def test_changed_ids_leaves_out_the_neighbours_of_a_function_the_commit_removed_whole(repo):
+    repo.commit({'lib.py': 'def a():\n    return 1\n\n\ndef gone():\n    return 2\n\n\n'
+                           'def b():\n    return 3\n'})
+    head = repo.commit({'lib.py': 'def a():\n    return 1\n\n\ndef b():\n    return 3\n'})
+    assert risk_changed.changed_ids(str(repo.path), head) <= {'lib.py::gone'}
 
 
 def test_changed_ids_of_a_first_commit_holds_every_function_in_it(repo):

@@ -52,6 +52,14 @@ def test_added_lines_of_empty_diff_is_empty():
     assert risk_core.added_lines('') == {}
 
 
+def test_removed_lines_reads_old_side_spans_from_hunk_headers():
+    assert risk_core.removed_lines(DIFF) == {'a.py': {2, 20, 21, 22}, 'new.go': set()}
+
+
+def test_removed_lines_of_empty_diff_is_empty():
+    assert risk_core.removed_lines('') == {}
+
+
 def header_diff(header):
     return f'diff --git a/x b/x\n--- a/x\n{header}\n@@ -1 +1 @@\n-a\n+b\n'
 

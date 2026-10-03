@@ -15,7 +15,7 @@ LANGUAGES = {'.go': 'go', '.py': 'python', '.php': 'php'}
 CONFIG = {'.json', '.yaml', '.yml', '.toml', '.lock', '.ini', '.cfg'}
 NON_SOURCE = CONFIG | {'.md', '.rst', '.txt', '.adoc', '.csv', '.png', '.jpg', '.jpeg', '.gif',
                        '.svg', '.ico', '.webp', '.bmp'}
-HUNK = re.compile(r'^@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@')
+HUNK = re.compile(r'^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@')
 DIFF_FILE = re.compile(r'^diff --git .*$', re.MULTILINE)
 
 
@@ -107,12 +107,19 @@ def combine_all(parts, empty_evidence):
     return _combine(parts, (False, 'unmeasured'), True, empty_evidence)
 
 
+def span(start, count):
+    first = int(start)
+    return range(first, first + int(count or 1))
+
+
 def new_span(header):
     m = HUNK.match(header)
-    if not m:
-        return range(0)
-    start = int(m.group(1))
-    return range(start, start + int(m.group(2) or 1))
+    return span(*m.group(3, 4)) if m else range(0)
+
+
+def old_span(header):
+    m = HUNK.match(header)
+    return span(*m.group(1, 2)) if m else range(0)
 
 
 def header_path(line):
@@ -142,11 +149,22 @@ def chunk_hunks(chunk):
     return path, hunks
 
 
-def added_lines(diff):
-    """path -> the new-side line numbers a `git diff -U0` adds or replaces."""
+def hunk_lines(diff, span_of):
     found = {}
     for chunk in DIFF_FILE.split(diff)[1:]:
         path, hunks = chunk_hunks(chunk)
         if path:
-            found.setdefault(path, set()).update(*(new_span(h) for h in hunks))
+            found.setdefault(path, set()).update(*(span_of(h) for h in hunks))
     return found
+
+
+def added_lines(diff):
+    """path -> the new-side line numbers a `git diff -U0` adds or replaces."""
+    return hunk_lines(diff, new_span)
+
+
+def removed_lines(diff):
+    """path -> the old-side line numbers a `git diff -U0` deletes or replaces.
+
+    Keyed by the new-side path, so a file the diff deletes has no entry."""
+    return hunk_lines(diff, old_span)

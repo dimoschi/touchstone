@@ -2,10 +2,12 @@
 
 `crap-check.sh` scores every function in each staged file, so a recorded row does
 not say whether the commit edited that function. A function counts as changed
-when its body or signature holds a line the commit added, the reading
-risk_reach.py uses too. The ids built here are the ones the gate prints:
+when its body or signature holds a line the commit added, or held one it removed
+(read from the parent's copy of the file, so deleting a whole function marks
+none of its neighbours). The ids built here are the ones the gate prints:
 `<path>::<name>` for Python (`Class.method` for a method), `<package>.<name>` or
-`<package>.<Type>.<name>` for Go, `<path>::<namespaced class>::<method>` for PHP.
+`<package>.<Type>.<name>` for Go (`<Type>[T]` for a generic one),
+`<path>::<namespaced class>::<method>` for PHP.
 A function whose id cannot be built the way the gate builds it reads as not
 changed, which leaves it out of the figures rather than putting a wrong one in.
 """
@@ -14,13 +16,14 @@ import ast
 import re
 import warnings
 
-from risk_core import added_lines, language_of
+from risk_core import added_lines, language_of, removed_lines
 from risk_reach import enclosing_func
 from risk_tools import cat_file, git
 
 FUNCTIONS = (ast.FunctionDef, ast.AsyncFunctionDef)
 GO_PACKAGE = re.compile(r'^package\s+(\w+)', re.MULTILINE)
-GO_FUNC = re.compile(r'func\s+(?:\(\s*(?:\w+\s+)?\*?(?P<recv>\w+)[^)]*\)\s*)?(?P<name>\w+)')
+GO_FUNC = re.compile(
+    r'func\s+(?:\(\s*(?:\w+\s+)?\*?(?P<recv>\w+)(?P<targs>\[[^\]]*\])?[^)]*\)\s*)?(?P<name>\w+)')
 PHP_NAMESPACE = re.compile(r'^namespace\s+([\w\\]+)', re.MULTILINE)
 PHP_CLASS = re.compile(r'^\s*(?:(?:abstract|final|readonly)\s+)*(?:class|trait|enum)\s+(\w+)')
 PHP_FUNCTION = re.compile(
@@ -58,9 +61,20 @@ def python_ids(path, text, added):
             if not added.isdisjoint(range(first_line(node), node.end_lineno + 1))}
 
 
+def go_receiver(recv, targs):
+    """The receiver type as the gate prints it. go-crap v0.5.0 keeps the one type
+    parameter of a generic type as written, and names a type with two or more
+    `<unknown>`."""
+    if not targs:
+        return recv
+    names = targs[1:-1].split(',')
+    return f'{recv}[{names[0].strip()}]' if len(names) == 1 else '<unknown>'
+
+
 def go_id(package, match):
     recv = match.group('recv')
-    return f"{package}.{recv + '.' if recv else ''}{match.group('name')}"
+    owner = f"{go_receiver(recv, match.group('targs'))}." if recv else ''
+    return f"{package}.{owner}{match.group('name')}"
 
 
 def go_ids(path, text, added):
@@ -106,15 +120,18 @@ def php_ids(path, text, added):
 FINDERS = {'go': go_ids, 'python': python_ids, 'php': php_ids}
 
 
-def file_ids(repo, sha, path, added):
+def file_ids(repo, rev, path, lines):
     finder = FINDERS.get(language_of(path))
-    data = cat_file(repo, sha, path) if finder else None
-    return finder(path, data.decode('utf-8', 'replace'), added) if data is not None else set()
+    data = cat_file(repo, rev, path) if finder else None
+    return finder(path, data.decode('utf-8', 'replace'), lines) if data is not None else set()
 
 
 def changed_ids(repo, sha):
     """{row id} of the scored functions the commit `sha` changed."""
     done = git(repo, '-c', 'core.quotePath=true', 'show', '--format=', '-U0', '--no-color',
                '--no-renames', sha)
-    added = added_lines(done.stdout.decode('utf-8', 'replace'))
-    return set().union(*(file_ids(repo, sha, path, lines) for path, lines in added.items()))
+    diff = done.stdout.decode('utf-8', 'replace')
+    added = (file_ids(repo, sha, path, lines) for path, lines in added_lines(diff).items())
+    removed = (file_ids(repo, f'{sha}^', path, lines)
+               for path, lines in removed_lines(diff).items() if lines)
+    return set().union(*added, *removed)
