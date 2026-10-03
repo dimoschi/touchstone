@@ -104,7 +104,98 @@ def test_la_per_lt_is_unmeasured_when_every_touched_file_is_new(repo):
 def test_git_signals_carries_the_six_git_only_keys_in_order(repo):
     base = repo.commit({'a.py': 'l1\n'})
     head = repo.commit({'a.py': 'l1\nl2\n', 'go.mod': 'module m\n'})
-    signals = risk_signals.git_signals(str(repo.path), base, head)
+    range_ = f'{base}..{head}'
+    rows = risk_signals.numstat_rows(str(repo.path), range_)
+    signals = risk_signals.git_signals(str(repo.path), base, range_, rows)
     assert list(signals) == ['la', 'ld', 'la_per_lt', 'files', 'directories', 'dependency_surface']
     assert signals['la']['value'] == 2
     assert signals['dependency_surface']['value'] is True
+
+
+def test_parse_range_splits_base_and_head_and_refuses_anything_else():
+    assert risk_signals.parse_range('abc..def') == ('abc', 'def')
+    assert risk_signals.parse_range('v1.2.0..feat/x') == ('v1.2.0', 'feat/x')
+    for bad in ('abc', 'abc..', '..def', 'a...b', '', 'a b..c', 'a..b c', '-x..y', 'x..-y'):
+        assert risk_signals.parse_range(bad) is None, bad
+
+
+def test_check_range_accepts_two_commits_and_names_the_ref_that_does_not_resolve(repo):
+    base = repo.commit({'a.py': '1\n'})
+    head = repo.commit({'a.py': '2\n'})
+    risk_signals.check_range(str(repo.path), base, head)
+    for bad_base, bad_head, name in ((base, 'nosuchref', 'nosuchref'), ('nosuchref', head, 'nosuchref')):
+        try:
+            risk_signals.check_range(str(repo.path), bad_base, bad_head)
+            assert False, 'expected ValueError'
+        except ValueError as exc:
+            assert str(exc) == f'{name} does not resolve to a commit'
+
+
+NO_TOOLS = ('difft', 'apidiff', 'griffe', 'roave-backward-compatibility-check', 'gosec', 'bandit',
+            'opengrep', 'deadcode')
+
+
+def test_collect_returns_every_key_in_order_and_never_false_for_what_it_cannot_measure(
+        repo, hide_tool):
+    hide_tool(*NO_TOOLS)
+    base = repo.commit({'a.go': 'package a\n', 'web/app.js': 'x\n', 'README.md': 'r\n'})
+    head = repo.commit({'a.go': 'package a\n// c\n', 'web/app.js': 'y\n', 'README.md': 'q\n'})
+    signals = risk_signals.collect(str(repo.path), base, head)
+    assert list(signals) == list(risk_signals.KEYS)
+    assert [signals[k]['value'] for k in ('la', 'ld', 'files', 'directories')] == [3, 2, 3, 2]
+    assert signals['dependency_surface']['value'] is False
+    assert signals['semantic_noop'] == {'value': 'unmeasured', 'reason': 'difft is not on PATH; '
+                                        'no semantic tool supports .js files (e.g. web/app.js)'}
+    assert 'apidiff is not on PATH' in signals['api_broken']['reason']
+    assert 'gosec is not on PATH' in signals['security_pattern']['reason']
+    assert 'deadcode is not on PATH' in signals['entry_reachable']['reason']
+    assert signals['crap_max']['value'] == 'unmeasured'
+    assert signals['coverage_min']['value'] == 'unmeasured'
+    assert signals['prior_defect_files']['value'] == 'unmeasured'
+    for entry in signals.values():
+        assert set(entry) in ({'value', 'evidence'}, {'value', 'reason'})
+        assert entry['value'] != 'unmeasured' or 'reason' in entry
+
+
+def test_a_signal_that_raises_is_unmeasured_and_the_others_are_kept(repo, hide_tool, monkeypatch):
+    hide_tool(*NO_TOOLS)
+
+    def boom(*args):
+        raise RuntimeError('tool exploded')
+
+    monkeypatch.setattr(risk_signals, 'api_signal', boom)
+    monkeypatch.setattr(risk_signals, 'crap_signals', boom)
+    base = repo.commit({'a.py': '1\n'})
+    head = repo.commit({'a.py': '2\n'})
+    signals = risk_signals.collect(str(repo.path), base, head)
+    assert signals['api_broken'] == {'value': 'unmeasured',
+                                     'reason': "api_broken failed: RuntimeError('tool exploded')"}
+    assert signals['crap_max'] == {'value': 'unmeasured',
+                                   'reason': "crap_max failed: RuntimeError('tool exploded')"}
+    assert signals['coverage_min'] == signals['crap_max']
+    assert signals['la']['value'] == 1
+
+
+def test_main_prints_the_three_line_block_for_the_range(repo, hide_tool, capsys):
+    hide_tool(*NO_TOOLS)
+    base = repo.commit({'a.py': '1\n'})
+    head = repo.commit({'a.py': '1\n2\n'})
+    assert risk_signals.main([str(repo.path), f'{base}..{head}']) == 0
+    out, err = capsys.readouterr()
+    lines = out.split('\n')
+    assert lines[0] == f'TOUCHSTONE_RISK_SIGNALS {base}..{head}'
+    assert list(json.loads(lines[1])['signals']) == list(risk_signals.KEYS)
+    assert lines[2:] == ['TOUCHSTONE_RISK_SIGNALS_END', '']
+    assert err == ''
+
+
+def test_main_exits_2_with_nothing_on_stdout_for_a_bad_argument_or_range(repo, tmp_path_factory,
+                                                                         capsys):
+    head = repo.commit({'a.py': '1\n'})
+    elsewhere = str(tmp_path_factory.mktemp('not-a-repo'))
+    cases = [[], [str(repo.path)], [str(repo.path), 'nope'], [str(repo.path), f'{head}..nosuch'],
+             [elsewhere, f'{head}..{head}']]
+    for argv in cases:
+        assert risk_signals.main(argv) == 2, argv
+        out, err = capsys.readouterr()
+        assert out == '' and err.startswith('risk-signals:'), (argv, out, err)
