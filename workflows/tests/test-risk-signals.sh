@@ -91,15 +91,21 @@ async function scenarioRSD() {
   check('the run did not halt', result.halted_at, undefined)
 }
 
-// Scenario RSE -- every halt before Draft PR says there are no signals; every halt
-// from there on carries the block, the run-budget halt included.
+// Scenario RSE -- a halt before the implementer returns has no signals; one after
+// it says why none were measured; every halt from Draft PR on carries the block,
+// the run-budget halt included.
 async function scenarioRSE() {
-  console.log('\n== scenario RSE: halts before Draft PR carry risk_signals: null')
+  console.log('\n== scenario RSE: halts before the implementer returns carry risk_signals: null')
   const early = await run({ args: BUDGETED, spendAllAfter: 'triage' })
   check('halted at Implement', early.result.halted_at, 'Implement')
   check('the key is present', has(early.result, 'risk_signals'), true)
   check('and null', early.result.risk_signals, null)
   check('the probe never ran', riskCalls(early.captured).length, 0)
+  const refusedImpl = await run({ implExtra: { unsupported_language: true } })
+  check('a halt at Implement after the implementer returned', refusedImpl.result.halted_at, 'Implement')
+  check('names the range it committed', refusedImpl.result.risk_signals?.range, COMMIT_RANGE)
+  check('and says it was not measured', typeof refusedImpl.result.risk_signals?.unmeasured, 'string')
+  check('the probe never ran', riskCalls(refusedImpl.captured).length, 0)
   const afterImpl = await run({ args: BUDGETED, spendAllAfter: 'implementer' })
   check('the draft-pr dispatch is the first one refused', afterImpl.result.halted_at, 'Draft PR')
   check('so Draft PR is the first phase whose halt carries a record',

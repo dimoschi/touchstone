@@ -249,7 +249,8 @@ function makeAgent(scenario, captured) {
     if (label === 'implementer') {
       return { summary: 'stub implementation', files_changed: scenario.implFilesChanged ?? ['a.js', 'b.js'],
         commit_range: COMMIT_RANGE, scored: scenario.implScored ?? true,
-        ...(scenario.implGateNote ? { gate_note: scenario.implGateNote } : {}) }
+        ...(scenario.implGateNote ? { gate_note: scenario.implGateNote } : {}),
+        ...(scenario.implExtra ?? {}) }
     }
     // draft-pr and size (gh-118): the diffstat probe and its one retry. Both
     // read the range straight out of their own prompt (diffstatCommandFor

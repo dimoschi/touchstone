@@ -296,8 +296,8 @@ const prNote = () => draftPr
 let planAdditions = null
 let scopeSplit = () => null
 // The change-risk signals the Draft PR phase measures (part 40): null on every
-// halt before that phase, and from there on either the parsed block or an
-// {range, unmeasured} record saying why there is none. Nothing reads it back to
+// halt before the implementer returns a range, and from there on either the
+// parsed block or an {range, unmeasured} record saying why there is none. Nothing reads it back to
 // decide anything; it only travels with the run record.
 let riskSignals = null
 const halted = async (at, extra) => {
@@ -2065,6 +2065,10 @@ const impl = await treeAgent(
   { label: 'implementer', schema: IMPL, model: 'sonnet', effort: effortFor.implement })
 if (!impl) throw new Error('implementer failed')
 sImpl.close()
+// From here on a halt has a range, so it records why there are no signals
+// instead of a bare null; the Draft PR phase replaces this with the probe's result.
+riskSignals = { range: impl.commit_range,
+  unmeasured: 'the run stopped before the risk-signals probe returned' }
 
 // Whether anything actually went through the gate, across every committing
 // phase from here through the mutation loop -- an implementer that scored
@@ -2392,10 +2396,6 @@ const parseRiskSignals = (output, range) => {
 }
 
 enterPhase('Draft PR')
-// Set before anything can be refused, so a halt from here on carries a record
-// saying why there are no signals instead of a bare null.
-riskSignals = { range: impl.commit_range,
-  unmeasured: 'the run stopped before the risk-signals probe returned' }
 const draft = await treeAgent(
   `Make sure this branch has a pull request to hang the run's progress on, ` +
   `then STOP.\n` +

@@ -296,8 +296,8 @@ const prNote = () => draftPr
 let planAdditions = null
 let scopeSplit = () => null
 // The change-risk signals the Draft PR phase measures (part 40): null on every
-// halt before that phase, and from there on either the parsed block or an
-// {range, unmeasured} record saying why there is none. Nothing reads it back to
+// halt before the implementer returns a range, and from there on either the
+// parsed block or an {range, unmeasured} record saying why there is none. Nothing reads it back to
 // decide anything; it only travels with the run record.
 let riskSignals = null
 const halted = async (at, extra) => {
