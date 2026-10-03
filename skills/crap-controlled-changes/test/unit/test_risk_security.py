@@ -106,7 +106,23 @@ def test_a_gosec_finding_on_an_added_line_is_a_security_pattern(
     head = repo.commit({'m.go': 'package m\n\nfunc A() { _ = 1 }\n'})
     sig = signal(repo, base, head, ['m.go'])
     assert sig == {'value': True, 'evidence': 'gosec: G401 weak hash at m.go:3'}
-    assert log.read_text().split() == ['-fmt=json', '-quiet', './...']
+    assert log.read_text().split() == ['-fmt=json', './...']
+
+
+QUIET_WHEN_CLEAN = '''
+case " $* " in *" -quiet "*) exit 0 ;; esac
+echo '{"Golang errors": {}, "Issues": [], "Stats": {"found": 0}}'
+exit 0
+'''
+
+
+def test_a_gosec_run_that_finds_nothing_is_false_not_unmeasured(repo, install_tool):
+    install_tool('gosec', QUIET_WHEN_CLEAN)
+    base = repo.commit(GO_BASE)
+    head = repo.commit({'m.go': 'package m\n\nfunc A() { _ = 1 }\n'})
+    sig = signal(repo, base, head, ['m.go'])
+    assert sig == {'value': False, 'evidence': 'gosec: 0 finding(s), none on a line this '
+                                               'range added'}
 
 
 def test_a_gosec_finding_on_an_unchanged_line_leaves_it_false(
@@ -174,7 +190,24 @@ def test_a_bandit_finding_on_an_added_line_is_a_security_pattern(
     head = repo.commit({'a.py': 'import hashlib\nx = hashlib.md5\n', 'gone.py': None})
     sig = signal(repo, base, head, ['a.py', 'gone.py'])
     assert sig == {'value': True, 'evidence': 'bandit: B324 weak md5 at a.py:2'}
-    assert log.read_text().split() == ['-q', '-f', 'json', '--', 'a.py']
+    assert log.read_text().split() == ['-q', '-f', 'json', '-s', 'B101', '--', 'a.py']
+
+
+ASSERT_UNLESS_SKIPPED = '''
+case " $* " in *" -s B101 "*) echo '{"results": []}'; exit 0 ;; esac
+echo '{"results": [{"filename": "./test_a.py", "issue_text": "Use of assert", "line_number": 2,
+  "line_range": [2], "test_id": "B101"}]}'
+exit 1
+'''
+
+
+def test_a_test_that_only_adds_an_assert_is_not_a_security_pattern(repo, install_tool):
+    install_tool('bandit', ASSERT_UNLESS_SKIPPED)
+    base = repo.commit({'test_a.py': 'def test_a():\n    pass\n'})
+    head = repo.commit({'test_a.py': 'def test_a():\n    assert 1 == 1\n'})
+    sig = signal(repo, base, head, ['test_a.py'])
+    assert sig == {'value': False, 'evidence': 'bandit: 0 finding(s), none on a line this '
+                                               'range added'}
 
 
 def test_a_bandit_finding_on_an_unchanged_line_leaves_it_false(

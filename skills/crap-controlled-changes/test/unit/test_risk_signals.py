@@ -49,8 +49,9 @@ def test_directories_counts_distinct_dirnames_with_the_root_as_a_dot():
 
 
 def test_dependency_surface_is_true_for_each_package_manager_file_name():
-    for name in ('go.mod', 'go.sum', 'composer.json', 'composer.lock', 'pyproject.toml',
-                 'uv.lock', 'requirements.txt', 'requirements-dev.txt'):
+    for name in ('go.mod', 'go.sum', 'go.work', 'go.work.sum', 'composer.json', 'composer.lock',
+                 'pyproject.toml', 'uv.lock', 'poetry.lock', 'Pipfile', 'Pipfile.lock',
+                 'requirements.txt', 'requirements-dev.txt'):
         for prefix in ('', 'svc/api/'):
             sig = risk_signals.dependency_signal([row('a.py'), row(prefix + name)])
             assert sig['value'] is True, prefix + name
@@ -70,6 +71,17 @@ def test_numstat_rows_reads_the_range_from_a_repository(repo):
     rows = risk_signals.numstat_rows(str(repo.path), f'{base}..{head}')
     assert sorted((r['path'], r['added'], r['removed']) for r in rows) == [
         ('a.py', 2, 1), ('b.py', 0, 1), ('src/c.py', 1, 0)]
+
+
+def test_diff_of_reads_added_lines_of_a_non_ascii_path_whatever_the_user_quoting_config(
+        repo, monkeypatch):
+    monkeypatch.setenv('GIT_CONFIG_COUNT', '1')
+    monkeypatch.setenv('GIT_CONFIG_KEY_0', 'core.quotePath')
+    monkeypatch.setenv('GIT_CONFIG_VALUE_0', 'false')
+    base = repo.commit({'café.py': 'x = 1\n', 'a"é.py': 'x = 1\n'})
+    head = repo.commit({'café.py': 'x = 1\ny = 2\n', 'a"é.py': 'x = 1\ny = 2\n'})
+    diff = risk_signals.diff_of(str(repo.path), f'{base}..{head}')
+    assert risk_core.added_lines(diff) == {'café.py': {2}, 'a"é.py': {2}}
 
 
 def test_text_line_count_counts_lines_at_a_revision_and_none_when_absent(repo):
@@ -155,6 +167,18 @@ def test_collect_returns_every_key_in_order_and_never_false_for_what_it_cannot_m
     for entry in signals.values():
         assert set(entry) in ({'value', 'evidence'}, {'value', 'reason'})
         assert entry['value'] != 'unmeasured' or 'reason' in entry
+
+
+def test_a_config_only_change_is_unmeasured_for_every_tool_backed_signal(repo, hide_tool):
+    hide_tool(*NO_TOOLS)
+    base = repo.commit({'deploy.yaml': 'privileged: false\n'})
+    head = repo.commit({'deploy.yaml': 'privileged: true\n'})
+    signals = risk_signals.collect(str(repo.path), base, head)
+    for key, tool in (('api_broken', 'API compatibility'), ('security_pattern', 'security'),
+                      ('entry_reachable', 'reachability')):
+        assert signals[key] == {
+            'value': 'unmeasured',
+            'reason': f'no {tool} tool supports .yaml files (e.g. deploy.yaml)'}
 
 
 def test_a_signal_that_raises_is_unmeasured_and_the_others_are_kept(repo, hide_tool, monkeypatch):

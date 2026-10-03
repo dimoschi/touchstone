@@ -52,6 +52,22 @@ def test_added_lines_of_empty_diff_is_empty():
     assert risk_core.added_lines('') == {}
 
 
+def header_diff(header):
+    return f'diff --git a/x b/x\n--- a/x\n{header}\n@@ -1 +1 @@\n-a\n+b\n'
+
+
+def test_added_lines_reads_a_path_git_quotes_back_to_the_real_name():
+    for header, name in (('+++ "b/caf\\303\\251.py"', 'café.py'),
+                         ('+++ "b/a\\"b.py"', 'a"b.py'),
+                         ('+++ "b/back\\\\slash.py"', 'back\\slash.py'),
+                         ('+++ "b/tab\\there.py"', 'tab\there.py')):
+        assert risk_core.added_lines(header_diff(header)) == {name: {1}}, header
+
+
+def test_added_lines_drops_the_tab_git_appends_to_a_path_holding_a_space():
+    assert risk_core.added_lines(header_diff('+++ b/my file.py\t')) == {'my file.py': {1}}
+
+
 def test_added_lines_ignores_a_hunk_header_it_cannot_read():
     assert risk_core.added_lines('diff --git a/x b/x\n+++ b/x\n@@ nonsense @@\n') == {'x': set()}
 
@@ -78,6 +94,19 @@ def test_language_name_is_the_extension_for_an_unsupported_language():
     assert risk_core.language_name('other:.js') == '.js'
     assert risk_core.language_name('other:Makefile') == 'Makefile'
     assert risk_core.language_name('python') == 'python'
+
+
+def test_by_language_does_not_assume_a_config_file_harmless():
+    paths = ['deploy.yaml', 'ci/build.yml', 'cfg/app.json', 'pyproject.toml', 'setup.cfg',
+             'tox.ini', 'poetry.lock', 'README.md']
+    assert risk_core.by_language(paths) == {
+        'other:.yaml': ['deploy.yaml'], 'other:.yml': ['ci/build.yml'],
+        'other:.json': ['cfg/app.json'], 'other:.toml': ['pyproject.toml'],
+        'other:.cfg': ['setup.cfg'], 'other:.ini': ['tox.ini'], 'other:.lock': ['poetry.lock']}
+
+
+def test_by_language_reads_a_config_extension_in_any_case():
+    assert risk_core.by_language(['DEPLOY.YAML']) == {'other:.yaml': ['DEPLOY.YAML']}
 
 
 def test_by_language_groups_source_paths_and_drops_files_with_no_language():

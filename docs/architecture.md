@@ -71,8 +71,8 @@ clear a failure: a gate that can be satisfied by editing its own record measures
 nothing. `--accept` and `--mark-scored` are user-approved overrides, not agent moves.
 
 `crap-check-rows.json` sits beside them but is not a ledger: nothing gates on it. It
-keeps the whole report of every green `crap-check.sh` run (one row per changed function:
-complexity, coverage, CRAP, status, tag), keyed by the tree the commit carries, because
+keeps the whole report of every green `crap-check.sh` run (one row per function in each
+staged file: complexity, coverage, CRAP, status, tag), keyed by the tree the commit carries, because
 `next_action.py` keeps only the failing rows and a function that passed would otherwise
 leave no figure behind. `lib/crap_rows.py` writes it from all three exit-0 paths. A run with
 nothing to score records an empty report for its tree, which never replaces rows already
@@ -100,7 +100,10 @@ each string cut to 400 characters so a model can relay the block verbatim.
 `roave-backward-compatibility-check`, `gosec`, `bandit`, `opengrep`, `deadcode`), a tool that
 fails, or a source file in a language no tool supports (anything but Go, Python and PHP,
 for which a fixed set of non-source extensions has no language at all) makes the signals
-that need it `unmeasured`, with a reason naming the cause. A probe that raises is turned
+that need it `unmeasured`, with a reason naming the cause. A config file (JSON, YAML, TOML,
+INI, CFG, a lockfile) is not assumed harmless either: `difft` reads those formats, but no
+security, API or reachability tool does, so a change to one makes `security_pattern`,
+`api_broken` and `entry_reachable` `unmeasured`. A probe that raises is turned
 into the same entry, so a block always carries every key. Combining languages: a boolean is
 true if any part is true, else unmeasured if any part is, else false. `semantic_noop` runs
 the other way, since true there may lower effort: false if any file is not a no-op (an added
@@ -110,17 +113,18 @@ or deleted file never is), else unmeasured if any is, else true.
 |---|---|
 | `la`, `ld`, `files`, `directories` | `git diff --numstat -z --no-renames`; a binary file counts 0 |
 | `la_per_lt` | lines added over text files, divided by the base-revision lines of the text files the range modifies or deletes; unmeasured when every touched file is new |
-| `dependency_surface` | a changed path whose basename is a package-manager manifest or lockfile |
+| `dependency_surface` | a changed path whose basename is a package-manager manifest or lockfile (`go.mod`, `go.sum`, `go.work`, `go.work.sum`, `composer.json`, `composer.lock`, `pyproject.toml`, `uv.lock`, `poetry.lock`, `Pipfile`, `Pipfile.lock`, `requirements*.txt`) |
 | `semantic_noop` | `difft --check-only --exit-code --ignore-comments` on every changed file, all modified |
 | `api_broken` | `apidiff -m -incompatible` per changed Go module (exit 0 either way, so non-empty stdout is the finding), `griffe check` per changed Python package, Roave BackwardCompatibilityCheck for PHP; a package new in the range has no earlier API to break |
-| `security_pattern` | gosec, bandit, opengrep with `rules/php-security.yml`, run over the head revision; a finding counts only when its line span overlaps a line the range added |
-| `crap_max`, `coverage_min` | the rows `crap-check.sh` recorded for each non-merge commit of the range; unmeasured when any commit has no recorded entry |
-| `entry_reachable` | `deadcode` per changed Go module: true when a function holding an added line is reachable from a main package; Go only |
-| `prior_defect_files` | `.claude/touchstone-runs` records: true when a changed path is the file of an unresolved finding whose `reproducer_run.outcome` was `reproduced`; unmeasured with no records |
+| `security_pattern` | gosec, bandit (without B101, `assert_used`, which flags every test), opengrep with `rules/php-security.yml`, run over the head revision; a finding counts only when its line span overlaps a line the range added |
+| `crap_max`, `coverage_min` | the rows `crap-check.sh` recorded for each non-merge commit of the range, keeping the functions that commit changed (a function holding a line it added, found by `risk_changed.py`); unmeasured when any commit has no recorded entry or none changed a scored function |
+| `entry_reachable` | `deadcode` per changed Go module: true when a function holding an added line is reachable from a main package; Go only. A `_test.go` file is left out, since deadcode loads no test file; a range that changes only tests is false |
+| `prior_defect_files` | `.claude/touchstone-runs` records: true when a changed path is the file of an unresolved finding whose `reproducer_run.outcome` was `reproduced` (a finding's absolute path is read relative to the checkout, or to its ticket worktree under `.claude/worktrees/`); unmeasured with no records |
 
 `lib/risk_signals.py` assembles the block; `risk_core.py` holds the entry shape and the
 language and combination rules, and `risk_noop.py`, `risk_api.py`, `risk_security.py`,
-`risk_reach.py` and `risk_history.py` one signal family each. The tools are optional and
+`risk_reach.py` and `risk_history.py` one signal family each (`risk_changed.py` tells
+`risk_history.py` which scored functions a commit changed). The tools are optional and
 looked up on PATH; the Semgrep registry rules are not usable here (Semgrep Rules
 License), which is why the PHP rules are written for this plugin.
 

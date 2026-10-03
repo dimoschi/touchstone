@@ -12,9 +12,9 @@ from posixpath import basename
 LIMIT = 400
 
 LANGUAGES = {'.go': 'go', '.py': 'python', '.php': 'php'}
-NON_SOURCE = {'.md', '.rst', '.txt', '.adoc', '.json', '.yaml', '.yml', '.toml', '.lock',
-              '.ini', '.cfg', '.csv', '.png', '.jpg', '.jpeg', '.gif', '.svg', '.ico',
-              '.webp', '.bmp'}
+CONFIG = {'.json', '.yaml', '.yml', '.toml', '.lock', '.ini', '.cfg'}
+NON_SOURCE = CONFIG | {'.md', '.rst', '.txt', '.adoc', '.csv', '.png', '.jpg', '.jpeg', '.gif',
+                       '.svg', '.ico', '.webp', '.bmp'}
 HUNK = re.compile(r'^@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@')
 DIFF_FILE = re.compile(r'^diff --git .*$', re.MULTILINE)
 
@@ -51,11 +51,22 @@ def language_name(lang):
     return lang[len('other:'):] if lang.startswith('other:') else lang
 
 
+def analysed_language_of(path):
+    """`language_of`, except that a config file is not harmless to an analyser.
+
+    difft reads config formats, so `language_of` leaves them without a language;
+    gosec, bandit, opengrep, apidiff, griffe and deadcode read none of them, and a
+    change to a deploy manifest or a CI workflow must read unmeasured, not clean.
+    """
+    ext = os.path.splitext(basename(path))[1].lower()
+    return f'other:{ext}' if ext in CONFIG else language_of(path)
+
+
 def by_language(paths):
     """language -> paths, leaving out files that have no language."""
     groups = {}
     for path in paths:
-        lang = language_of(path)
+        lang = analysed_language_of(path)
         if lang is not None:
             groups.setdefault(lang, []).append(path)
     return groups
@@ -104,6 +115,20 @@ def new_span(header):
     return range(start, start + int(m.group(2) or 1))
 
 
+def header_path(line):
+    """The new-side path a '+++ ' header names, or None for /dev/null.
+
+    Reads a diff made with core.quotePath on, where git quotes a name that holds
+    a non-ASCII byte, a quote, a backslash or a control character (octal and
+    one-letter escapes), and appends a tab to one that holds a space.
+    """
+    name = line[4:].rstrip('\t')
+    if name.startswith('"'):
+        name = name[1:-1].encode('ascii').decode('unicode_escape').encode('latin-1').decode(
+            'utf-8', 'replace')
+    return name[2:] if name.startswith('b/') else None
+
+
 def chunk_hunks(chunk):
     """(new path or None, hunk header lines) of one file's part of a diff."""
     path, hunks = None, []
@@ -112,8 +137,8 @@ def chunk_hunks(chunk):
             hunks.append(line)
         # Only the header names the file: after the first hunk, a line that
         # starts with '+++ ' is added content, not a header.
-        elif not hunks and line.startswith('+++ b/'):
-            path = line[6:]
+        elif not hunks and line.startswith('+++ '):
+            path = header_path(line)
     return path, hunks
 
 

@@ -70,7 +70,8 @@ def scan_verdict(tool, done, parse, added):
 
 
 def gosec_module(head_root, moddir, added):
-    done = run(['gosec', '-fmt=json', '-quiet', './...'], cwd=os.path.join(head_root, moddir))
+    # No -quiet: with it, a module gosec finds nothing in prints no report at all.
+    done = run(['gosec', '-fmt=json', './...'], cwd=os.path.join(head_root, moddir))
     return scan_verdict('gosec', done, lambda text: gosec_findings(text, head_root), added)
 
 
@@ -94,8 +95,9 @@ def scan_changed(tool, argv, parse, head_root, paths, added, noun):
 
 
 def python_part(head_root, paths, added):
-    return scan_changed('bandit', ['bandit', '-q', '-f', 'json', '--'], bandit_findings,
-                        head_root, paths, added, 'Python')
+    # B101 (assert_used) flags every assert, so it would mark each pytest test as risky.
+    return scan_changed('bandit', ['bandit', '-q', '-f', 'json', '-s', 'B101', '--'],
+                        bandit_findings, head_root, paths, added, 'Python')
 
 
 def php_part(head_root, paths, added):

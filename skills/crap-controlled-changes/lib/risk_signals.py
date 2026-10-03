@@ -46,8 +46,9 @@ KEYS = ('la', 'ld', 'la_per_lt', 'files', 'directories', 'dependency_surface', '
         'prior_defect_files')
 RANGE = re.compile(r'((?!-)\S+?)\.\.((?!-)\S+)')
 
-DEPENDENCY_FILES = {'go.mod', 'go.sum', 'composer.json', 'composer.lock', 'pyproject.toml',
-                    'uv.lock'}
+DEPENDENCY_FILES = {'go.mod', 'go.sum', 'go.work', 'go.work.sum', 'composer.json',
+                    'composer.lock', 'pyproject.toml', 'uv.lock', 'poetry.lock', 'Pipfile',
+                    'Pipfile.lock'}
 
 
 def parse_numstat(raw):
@@ -148,7 +149,8 @@ def git_signals(repo, base, range_, rows):
 
 
 def diff_of(repo, range_):
-    done = git(repo, 'diff', '-U0', '--no-color', '--no-renames', range_)
+    done = git(repo, '-c', 'core.quotePath=true', 'diff', '-U0', '--no-color', '--no-renames',
+               range_)
     return done.stdout.decode('utf-8', 'replace')
 
 
