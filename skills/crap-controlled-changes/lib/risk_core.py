@@ -46,6 +46,11 @@ def language_of(path):
     return f'other:{ext or name}'
 
 
+def language_name(lang):
+    """'.js' for 'other:.js'; any other language as it is."""
+    return lang[len('other:'):] if lang.startswith('other:') else lang
+
+
 def by_language(paths):
     """language -> paths, leaving out files that have no language."""
     groups = {}
@@ -57,7 +62,8 @@ def by_language(paths):
 
 
 def _join(parts, key):
-    return '; '.join(p[key] for p in parts)
+    """Each distinct text once, so ten files missing one tool say so once."""
+    return '; '.join(dict.fromkeys(p[key] for p in parts))
 
 
 def _with(parts, value):

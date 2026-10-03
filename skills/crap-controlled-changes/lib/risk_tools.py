@@ -2,6 +2,7 @@
 
 import shutil
 import subprocess
+import tempfile
 
 
 def which(tool):
@@ -30,6 +31,17 @@ def cat_file(repo, rev, path):
     """The bytes of `path` at `rev`, or None when it is not there."""
     done = git(repo, 'cat-file', '-p', f'{rev}:{path}')
     return done.stdout if done.returncode == 0 else None
+
+
+def unpack(repo, rev, parent, paths=()):
+    """`rev` exported into a new directory under `parent`, which is returned.
+
+    The directory exists even when the export failed, so a path the revision
+    does not have simply is not in it.
+    """
+    dest = tempfile.mkdtemp(dir=parent)
+    export_tree(repo, rev, dest, paths)
+    return dest
 
 
 def export_tree(repo, rev, dest, paths=()):

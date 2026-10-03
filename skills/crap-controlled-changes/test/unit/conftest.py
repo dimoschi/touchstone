@@ -46,3 +46,30 @@ class Repo:
 @pytest.fixture
 def repo(tmp_path):
     return Repo(tmp_path)
+
+
+@pytest.fixture
+def install_tool(tmp_path_factory, monkeypatch):
+    """Put a fake executable ahead of everything else on PATH."""
+    bin_dir = tmp_path_factory.mktemp('fake-bin')
+    monkeypatch.setenv('PATH', f"{bin_dir}{os.pathsep}{os.environ['PATH']}")
+
+    def install(name, script):
+        tool = bin_dir / name
+        tool.write_text('#!/bin/sh\n' + script)
+        tool.chmod(0o755)
+        return tool
+
+    return install
+
+
+@pytest.fixture
+def hide_tool(monkeypatch):
+    """Make named tools look absent from PATH to the risk modules."""
+    import risk_tools
+    real = risk_tools.which
+
+    def hide(*names):
+        monkeypatch.setattr(risk_tools, 'which', lambda tool: None if tool in names else real(tool))
+
+    return hide

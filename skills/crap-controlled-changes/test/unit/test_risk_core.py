@@ -74,6 +74,12 @@ def test_language_of_marks_every_other_file_as_an_unsupported_extension():
     assert risk_core.language_of('Makefile') == 'other:Makefile'
 
 
+def test_language_name_is_the_extension_for_an_unsupported_language():
+    assert risk_core.language_name('other:.js') == '.js'
+    assert risk_core.language_name('other:Makefile') == 'Makefile'
+    assert risk_core.language_name('python') == 'python'
+
+
 def test_by_language_groups_source_paths_and_drops_files_with_no_language():
     assert risk_core.by_language(['a.go', 'README.md', 'b.go', 'c.py', 'd.js']) == {
         'go': ['a.go', 'b.go'], 'python': ['c.py'], 'other:.js': ['d.js']}
@@ -96,6 +102,14 @@ def test_combine_any_is_false_when_every_part_is_false():
     parts = [risk_core.measured(False, 'a clean'), risk_core.measured(False, 'b clean')]
     assert risk_core.combine_any(parts, 'none') == {
         'value': False, 'evidence': 'a clean; b clean'}
+
+
+def test_combining_says_each_distinct_reason_once():
+    parts = [risk_core.unmeasured('apidiff is not on PATH'),
+             risk_core.unmeasured('apidiff is not on PATH'),
+             risk_core.unmeasured('griffe is not on PATH')]
+    assert risk_core.combine_any(parts, 'none')['reason'] == (
+        'apidiff is not on PATH; griffe is not on PATH')
 
 
 def test_combine_any_of_no_parts_is_false_with_the_given_evidence():

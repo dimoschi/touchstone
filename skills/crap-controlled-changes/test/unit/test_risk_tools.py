@@ -69,6 +69,18 @@ def test_export_tree_limited_to_the_given_paths(repo, tmp_path):
     assert not (dest / 'b').exists()
 
 
+def test_unpack_makes_a_fresh_directory_under_the_parent_for_each_call(repo, tmp_path):
+    rev = repo.commit({'a/x.go': '1\n'})
+    parent = tmp_path / 'work'
+    parent.mkdir()
+    first = risk_tools.unpack(str(repo.path), rev, str(parent))
+    second = risk_tools.unpack(str(repo.path), rev, str(parent), ('a',))
+    assert first != second
+    assert os.path.dirname(first) == str(parent) == os.path.dirname(second)
+    assert os.path.isfile(os.path.join(first, 'a', 'x.go'))
+    assert os.path.isfile(os.path.join(second, 'a', 'x.go'))
+
+
 def test_export_tree_reports_an_unknown_revision_as_failure(repo, tmp_path):
     repo.commit({'a.txt': 'x\n'})
     assert risk_tools.export_tree(str(repo.path), 'nosuchrev', str(tmp_path)) is False
