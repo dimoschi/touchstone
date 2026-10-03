@@ -119,13 +119,13 @@ async function scenarioSBE() {
 async function scenarioSBF() {
   console.log('\n== scenario SBF: a spent-out budget refuses the next dispatch and reports it, with the open stage in stage_spend')
   const { result, captured } = await run({
-    args: { runBudget: 250_000 },
+    args: { runBudget: 350_000 },
     budgetPerAgentCall: 100_000,
   })
   check('halted at Implement, the phase the refused dispatch belongs to', result.halted_at, 'Implement')
   check('the implementer was never dispatched', callCount(captured, 'implementer'), 0)
   check('the note names the refused label', (result.note ?? '').includes("'implementer'"), true)
-  check('the note names the spend at the halt', (result.note ?? '').includes('300k'), true)
+  check('the note names the spend at the halt', (result.note ?? '').includes('400k'), true)
   check('the note explains this is a budget halt, not a code problem',
     (result.note ?? '').includes('Run budget exhausted'), true)
   check('the open implement stage reached stage_spend', typeof result.stage_spend?.implement, 'number')
@@ -148,7 +148,7 @@ async function scenarioSBF() {
 async function scenarioSBG() {
   console.log('\n== scenario SBG: a budget refusal inside a parallel review lens halts, rather than reading as a clean review')
   const { result, captured } = await run({
-    args: { runBudget: 550 },
+    args: { runBudget: 750 },
     budgetPerAgentCall: 100,
     initialReview: { correctness: [], advocate: [] },
   })
@@ -395,7 +395,7 @@ async function scenarioSBW() {
 async function scenarioSBX() {
   console.log('\n== scenario SBX: a budget halt mid-post-Implement-checks keeps the pre-Implement checks baseline in stage_spend')
   const { result, captured } = await run({
-    args: { runBudget: 450_000 },
+    args: { runBudget: 550_000 },
     budgetPerAgentCall: 100_000,
     discovery: { file: '/repo/AGENTS.md',
       sections: [{ heading: '## Checks', fence: 'bash scripts/run-tests.sh' }], detail: 'stub' },

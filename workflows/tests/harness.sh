@@ -80,6 +80,13 @@ function idsIn(prompt) {
 // baseArgs()'s branch/branch:existing defaults both put the worktree here.
 const STUB_WT_PATH = '/tmp/stub-worktree'
 
+// The text strictly between the plan:write prompt's PLAN FILE BEGIN and END
+// lines, which is what the script asked to have written.
+function planFileIn(prompt) {
+  const m = /^PLAN FILE BEGIN ([0-9a-f]{8})\n([\s\S]*)^PLAN FILE END \1$/m.exec(prompt)
+  return m ? { id: m[1], content: m[2] } : null
+}
+
 // The exact Bash invocation deliver-pipeline.js's own invocationFor builds
 // for a check, id included since the trailing echo names it. A checkRuns
 // stub uses this so a scenario testing the happy path does not have to
@@ -228,10 +235,36 @@ function makeAgent(scenario, captured) {
       return scenario.plannerResult ?? { plan: 'stub plan', acceptance_criteria: [],
         risky_areas: [], task_demands_implementation: false }
     }
+    if (label === 'planner:tighten') {
+      if (Object.prototype.hasOwnProperty.call(scenario, 'tightenResult')) return scenario.tightenResult
+      return { plan: 'tightened stub plan', acceptance_criteria: [],
+        risky_areas: [], task_demands_implementation: false }
+    }
+    // Default answer is a correct write of whatever the prompt asked for;
+    // scenario.planWrite overrides fields of it, or is null for no answer.
+    if (label === 'plan:write') {
+      if (scenario.planWrite === null) return null
+      const written = planFileIn(prompt)
+      return { bytes: written ? Buffer.byteLength(written.content, 'utf8') : 0,
+        last_line: written ? written.content.replace(/\n$/, '').split('\n').pop() : '',
+        ignored_exit: 0, ...(scenario.planWrite ?? {}) }
+    }
+    // implPlanId: undefined omits plan_id from the response altogether.
+    const planIdOf = () => planFileIn(captured.calls.find(c => c.label === 'plan:write')?.prompt ?? '')?.id ?? ''
     if (label === 'implementer') {
       return { summary: 'stub implementation', files_changed: scenario.implFilesChanged ?? ['a.js', 'b.js'],
-        commit_range: COMMIT_RANGE, scored: scenario.implScored ?? true,
+        commit_range: scenario.implRange ?? COMMIT_RANGE, scored: scenario.implScored ?? true,
+        plan_id: Object.prototype.hasOwnProperty.call(scenario, 'implPlanId') ? scenario.implPlanId : planIdOf(),
         ...(scenario.implGateNote ? { gate_note: scenario.implGateNote } : {}) }
+    }
+    // Clean unless scenario.planLeak(at, range) returns the probe's raw
+    // output as a string, or null for no answer.
+    if (label.startsWith('plan:leak:')) {
+      const at = label.slice('plan:leak:'.length)
+      const range = (/echo TOUCHSTONE_PLAN_LEAK ([^\s;]+);/.exec(prompt) ?? [])[1] ?? ''
+      const custom = scenario.planLeak ? scenario.planLeak(at, range, prompt) : undefined
+      if (custom === null) return null
+      return { output: custom ?? `TOUCHSTONE_PLAN_LEAK ${range}\nTOUCHSTONE_PLAN_LEAK_END` }
     }
     // draft-pr and size (gh-118): the diffstat probe and its one retry. Both
     // read the range straight out of their own prompt (diffstatCommandFor
