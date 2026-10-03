@@ -2,8 +2,8 @@
 
 Only Go has a reachability tool here: `deadcode` builds a call graph from every
 main package and lists what it cannot reach. A changed function is one whose
-body or signature holds a line the range added, in a file other than a `_test.go`
-file: deadcode loads no test file, so a function in one is never listed and
+body or signature holds a line the range added, or lost lines from inside it, in
+a file other than a `_test.go` file: deadcode loads no test file, so a function in one is never listed and
 would read as reachable. The signal is true when any changed function is
 reachable and false when all are not; a module with no main
 package (a library's entry points are its exported API, which no call graph
@@ -53,11 +53,22 @@ def file_lines(head_root, path):
         return []
 
 
-def changed_funcs(head_root, added, paths):
+def gap_func(lines, n):
+    """The function lines were deleted from after line `n`, when lines `n` and
+    `n + 1` both sit in it; a deleted whole function has neither neighbour inside."""
+    if n >= len(lines):
+        return None
+    decl = enclosing_func(lines, n)
+    return decl if decl == enclosing_func(lines, n + 1) else None
+
+
+def changed_funcs(head_root, edits, paths):
+    added, gaps = edits
     found = set()
     for path in paths:
         lines = file_lines(head_root, path)
-        decls = (enclosing_func(lines, n) for n in sorted(added.get(path, ())))
+        decls = [enclosing_func(lines, n) for n in sorted(added.get(path, ()))]
+        decls += [gap_func(lines, n) for n in sorted(gaps.get(path, ()))]
         found.update((path, decl) for decl in decls if decl)
     return found
 
@@ -90,28 +101,29 @@ def module_part(head_root, moddir, funcs):
                            f'unreachable from a main package')
 
 
-def deadcode_part(head_root, sources, added):
+def deadcode_part(head_root, sources, edits):
     gap = missing('deadcode')
     if gap:
         return unmeasured(gap)
-    funcs = changed_funcs(head_root, added, sources)
+    funcs = changed_funcs(head_root, edits, sources)
     if not funcs:
-        return unmeasured('no added line sits inside a Go function')
+        return unmeasured('no changed line sits inside a Go function')
     modules = sorted(by_module(head_root, funcs).items())
     return combine_any([module_part(head_root, m, fs) for m, fs in modules],
                        'no Go function changed')
 
 
-def go_part(head_root, paths, added):
+def go_part(head_root, paths, edits):
     sources = [p for p in paths if not p.endswith('_test.go')]
     if not sources:
         return measured(False, 'every changed Go file is a _test.go file: no main package '
                                'calls test code, and deadcode does not load it')
-    return deadcode_part(head_root, sources, added)
+    return deadcode_part(head_root, sources, edits)
 
 
 HANDLERS = {'go': go_part}
 
 
-def reach_signal(repo, head, groups, added):
-    return scan_head(HANDLERS, 'reachability tool', repo, head, groups, added)
+def reach_signal(repo, head, groups, added, gaps):
+    """`gaps` is risk_core.gap_lines over the range."""
+    return scan_head(HANDLERS, 'reachability tool', repo, head, groups, (added, gaps))

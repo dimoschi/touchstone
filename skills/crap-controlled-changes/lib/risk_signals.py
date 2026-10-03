@@ -32,7 +32,7 @@ from functools import partial
 from posixpath import basename, dirname
 
 from risk_api import api_signal
-from risk_core import added_lines, by_language, measured, unmeasured
+from risk_core import added_lines, by_language, gap_lines, measured, unmeasured
 from risk_history import crap_signals, prior_defect_signal
 from risk_noop import name_status, semantic_noop_signal
 from risk_reach import reach_signal
@@ -178,7 +178,8 @@ def collect(repo, base, head):
     range_ = f'{base}..{head}'
     rows = numstat_rows(repo, range_)
     paths = [r['path'] for r in rows]
-    groups, added = by_language(paths), added_lines(diff_of(repo, range_))
+    diff = diff_of(repo, range_)
+    groups, added = by_language(paths), added_lines(diff)
     signals = git_signals(repo, base, range_, rows)
     signals['semantic_noop'] = guarded(
         'semantic_noop', partial(noop_probe, repo, base, head, range_))
@@ -187,7 +188,7 @@ def collect(repo, base, head):
         'security_pattern', partial(security_signal, repo, head, groups, added))
     signals['crap_max'], signals['coverage_min'] = crap_pair(repo, range_)
     signals['entry_reachable'] = guarded(
-        'entry_reachable', partial(reach_signal, repo, head, groups, added))
+        'entry_reachable', partial(reach_signal, repo, head, groups, added, gap_lines(diff)))
     signals['prior_defect_files'] = guarded(
         'prior_defect_files', partial(prior_defect_signal, repo, paths))
     return signals

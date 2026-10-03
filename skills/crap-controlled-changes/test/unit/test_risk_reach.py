@@ -84,8 +84,10 @@ def added(repo, base, head):
 
 
 def signal(repo, base, head, paths):
+    diff = git(str(repo.path), 'diff', '-U0', '--no-color', '--no-renames', f'{base}..{head}')
     return risk_reach.reach_signal(
-        str(repo.path), head, risk_core.by_language(paths), added(repo, base, head))
+        str(repo.path), head, risk_core.by_language(paths), added(repo, base, head),
+        risk_core.gap_lines(diff.stdout.decode()))
 
 
 def edit_foo(repo):
@@ -112,6 +114,30 @@ def test_a_changed_function_deadcode_reports_unreachable_is_false(
     sig = signal(repo, base, head, ['m.go'])
     assert sig == {'value': False, 'evidence': 'deadcode: every changed function in module . '
                                                'is unreachable from a main package'}
+
+
+GUARDED_GO = ('package m\n\nfunc Foo(n int) int {\n\tif n < 0 {\n\t\treturn 0\n\t}\n'
+              '\treturn n\n}\n\nfunc Bar() int {\n\treturn 2\n}\n')
+
+
+def test_a_reachable_function_that_only_lost_lines_raises_the_signal(
+        repo, install_tool, monkeypatch, tmp_path_factory):
+    fake_deadcode(install_tool, monkeypatch, tmp_path_factory,
+                  report='m.go:7:6: unreachable func: Bar\n')
+    base = repo.commit({'go.mod': GO_MOD, 'm.go': GUARDED_GO})
+    unguarded = GUARDED_GO.replace('\tif n < 0 {\n\t\treturn 0\n\t}\n', '')
+    head = repo.commit({'m.go': unguarded.replace('return 2', 'return 3')})
+    sig = signal(repo, base, head, ['m.go'])
+    assert sig == {'value': True, 'evidence': 'reachable from a main package: m.go:3'}
+
+
+def test_deleting_a_whole_function_does_not_mark_its_neighbours_changed(
+        repo, install_tool, monkeypatch, tmp_path_factory):
+    fake_deadcode(install_tool, monkeypatch, tmp_path_factory)
+    base = repo.commit({'go.mod': GO_MOD, 'm.go': M_GO})
+    head = repo.commit({'m.go': M_GO.replace('\nfunc Bar() int {\n\treturn 2\n}\n', '')})
+    sig = signal(repo, base, head, ['m.go'])
+    assert sig == {'value': 'unmeasured', 'reason': 'no changed line sits inside a Go function'}
 
 
 M_TEST_GO = 'package m\n\nimport "testing"\n\nfunc TestFoo(t *testing.T) {\n\t_ = Foo()\n}\n'
@@ -197,7 +223,7 @@ def test_added_lines_outside_every_function_leave_nothing_to_judge(
     base = repo.commit({'go.mod': GO_MOD, 'm.go': M_GO})
     head = repo.commit({'m.go': M_GO.replace('package m\n', 'package m\n\nvar x = 1\n')})
     sig = signal(repo, base, head, ['m.go'])
-    assert sig == {'value': 'unmeasured', 'reason': 'no added line sits inside a Go function'}
+    assert sig == {'value': 'unmeasured', 'reason': 'no changed line sits inside a Go function'}
 
 
 def test_missing_deadcode_is_unmeasured_and_named(repo, hide_tool):

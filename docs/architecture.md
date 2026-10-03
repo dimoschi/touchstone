@@ -117,8 +117,8 @@ or deleted file never is), else unmeasured if any is, else true.
 | `semantic_noop` | `difft --check-only --exit-code --ignore-comments` on every changed file, all modified |
 | `api_broken` | `apidiff -m -incompatible` per changed Go module (exit 0 either way, so non-empty stdout is the finding), `griffe check` per changed Python package, Roave BackwardCompatibilityCheck for PHP; a package new in the range has no earlier API to break |
 | `security_pattern` | gosec, bandit (without B101, `assert_used`, which flags every test), opengrep with `rules/php-security.yml`, run over the head revision; a finding counts only when its line span overlaps a line the range added |
-| `crap_max`, `coverage_min` | the rows `crap-check.sh` recorded for each non-merge commit of the range, keeping the functions that commit changed (a function holding a line it added, or that held a line it removed, found by `risk_changed.py`); unmeasured when any commit has no recorded entry or none changed a scored function |
-| `entry_reachable` | `deadcode` per changed Go module: true when a function holding an added line is reachable from a main package; Go only. A `_test.go` file is left out, since deadcode loads no test file; a range that changes only tests is false |
+| `crap_max`, `coverage_min` | the rows `crap-check.sh` recorded for each non-merge commit of the range, keeping the functions that commit changed (a function holding a line it added, or that held a line it removed, found by `risk_changed.py`; a method of a type with two or more type parameters is left out, because go-crap names every such type `<unknown>`); unmeasured when any commit has no recorded entry or none changed a scored function |
+| `entry_reachable` | `deadcode` per changed Go module: true when a function holding an added line, or one lines were deleted from inside, is reachable from a main package; Go only. A `_test.go` file is left out, since deadcode loads no test file; a range that changes only tests is false |
 | `prior_defect_files` | `.claude/touchstone-runs` records: true when a changed path is the file of an unresolved finding whose `reproducer_run.outcome` was `reproduced` (a finding's absolute path is read relative to the checkout, or to its ticket worktree under `.claude/worktrees/`); unmeasured with no records |
 
 `lib/risk_signals.py` assembles the block; `risk_core.py` holds the entry shape and the
@@ -568,9 +568,9 @@ has no ceiling and never halts a run: nothing downstream depends on it yet, and 
 would change outcomes.
 
 `risk_signals` is carried by every halt from Draft PR on, the run-budget halt included, and by
-the final result. It is `null` on halts before that phase, and from the moment the phase
-opens it holds a `{range, unmeasured}` record, so a budget refusal of the probe itself still
-says why there are no signals. `scripts/run-report.py` breaks each pipeline version's runs
+the final result. It is `null` on halts before the implementer returns a range, and from then
+until the probe returns it holds a `{range, unmeasured}` record, so a halt at Implement and a
+budget refusal of the probe itself still say why there are no signals. `scripts/run-report.py` breaks each pipeline version's runs
 down by every signal's value (true, false or unmeasured; at or below and above the median for
 numbers), with runs, median fix rounds, halts and blocking findings per group, and counts a
 run with no `risk_signals` as missing. `workflows/tests/test-risk-signals.sh` pins that the

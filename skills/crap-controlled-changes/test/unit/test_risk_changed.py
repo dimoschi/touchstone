@@ -111,8 +111,9 @@ def test_go_ids_keep_the_type_parameter_of_a_generic_receiver_as_written():
     assert go_ids(25) == {'calc.Stack[U].Push'}
 
 
-def test_go_ids_name_a_receiver_with_several_type_parameters_the_way_go_crap_does():
-    assert go_ids(29) == {'calc.<unknown>.Get'}
+def test_go_ids_leave_out_a_receiver_with_several_type_parameters():
+    # go-crap names every such receiver `<unknown>`, so its row may be another method's.
+    assert go_ids(29) == set()
 
 
 def test_go_ids_count_the_signature_line_and_leave_out_a_line_outside_every_function():

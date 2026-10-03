@@ -62,19 +62,21 @@ def python_ids(path, text, added):
 
 
 def go_receiver(recv, targs):
-    """The receiver type as the gate prints it. go-crap v0.5.0 keeps the one type
-    parameter of a generic type as written, and names a type with two or more
-    `<unknown>`."""
+    """The receiver type as the gate prints it, or None. go-crap v0.5.0 keeps the
+    one type parameter of a generic type as written, and names every type with two
+    or more `<unknown>`, an id several methods share."""
     if not targs:
         return recv
     names = targs[1:-1].split(',')
-    return f'{recv}[{names[0].strip()}]' if len(names) == 1 else '<unknown>'
+    return f'{recv}[{names[0].strip()}]' if len(names) == 1 else None
 
 
 def go_id(package, match):
     recv = match.group('recv')
-    owner = f"{go_receiver(recv, match.group('targs'))}." if recv else ''
-    return f"{package}.{owner}{match.group('name')}"
+    if not recv:
+        return f"{package}.{match.group('name')}"
+    owner = go_receiver(recv, match.group('targs'))
+    return f"{package}.{owner}.{match.group('name')}" if owner else None
 
 
 def go_ids(path, text, added):
@@ -82,7 +84,7 @@ def go_ids(path, text, added):
     lines = text.splitlines()
     decls = {enclosing_func(lines, n) for n in added} - {None}
     matches = (GO_FUNC.match(lines[decl - 1]) for decl in decls)
-    return {go_id(package.group(1), m) for m in matches if m and package}
+    return {go_id(package.group(1), m) for m in matches if m and package} - {None}
 
 
 def php_end(lines, start, indent):

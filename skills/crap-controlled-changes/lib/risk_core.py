@@ -163,6 +163,16 @@ def added_lines(diff):
     return hunk_lines(diff, new_span)
 
 
+def gap_span(header):
+    m = HUNK.match(header)
+    return {int(m.group(3))} if m and m.group(4) == '0' and m.group(3) != '0' else set()
+
+
+def gap_lines(diff):
+    """path -> the new-side line after which a `git diff -U0` hunk only deletes."""
+    return hunk_lines(diff, gap_span)
+
+
 def removed_lines(diff):
     """path -> the old-side line numbers a `git diff -U0` deletes or replaces.
 

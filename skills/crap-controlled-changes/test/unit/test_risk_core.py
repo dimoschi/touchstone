@@ -60,6 +60,12 @@ def test_removed_lines_of_empty_diff_is_empty():
     assert risk_core.removed_lines('') == {}
 
 
+def test_gap_lines_are_the_new_side_line_each_pure_deletion_follows():
+    assert risk_core.gap_lines(DIFF) == {'a.py': {23}, 'new.go': set()}
+    assert risk_core.gap_lines(header_diff('+++ b/x').replace('@@ -1 +1 @@', '@@ -1 +0,0 @@')) == {
+        'x': set()}
+
+
 def header_diff(header):
     return f'diff --git a/x b/x\n--- a/x\n{header}\n@@ -1 +1 @@\n-a\n+b\n'
 
