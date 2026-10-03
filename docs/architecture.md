@@ -239,7 +239,11 @@ dedicated `run-record` dispatch on every exit path. The script has no filesystem
 access, so all it can do is name where the file belongs (`record_file`, sanitizing the
 ticket arg to a safe basename) and hand back the full payload; the invoking session
 (`commands/deliver.md`) writes it, the same session that already appends `run_id`,
-`models` and `recorded_on` afterwards.
+`models` and `recorded_on` afterwards. That session also adds `outcome` and
+`pr_number`, read from `gh pr view` rather than asked of an agent, and
+`scripts/run-report.py` (logic in `scripts/lib/run_report.py`) summarises every record
+per pipeline version, refreshing any outcome still `open`. The record is the single
+source: no phase reports on itself any more.
 
 Two invariants the script exists to hold:
 

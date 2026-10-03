@@ -29,7 +29,7 @@ export const meta = {
 // against the manifest in scripts/check-version-bump.sh, so drift is a
 // gate's job rather than something this script verifies about itself.
 const PLUGIN_NAME = 'touchstone'
-const PIPELINE_VERSION = '0.27.0'
+const PIPELINE_VERSION = '0.28.0'
 
 // Boundaries. Wall-clock deadlines are not expressible here (no Date.now, by
 // design); the bounds are rounds, counts, and token budget instead.
@@ -74,11 +74,6 @@ if (!ticketMarker) {
 // session writes it, the same session that already appends run_id and models
 // afterwards.
 const runRecordFile = `.claude/touchstone-runs/${String(ticket).replace(/[^A-Za-z0-9_-]/g, '-')}.json`
-// Phase recording goes to agent-eval, a separate optional tool. Default on so a
-// machine that has it keeps its ground truth without opting in every run; the
-// prompt tells each phase to skip a missing command rather than halt, so this
-// flag exists to silence the instruction entirely, not to make it safe.
-const recordPhases = args?.record !== false
 
 // Stacking on a PR still in flight. The review range is the merge base with the
 // base and the PR opens against it, so defaulting here puts the parent's commits
@@ -832,32 +827,6 @@ const SETUP = {
 // named: without the jira-/gh- marker the session is reported untracked
 // forever. Creating the worktree first means inline work happens in the right
 // place too. The cost is one unused worktree when triage rejects the premise.
-// Recording is the sanctioned way to finish, not an extra step. A phase that
-// halts never reaches the moment a human would report it, so halted runs used
-// to leave no trace at all and the evaluation data described only work that
-// completed -- it could not show this workflow failing, because failure never
-// arrived. The script cannot record on a phase's behalf: it has no shell, and a
-// phase that dies mid-flight returns nothing for it to write.
-// Set once the worktree exists. RECORD is called while building the worktree
-// agents' own prompts, before `wt` is initialised, so reading wt there is a
-// temporal dead zone crash on every run.
-let recordedBranch = ''
-
-const RECORD = (label) => !recordPhases ? '' :
-  `\n\nBefore you return, record this phase. It is the only reason a stopped ` +
-  `run leaves any evidence:\n` +
-  `  agent-eval record-phase --session "$CLAUDE_CODE_SESSION_ID" ` +
-  `--phase '${label}' --status <completed|halted|failed> [--reason '<why>'] `+
-  `--branch '${recordedBranch}'\n` +
-  `Use completed when you did the job; halted when you deliberately stopped ` +
-  `because the work should not continue; failed when you stopped without ` +
-  `deciding anything, such as running out of budget or hitting an error. ` +
-  `halted and failed look identical from outside and mean opposite things, so ` +
-  `do not use one for the other.\n` +
-  `agent-eval is an optional companion tool. If the command is not installed ` +
-  `(command not found), skip this step silently and carry on: it records ` +
-  `metrics and has no bearing on the work. Report any other error verbatim, ` +
-  `and never set CLAUDE_CONFIG_DIR to make it work.`
 
 // One dispatch, before anything reads the envelope, answering three questions
 // that share nothing but their timing: none needs a worktree, and each used
@@ -912,8 +881,7 @@ const setupResult = await dispatch(
   `there or you could not determine either way, markers.mutation_gated=` +
   `false only if you confirmed it is absent -- an unconfirmed mutation ` +
   `marker should still run the gate, which only costs a run rather than ` +
-  `dropping a real one. Report the paths you checked in markers.detail.` +
-  RECORD('setup'),
+  `dropping a real one. Report the paths you checked in markers.detail.`,
   { label: 'setup', schema: SETUP, model: 'haiku', effort: 'low' })
 sSetup.close()
 
@@ -1145,8 +1113,7 @@ const wt = args?.existingBranch
       `(step 4), the worktree-less branch (step 5), or the fallback (step 6), ` +
       `whether that path is the main checkout or a linked worktree, and ` +
       `whether the branch name carries a jira- or gh- marker.\n` +
-      checksDiscoveryStep(9, 'that path') +
-      RECORD('branch:existing'),
+      checksDiscoveryStep(9, 'that path'),
       { label: 'branch:existing', schema: EXISTING_BRANCH, model: 'haiku', effort: 'low' })
   // A worktree is a separate checkout, so the main tree's state is irrelevant
   // to it; cutting from origin/<base> is what removes the need to touch the
@@ -1229,8 +1196,7 @@ const wt = args?.existingBranch
   checksDiscoveryStep(11, 'the worktree path from step 5 (or the reused path from step 6)') + `\n` +
   `Return the branch you created or reused, the base you cut it from (or ` +
   (baseOverride ? `${baseOverride}` : `the repo's base branch`) +
-  ` if the branch already existed), and the absolute worktree path.` +
-  RECORD('branch'),
+  ` if the branch already existed), and the absolute worktree path.`,
   { label: 'branch', schema: BRANCH, model: 'haiku', effort: 'low' })
 sBranch.close()
 
@@ -1308,7 +1274,6 @@ if (!wt?.created) {
 // Bare unconditionally: neither gh pr create --base nor the merge-base rule
 // below can take an origin/-qualified name.
 wt.base = (baseOverride || wt.base).replace(/^origin\//, '')
-recordedBranch = wt.branch
 log(args?.existingBranch
   ? `worktree ${wt.path} reused for branch ${wt.branch} (base ${wt.base})`
   : `worktree ${wt.path} created for branch ${wt.branch} (base ${wt.base})`)
@@ -1442,7 +1407,7 @@ const treeAgent = (prompt, { omitBase = false, ...opts }) =>
     `GIT_AUTHOR_NAME=test GIT_AUTHOR_EMAIL=t@t GIT_COMMITTER_NAME=test ` +
     `GIT_COMMITTER_EMAIL=t@t git -C <scratch path> -c commit.gpgsign=false ` +
     `-c gpg.format=openpgp commit -q -m scratch.\n\n` +
-    envelope(!omitBase) + `\n` + prompt + RECORD(opts.label),
+    envelope(!omitBase) + `\n` + prompt,
     opts)
 
 const headOf = (range) => range.includes('..') ? range.split('..')[1].trim() : range.trim()

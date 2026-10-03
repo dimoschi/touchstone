@@ -29,7 +29,7 @@ export const meta = {
 // against the manifest in scripts/check-version-bump.sh, so drift is a
 // gate's job rather than something this script verifies about itself.
 const PLUGIN_NAME = 'touchstone'
-const PIPELINE_VERSION = '0.27.0'
+const PIPELINE_VERSION = '0.28.0'
 
 // Boundaries. Wall-clock deadlines are not expressible here (no Date.now, by
 // design); the bounds are rounds, counts, and token budget instead.
@@ -74,11 +74,6 @@ if (!ticketMarker) {
 // session writes it, the same session that already appends run_id and models
 // afterwards.
 const runRecordFile = `.claude/touchstone-runs/${String(ticket).replace(/[^A-Za-z0-9_-]/g, '-')}.json`
-// Phase recording goes to agent-eval, a separate optional tool. Default on so a
-// machine that has it keeps its ground truth without opting in every run; the
-// prompt tells each phase to skip a missing command rather than halt, so this
-// flag exists to silence the instruction entirely, not to make it safe.
-const recordPhases = args?.record !== false
 
 // Stacking on a PR still in flight. The review range is the merge base with the
 // base and the PR opens against it, so defaulting here puts the parent's commits

@@ -59,7 +59,6 @@ function baseArgs(overrides) {
   return {
     ticket: '21',
     task: 'test task for the fix-loop verdict join',
-    record: false,
     openPr: false,
     maxReviewRounds: 3,
     maxGateAttempts: 1,

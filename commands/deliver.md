@@ -172,12 +172,13 @@ the work lands).
 
 Write it yourself: `mkdir -p` the parent directory, then write the returned payload as
 JSON to `<main checkout>/<record_file>`, with `run_id` (the `wf_` id the Workflow tool
-returned), `models`, and `recorded_on` (today's date) added. The run id reaches you only
+returned), `models`, and `recorded_on` (today's date) added, plus `outcome` and
+`pr_number` (see below). The run id reaches you only
 after the run has started, so nothing inside the workflow can be told it, which is why
 this has to happen out here rather than inside the run:
 
 ```
-{ ...the returned payload..., "run_id": "<the wf_ id the Workflow tool returned>", "models": { "<alias>": ["<model id>", ...] }, "recorded_on": "<today>" }
+{ ...the returned payload..., "run_id": "<the wf_ id the Workflow tool returned>", "models": { "<alias>": ["<model id>", ...] }, "recorded_on": "<today>", "outcome": "<see below>", "pr_number": <n or null> }
 ```
 
 Build `models` from the run's own transcript directory, not by asking an agent which
@@ -202,35 +203,21 @@ session's own directory, invisible to any later session and to a second
 Do not commit it. `.claude/` is ignored, and the record is local state, not
 something the repo's team asked for.
 
-### Record what happened, before you report it
+### Record the outcome, and read the records together
 
-**Only if `agent-eval` is installed.** It is
-an optional companion that stores session outcomes so quality metrics have ground
-truth. If `agent-eval` is not on PATH, skip this whole section: report the run and
-stop. Nothing here affects the work, and the workflow does not depend on it.
-
-If the run returned a `halted_at`, record the halt:
+Add the delivered PR's outcome to the record as you write it, from GitHub rather than
+from any agent's account of it:
 
 ```
-agent-eval record-phase --session "$CLAUDE_CODE_SESSION_ID" --phase '<halted_at>' \
-  --status halted --reason '<the halt note, verbatim>' \
-  --workflow-run <the wf_ id the Workflow tool returned> --branch '<branch>'
+gh pr view '<branch>' --json number,state,mergedAt
 ```
 
-If it errored, was killed, or returned nothing usable, record that instead with
-`--status failed` and whatever phase it reached. Then, whenever the outcome is known:
+Set `pr_number` to its `number` and `outcome` to `merged` when `mergedAt` is set,
+otherwise `closed` or `open` from `state`. When gh finds no PR for the branch, set
+`outcome` to `none` and `pr_number` to `null`. A halted run with a draft PR is `open`.
 
-```
-agent-eval record --session "$CLAUDE_CODE_SESSION_ID" --outcome merged --pr <n> \
-  --workflow-run <the wf_ id>
-```
-
-Only you can do either. The run id reaches you after the run has started, so no agent
-inside the workflow can be told it, and a session that ran /touchstone:deliver twice otherwise
-records two outcomes for two PRs with nothing saying which run produced which.
-
-The halt record matters more than the outcome one. Each phase reports on itself, and a
-phase that raises a fundamental objection has completed its own job perfectly well, so
-it records `completed` and is right to. Whether the *run* stops is your decision to
-report, not the phase's: without this, two runs that halted and produced no code showed
-four phases, all `completed`, and querying for halted runs returned nothing.
+`scripts/run-report.py [<main checkout>]`, in this plugin, reads every record under
+`.claude/touchstone-runs/`, re-reads the outcome of any still `open` from gh and
+rewrites it, and prints per pipeline version: runs, outcomes, halts by stage, median
+output tokens per changed line, median fix rounds, and blocking findings against
+notes. A record missing a field is counted as missing, never estimated.

@@ -140,4 +140,13 @@ check "NATIVE_TOOLS(wt.path) reaches implement, checks:fix, fix and reviewOf" \
 check "GENERATED_FILES reaches implement, checks:fix and fix, not reviewOf" \
   "$(grep -Fc '${GENERATED_FILES}' "$SCRIPT" || true)" 3
 
+echo ""
+echo "== static: gh-129 -- the run record is the one source; no phase records on itself"
+check "no prompt tells an agent to call agent-eval" \
+  "$(grep -c 'agent-eval' "$SCRIPT" || true)" 0
+check "commands/deliver.md no longer calls agent-eval" \
+  "$(grep -c 'agent-eval' "$REPO_ROOT/commands/deliver.md" || true)" 0
+check "commands/deliver.md takes the outcome from gh" \
+  "$(grep -Fc "gh pr view '<branch>' --json number,state,mergedAt" "$REPO_ROOT/commands/deliver.md" || true)" 1
+
 finish

@@ -124,7 +124,6 @@ function baseArgs(overrides) {
   return {
     ticket: '101',
     task: 'test task for pipeline_version transparency',
-    record: false,
     maxReviewRounds: 3,
     maxGateAttempts: 1,
     reviewers: 0,
