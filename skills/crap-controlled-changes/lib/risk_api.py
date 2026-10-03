@@ -71,7 +71,7 @@ def go_part(repo, base, head, paths, tmp):
 
 def tree_files(repo, rev):
     done = git(repo, 'ls-tree', '-r', '--name-only', '-z', rev)
-    return set(done.stdout.decode('utf-8', 'replace').split('\0')) - {''}
+    return set(done.stdout.decode(errors='replace').split('\0')) - {''}
 
 
 def package_target(path, files):

@@ -247,3 +247,94 @@ def test_a_diff_with_no_source_file_is_false_with_that_evidence(repo):
     head = repo.commit({'README.md': 'b\n'})
     assert signal(repo, base, head, ['README.md']) == {
         'value': False, 'evidence': 'no source files changed'}
+
+
+def test_enclosing_func_reaches_a_declaration_on_the_first_line():
+    assert risk_reach.enclosing_func(['func F() {', '\tx()', '}'], 2) == 1
+
+
+def test_enclosing_func_ignores_an_indented_closing_brace():
+    lines = ['func F() {', '\tif x {', '\t}', '\ty()', '}']
+    assert risk_reach.enclosing_func(lines, 4) == 1
+
+
+def test_enclosing_func_stops_at_a_closing_brace_with_trailing_space():
+    lines = ['func F() {', '}  ', 'var x = 1']
+    assert risk_reach.enclosing_func(lines, 3) is None
+
+
+def test_file_lines_reads_utf8_and_replaces_undecodable_bytes(tmp_path):
+    (tmp_path / 'a.go').write_bytes('x := "é"\n'.encode() + b'bad \xff byte\n')
+    assert risk_reach.file_lines(str(tmp_path), 'a.go') == ['x := "é"', 'bad � byte']
+
+
+def test_file_lines_opens_the_file_as_utf8_with_replacement(tmp_path, monkeypatch):
+    (tmp_path / 'a.go').write_text('x\n')
+    seen = {}
+    real = open
+
+    def spy(*args, **kwargs):
+        seen.update(kwargs)
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(risk_reach, 'open', spy, raising=False)
+    risk_reach.file_lines(str(tmp_path), 'a.go')
+    assert seen == {'encoding': 'utf-8', 'errors': 'replace'}
+
+
+def test_file_lines_of_a_missing_file_is_empty(tmp_path):
+    assert risk_reach.file_lines(str(tmp_path), 'gone.go') == []
+
+
+def test_gap_func_is_none_when_the_gap_follows_the_closing_brace():
+    assert risk_reach.gap_func(SOURCE, 8) is None
+
+
+def test_gap_func_names_the_function_when_both_neighbours_sit_in_it():
+    assert risk_reach.gap_func(SOURCE, 7) == 5
+    assert risk_reach.gap_func(SOURCE, 6) == 5
+
+
+def test_changed_funcs_reads_a_path_that_only_has_added_lines_or_only_gaps(tmp_path):
+    (tmp_path / 'a.go').write_text('\n'.join(SOURCE[4:8]) + '\n')
+    (tmp_path / 'b.go').write_text('\n'.join(SOURCE[4:8]) + '\n')
+    edits = ({'a.go': {2}}, {'b.go': {2}})
+    assert risk_reach.changed_funcs(str(tmp_path), edits, ['a.go', 'b.go']) == {
+        ('a.go', 1), ('b.go', 1)}
+
+
+def test_describe_live_joins_the_functions_with_a_comma_and_space():
+    assert risk_reach.describe_live([('a.go', 3), ('b.go', 9)]) == (
+        'reachable from a main package: a.go:3, b.go:9')
+
+
+def test_module_part_runs_the_deadcode_tool_by_its_lowercase_name(
+        repo, install_tool, monkeypatch, tmp_path_factory):
+    log = fake_deadcode(install_tool, monkeypatch, tmp_path_factory)
+    install_tool('deadcode', 'basename "$0" >> "$TOOL_LOG"\n')
+    repo.commit({'go.mod': GO_MOD, 'm.go': M_GO})
+    risk_reach.module_part(str(repo.path), '.', {('m.go', 3)})
+    assert log.read_text().split() == ['deadcode']
+
+
+def test_module_part_says_false_not_none_when_every_function_is_unreachable(
+        repo, install_tool, monkeypatch, tmp_path_factory):
+    fake_deadcode(install_tool, monkeypatch, tmp_path_factory,
+                  report='m.go:3:6: unreachable func: Foo\n')
+    repo.commit({'go.mod': GO_MOD, 'm.go': M_GO})
+    part = risk_reach.module_part(str(repo.path), '.', {('m.go', 3)})
+    assert part['value'] is False
+
+
+def test_deadcode_part_with_no_module_to_judge_says_no_go_function_changed(
+        repo, install_tool, monkeypatch):
+    install_tool('deadcode', 'exit 0\n')
+    monkeypatch.setattr(risk_reach, 'changed_funcs', lambda *a: {('m.go', 3)})
+    monkeypatch.setattr(risk_reach, 'by_module', lambda *a: {})
+    assert risk_reach.deadcode_part(str(repo.path), ['m.go'], ({}, {})) == {
+        'value': False, 'evidence': 'no Go function changed'}
+
+
+def test_go_part_over_test_files_only_is_false_not_none(tmp_path):
+    part = risk_reach.go_part(str(tmp_path), ['m_test.go'], ({}, {}))
+    assert part['value'] is False

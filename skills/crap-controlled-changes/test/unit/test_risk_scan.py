@@ -41,3 +41,17 @@ def test_languages_combine_so_one_finding_wins(repo):
     sig = risk_scan.scan_head(handlers, 'tool', str(repo.path), head,
                               {'go': ['a.go'], 'python': ['b.py']}, {})
     assert sig == {'value': True, 'evidence': 'python found'}
+
+
+def test_the_head_tree_is_unpacked_in_a_temporary_directory_removed_afterwards(repo):
+    import tempfile
+    head = repo.commit({'a.go': 'package a\n'})
+    seen = []
+
+    def handler(head_root, paths, added):
+        seen.append(head_root)
+        return risk_core.measured(False, 'ok')
+
+    risk_scan.scan_head({'go': handler}, 'tool', str(repo.path), head, {'go': ['a.go']}, {})
+    assert os.path.dirname(seen[0]) != tempfile.gettempdir()
+    assert not os.path.exists(seen[0])

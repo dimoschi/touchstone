@@ -11,7 +11,8 @@ import os
 import tempfile
 from posixpath import dirname
 
-from risk_core import combine_all, language_name, language_of, measured, unmeasured
+from risk_core import (NO_SOURCE_CHANGED, combine_all, language_name, language_of, measured,
+                       unmeasured)
 from risk_tools import cat_file, git, missing, run, tail
 
 DIFFT = ['difft', '--check-only', '--exit-code', '--ignore-comments']
@@ -20,7 +21,7 @@ DIFFT = ['difft', '--check-only', '--exit-code', '--ignore-comments']
 def name_status(repo, range_):
     """path -> git's status letter (A, M, D, ...) for every changed path."""
     done = git(repo, 'diff', '--name-status', '-z', '--no-renames', range_)
-    fields = done.stdout.decode('utf-8', 'replace').split('\0')
+    fields = done.stdout.decode(errors='replace').split('\0')
     return dict(zip(fields[1::2], fields[0::2]))
 
 
@@ -58,8 +59,8 @@ def file_part(repo, base, head, path, status, tmp, gap):
 
 def semantic_noop_signal(repo, base, head, statuses):
     if not any(language_of(p) for p in statuses):
-        return measured(False, 'no source files changed')
+        return measured(False, NO_SOURCE_CHANGED)
     gap = missing('difft')
     with tempfile.TemporaryDirectory() as tmp:
         parts = [file_part(repo, base, head, p, statuses[p], tmp, gap) for p in sorted(statuses)]
-    return combine_all(parts, 'no files changed')
+    return combine_all(parts, NO_SOURCE_CHANGED)

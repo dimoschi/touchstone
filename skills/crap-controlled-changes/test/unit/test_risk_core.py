@@ -179,3 +179,16 @@ def test_combine_all_is_true_when_every_part_is_true():
 def test_combine_all_of_no_parts_is_false_with_the_given_evidence():
     assert risk_core.combine_all([], 'no source files changed') == {
         'value': False, 'evidence': 'no source files changed'}
+
+
+def test_removed_lines_ignores_a_hunk_header_it_cannot_read():
+    assert risk_core.removed_lines('diff --git a/x b/x\n+++ b/x\n@@ nonsense @@\n') == {'x': set()}
+
+
+def test_added_lines_keeps_trailing_blanks_and_letters_of_a_tab_terminated_path():
+    assert risk_core.added_lines(header_diff('+++ b/a \t')) == {'a ': {1}}
+    assert risk_core.added_lines(header_diff('+++ b/a X\t')) == {'a X': {1}}
+
+
+def test_added_lines_replaces_bytes_of_a_quoted_path_that_are_not_utf8():
+    assert risk_core.added_lines(header_diff('+++ "b/\\377.py"')) == {'\ufffd.py': {1}}

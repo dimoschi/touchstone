@@ -10,6 +10,7 @@ import re
 from posixpath import basename
 
 LIMIT = 400
+NO_SOURCE_CHANGED = 'no source files changed'
 
 LANGUAGES = {'.go': 'go', '.py': 'python', '.php': 'php'}
 CONFIG = {'.json', '.yaml', '.yml', '.toml', '.lock', '.ini', '.cfg'}
@@ -132,7 +133,7 @@ def header_path(line):
     name = line[4:].rstrip('\t')
     if name.startswith('"'):
         name = name[1:-1].encode('ascii').decode('unicode_escape').encode('latin-1').decode(
-            'utf-8', 'replace')
+            errors='replace')
     return name[2:] if name.startswith('b/') else None
 
 

@@ -1,4 +1,5 @@
 import os
+import subprocess
 
 import risk_tools
 
@@ -89,3 +90,55 @@ def test_export_tree_reports_an_unknown_revision_as_failure(repo, tmp_path):
 def test_export_tree_reports_an_unusable_destination_as_failure(repo, tmp_path):
     rev = repo.commit({'a.txt': 'x\n'})
     assert risk_tools.export_tree(str(repo.path), rev, str(tmp_path / 'absent')) is False
+
+
+def test_tail_defaults_to_the_last_300_characters():
+    assert len(risk_tools.tail('x' * 500)) == 300
+
+
+class Recorder:
+    def __init__(self, monkeypatch, returncode=0, stdout=b''):
+        self.calls = []
+        self.result = subprocess.CompletedProcess([], returncode, stdout, b'')
+        monkeypatch.setattr(subprocess, 'run', self.fake)
+
+    def fake(self, cmd, **kwargs):
+        self.calls.append((cmd, kwargs))
+        return self.result
+
+
+def test_run_never_raises_on_a_failing_command(monkeypatch):
+    rec = Recorder(monkeypatch)
+    risk_tools.run(['tool'], cwd='/w')
+    assert rec.calls == [(['tool'], {'cwd': '/w', 'capture_output': True, 'text': True,
+                                     'check': False})]
+
+
+def test_git_runs_the_git_binary_on_the_repo_capturing_bytes(monkeypatch):
+    rec = Recorder(monkeypatch)
+    risk_tools.git('/r', 'status', '-s')
+    assert rec.calls == [(['git', '-C', '/r', 'status', '-s'],
+                          {'capture_output': True, 'check': False})]
+
+
+def test_export_tree_pipes_git_archive_into_tar(monkeypatch):
+    rec = Recorder(monkeypatch, stdout=b'TARBALL')
+    assert risk_tools.export_tree('/r', 'rev1', '/d') is True
+    assert rec.calls == [
+        (['git', '-C', '/r', 'archive', '--format=tar', 'rev1'],
+         {'capture_output': True, 'check': False}),
+        (['tar', '-x', '-C', '/d'],
+         {'input': b'TARBALL', 'capture_output': True, 'check': False})]
+
+
+def test_export_tree_names_the_paths_after_a_separator(monkeypatch):
+    rec = Recorder(monkeypatch)
+    risk_tools.export_tree('/r', 'rev1', '/d', ('a', 'b'))
+    assert rec.calls[0][0] == ['git', '-C', '/r', 'archive', '--format=tar', 'rev1', '--', 'a', 'b']
+
+
+def test_unpack_limits_the_export_to_the_given_paths(repo, tmp_path):
+    rev = repo.commit({'a/x.go': '1\n', 'b/y.go': '2\n'})
+    dest = risk_tools.unpack(str(repo.path), rev, str(tmp_path), ('a',))
+    assert os.path.isfile(os.path.join(dest, 'a', 'x.go'))
+    assert not os.path.exists(os.path.join(dest, 'b'))

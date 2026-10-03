@@ -125,14 +125,14 @@ FINDERS = {'go': go_ids, 'python': python_ids, 'php': php_ids}
 def file_ids(repo, rev, path, lines):
     finder = FINDERS.get(language_of(path))
     data = cat_file(repo, rev, path) if finder else None
-    return finder(path, data.decode('utf-8', 'replace'), lines) if data is not None else set()
+    return finder(path, data.decode(errors='replace'), lines) if data is not None else set()
 
 
 def changed_ids(repo, sha):
     """{row id} of the scored functions the commit `sha` changed."""
     done = git(repo, '-c', 'core.quotePath=true', 'show', '--format=', '-U0', '--no-color',
                '--no-renames', sha)
-    diff = done.stdout.decode('utf-8', 'replace')
+    diff = done.stdout.decode(errors='replace')
     added = (file_ids(repo, sha, path, lines) for path, lines in added_lines(diff).items())
     removed = (file_ids(repo, f'{sha}^', path, lines)
                for path, lines in removed_lines(diff).items() if lines)

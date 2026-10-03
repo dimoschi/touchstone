@@ -274,3 +274,29 @@ def test_records_are_read_from_the_main_checkout_of_a_linked_worktree(repo, tmp_
     linked = tmp_path_factory.mktemp('linked') / 'wt'
     repo.git('worktree', 'add', '-q', '-b', 'wt', str(linked))
     assert risk_history.prior_defect_signal(str(linked), ['src/a.go'])['value'] is True
+
+
+def test_recorded_entries_read_the_store_named_crap_check_rows_json(repo, monkeypatch):
+    head = repo.commit({'README.md': 'x\n'})
+    seen = []
+
+    def spy(store, tree):
+        seen.append(os.path.basename(store))
+
+    monkeypatch.setattr(crap_rows, 'rows_for_tree', spy)
+    risk_history.recorded_entries(str(repo.path), head)
+    assert seen == ['crap-check-rows.json']
+
+
+def test_fmt_writes_a_missing_figure_as_n_a_and_a_number_without_trailing_zeros():
+    assert risk_history.fmt(None) == 'n/a'
+    assert risk_history.fmt(2.5) == '2.5'
+    assert risk_history.fmt(3.0) == '3'
+
+
+def test_several_reproduced_paths_are_listed_with_a_comma_and_space(repo):
+    repo.commit({'README.md': 'x\n'})
+    write_record(repo, 'gh-1.json', {'unresolved_findings': [
+        finding('src/a.go', 'reproduced'), finding('src/b.go', 'reproduced')]})
+    sig = risk_history.prior_defect_signal(str(repo.path), ['src/a.go', 'src/b.go'])
+    assert sig['evidence'].endswith('src/a.go (gh-1.json), src/b.go (gh-1.json)')

@@ -82,3 +82,29 @@ def test_main_refuses_a_call_with_no_tree(tmp_path, monkeypatch):
         assert False, 'expected SystemExit'
     except SystemExit as exc:
         assert exc.code == 2
+
+
+def test_record_takes_the_lock_that_belongs_to_the_store(tmp_path):
+    store = str(tmp_path / 'rows.json')
+    crap_rows.record(store, 'tree1', [])
+    assert (tmp_path / 'rows.json.lock').exists()
+
+
+def test_main_names_itself_and_its_arguments_in_the_usage_line(tmp_path, capsys):
+    try:
+        crap_rows.main([])
+        assert False, 'expected SystemExit'
+    except SystemExit as exc:
+        assert exc.code == 2
+    err = capsys.readouterr().err
+    assert err.startswith('usage: crap_rows.py [-h] --tree TREE {record} store\n')
+    assert 'the following arguments are required: command, store, --tree' in err
+
+
+def test_main_refuses_a_command_other_than_record(tmp_path, capsys):
+    try:
+        crap_rows.main(['forget', str(tmp_path / 'rows.json'), '--tree', 't'])
+        assert False, 'expected SystemExit'
+    except SystemExit as exc:
+        assert exc.code == 2
+    assert "invalid choice: 'forget' (choose from" in capsys.readouterr().err

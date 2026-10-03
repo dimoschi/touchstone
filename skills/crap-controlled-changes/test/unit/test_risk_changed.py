@@ -237,3 +237,56 @@ def test_changed_ids_reads_all_three_languages(repo):
                         'c.py': 'def f():\n    return 1\n'})
     assert risk_changed.changed_ids(str(repo.path), head) == {
         'a.F', 'b.php::B::m', 'c.py::f'}
+
+
+def test_python_ids_keep_the_class_of_a_method_declared_under_a_condition():
+    source = 'class Box:\n    if True:\n        def maybe(self):\n            return 1\n'
+    assert risk_changed.python_ids('m.py', source, {4}) == {'m.py::Box.maybe'}
+
+
+def test_go_receiver_with_two_type_parameters_is_none_however_they_are_spaced():
+    assert risk_changed.go_receiver('Pair', '[K,V]') is None
+    assert risk_changed.go_receiver('Pair', '[K, V]') is None
+    assert risk_changed.go_receiver('Tree', '[T]') == 'Tree[T]'
+    assert risk_changed.go_receiver('Box', None) == 'Box'
+
+
+def test_php_end_of_a_one_line_function_with_trailing_space_is_that_line():
+    lines = ['    function a() { return 1; }  ', 'x', '    }']
+    assert risk_changed.php_end(lines, 0, '    ') == 1
+
+
+def test_php_end_does_not_look_back_at_an_earlier_closing_brace():
+    lines = ['    }', '    function a()', '    {', '        x', '    }']
+    assert risk_changed.php_end(lines, 1, '    ') == 5
+
+
+def test_php_end_accepts_a_closing_brace_on_the_line_after_the_declaration():
+    lines = ['    function a()', '    }', 'x']
+    assert risk_changed.php_end(lines, 0, '    ') == 2
+
+
+def test_php_functions_before_any_class_that_are_indented_belong_to_global():
+    text = '<?php\n    function early() {}\nclass K\n{\n}\n'
+    assert list(risk_changed.php_functions(text)) == [(2, 2, '<global>', 'early')]
+
+
+def test_changed_ids_reads_source_and_diff_with_undecodable_bytes(repo):
+    repo.commit({'c.py': b'def f():\n    return 1  # \xff\n'})
+    head = repo.commit({'c.py': b'def f():\n    return 2  # \xff\n'})
+    assert risk_changed.changed_ids(str(repo.path), head) == {'c.py::f'}
+
+
+def test_changed_ids_asks_git_for_a_bare_quoted_zero_context_diff(repo, monkeypatch):
+    head = repo.commit({'c.py': 'def f():\n    return 1\n'})
+    calls = []
+    real = risk_changed.git
+
+    def spy(path, *args):
+        calls.append(args)
+        return real(path, *args)
+
+    monkeypatch.setattr(risk_changed, 'git', spy)
+    risk_changed.changed_ids(str(repo.path), head)
+    assert calls == [('-c', 'core.quotePath=true', 'show', '--format=', '-U0', '--no-color',
+                      '--no-renames', head)]

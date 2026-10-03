@@ -294,3 +294,67 @@ def test_a_diff_with_no_source_file_is_false_with_that_evidence(repo):
     head = repo.commit({'README.md': 'b\n'})
     assert signal(repo, base, head, ['README.md']) == {
         'value': False, 'evidence': 'no source files changed'}
+
+
+class Done:
+    returncode = 0
+    stdout = '{"results": []}'
+    stderr = ''
+
+
+def capture_run(monkeypatch):
+    calls = []
+
+    def fake(cmd, cwd=None):
+        calls.append((cmd, cwd))
+        return Done()
+
+    monkeypatch.setattr(risk_security, 'run', fake)
+    return calls
+
+
+def test_describe_joins_hits_with_a_semicolon_and_space():
+    hits = [('a.go', 3, 3, 'G1 x'), ('b.go', 7, 8, 'G2 y')]
+    assert risk_security.describe(hits) == 'G1 x at a.go:3; G2 y at b.go:7'
+
+
+def test_gosec_runs_by_name_in_the_module_directory(install_tool, monkeypatch):
+    calls = capture_run(monkeypatch)
+    risk_security.gosec_module('/head', 'svc', {})
+    assert calls == [(['gosec', '-fmt=json', './...'], '/head/svc')]
+
+
+def test_go_part_with_no_paths_names_no_module(install_tool, tmp_path):
+    install_tool('gosec', 'exit 0\n')
+    assert risk_security.go_part(str(tmp_path), [], {}) == {
+        'value': False, 'evidence': 'no Go module changed'}
+
+
+def test_python_part_runs_bandit_by_name_in_the_head_root(install_tool, monkeypatch, tmp_path):
+    install_tool('bandit', 'exit 0\n')
+    (tmp_path / 'a.py').write_text('x = 1\n')
+    calls = capture_run(monkeypatch)
+    risk_security.python_part(str(tmp_path), ['a.py'], {})
+    assert calls == [(['bandit', '-q', '-f', 'json', '-s', 'B101', '--', 'a.py'], str(tmp_path))]
+
+
+def test_php_part_runs_opengrep_by_name_in_the_head_root(install_tool, monkeypatch, tmp_path):
+    install_tool('opengrep', 'exit 0\n')
+    (tmp_path / 'a.php').write_text('<?php\n')
+    calls = capture_run(monkeypatch)
+    risk_security.php_part(str(tmp_path), ['a.php'], {})
+    assert calls == [(['opengrep', 'scan', '--json', '--quiet', '--config',
+                       risk_security.PHP_RULES, 'a.php'], str(tmp_path))]
+
+
+def test_php_files_all_deleted_leave_nothing_to_scan(install_tool, tmp_path):
+    install_tool('opengrep', 'exit 0\n')
+    assert risk_security.php_part(str(tmp_path), ['gone.php'], {}) == {
+        'value': False,
+        'evidence': 'opengrep: no changed PHP file exists at the head revision'}
+
+
+def test_scan_verdict_with_no_finding_on_an_added_line_is_exactly_false():
+    done = type('Done', (), {'returncode': 0, 'stdout': '', 'stderr': ''})()
+    assert risk_security.scan_verdict('gosec', done, lambda text: [], {}) == {
+        'value': False, 'evidence': 'gosec: 0 finding(s), none on a line this range added'}

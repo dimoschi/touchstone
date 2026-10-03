@@ -10,6 +10,7 @@ import subprocess
 import pytest
 
 from run_report import (
+    _risk_value,
     changed_lines,
     gh_view,
     load_records,
@@ -408,3 +409,14 @@ def test_main_passes_the_repo_to_gh(tmp_path, capsys):
     seen = []
     main([str(tmp_path)], view=lambda repo, n: seen.append((repo, n)))
     assert seen == [(tmp_path, 3)]
+
+
+def test_a_signals_block_that_is_not_a_mapping_reads_as_missing():
+    assert _risk_value({'risk_signals': {'signals': ['la']}}, 'la') == 'missing'
+    assert _risk_value({'risk_signals': {'signals': 'la'}}, 'la') == 'missing'
+
+
+def test_a_block_without_signals_is_unmeasured_only_when_it_says_why_in_text():
+    assert _risk_value({'risk_signals': {'unmeasured': 'failed'}}, 'la') == 'unmeasured'
+    assert _risk_value({'risk_signals': {'unmeasured': 5}}, 'la') == 'missing'
+    assert _risk_value({'risk_signals': {}}, 'la') == 'missing'

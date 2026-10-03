@@ -223,3 +223,165 @@ def test_main_exits_2_with_nothing_on_stdout_for_a_bad_argument_or_range(repo, t
         assert risk_signals.main(argv) == 2, argv
         out, err = capsys.readouterr()
         assert out == '' and err.startswith('risk-signals:'), (argv, out, err)
+
+
+class Done:
+    def __init__(self, stdout=b'', returncode=0):
+        self.stdout, self.returncode = stdout, returncode
+
+
+def test_parse_numstat_skips_an_empty_record_and_keeps_reading():
+    assert risk_signals.parse_numstat('1\t0\ta.py\x00\x002\t0\tb.py\x00') == [
+        row('a.py', 1, 0), row('b.py', 2, 0)]
+
+
+def test_parse_numstat_splits_on_tabs_only_so_a_leading_space_in_the_path_survives():
+    assert risk_signals.parse_numstat('1\t0\t a b.py\x00') == [row(' a b.py', 1, 0)]
+
+
+def test_render_block_json_line_is_compact():
+    block = risk_signals.render_block('a..b', {'la': {'value': 1, 'evidence': 'e'}})
+    assert block.split('\n')[1] == '{"signals":{"la":{"value":1,"evidence":"e"}}}'
+
+
+def test_numstat_rows_lists_a_rename_as_a_delete_and_an_add(repo):
+    base = repo.commit({'old.py': 'a\nb\nc\n'})
+    head = repo.commit({'old.py': None, 'new.py': 'a\nb\nc\n'})
+    rows = risk_signals.numstat_rows(str(repo.path), f'{base}..{head}')
+    assert sorted((r['path'], r['added'], r['removed']) for r in rows) == [
+        ('new.py', 3, 0), ('old.py', 0, 3)]
+
+
+def test_numstat_rows_and_diff_of_replace_undecodable_bytes(monkeypatch):
+    bad = b'1\t0\ta\xff.py\x00'
+    monkeypatch.setattr(risk_signals, 'git', lambda *a: Done(bad))
+    assert risk_signals.numstat_rows('r', 'a..b') == [row('a�.py', 1, 0)]
+    assert risk_signals.diff_of('r', 'a..b') == '1\t0\ta�.py\x00'
+
+
+def test_diff_of_asks_git_for_quoted_paths(monkeypatch):
+    calls = []
+    monkeypatch.setattr(risk_signals, 'git', lambda *a: calls.append(a) or Done(b''))
+    risk_signals.diff_of('r', 'a..b')
+    assert calls == [('r', '-c', 'core.quotePath=true', 'diff', '-U0', '--no-color',
+                      '--no-renames', 'a..b')]
+
+
+def test_diff_of_has_no_color_and_no_renames_whatever_the_user_config(repo, monkeypatch):
+    monkeypatch.setenv('GIT_CONFIG_COUNT', '1')
+    monkeypatch.setenv('GIT_CONFIG_KEY_0', 'color.diff')
+    monkeypatch.setenv('GIT_CONFIG_VALUE_0', 'always')
+    base = repo.commit({'old.py': 'a\nb\nc\n'})
+    head = repo.commit({'old.py': None, 'new.py': 'a\nb\nc\n'})
+    diff = risk_signals.diff_of(str(repo.path), f'{base}..{head}')
+    assert '\x1b' not in diff
+    assert risk_core.added_lines(diff) == {'new.py': {1, 2, 3}}
+
+
+def test_ld_signal_evidence_names_the_removed_lines_and_the_range():
+    rows = [row('a.py', 3, 1), row('b.go', 4, 6)]
+    assert risk_signals.ld_signal(rows, 'r') == {
+        'value': 7, 'evidence': '7 removed line(s) over 2 changed path(s) in git diff '
+                                '--numstat --no-renames r; a binary file counts 0'}
+
+
+def test_dependency_surface_evidence_lists_every_hit_comma_separated():
+    sig = risk_signals.dependency_signal([row('go.mod'), row('a.py'), row('x/uv.lock')])
+    assert sig == {'value': True, 'evidence': 'package-manager manifest or lockfile changed: '
+                                              'go.mod, x/uv.lock'}
+
+
+def test_la_per_lt_reason_is_the_full_sentence(repo):
+    base = repo.commit({'keep.py': 'k\n'})
+    head = repo.commit({'n1.py': 'a\n'})
+    rows = risk_signals.numstat_rows(str(repo.path), f'{base}..{head}')
+    assert risk_signals.la_per_lt_signal(str(repo.path), base, rows) == {
+        'value': 'unmeasured',
+        'reason': 'LT is 0: every touched file is new (LT counts the base-revision lines of '
+                  'the text files the range modifies or deletes)'}
+
+
+def test_git_signals_equal_each_signal_computed_on_its_own(repo):
+    base = repo.commit({'a.py': 'l1\n', 'b.py': 'x\ny\n'})
+    head = repo.commit({'a.py': 'l1\nl2\n', 'b.py': None})
+    range_ = f'{base}..{head}'
+    repo_path = str(repo.path)
+    rows = risk_signals.numstat_rows(repo_path, range_)
+    assert risk_signals.git_signals(repo_path, base, range_, rows) == {
+        'la': risk_signals.la_signal(rows, range_),
+        'ld': risk_signals.ld_signal(rows, range_),
+        'la_per_lt': risk_signals.la_per_lt_signal(repo_path, base, rows),
+        'files': risk_signals.files_signal(rows, range_),
+        'directories': risk_signals.directories_signal(rows),
+        'dependency_surface': risk_signals.dependency_signal(rows)}
+    assert risk_signals.la_per_lt_signal(repo_path, base, rows)['value'] == 1 / 3
+
+
+def spy_probes(monkeypatch):
+    calls = {}
+
+    def spy(name):
+        def probe(*args):
+            calls[name] = args
+            raise RuntimeError(name)
+        return probe
+
+    monkeypatch.setattr(risk_signals, 'name_status', lambda *a: ('name_status',) + a)
+    for name, attr in (('semantic_noop', 'semantic_noop_signal'), ('api_broken', 'api_signal'),
+                       ('security_pattern', 'security_signal'), ('crap', 'crap_signals'),
+                       ('entry_reachable', 'reach_signal'),
+                       ('prior_defect_files', 'prior_defect_signal')):
+        monkeypatch.setattr(risk_signals, attr, spy(name))
+    return calls
+
+
+def test_collect_hands_each_probe_its_arguments_and_names_it_when_it_fails(repo, monkeypatch):
+    calls = spy_probes(monkeypatch)
+    base = repo.commit({'a.py': 'x = 1\n', 'b.go': 'package b\n'})
+    head = repo.commit({'a.py': 'x = 1\ny = 2\n', 'b.go': 'package b\nvar v = 1\n'})
+    r, range_ = str(repo.path), f'{base}..{head}'
+    signals = risk_signals.collect(r, base, head)
+    diff = risk_signals.diff_of(r, range_)
+    groups = risk_core.by_language(['a.py', 'b.go'])
+    assert calls == {
+        'semantic_noop': (r, base, head, ('name_status', r, range_)),
+        'api_broken': (r, base, head, groups),
+        'security_pattern': (r, head, groups, risk_core.added_lines(diff)),
+        'crap': (r, range_),
+        'entry_reachable': (r, head, groups, risk_core.added_lines(diff),
+                            risk_core.gap_lines(diff)),
+        'prior_defect_files': (r, ['a.py', 'b.go'])}
+    for key in ('semantic_noop', 'api_broken', 'security_pattern', 'entry_reachable',
+                'prior_defect_files'):
+        assert signals[key] == {'value': 'unmeasured',
+                                'reason': f"{key} failed: RuntimeError('{key}')"}
+    assert signals['crap_max'] == {'value': 'unmeasured',
+                                   'reason': "crap_max failed: RuntimeError('crap')"}
+    assert range_ in signals['la']['evidence']
+    assert range_ in signals['ld']['evidence']
+    assert range_ in signals['files']['evidence']
+    assert signals['la_per_lt']['value'] == 3 / 3
+
+
+def test_check_range_asks_git_for_one_quiet_verified_commit(monkeypatch):
+    seen = []
+
+    def fake(repo, *args):
+        seen.append((repo, args))
+        return Done(returncode=0)
+
+    monkeypatch.setattr(risk_signals, 'git', fake)
+    risk_signals.check_range('r', 'b', 'h')
+    assert seen == [('r', ('rev-parse', '--verify', '--quiet', 'b^{commit}')),
+                    ('r', ('rev-parse', '--verify', '--quiet', 'h^{commit}'))]
+
+
+def test_main_reports_each_failure_with_its_exact_message(repo, capsys):
+    head = repo.commit({'a.py': '1\n'})
+    r = str(repo.path)
+    for argv, message in (([], 'usage: risk_signals.py <repo-root> <base>..<head>'),
+                          ([r, 'nope'], "'nope' is not <base>..<head>"),
+                          ([r, f'{head}..nosuch'], 'nosuch does not resolve to a commit')):
+        assert risk_signals.main(argv) == 2
+        out, err = capsys.readouterr()
+        assert (out, err) == ('', f'risk-signals: {message}\n')

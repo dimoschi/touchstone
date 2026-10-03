@@ -72,7 +72,7 @@ def render_block(range_, signals):
 
 def numstat_rows(repo, range_):
     done = git(repo, 'diff', '--numstat', '-z', '--no-renames', range_)
-    return parse_numstat(done.stdout.decode('utf-8', 'replace'))
+    return parse_numstat(done.stdout.decode(errors='replace'))
 
 
 def text_line_count(repo, rev, path):
@@ -151,7 +151,7 @@ def git_signals(repo, base, range_, rows):
 def diff_of(repo, range_):
     done = git(repo, '-c', 'core.quotePath=true', 'diff', '-U0', '--no-color', '--no-renames',
                range_)
-    return done.stdout.decode('utf-8', 'replace')
+    return done.stdout.decode(errors='replace')
 
 
 def noop_probe(repo, base, head, range_):

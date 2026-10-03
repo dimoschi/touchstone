@@ -1,3 +1,6 @@
+import os
+import subprocess
+
 import risk_noop
 
 # Mimics `difft --check-only --exit-code --ignore-comments <old> <new>`: comment
@@ -111,3 +114,54 @@ def test_a_difft_failure_is_unmeasured_with_its_message(repo, install_tool, monk
     sig = risk_noop.semantic_noop_signal(str(repo.path), base, head, {'boom.go': 'M'})
     assert sig['value'] == 'unmeasured'
     assert sig['reason'].startswith('difft exited 2 on boom.go: difft exploded')
+
+
+def test_name_status_lists_a_rename_as_a_delete_and_an_add(repo):
+    base = repo.commit({'old.py': 'same content here\nmore\n'})
+    (repo.path / 'old.py').rename(repo.path / 'new.py')
+    head = repo.commit({})
+    assert risk_noop.name_status(str(repo.path), f'{base}..{head}') == {
+        'old.py': 'D', 'new.py': 'A'}
+
+
+def test_name_status_tolerates_a_path_that_is_not_utf8(monkeypatch):
+    done = subprocess.CompletedProcess([], 0, b'M\0caf\xff.py\0', b'')
+    monkeypatch.setattr(risk_noop, 'git', lambda *a: done)
+    assert risk_noop.name_status('/r', 'a..b') == {'caf\ufffd.py': 'M'}
+
+
+def test_write_revision_writes_nested_files_and_reuses_a_directory(repo, tmp_path):
+    rev = repo.commit({'pkg/a.py': 'a\n', 'pkg/b.py': 'b\n'})
+    for name in ('a', 'b'):
+        risk_noop.write_revision(str(repo.path), rev, f'pkg/{name}.py',
+                                 str(tmp_path / 'out' / 'pkg' / f'{name}.py'))
+    assert (tmp_path / 'out' / 'pkg' / 'a.py').read_bytes() == b'a\n'
+    assert (tmp_path / 'out' / 'pkg' / 'b.py').read_bytes() == b'b\n'
+
+
+def test_write_revision_writes_an_empty_file_for_a_path_the_revision_lacks(repo, tmp_path):
+    rev = repo.commit({'a.py': 'a\n'})
+    dest = tmp_path / 'x' / 'gone.py'
+    risk_noop.write_revision(str(repo.path), rev, 'gone.py', str(dest))
+    assert dest.read_bytes() == b''
+
+
+def test_difft_verdict_is_true_for_exit_0_with_the_path_as_evidence():
+    done = subprocess.CompletedProcess([], 0, '', '')
+    assert risk_noop.difft_verdict(done, 'a.go') == {
+        'value': True, 'evidence': 'difft: no syntactic change in a.go'}
+
+
+def test_difft_compares_the_base_and_head_copies_under_the_temporary_directory(
+        repo, install_tool, monkeypatch, tmp_path_factory, tmp_path):
+    elsewhere = tmp_path_factory.mktemp('cwd')
+    log = with_difft(install_tool, monkeypatch, tmp_path_factory)
+    base = repo.commit({'a.go': 'package a\n'})
+    head = repo.commit({'a.go': '// c\npackage a\n'})
+    work = tmp_path / 'work'
+    work.mkdir()
+    monkeypatch.chdir(elsewhere)
+    risk_noop.difft_part(str(repo.path), base, head, 'a.go', str(work))
+    assert log.read_text().split()[3:] == [str(work / 'base' / 'a.go'),
+                                           str(work / 'head' / 'a.go')]
+    assert os.listdir(elsewhere) == []
