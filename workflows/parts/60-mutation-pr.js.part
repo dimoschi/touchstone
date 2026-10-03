@@ -291,6 +291,11 @@ if (args?.openPr !== false && !outOfBudget()) {
       : `No draft PR exists for this branch, so push it and open the PR with ` +
         `gh. Return the PR url.\n`) +
     notesSection +
+    (planAdditions.length
+      ? `The plan took on work the ticket did not ask for. Add a short "Beyond ` +
+        `the ticket" section to the PR body listing each item and its reason ` +
+        `exactly as given below:\n${additionsLines()}\n`
+      : '') +
     `Do not merge it.`,
     { label: 'pr', schema: PR, model: 'sonnet', effort: 'medium' })
   sPr.close()
@@ -307,6 +312,8 @@ const result = {
   ticket: wt.ticket,
   worktree: wt.path,
   plan: plan.plan,
+  plan_additions: planAdditions,
+  scope_split: scopeSplit(),
   pipeline_version: pipelineVersion,
   stage_spend: stageSpend,
   implemented: impl.summary,

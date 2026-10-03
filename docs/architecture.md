@@ -294,6 +294,23 @@ mutation result, the same fields any other halt at that phase carries. It cannot
 closure each phase widens with `widenBudgetHaltState()` once the state it adds exists. A
 field the run never reached is absent from the halt rather than guessed.
 
+### Work beyond the ticket: plan additions
+
+The planner returns work it believes the ticket needs but does not ask for under
+`additions`, each with an `item` and the `consequence` that makes it necessary, apart
+from `plan` itself. The implementer and every review lens (tail and post-mutation
+reviews included) are shown the list marked as beyond the ticket, the lenses are asked
+to set `scope` (`ticket` or `addition`) on each finding, and the PR body gets a "Beyond
+the ticket" section. `reviewOf` stamps `scope` itself: `ticket` for every finding when
+there are no additions, otherwise the lens's value, or `unattributed` when it gave none
+or an invalid one. Every halt and the final result carry `plan_additions` and, once
+review has started, `scope_split`: counts by scope of the blocking findings, settled
+and open. An empty list is the normal case, and then no prompt grows by a word.
+
+Additions are not forbidden; some are genuinely required. The point is attribution: on
+two runs that grew past their ticket, every finding left at the halt sat in the added
+work, and nothing in the record could show it.
+
 ### What can hold a run: `classify()` and reproducers
 
 A lens can raise up to `MAX_FINDINGS_PER_LENS` findings, and every one carries a

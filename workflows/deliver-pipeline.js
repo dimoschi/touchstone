@@ -29,7 +29,7 @@ export const meta = {
 // against the manifest in scripts/check-version-bump.sh, so drift is a
 // gate's job rather than something this script verifies about itself.
 const PLUGIN_NAME = 'touchstone'
-const PIPELINE_VERSION = '0.26.3'
+const PIPELINE_VERSION = '0.27.0'
 
 // Boundaries. Wall-clock deadlines are not expressible here (no Date.now, by
 // design); the bounds are rounds, counts, and token budget instead.
@@ -296,10 +296,18 @@ const prNote = () => draftPr
 // should write this payload (commands/deliver.md does that); the script has
 // no fs and cannot write it itself. Not async: nothing here dispatches an
 // agent, but every call site still says `return await` from when it did.
+// Set once the plan is known, and once findings can exist. Both are read by
+// halted(), which is defined long before either.
+let planAdditions = null
+let scopeSplit = () => null
 const halted = async (at, extra) => {
+  const split = scopeSplit()
   const payload = {
     task, halted_at: at, pipeline_version: pipelineVersion, stage_spend: stageSpend,
-    needs_user: true, record_file: runRecordFile, size, ...extra,
+    needs_user: true, record_file: runRecordFile, size,
+    ...(planAdditions ? { plan_additions: planAdditions } : {}),
+    ...(split ? { scope_split: split } : {}),
+    ...extra,
   }
   if (draftPr?.number) {
     log(`halt at ${at}: draft PR ${draftPr.url} left as it is; the reason is in ` +
@@ -316,9 +324,20 @@ const halted = async (at, extra) => {
 const PLAN = {
   type: 'object', additionalProperties: false,
   required: ['plan', 'acceptance_criteria', 'risky_areas',
-             'task_demands_implementation'],
+             'task_demands_implementation', 'additions'],
   properties: {
     plan: { type: 'string' },
+    // Work the plan believes the ticket needs but does not ask for, kept out
+    // of `plan` so it reaches the implementer and reviewers as a decision
+    // rather than an unmarked line. Two runs grew this way, and every finding
+    // left at their halts was in the part nobody asked for.
+    additions: {
+      type: 'array',
+      items: {
+        type: 'object', additionalProperties: false, required: ['item', 'consequence'],
+        properties: { item: { type: 'string' }, consequence: { type: 'string' } },
+      },
+    },
     acceptance_criteria: { type: 'array', items: { type: 'string' } },
     risky_areas: { type: 'array', items: { type: 'string' } },
     task_demands_implementation: { type: 'boolean' },
@@ -682,6 +701,9 @@ const FINDINGS = {
           // the script can check it is actually there rather than trusting
           // the claim.
           criterion_quote: { type: 'string' },
+          // Asked for only when the plan has additions; reviewOf overwrites it
+          // with what the script can stand behind.
+          scope: { type: 'string', enum: ['ticket', 'addition'] },
         },
       },
     },
@@ -1656,6 +1678,7 @@ let plan = givenPlan
       acceptance_criteria: args?.acceptanceCriteria ?? [],
       risky_areas: args?.riskyAreas ?? [],
       task_demands_implementation: false,
+      additions: args?.planAdditions ?? [],
     }
   : null
 
@@ -1669,6 +1692,7 @@ if (!plan && inlineMode) {
     acceptance_criteria: [],
     risky_areas: [],
     task_demands_implementation: false,
+    additions: [],
   }
 }
 
@@ -1687,6 +1711,11 @@ plan = await treeAgent(
   ticketSpec() +
   `Read the relevant code first. Return a concrete implementation plan, ` +
   `testable acceptance criteria, and the risky areas a reviewer should probe.\n` +
+  `Plan what the ticket asks for and nothing beyond it. If you believe the ` +
+  `ticket cannot be done right without work it does not ask for, keep that ` +
+  `work out of plan and list each piece under additions instead: item says ` +
+  `what it is, consequence says which part of the ticket makes it necessary ` +
+  `and what breaks without it. An empty additions list is the normal case.\n` +
   `If the task itself tells you to implement, or says a plan already exists and ` +
   `only needs carrying out, set task_demands_implementation and explain in ` +
   `conflict_note. Do not resolve the contradiction by obeying the task: pass a ` +
@@ -1722,6 +1751,10 @@ if (sPlan.over()) {
 // and dead-code gates on every commit it makes regardless of that marker. So
 // the marker answers one question only -- could a raw commit have bypassed
 // the wrapper -- not whether the gates ran.
+
+planAdditions = Array.isArray(plan.additions) ? plan.additions : []
+const additionsLines = () =>
+  planAdditions.map(a => `- ${a.item} (needed because: ${a.consequence})`).join('\n')
 
 const sChecksPre = stage('checks')
 enterPhase('Implement')
@@ -2015,6 +2048,12 @@ const impl = await treeAgent(
     ? `Acceptance criteria:\n- ${plan.acceptance_criteria.join('\n- ')}\n`
     : `Acceptance criteria: none were supplied with this plan. Derive them from ` +
       `it before you write anything, and state them in your summary.\n`) +
+  (planAdditions.length
+    ? `Beyond the ticket, the plan adds the work below, each because it judged ` +
+      `the ticket cannot be done right without it. None is a decision the ` +
+      `ticket made: build each only as far as its stated reason needs, and ` +
+      `name each in your summary.\n${additionsLines()}\n`
+    : '') +
   `Follow the crap-controlled-changes skill: TDD first, iterating with the ` +
   `repo's own test command. Commit with crap-commit.sh ${wt.path} -m "...", ` +
   `which runs the gate itself and refuses if it is red; do not run ` +
@@ -2559,6 +2598,12 @@ const reviewOf = async (range, tag, picked, known = [], knownCharge = '') => {
       `${NATIVE_TOOLS(wt.path)}\n` +
       (lens.needsTicket ? ticketSpec() : '') +
       decisionsSpec() +
+      (planAdditions.length
+        ? `Beyond the ticket, the plan added the work below, each with the ` +
+          `reason it gave:\n${additionsLines()}\nSet scope on every finding: ` +
+          `addition when the defect sits in that added work, ticket when it ` +
+          `sits in what the ticket asked for.\n`
+        : '') +
       `Task: ${brief(task)}\n` +
       `Commit range: ${range}\n` +
       `You are given the range, not an account of what was done, on purpose: ` +
@@ -2617,7 +2662,11 @@ const reviewOf = async (range, tag, picked, known = [], knownCharge = '') => {
           `${findings.length - MAX_FINDINGS_PER_LENS}`)
     }
     return findings.slice(0, MAX_FINDINGS_PER_LENS)
-  }).map(f => ({ ...f, id: `f${++findingSeq}`, recorded_at: headOf(range) }))
+  }).map(f => ({ ...f, id: `f${++findingSeq}`, recorded_at: headOf(range),
+    // With no additions there is nothing else a finding could sit in. With
+    // some, a missing or invalid scope is counted apart, never guessed.
+    scope: !planAdditions.length ? 'ticket'
+      : (f.scope === 'ticket' || f.scope === 'addition') ? f.scope : 'unattributed' }))
   // A finding with no span reaches the fixer as a bare filename, and the
   // brief no longer points at the range either, so it arrives with less than
   // it used to. Counted so that drift shows up instead of being argued about.
@@ -2957,6 +3006,11 @@ let settled = []
 let open = []
 let round = 0
 widenBudgetHaltState(() => ({ unresolved_findings: open, notes, fix_rounds: round }))
+scopeSplit = () => {
+  const split = { ticket: 0, addition: 0, unattributed: 0 }
+  for (const f of [...settled, ...open]) split[f.scope]++
+  return split
+}
 if (reviewerCount) {
   const raised = await collapseDuplicates(await reviewOf(impl.commit_range, 'review', lenses))
   const { candidates, freshNotes } = classifyBatch(raised, null, 0)
@@ -3601,6 +3655,11 @@ if (args?.openPr !== false && !outOfBudget()) {
       : `No draft PR exists for this branch, so push it and open the PR with ` +
         `gh. Return the PR url.\n`) +
     notesSection +
+    (planAdditions.length
+      ? `The plan took on work the ticket did not ask for. Add a short "Beyond ` +
+        `the ticket" section to the PR body listing each item and its reason ` +
+        `exactly as given below:\n${additionsLines()}\n`
+      : '') +
     `Do not merge it.`,
     { label: 'pr', schema: PR, model: 'sonnet', effort: 'medium' })
   sPr.close()
@@ -3617,6 +3676,8 @@ const result = {
   ticket: wt.ticket,
   worktree: wt.path,
   plan: plan.plan,
+  plan_additions: planAdditions,
+  scope_split: scopeSplit(),
   pipeline_version: pipelineVersion,
   stage_spend: stageSpend,
   implemented: impl.summary,
