@@ -251,7 +251,7 @@ if (!plan && inlineMode) {
 if (!givenPlan && !inlineMode) {
 enterPhase('Plan')
 const sPlan = stage('plan')
-plan = await treeAgent(
+const plannerPrompt =
   `You are the planner for this task; do NOT implement anything. You have no ` +
   `Edit or Write tool, and must not reach for another route to the same thing.\n` +
   `Task: ${brief(task)}\n` +
@@ -263,6 +263,10 @@ plan = await treeAgent(
   ticketSpec() +
   `Read the relevant code first. Return a concrete implementation plan, ` +
   `testable acceptance criteria, and the risky areas a reviewer should probe.\n` +
+  `Keep the plan to at most ${PLAN_MAX_CHARS} characters: decisions and steps ` +
+  `only, no restated ticket, no prose. The implementer reads it whole from a ` +
+  `file. A longer plan is sent back to you once to cut; if it is still over, ` +
+  `the run stops and the ticket may need splitting.\n` +
   `Plan what the ticket asks for and nothing beyond it. If you believe the ` +
   `ticket cannot be done right without work it does not ask for, keep that ` +
   `work out of plan and list each piece under additions instead: item says ` +
@@ -271,10 +275,34 @@ plan = await treeAgent(
   `If the task itself tells you to implement, or says a plan already exists and ` +
   `only needs carrying out, set task_demands_implementation and explain in ` +
   `conflict_note. Do not resolve the contradiction by obeying the task: pass a ` +
-  `plan already in hand as args.plan instead, which starts the run at Implement.`,
-  { label: 'planner', schema: PLAN, model: 'opus', effort: effortFor.plan,
-    agentType: 'touchstone:planner' })
+  `plan already in hand as args.plan instead, which starts the run at Implement.`
+const plannerOpts = { schema: PLAN, model: 'opus', effort: effortFor.plan,
+  agentType: 'touchstone:planner' }
+plan = await treeAgent(plannerPrompt, { label: 'planner', ...plannerOpts })
 if (!plan) throw new Error('planner failed')
+
+// One retry only: a plan that will not fit after being asked twice is a ticket
+// that needs splitting.
+if (plan.plan.length > PLAN_MAX_CHARS) {
+  const overBy = plan.plan.length
+  log(`planner returned a ${overBy}-char plan, over the ${PLAN_MAX_CHARS} limit; asking once for a tighter one`)
+  const tightened = await treeAgent(
+    `${plannerPrompt}\nYour previous plan, in full:\n${plan.plan}\n` +
+    `It is ${overBy} chars, limit ${PLAN_MAX_CHARS}: decisions and steps only, ` +
+    `no restated ticket, no prose. Return the same plan cut to fit.`,
+    { label: 'planner:tighten', ...plannerOpts })
+  if (!tightened || tightened.plan.length > PLAN_MAX_CHARS) {
+    sPlan.close()
+    return await halted('Plan', {
+      plan: plan.plan,
+      note: `The plan did not fit in ${PLAN_MAX_CHARS} chars after one retry ` +
+        `(${overBy} chars, then ` +
+        `${tightened ? `${tightened.plan.length} chars` : 'no answer'}). The ticket ` +
+        `may need splitting. Nothing was written or implemented.`,
+    })
+  }
+  plan = tightened
+}
 
 // This used to halt and ask the user to re-run with args.plan. The script is
 // already holding that plan, so the halt bought nothing but a round trip: the
@@ -308,8 +336,66 @@ planAdditions = Array.isArray(plan.additions) ? plan.additions : []
 const additionsLines = () =>
   planAdditions.map(a => `- ${a.item} (needed because: ${a.consequence})`).join('\n')
 
-const sChecksPre = stage('checks')
 enterPhase('Implement')
+// The plan reaches the implementer as an untracked file it reads whole, never
+// as prompt text, which brief() would clamp. The script has no fs, so an agent
+// writes it and the script checks the measurements it reports.
+const fnv1a = (s) => {
+  let h = 0x811c9dc5
+  for (let i = 0; i < s.length; i++) { h ^= s.charCodeAt(i); h = Math.imul(h, 0x01000193) }
+  return (h >>> 0).toString(16).padStart(8, '0')
+}
+const utf8Length = (s) => {
+  let n = 0
+  for (const ch of s) {
+    const cp = ch.codePointAt(0)
+    n += cp < 0x80 ? 1 : cp < 0x800 ? 2 : cp < 0x10000 ? 3 : 4
+  }
+  return n
+}
+const planId = fnv1a(`${ticket}${plan.plan}`)
+const planFile = `${wt.path}/.touchstone/plan.md`
+const planEndLine = `END OF PLAN ${planId}`
+const planContent = `${plan.plan}\n\n${planEndLine}\n`
+widenBudgetHaltState(() => ({ plan: plan.plan }))
+const planWritten = await treeAgent(
+  `Write the plan file, then STOP. Do not implement anything and do not commit.\n` +
+  `1. mkdir -p ${wt.path}/.touchstone && rm -f ${planFile}\n` +
+  `2. Write the text between the PLAN FILE BEGIN and PLAN FILE END lines below ` +
+  `to ${planFile} with the Write tool. The file ` +
+  `is exactly that text: it starts at the first character after the BEGIN ` +
+  `line's newline and ends with the newline after its last line, ` +
+  `${planEndLine}. Do not trim, reflow, translate, summarise or correct it, ` +
+  `and leave both marker lines out.\n` +
+  `3. Keep it out of git without touching any tracked file. Run: ` +
+  `x="$(git -C ${wt.path} rev-parse --path-format=absolute --git-common-dir)/info/exclude"; ` +
+  `mkdir -p "$(dirname "$x")"; ` +
+  `grep -qxF '.touchstone/' "$x" || printf '\\n.touchstone/\\n' >> "$x"\n` +
+  `4. Only after steps 1 to 3, run these and report what they print, never ` +
+  `what you expect them to print. bytes: the number printed by ` +
+  `wc -c < ${planFile}. last_line: what tail -n 1 ${planFile} prints, exactly, ` +
+  `without its newline. ignored_exit: the exit status of ` +
+  `git -C ${wt.path} check-ignore -q .touchstone/plan.md (0 means ignored).\n` +
+  `PLAN FILE BEGIN ${planId}\n${planContent}PLAN FILE END ${planId}`,
+  { label: 'plan:write', schema: PLAN_WRITE, model: 'haiku', effort: 'low' })
+const planWriteProblem = !planWritten
+  ? 'the plan:write agent returned nothing'
+  : planWritten.bytes !== utf8Length(planContent)
+  ? `the file is ${planWritten.bytes} bytes, not the ${utf8Length(planContent)} the plan needs`
+  : planWritten.last_line !== planEndLine
+  ? `its last line is ${JSON.stringify(planWritten.last_line)}, not ${planEndLine}`
+  : planWritten.ignored_exit !== 0
+  ? `git check-ignore exited ${planWritten.ignored_exit}, so it is not ignored and a commit could pick it up`
+  : null
+if (planWriteProblem) {
+  return await halted('Implement', {
+    plan: plan.plan,
+    note: `The plan file ${planFile} could not be verified: ${planWriteProblem}. ` +
+      `Nothing was implemented.`,
+  })
+}
+
+const sChecksPre = stage('checks')
 // wt.checks_source came back from the branch/branch:existing call itself
 // (its last step, done only when created=true), replacing a separate
 // checks:discover dispatch now that the worktree it needs to read is

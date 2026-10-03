@@ -315,6 +315,34 @@ Additions are not forbidden; some are genuinely required. The point is attributi
 two runs that grew past their ticket, every finding left at the halt sat in the added
 work, and nothing in the record could show it.
 
+### The plan is a file, not a prompt section
+
+The implementer never gets the plan as prompt text. `brief()` clamps to `briefChars`
+(4000), so a 24,600-char plan used to reach the implementer as its first 4,000 chars.
+
+- **Length gate.** The planner is told to stay within `PLAN_MAX_CHARS` (6000;
+  `args.planMaxChars` overrides). A longer plan is sent back once as
+  `planner:tighten`, with the previous plan in full. Still over, or no answer, halts at
+  Plan: the ticket probably needs splitting. A plan passed as `args.plan`, and the
+  inline stub plan, are not gated.
+- **Plan file.** On every plan path, a haiku `plan:write` agent writes the plan, a blank
+  line and `END OF PLAN <id>` to `<worktree>/.touchstone/plan.md`, adds `.touchstone/`
+  to `info/exclude` under `git rev-parse --git-common-dir` (never a tracked
+  `.gitignore`), and reports `wc -c`, `tail -n 1` and the `git check-ignore` exit. The
+  script halts at Implement unless the byte count equals the UTF-8 length it computed
+  itself, the last line is the end line, and the file is ignored. The id is an FNV-1a
+  hash of ticket and plan, computed by the script, so it is deterministic.
+- **Proof of reading.** The implementer is told to read the whole file and return the id
+  as `plan_id`, or to refuse to start (empty `plan_id`) if it cannot. A missing, empty or
+  wrong id halts at Implement before the draft PR, review or any fix.
+- **Leak probe.** Nothing under `.touchstone/` may be committed. After Implement and its
+  checks fix, after every fix round that moved the head, and after a mutation attempt
+  that moved it, a `plan:leak:<phase>` agent runs a script-built `git log --name-only`
+  over `<implementer base>..<new head>`. Using the range from the implementer's base
+  catches a commit that adds the file and a later one that deletes it. Any path, or
+  output that does not parse like the diffstat probe's, halts at that phase before a
+  push.
+
 ### What can hold a run: `classify()` and reproducers
 
 A lens can raise up to `MAX_FINDINGS_PER_LENS` findings, and every one carries a

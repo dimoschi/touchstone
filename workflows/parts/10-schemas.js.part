@@ -227,13 +227,16 @@ const TRIAGE = {
 // (part 40, `size` in the result) replaces it with a real, measured count.
 const IMPL = {
   type: 'object', additionalProperties: false,
-  required: ['summary', 'files_changed', 'commit_range', 'scored'],
+  required: ['summary', 'files_changed', 'commit_range', 'scored', 'plan_id'],
   properties: {
     summary: { type: 'string' },
     files_changed: { type: 'array', items: { type: 'string' } },
     commit_range: { type: 'string' },
     scored: { type: 'boolean' },
     gate_note: { type: 'string' },
+    // The id on the plan file's last line: returning it proves the whole file
+    // was read.
+    plan_id: { type: 'string' },
     // Set when the one halt this phase can hit -- a NEXT_ACTION of
     // UNSUPPORTED_LANGUAGE -- fires. Without a schema field for it, the phase
     // has no way to represent a halt at all: it would return a normal result
@@ -241,6 +244,19 @@ const IMPL = {
     // with the refused work never committed.
     unsupported_language: { type: 'boolean' },
   },
+}
+const PLAN_WRITE = {
+  type: 'object', additionalProperties: false,
+  required: ['bytes', 'last_line', 'ignored_exit'],
+  properties: {
+    bytes: { type: 'integer' },
+    last_line: { type: 'string' },
+    ignored_exit: { type: 'integer' },
+  },
+}
+const PLAN_LEAK_PROBE = {
+  type: 'object', additionalProperties: false, required: ['output'],
+  properties: { output: { type: 'string' } },
 }
 // head_sha is required, not optional: it is how the script learns what this
 // phase committed, and an absent one is indistinguishable from "committed

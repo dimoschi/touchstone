@@ -123,8 +123,18 @@ function makeAgent(scenario, captured) {
       return { scope: 'inline', complexity: 'trivial', expected_files: [], complexity_note: 'stub',
         premise_ok: true, estimated_loc: 5, evidence: [], premise_note: 'stub' }
     }
+    if (label === 'plan:write') {
+      const m = /^PLAN FILE BEGIN ([0-9a-f]{8})\n([\s\S]*)^PLAN FILE END \1$/m.exec(prompt)
+      captured.planId = m?.[1]
+      return { bytes: Buffer.byteLength(m?.[2] ?? '', 'utf8'),
+        last_line: (m?.[2] ?? '').replace(/\n$/, '').split('\n').pop(), ignored_exit: 0 }
+    }
+    if (label.startsWith('plan:leak:')) {
+      const range = (/echo TOUCHSTONE_PLAN_LEAK ([^\s;]+);/.exec(prompt) ?? [])[1] ?? ''
+      return { output: `TOUCHSTONE_PLAN_LEAK ${range}\nTOUCHSTONE_PLAN_LEAK_END` }
+    }
     if (label === 'implementer') {
-      return scenario.implementer
+      return { plan_id: captured.planId, ...scenario.implementer }
     }
     // draft-pr and size (gh-118): the diffstat probe and its one retry. Every
     // scenario here defaults args.reviewers to 0, but the diffstat still has
