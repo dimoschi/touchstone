@@ -1,0 +1,35 @@
+# Rules for the security_pattern signal on PHP files (lib/risk_security.py).
+#
+# Written for this plugin on purpose: the Semgrep registry rules fall under the
+# Semgrep Rules License and cannot ship here. Each rule matches a call whose
+# misuse is a well-known injection or weak-crypto pattern; the signal asks only
+# whether such a call sits on a line a change added.
+rules:
+  - id: touchstone-php-eval
+    languages: [php]
+    severity: ERROR
+    message: eval() runs arbitrary code
+    pattern: eval(...)
+  - id: touchstone-php-command-execution
+    languages: [php]
+    severity: ERROR
+    message: a shell command is built and run
+    pattern-either:
+      - pattern: system(...)
+      - pattern: exec(...)
+      - pattern: shell_exec(...)
+      - pattern: passthru(...)
+      - pattern: popen(...)
+      - pattern: proc_open(...)
+  - id: touchstone-php-unserialize
+    languages: [php]
+    severity: ERROR
+    message: unserialize() on untrusted data allows object injection
+    pattern: unserialize(...)
+  - id: touchstone-php-weak-hash
+    languages: [php]
+    severity: WARNING
+    message: md5 and sha1 are not collision resistant
+    pattern-either:
+      - pattern: md5(...)
+      - pattern: sha1(...)

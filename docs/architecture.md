@@ -70,6 +70,68 @@ Only their own tools write them. Never hand-edit a ledger and never regenerate o
 clear a failure: a gate that can be satisfied by editing its own record measures
 nothing. `--accept` and `--mark-scored` are user-approved overrides, not agent moves.
 
+`crap-check-rows.json` sits beside them but is not a ledger: nothing gates on it. It
+keeps the whole report of every green `crap-check.sh` run (one row per function in each
+staged file: complexity, coverage, CRAP, status, tag), keyed by the tree the commit carries, because
+`next_action.py` keeps only the failing rows and a function that passed would otherwise
+leave no figure behind. `lib/crap_rows.py` writes it from all three exit-0 paths. A run with
+nothing to score records an empty report for its tree, which never replaces rows already
+recorded for it, and a failure to record is a stderr note, never a change of verdict.
+The change-risk signals below read it back.
+
+### Change-risk signals
+
+`risk-signals.sh [<absolute-repo-path>] <base>..<head>` measures what a change *is*, so a
+later rule can ask for more review than its size alone would. Every value is a measurement:
+no model decides one, and no path or naming convention feeds one. The package-manager
+file names (`go.mod`, `composer.lock`, `requirements*.txt`, ...) are the single exception,
+because the package managers fix them, not the team.
+
+It prints exactly three lines and exits 0: `TOUCHSTONE_RISK_SIGNALS <range>`, one JSON line,
+and `TOUCHSTONE_RISK_SIGNALS_END`. A bad argument, a path that is not a repository, or a
+range that does not resolve exits 2 with nothing on stdout. The JSON is `{"signals": {...}}`
+with thirteen keys, always all present: `la`, `ld`, `la_per_lt`, `files`, `directories`,
+`dependency_surface`, `semantic_noop`, `api_broken`, `security_pattern`, `crap_max`,
+`coverage_min`, `entry_reachable`, `prior_defect_files`. An entry is
+`{"value": true|false|<number>, "evidence": ...}` or `{"value": "unmeasured", "reason": ...}`,
+each string cut to 400 characters so a model can relay the block verbatim.
+
+**Unmeasured is never false.** A missing tool (`difft`, `apidiff`, `griffe`,
+`roave-backward-compatibility-check`, `gosec`, `bandit`, `opengrep`, `deadcode`), a tool that
+fails, or a source file in a language no tool supports (anything but Go, Python and PHP,
+for which a fixed set of non-source extensions has no language at all) makes the signals
+that need it `unmeasured`, with a reason naming the cause. A config file (JSON, YAML, TOML,
+INI, CFG, a lockfile) is not assumed harmless either: `difft` reads those formats, but no
+security, API or reachability tool does, so a change to one makes `security_pattern`,
+`api_broken` and `entry_reachable` `unmeasured`. A probe that raises is turned
+into the same entry, so a block always carries every key. Combining languages: a boolean is
+true if any part is true, else unmeasured if any part is, else false. `semantic_noop` runs
+the other way, since true there may lower effort: false if any file is not a no-op (an added
+or deleted file never is), else unmeasured if any is, else true.
+
+| Signal | Where it comes from |
+|---|---|
+| `la`, `ld`, `files`, `directories` | `git diff --numstat -z --no-renames`; a binary file counts 0 |
+| `la_per_lt` | lines added over text files, divided by the base-revision lines of the text files the range modifies or deletes; unmeasured when every touched file is new |
+| `dependency_surface` | a changed path whose basename is a package-manager manifest or lockfile (`go.mod`, `go.sum`, `go.work`, `go.work.sum`, `composer.json`, `composer.lock`, `pyproject.toml`, `uv.lock`, `poetry.lock`, `Pipfile`, `Pipfile.lock`, `requirements*.txt`) |
+| `semantic_noop` | `difft --check-only --exit-code --ignore-comments` on every changed file, all modified |
+| `api_broken` | `apidiff -m -incompatible` per changed Go module (exit 0 either way, so non-empty stdout is the finding), `griffe check` per changed Python package, Roave BackwardCompatibilityCheck for PHP; a package new in the range has no earlier API to break |
+| `security_pattern` | gosec, bandit (without B101, `assert_used`, which flags every test), opengrep with `rules/php-security.yml`, run over the head revision; a finding counts only when its line span overlaps a line the range added |
+| `crap_max`, `coverage_min` | the rows `crap-check.sh` recorded for each non-merge commit of the range, keeping the functions that commit changed (a function holding a line it added, or that held a line it removed, found by `risk_changed.py`; a method of a type with two or more type parameters is left out, because go-crap names every such type `<unknown>`); unmeasured when any commit has no recorded entry or none changed a scored function |
+| `entry_reachable` | `deadcode` per changed Go module: true when a function holding an added line, or one lines were deleted from inside, is reachable from a main package; Go only. A `_test.go` file is left out, since deadcode loads no test file; a range that changes only tests is false |
+| `prior_defect_files` | `.claude/touchstone-runs` records: true when a changed path is the file of an unresolved finding whose `reproducer_run.outcome` was `reproduced` (a finding's absolute path is read relative to the checkout, or to its ticket worktree under `.claude/worktrees/`); unmeasured with no records |
+
+`lib/risk_signals.py` assembles the block; `risk_core.py` holds the entry shape and the
+language and combination rules, and `risk_noop.py`, `risk_api.py`, `risk_security.py`,
+`risk_reach.py` and `risk_history.py` one signal family each (`risk_changed.py` tells
+`risk_history.py` which scored functions a commit changed). The tools are optional and
+looked up on PATH; the Semgrep registry rules are not usable here (Semgrep Rules
+License), which is why the PHP rules are written for this plugin.
+
+Nothing in the pipeline reads a signal to decide anything yet: acting on them is a later
+change, once the run records show which signals separate runs that needed more review from
+runs that did not.
+
 ### Thresholds and classification live in one place
 
 `lib/thresholds.py` holds the four settings, their defaults, and the rule that
@@ -491,6 +553,30 @@ Below the code floor the ratio never applies, which is what lets an ordinary TDD
 (support code well over 1:1 against the code it backs) through unaffected.
 `args.supportRatio` raises the limit for a run that knows its own
 ratio is intentional.
+
+### Recording the change-risk signals
+
+Right after the draft PR step, and before Review, a dedicated `risk-signals` dispatch (haiku
+at low effort, phase Draft PR) runs `risk-signals.sh` over `impl.commit_range` and puts its
+output verbatim in `output`. `parseRiskSignals` is the only thing that reads it: exactly
+three lines, the first naming this range, the last the end marker, one JSON line between
+them holding exactly `RISK_SIGNAL_KEYS` (any order), each entry a boolean or finite number
+with non-empty evidence, or `unmeasured` with a reason, no other fields, no string over 400
+characters. A block that fails any of that gets one `risk-signals:retry`, and one that
+still fails is recorded as `{range, unmeasured: <reason>}`. The probe opens no `stage()`,
+has no ceiling and never halts a run: nothing downstream depends on it yet, and a new halt
+would change outcomes.
+
+`risk_signals` is carried by every halt from Draft PR on, the run-budget halt included, and by
+the final result. It is `null` on halts before the implementer returns a range, and from then
+until the probe returns it holds a `{range, unmeasured}` record, so a halt at Implement and a
+budget refusal of the probe itself still say why there are no signals. `scripts/run-report.py` breaks each pipeline version's runs
+down by every signal's value (true, false or unmeasured; at or below and above the median for
+numbers), with runs, median fix rounds, halts and blocking findings per group, and counts a
+run with no `risk_signals` as missing. `workflows/tests/test-risk-signals.sh` pins that the
+review, fix and mutation labels, the fix rounds up to `MAX_REVIEW_ROUNDS` and the stage
+ceilings are identical whatever the block says, for both the two-lens and the three-lens
+diffstat.
 
 ### Pipeline version transparency
 

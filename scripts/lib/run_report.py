@@ -16,6 +16,8 @@ from pathlib import Path
 
 OUTCOMES = ('merged', 'closed', 'open', 'none')
 RUNS_DIR = Path('.claude') / 'touchstone-runs'
+UNMEASURED, MISSING = 'unmeasured', 'missing'
+GROUP_ORDER = ('true', 'false', '<= median', '> median', UNMEASURED, MISSING)
 
 
 def version_of(rec):
@@ -110,14 +112,91 @@ def _halts_of(recs):
     return halts
 
 
+def _rounds_of(recs):
+    return _median_of([r.get('fix_rounds') if _number(r.get('fix_rounds')) else None
+                       for r in recs])
+
+
+def _usable(value):
+    return value == UNMEASURED or isinstance(value, bool) or _number(value)
+
+
+def _entry_value(signals, key):
+    entry = signals.get(key) if isinstance(signals, dict) else None
+    value = entry.get('value') if isinstance(entry, dict) else None
+    return value if _usable(value) else MISSING
+
+
+def _risk_value(rec, key):
+    """One signal of one run: its value, UNMEASURED, or MISSING when the run
+    recorded no usable entry for it."""
+    block = rec.get('risk_signals')
+    if not isinstance(block, dict):
+        return MISSING
+    signals = block.get('signals')
+    if signals is None:
+        return UNMEASURED if isinstance(block.get('unmeasured'), str) else MISSING
+    return _entry_value(signals, key)
+
+
+def _signal_keys(recs):
+    """Every signal any run recorded, in the order first seen."""
+    keys = {}
+    for rec in recs:
+        block = rec.get('risk_signals')
+        signals = block.get('signals') if isinstance(block, dict) else None
+        keys.update(dict.fromkeys(signals if isinstance(signals, dict) else ()))
+    return list(keys)
+
+
+def _group_label(value, median):
+    if value in (UNMEASURED, MISSING):
+        return value
+    if isinstance(value, bool):
+        return 'true' if value else 'false'
+    return '<= median' if value <= median else '> median'
+
+
+def _group_stats(recs):
+    return {
+        'runs': len(recs), 'fix_rounds': _rounds_of(recs),
+        'halted': sum(1 for r in recs if r.get('halted_at')),
+        'blocking': _total_of([r.get('unresolved_findings') for r in recs]),
+    }
+
+
+def _numeric_median(values):
+    numbers = [v for v in values if _number(v)]
+    return statistics.median(numbers) if numbers else None
+
+
+def _grouped(recs, values, median):
+    grouped = {}
+    for rec, value in zip(recs, values):
+        grouped.setdefault(_group_label(value, median), []).append(rec)
+    return {g: _group_stats(grouped[g]) for g in GROUP_ORDER if g in grouped}
+
+
+def _signal_groups(recs, key):
+    values = [_risk_value(r, key) for r in recs]
+    median = _numeric_median(values)
+    return {'median': median, 'groups': _grouped(recs, values, median)}
+
+
+def _risk_of(recs):
+    recorded = sum(1 for r in recs if isinstance(r.get('risk_signals'), dict))
+    return {'recorded': recorded, 'missing': len(recs) - recorded,
+            'signals': {k: _signal_groups(recs, k) for k in _signal_keys(recs)}}
+
+
 def _summary_of(recs):
-    rounds = [r.get('fix_rounds') if _number(r.get('fix_rounds')) else None for r in recs]
     return {
         'runs': len(recs), 'outcomes': _outcomes_of(recs), 'halts': _halts_of(recs),
         'tokens_per_line': _median_of([_per_line(r) for r in recs]),
-        'fix_rounds': _median_of(rounds),
+        'fix_rounds': _rounds_of(recs),
         'blocking': _total_of([r.get('unresolved_findings') for r in recs]),
         'notes': _total_of([r.get('notes') for r in recs]),
+        'risk': _risk_of(recs),
     }
 
 
@@ -137,6 +216,28 @@ def _fmt(median):
     return 'n/a' if median is None else f'{median:.0f}'
 
 
+def _render_group(label, g):
+    b = g['blocking']
+    return (f"      {label}: {g['runs']} run(s), median fix rounds {_fmt(g['fix_rounds']['median'])}, "
+            f"halted {g['halted']}, blocking findings {b['total']} ({b['missing']} missing)\n")
+
+
+def _render_signal(key, signal):
+    median = signal['median']
+    title = key if median is None else f'{key} (median {median:g})'
+    groups = ''.join(_render_group(label, g) for label, g in signal['groups'].items())
+    return f'    {title}\n{groups}'
+
+
+def _render_risk(risk):
+    if not risk['recorded']:
+        return f"  risk signals: none recorded ({risk['missing']} run(s) missing them)\n"
+    head = f"  risk signals: {risk['recorded']} run(s) recorded them, {risk['missing']} missing\n"
+    if not risk['signals']:
+        return head + '    no signal was measured in any of them\n'
+    return head + ''.join(_render_signal(k, s) for k, s in risk['signals'].items())
+
+
 def _render_one(version, s):
     outcomes = ', '.join(f'{k} {n}' for k, n in s['outcomes'].items())
     halts = ', '.join(f'{k} {n}' for k, n in s['halts'].items()) or 'none'
@@ -150,6 +251,7 @@ def _render_one(version, s):
         f"  fix rounds: median {_fmt(fr['median'])} ({fr['measured']} measured, {fr['missing']} missing)\n"
         f"  blocking findings {b['total']} ({b['missing']} missing), "
         f"notes {n['total']} ({n['missing']} missing)\n"
+        + _render_risk(s['risk'])
     )
 
 

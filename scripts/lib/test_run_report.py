@@ -10,6 +10,7 @@ import subprocess
 import pytest
 
 from run_report import (
+    _risk_value,
     changed_lines,
     gh_view,
     load_records,
@@ -171,6 +172,7 @@ def test_render_prints_every_measure_per_version():
         '  output tokens per changed line: median 200 (2 measured, 0 missing)\n'
         '  fix rounds: median 1 (2 measured, 0 missing)\n'
         '  blocking findings 1 (0 missing), notes 0 (0 missing)\n'
+        '  risk signals: none recorded (2 run(s) missing them)\n'
     )
 
 
@@ -179,7 +181,7 @@ def test_render_lists_several_halt_stages_and_versions():
     out = render(summarise(recs))
     assert '  halted: Fix 1, Review 1\n' in out
     assert out.count('pipeline ') == 2
-    assert '0 missing)\npipeline 0.27.0: 1 run(s)\n' in out
+    assert '(2 run(s) missing them)\npipeline 0.27.0: 1 run(s)\n' in out
 
 
 def test_render_says_none_for_no_halts_and_no_median():
@@ -191,6 +193,105 @@ def test_render_says_none_for_no_halts_and_no_median():
 
 def test_render_of_no_records():
     assert render({}) == 'no run records found\n'
+
+
+def signals(**entries):
+    return {'range': 'a..b', 'signals': entries}
+
+
+def measured(value):
+    return {'value': value, 'evidence': 'e'}
+
+
+UNKNOWN = {'value': 'unmeasured', 'reason': 'r'}
+
+
+def test_a_boolean_signal_groups_runs_by_value_with_each_groups_outcomes():
+    recs = [
+        record(risk_signals=signals(dependency_surface=measured(True)), fix_rounds=3,
+               halted_at='Fix', unresolved_findings=[{'id': 'f1'}, {'id': 'f2'}]),
+        record(risk_signals=signals(dependency_surface=measured(True)), fix_rounds=1),
+        record(risk_signals=signals(dependency_surface=measured(False)), fix_rounds=0),
+    ]
+    groups = summarise(recs)['0.26.1']['risk']['signals']['dependency_surface']['groups']
+    assert list(groups) == ['true', 'false']
+    assert groups['true'] == {
+        'runs': 2, 'fix_rounds': {'median': 2.0, 'measured': 2, 'missing': 0}, 'halted': 1,
+        'blocking': {'total': 2, 'missing': 0}}
+    assert groups['false']['runs'] == 1
+    assert groups['false']['halted'] == 0
+
+
+def test_a_numeric_signal_splits_at_its_median():
+    recs = [record(risk_signals=signals(la=measured(v)), fix_rounds=r)
+            for v, r in ((10, 0), (20, 1), (30, 4))]
+    sig = summarise(recs)['0.26.1']['risk']['signals']['la']
+    assert sig['median'] == 20
+    assert list(sig['groups']) == ['<= median', '> median']
+    assert sig['groups']['<= median']['runs'] == 2
+    assert sig['groups']['> median']['fix_rounds']['median'] == 4
+
+
+def test_unmeasured_and_missing_signals_are_their_own_groups():
+    recs = [
+        record(risk_signals=signals(la=measured(5), files=UNKNOWN)),
+        record(risk_signals={'range': 'a..b', 'unmeasured': 'the probe failed'}),
+        record(risk_signals=signals(files=measured(2))),
+        without(record(), 'risk_signals'),
+        record(risk_signals=None),
+        record(risk_signals='not a block'),
+    ]
+    risk = summarise(recs)['0.26.1']['risk']
+    assert (risk['recorded'], risk['missing']) == (3, 3)
+    assert list(risk['signals']) == ['la', 'files']
+    assert {k: g['runs'] for k, g in risk['signals']['la']['groups'].items()} == {
+        '<= median': 1, 'unmeasured': 1, 'missing': 4}
+    assert {k: g['runs'] for k, g in risk['signals']['files']['groups'].items()} == {
+        '<= median': 1, 'unmeasured': 2, 'missing': 3}
+
+
+def test_a_value_that_is_neither_a_boolean_nor_a_number_counts_as_missing():
+    recs = [record(risk_signals=signals(la={'value': 'big', 'evidence': 'e'})),
+            record(risk_signals=signals(la='broken')),
+            record(risk_signals=signals(la=measured(True)))]
+    groups = summarise(recs)['0.26.1']['risk']['signals']['la']['groups']
+    assert {k: g['runs'] for k, g in groups.items()} == {'true': 1, 'missing': 2}
+
+
+def test_signals_in_runs_with_no_findings_or_rounds_still_group():
+    recs = [record(risk_signals=signals(api_broken=measured(False)), fix_rounds=None,
+                   unresolved_findings=None)]
+    group = summarise(recs)['0.26.1']['risk']['signals']['api_broken']['groups']['false']
+    assert group['fix_rounds'] == {'median': None, 'measured': 0, 'missing': 1}
+    assert group['blocking'] == {'total': 0, 'missing': 1}
+
+
+def test_render_lists_each_signals_groups_with_their_outcomes():
+    recs = [
+        record(risk_signals=signals(la=measured(10), api_broken=measured(True)), fix_rounds=0),
+        record(risk_signals=signals(la=measured(30), api_broken=UNKNOWN), fix_rounds=2,
+               halted_at='Fix', unresolved_findings=[{'id': 'f1'}]),
+        without(record(), 'risk_signals'),
+    ]
+    out = render(summarise(recs))
+    assert out.endswith(
+        '  risk signals: 2 run(s) recorded them, 1 missing\n'
+        '    la (median 20)\n'
+        '      <= median: 1 run(s), median fix rounds 0, halted 0, blocking findings 0 (0 missing)\n'
+        '      > median: 1 run(s), median fix rounds 2, halted 1, blocking findings 1 (0 missing)\n'
+        '      missing: 1 run(s), median fix rounds 1, halted 0, blocking findings 0 (0 missing)\n'
+        '    api_broken\n'
+        '      true: 1 run(s), median fix rounds 0, halted 0, blocking findings 0 (0 missing)\n'
+        '      unmeasured: 1 run(s), median fix rounds 2, halted 1, blocking findings 1 '
+        '(0 missing)\n'
+        '      missing: 1 run(s), median fix rounds 1, halted 0, blocking findings 0 (0 missing)\n')
+
+
+def test_render_says_so_when_every_recorded_block_is_a_failed_probe():
+    recs = [record(risk_signals={'range': 'a..b', 'unmeasured': 'the probe failed'})]
+    assert render(summarise(recs)).endswith(
+        '  risk signals: 1 run(s) recorded them, 0 missing\n'
+        '    no signal was measured in any of them\n')
 
 
 def write(dirpath, name, rec):
@@ -308,3 +409,14 @@ def test_main_passes_the_repo_to_gh(tmp_path, capsys):
     seen = []
     main([str(tmp_path)], view=lambda repo, n: seen.append((repo, n)))
     assert seen == [(tmp_path, 3)]
+
+
+def test_a_signals_block_that_is_not_a_mapping_reads_as_missing():
+    assert _risk_value({'risk_signals': {'signals': ['la']}}, 'la') == 'missing'
+    assert _risk_value({'risk_signals': {'signals': 'la'}}, 'la') == 'missing'
+
+
+def test_a_block_without_signals_is_unmeasured_only_when_it_says_why_in_text():
+    assert _risk_value({'risk_signals': {'unmeasured': 'failed'}}, 'la') == 'unmeasured'
+    assert _risk_value({'risk_signals': {'unmeasured': 5}}, 'la') == 'missing'
+    assert _risk_value({'risk_signals': {}}, 'la') == 'missing'

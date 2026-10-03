@@ -77,6 +77,23 @@ function idsIn(prompt) {
   return [...prompt.matchAll(/\[(f\d+)\]/g)].map(m => m[1])
 }
 
+// The probe's signal keys, in the order risk-signals.sh prints them, and a
+// block built the way it prints one: every entry measured and clear unless a
+// scenario overrides it. `entries` replaces the whole signals object, for a
+// scenario that needs a key missing or an entry malformed.
+const RISK_KEYS = ['la', 'ld', 'la_per_lt', 'files', 'directories', 'dependency_surface',
+  'semantic_noop', 'api_broken', 'security_pattern', 'crap_max', 'coverage_min',
+  'entry_reachable', 'prior_defect_files']
+const RISK_NUMBERS = new Set(['la', 'ld', 'la_per_lt', 'files', 'directories', 'crap_max', 'coverage_min'])
+function riskEntries(over = {}) {
+  return Object.fromEntries(RISK_KEYS.map(k => [k,
+    over[k] ?? { value: RISK_NUMBERS.has(k) ? 0 : false, evidence: `stub ${k}` }]))
+}
+function riskOutput(range, over = {}, entries = riskEntries(over)) {
+  return `TOUCHSTONE_RISK_SIGNALS ${range}\n${JSON.stringify({ signals: entries })}\n` +
+    `TOUCHSTONE_RISK_SIGNALS_END`
+}
+
 // baseArgs()'s branch/branch:existing defaults both put the worktree here.
 const STUB_WT_PATH = '/tmp/stub-worktree'
 
@@ -186,7 +203,8 @@ function reproduceResponse(prompt, scenario, exitFn, hunkLines) {
 function makeAgent(scenario, captured) {
   return async (prompt, opts) => {
     const label = opts.label
-    captured.calls.push({ label, prompt, schema: opts.schema })
+    captured.calls.push({ label, prompt, schema: opts.schema, model: opts.model,
+      effort: opts.effort, phase: opts.phase })
 
     // Replaces the old separate ticket/plugin:version/gate:opt-in dispatches
     // (gh-118): one call, before any worktree exists, answers all three.
@@ -231,7 +249,8 @@ function makeAgent(scenario, captured) {
     if (label === 'implementer') {
       return { summary: 'stub implementation', files_changed: scenario.implFilesChanged ?? ['a.js', 'b.js'],
         commit_range: COMMIT_RANGE, scored: scenario.implScored ?? true,
-        ...(scenario.implGateNote ? { gate_note: scenario.implGateNote } : {}) }
+        ...(scenario.implGateNote ? { gate_note: scenario.implGateNote } : {}),
+        ...(scenario.implExtra ?? {}) }
     }
     // draft-pr and size (gh-118): the diffstat probe and its one retry. Both
     // read the range straight out of their own prompt (diffstatCommandFor
@@ -258,6 +277,19 @@ function makeAgent(scenario, captured) {
       const diffstat = scenario.diffstat ??
         (scenario.sizeUnmeasured ? 'not a real diffstat' : goodDiffstat)
       return { diffstat, ...(scenario.draftPr ?? { opened: false, detail: 'no draft in this test' }) }
+    }
+    // The change-risk probe (gh-141) and its one retry. The range comes out of
+    // the prompt, as for the diffstat, so a default block always names whatever
+    // range the script asked about. scenario.risk is the first answer and
+    // scenario.riskRetry the retry's (the same one if absent): a string is the
+    // probe's output, a function gets the range, null is a probe that failed.
+    if (label === 'risk-signals' || label === 'risk-signals:retry') {
+      const range = (/risk-signals\.sh \S+ (\S+)/.exec(prompt) ?? [])[1] ?? COMMIT_RANGE
+      const spec = label.endsWith(':retry') && 'riskRetry' in scenario
+        ? scenario.riskRetry : scenario.risk
+      if (spec === null) return null
+      const output = typeof spec === 'function' ? spec(range) : (spec ?? riskOutput(range))
+      return { output }
     }
     // Opening the PR is the workflow's only write to GitHub. These two labels
     // posted comments on it; throwing rather than stubbing them means any

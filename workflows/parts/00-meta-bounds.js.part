@@ -29,7 +29,7 @@ export const meta = {
 // against the manifest in scripts/check-version-bump.sh, so drift is a
 // gate's job rather than something this script verifies about itself.
 const PLUGIN_NAME = 'touchstone'
-const PIPELINE_VERSION = '0.28.0'
+const PIPELINE_VERSION = '0.29.0'
 
 // Boundaries. Wall-clock deadlines are not expressible here (no Date.now, by
 // design); the bounds are rounds, counts, and token budget instead.
@@ -295,11 +295,16 @@ const prNote = () => draftPr
 // halted(), which is defined long before either.
 let planAdditions = null
 let scopeSplit = () => null
+// The change-risk signals the Draft PR phase measures (part 40): null on every
+// halt before the implementer returns a range, and from there on either the
+// parsed block or an {range, unmeasured} record saying why there is none. Nothing reads it back to
+// decide anything; it only travels with the run record.
+let riskSignals = null
 const halted = async (at, extra) => {
   const split = scopeSplit()
   const payload = {
     task, halted_at: at, pipeline_version: pipelineVersion, stage_spend: stageSpend,
-    needs_user: true, record_file: runRecordFile, size,
+    needs_user: true, record_file: runRecordFile, size, risk_signals: riskSignals,
     ...(planAdditions ? { plan_additions: planAdditions } : {}),
     ...(split ? { scope_split: split } : {}),
     ...extra,

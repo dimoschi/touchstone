@@ -74,6 +74,12 @@ echo "$OUT"
 [ -f .git/crap-check-scored.json ] || { echo "FAIL: ledger not written"; exit 1; }
 grep -q 'calc.go' .git/crap-check-scored.json || { echo "FAIL: calc.go not in ledger"; exit 1; }
 grep -q 'calc_test.go' .git/crap-check-scored.json && { echo "FAIL: test file recorded as measurable"; exit 1; }
+TREE1="$(git write-tree)"
+python3 - "$TREE1" <<'PY' || { echo "FAIL: a green run left no per-function rows for the staged tree"; exit 1; }
+import json, sys
+rows = json.load(open('.git/crap-check-rows.json')).get(sys.argv[1])
+assert rows and any('Triple' in r['id'] and r['cc'] and r['cov'] is not None for r in rows), rows
+PY
 
 echo "--- phase 2: docs + _test.go follow-up commit is not an unmeasured commit ---"
 commit -m "feat: add Triple"
@@ -93,6 +99,12 @@ run
 echo "$OUT"
 [ "$RC" -eq 0 ] || { echo "FAIL: docs+test follow-up should pass, got $RC"; echo "$OUT"; exit 1; }
 echo "$OUT" | grep -q 'already scored' || { echo "FAIL: expected already-scored message"; exit 1; }
+python3 - "$TREE1" "$(git rev-parse 'HEAD^{tree}')" <<'PY' || { echo "FAIL: a run with nothing to score must record an empty report without replacing earlier rows"; exit 1; }
+import json, sys
+store = json.load(open('.git/crap-check-rows.json'))
+assert store[sys.argv[2]] == [], store
+assert store[sys.argv[1]], store
+PY
 
 echo "--- phase 3: amending the commit does not invalidate the ledger ---"
 commit --amend -m "docs: notes, and another Double case (reworded)"

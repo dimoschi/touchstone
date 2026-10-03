@@ -149,6 +149,7 @@ function makeAgent(scenario, captured) {
       return { diffstat: goodDiffstat,
         ...(scenario.draftPr ?? { opened: false, detail: 'should not be reached' }) }
     }
+    if (label === 'risk-signals' || label === 'risk-signals:retry') return null
     if (label.startsWith('halt-notice:')) {
       captured.haltAt = label.slice('halt-notice:'.length)
       return true

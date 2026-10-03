@@ -187,6 +187,9 @@ function makeAgent(scenario, captured) {
       return scenario.draftPr ?? { opened: true, url: 'https://example.test/pr/1', number: 1, detail: 'stub',
         diffstat: `TOUCHSTONE_DIFFSTAT ${range}\n${DEFAULT_DIFFSTAT_BODY}` }
     }
+    if (label === 'risk-signals' || label === 'risk-signals:retry') {
+      return null
+    }
     if (label.startsWith('mutation:')) {
       return scenario.mutationResult ??
         { green: true, head_sha: 'impl0000000000000000000000000000000000000',

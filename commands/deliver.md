@@ -220,4 +220,11 @@ otherwise `closed` or `open` from `state`. When gh finds no PR for the branch, s
 `.claude/touchstone-runs/`, re-reads the outcome of any still `open` from gh and
 rewrites it, and prints per pipeline version: runs, outcomes, halts by stage, median
 output tokens per changed line, median fix rounds, and blocking findings against
-notes. A record missing a field is counted as missing, never estimated.
+notes, then fix rounds, halts and blocking findings grouped by each change-risk signal's value. A record
+missing a field is counted as missing, never estimated.
+
+The returned payload carries `risk_signals`: the thirteen change-risk signals measured
+over the run's commit range, each a measured value with its evidence or `unmeasured` with
+a reason, or `{range, unmeasured}` when the probe could not produce a block. It is
+`null` on a halt before the implementer returns a range. Nothing in the run depends on it; keep it in the record
+as returned and do not summarise it.
