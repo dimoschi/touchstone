@@ -29,7 +29,7 @@ export const meta = {
 // against the manifest in scripts/check-version-bump.sh, so drift is a
 // gate's job rather than something this script verifies about itself.
 const PLUGIN_NAME = 'touchstone'
-const PIPELINE_VERSION = '0.28.0'
+const PIPELINE_VERSION = '0.29.0'
 
 // Boundaries. Wall-clock deadlines are not expressible here (no Date.now, by
 // design); the bounds are rounds, counts, and token budget instead.
@@ -295,11 +295,16 @@ const prNote = () => draftPr
 // halted(), which is defined long before either.
 let planAdditions = null
 let scopeSplit = () => null
+// The change-risk signals the Draft PR phase measures (part 40): null on every
+// halt before that phase, and from there on either the parsed block or an
+// {range, unmeasured} record saying why there is none. Nothing reads it back to
+// decide anything; it only travels with the run record.
+let riskSignals = null
 const halted = async (at, extra) => {
   const split = scopeSplit()
   const payload = {
     task, halted_at: at, pipeline_version: pipelineVersion, stage_spend: stageSpend,
-    needs_user: true, record_file: runRecordFile, size,
+    needs_user: true, record_file: runRecordFile, size, risk_signals: riskSignals,
     ...(planAdditions ? { plan_additions: planAdditions } : {}),
     ...(split ? { scope_split: split } : {}),
     ...extra,
@@ -2320,7 +2325,77 @@ const lensKeysFor = (size) =>
   : size.codeChurn > BIG_LOC || size.codeFiles > BIG_FILES ? ['correctness', 'advocate', 'requirements']
   : ['correctness', 'advocate']
 
+// The change-risk probe: risk-signals.sh over the same range the diffstat
+// measures, relayed verbatim by a cheap agent the way the diffstat is. The
+// script owns every value in it; this only checks the block has the shape the
+// script prints, so a model's retelling of it is never read. The set is fixed
+// and every key is always present (a signal that could not be measured says
+// `unmeasured` and why), which is what lets a missing or extra one count as a
+// malformed block rather than as a signal.
+const RISK_SIGNAL_KEYS = ['la', 'ld', 'la_per_lt', 'files', 'directories', 'dependency_surface',
+  'semantic_noop', 'api_broken', 'security_pattern', 'crap_max', 'coverage_min',
+  'entry_reachable', 'prior_defect_files']
+const RISK_TEXT_LIMIT = 400
+const RISK_PROBE = {
+  type: 'object', additionalProperties: false, required: ['output'],
+  properties: { output: { type: 'string' } },
+}
+
+// The skill is named, not its path: the script sits in a version-keyed plugin
+// cache this script cannot see, and every other prompt here finds its gate
+// scripts through the skill the same way.
+const riskPromptFor = (range) =>
+  `Measure this branch's change-risk signals, then STOP. This is a measurement ` +
+  `and not a review: do not read the diff, judge the change or add anything of ` +
+  `your own.\n` +
+  `Invoke the crap-controlled-changes skill to learn the directory it ships in, ` +
+  `then run exactly this, with <skill directory> replaced by that directory, in ` +
+  `the foreground with a Bash timeout of 600000 (it can take minutes: never ` +
+  `background it and wait with sleep):\n` +
+  `<skill directory>/risk-signals.sh ${wt.path} ${range}\n` +
+  `Put everything it printed in output, verbatim: three lines, the first and ` +
+  `last of them markers, with one line of JSON between them. Do not summarise, ` +
+  `reformat, reorder or comment on it. If it exits non-zero, put whatever it ` +
+  `printed in output and stop: do not retry it and do not work around it.`
+
+const riskEntryOk = (e) => {
+  if (e === null || typeof e !== 'object' || Array.isArray(e)) return false
+  const text = (t) => typeof t === 'string' && t.length > 0 && t.length <= RISK_TEXT_LIMIT
+  const fields = Object.keys(e).sort().join(',')
+  if (e.value === 'unmeasured') return fields === 'reason,value' && text(e.reason)
+  const scalar = typeof e.value === 'boolean' || (typeof e.value === 'number' && Number.isFinite(e.value))
+  return fields === 'evidence,value' && scalar && text(e.evidence)
+}
+
+// Pure: reads only the shape of the script's own output, never a model's
+// account of it. The block is exactly three lines, the first naming this
+// range, so one run against other commits, wrapped in prose, or with a line
+// added or lost counts as malformed. The JSON must hold exactly RISK_SIGNAL_KEYS
+// (in any order, since a relay may re-serialise it), each a well-formed entry.
+// Returns null for anything else, the same contract as parseDiffstat.
+const parseRiskSignals = (output, range) => {
+  const lines = String(output ?? '').split(/\r?\n/)
+  while (lines.length && lines[0].trim() === '') lines.shift()
+  while (lines.length && lines[lines.length - 1].trim() === '') lines.pop()
+  if (lines.length !== 3) return null
+  if (lines[0] !== `TOUCHSTONE_RISK_SIGNALS ${range}`) return null
+  if (lines[2] !== 'TOUCHSTONE_RISK_SIGNALS_END') return null
+  let parsed
+  try { parsed = JSON.parse(lines[1]) } catch { return null }
+  const signals = parsed?.signals
+  if (signals === null || typeof signals !== 'object' || Array.isArray(signals)) return null
+  if (Object.keys(parsed).length !== 1) return null
+  const keys = Object.keys(signals)
+  if (keys.length !== RISK_SIGNAL_KEYS.length || !RISK_SIGNAL_KEYS.every(k => keys.includes(k))) return null
+  if (!RISK_SIGNAL_KEYS.every(k => riskEntryOk(signals[k]))) return null
+  return { range, signals }
+}
+
 enterPhase('Draft PR')
+// Set before anything can be refused, so a halt from here on carries a record
+// saying why there are no signals instead of a bare null.
+riskSignals = { range: impl.commit_range,
+  unmeasured: 'the run stopped before the risk-signals probe returned' }
 const draft = await treeAgent(
   `Make sure this branch has a pull request to hang the run's progress on, ` +
   `then STOP.\n` +
@@ -2360,6 +2435,29 @@ if (draft?.number) {
 } else {
   log(`draft PR not opened (${draft?.detail ?? 'no detail'}); continuing. ` +
       `A halt from here on is only visible in this session`)
+}
+
+// One retry, at the same range, for a block the shape check refuses, and then
+// the record says so and the run goes on. A risk probe never halts a run:
+// nothing downstream depends on it yet, and a new halt would change outcomes.
+// No stage() and no ceiling either, for the same reason draft-pr has none.
+const riskRange = impl.commit_range
+const riskOpts = (label) => ({ label, phase: 'Draft PR', schema: RISK_PROBE, model: 'haiku',
+  effort: 'low' })
+let riskBlock = parseRiskSignals(
+  (await treeAgent(riskPromptFor(riskRange), riskOpts('risk-signals')))?.output, riskRange)
+if (!riskBlock) {
+  riskBlock = parseRiskSignals(
+    (await treeAgent(riskPromptFor(riskRange), riskOpts('risk-signals:retry')))?.output, riskRange)
+}
+riskSignals = riskBlock ?? { range: riskRange, unmeasured:
+  `the risk-signals probe did not return a well-formed block, even after a retry` }
+if (riskBlock) {
+  const named = (value) => RISK_SIGNAL_KEYS.filter(k => riskBlock.signals[k].value === value)
+  log(`risk signals: raised ${named(true).join(', ') || 'none'}; ` +
+      `unmeasured ${named('unmeasured').join(', ') || 'none'}`)
+} else {
+  log(`risk signals: not measured, even after a retry; the run carries on without them`)
 }
 
 enterPhase('Review')
@@ -3650,6 +3748,7 @@ const result = {
   checks: checksPayload(),
   mutation,
   size,
+  risk_signals: riskSignals,
   reviewers: reviewerCount,
   // Raised but never blocking: wrong category, no reproducer, an unmet
   // criterion whose quote was not found, out of range, or a residual of a
