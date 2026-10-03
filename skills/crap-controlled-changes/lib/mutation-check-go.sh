@@ -26,7 +26,9 @@
 #   MUTATION_GO_WORKERS     parallel mutants (default: cores/4, min 1)
 #   MUTATION_GO_MAXPROCS    GOMAXPROCS per worker (default: 2)
 #   MUTATION_GOCACHE        build cache for mutant compiles (default: <GOCACHE>-mutation)
-#   MUTATION_GOCACHE_MAX_MB reset that cache once it exceeds this (default: 8192)
+#   MUTATION_GOCACHE_MAX_MB reset that cache when a run starts or ends over this (default: 8192)
+#   MUTATION_MIN_FREE_MB    refuse to start below this much free space (default: 4096)
+#   MUTATION_GO_CONCURRENCY runs allowed at once per cache, i.e. per machine (default: 1)
 #
 # Exit codes: 0 measured, 2 setup problem, 4 could not measure.
 
@@ -34,6 +36,7 @@ set -euo pipefail
 
 SKILL_LIB="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$SKILL_LIB/tool-versions.sh"
+source "$SKILL_LIB/repo-lock.sh"
 
 MUTAGO_VERSION="${MUTATION_GO_MUTAGO_VERSION:-$MUTAGO_VERSION_DEFAULT}"
 MUTAGO_PKG="github.com/quality-gates/mutago/v2/cmd/mutago"
@@ -75,7 +78,16 @@ BYMOD="$(mktemp)"
 # Set here rather than beside RAW_OUT: the "nothing to mutate" exit below comes
 # first and would otherwise leak this file. The rest are unset then, which the
 # :- guards make harmless.
-trap 'rm -f "$BYMOD" "${RAW_OUT:-}" "${RAW_ERR:-}"' EXIT
+GO_LOCK_SLOT=""
+cleanup() {
+  rm -f "$BYMOD" "${RAW_OUT:-}" "${RAW_ERR:-}"
+  [ -n "$GO_LOCK_SLOT" ] || return 0
+  # Before the release, so the next queued run never starts on a cache this one
+  # is still deleting.
+  reset_cache_over_budget
+  rm -rf "$GO_LOCK_SLOT"
+}
+trap cleanup EXIT
 for f in "${CHANGED[@]}"; do
   [ -f "$f" ] || continue
   printf '%s\n' "$f"
@@ -111,15 +123,62 @@ GO_MAXPROCS="${MUTATION_GO_MAXPROCS:-2}"
 # and reset past the budget at the cost of one cold dependency build. The budget
 # must clear several full runs or it defeats itself: one measured 2.5 GB, so the
 # old 4 GB cap fired every second run and turned warm deps cold each time.
+# The budget is checked at both ends of a run, because one run alone can grow
+# the cache far past it.
 MUTATION_GOCACHE="${MUTATION_GOCACHE:-$(go env GOCACHE)-mutation}"
-if [ -d "$MUTATION_GOCACHE" ]; then
+reset_cache_over_budget() {
+  [ -d "$MUTATION_GOCACHE" ] || return 0
+  local cache_mb
   # du exits non-zero on an unreadable entry but still reports the total.
   cache_mb="$(du -sm "$MUTATION_GOCACHE" 2>/dev/null | cut -f1 || true)"
   if [ "${cache_mb:-0}" -gt "${MUTATION_GOCACHE_MAX_MB:-8192}" ]; then
     echo "mutation-check[go]: resetting mutant build cache (${cache_mb}MB)" >&2
     rm -rf "$MUTATION_GOCACHE"
   fi
-fi
+}
+
+# Several worktrees each running mutation at once multiplied both the CPU load
+# and the cache growth until a disk filled. Runs sharing a cache take one of
+# MUTATION_GO_CONCURRENCY slots beside it and otherwise wait; there is no wait
+# cap, because a legitimate run ahead can take hours.
+acquire_go_slot() {
+  local root="$MUTATION_GOCACHE.lock" limit="${MUTATION_GO_CONCURRENCY:-1}" slot told=0
+  mkdir -p "$root"
+  while :; do
+    for slot in $(seq 1 "$limit"); do
+      if take_lock_dir "$root/$slot" "mutation-check[go]: clearing a run lock left by dead pid"; then
+        GO_LOCK_SLOT="$root/$slot"
+        return 0
+      fi
+    done
+    if [ "$told" -eq 0 ]; then
+      echo "mutation-check[go]: $limit Go mutation run(s) already hold $root (pid ${LOCK_OWNER:-unknown}); waiting..." >&2
+      told=1
+    fi
+    sleep 1
+  done
+}
+
+require_free_space() {
+  local dir="$1" line free_mb volume min="${MUTATION_MIN_FREE_MB:-4096}"
+  line="$(df -Pk "$dir" | awk 'NR == 2 { free = $4; $1 = $2 = $3 = $4 = $5 = ""; sub(/^ +/, ""); print int(free / 1024), $0 }')"
+  free_mb="${line%% *}"
+  volume="${line#* }"
+  if [ "$free_mb" -lt "$min" ]; then
+    {
+      echo "mutation-check[go]: refusing to start: ${free_mb}MB free on volume $volume (holding $dir),"
+      echo "  below MUTATION_MIN_FREE_MB=$min. A run grows the mutant build cache and temp"
+      echo "  space as it goes, so free space first. This is a setup problem, not a pass."
+    } >&2
+    exit 2
+  fi
+}
+
+acquire_go_slot
+reset_cache_over_budget
+mkdir -p "$MUTATION_GOCACHE"
+require_free_space "$MUTATION_GOCACHE"
+require_free_space "${TMPDIR:-/tmp}"
 export GOCACHE="$MUTATION_GOCACHE"
 
 MUTAGO_ARGS=(--git-diff-lines --git-diff-base="$MUTATION_BASE" --logger-agentic-json

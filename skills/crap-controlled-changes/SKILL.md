@@ -162,7 +162,7 @@ and wait rather than interleave. A run killed mid-stash leaves the lock behind
 with its pid in it; the next run clears it once that pid is gone. `CRAP_LOCK_WAIT`
 caps the wait (default 900s). Do not add your own locking around gate runs.
 
-Env knobs: `MUTATION_GO_TEST_FLAGS`, `MUTATION_PHP_INFECTION`, `MUTATION_PHP_CONFIG`, `MUTATION_PHP_THREADS`, `MUTATION_PY_RUN`. The Go run is CPU-bounded to `cores/4` parallel mutants at `GOMAXPROCS=2` each, since mutago's own default is one worker per core and each worker runs a full `go test`; raise with `MUTATION_GO_WORKERS` / `MUTATION_GO_MAXPROCS` on a machine that can take it.
+Env knobs: `MUTATION_GO_TEST_FLAGS`, `MUTATION_PHP_INFECTION`, `MUTATION_PHP_CONFIG`, `MUTATION_PHP_THREADS`, `MUTATION_PY_RUN`. The Go run is CPU-bounded to `cores/4` parallel mutants at `GOMAXPROCS=2` each, since mutago's own default is one worker per core and each worker runs a full `go test`; raise with `MUTATION_GO_WORKERS` / `MUTATION_GO_MAXPROCS` on a machine that can take it. Go mutation runs also queue one at a time per machine (`MUTATION_GO_CONCURRENCY` raises that), refuse with exit 2 below `MUTATION_MIN_FREE_MB` free (default 4096) on the cache or temp volume, and reset the mutant build cache when it is over `MUTATION_GOCACHE_MAX_MB` (default 8192) at the start or the end of a run. A run that prints `waiting...` is queued behind another, not hung.
 
 ## Out of Scope
 
