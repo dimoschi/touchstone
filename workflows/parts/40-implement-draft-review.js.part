@@ -68,6 +68,7 @@ let scored = impl.scored === true
 // says which.
 let scoredNote = scored ? (impl.gate_note ?? '') : ''
 let unscoredNote = scored ? '' : (impl.gate_note ?? '')
+widenBudgetHaltState(() => ({ implemented: impl.summary, gates: gatesPayload() }))
 
 // The only other outcome this phase can report, and the only one that must
 // not fall through to Draft PR: the schema has no other way to say "I

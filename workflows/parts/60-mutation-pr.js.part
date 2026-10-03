@@ -7,6 +7,7 @@
 enterPhase('Mutation')
 const sMut = stage('mutation')
 let mutation = { green: false, detail: 'not run' }
+widenBudgetHaltState(() => ({ mutation }))
 
 // Mutation gating is opt-in, on the same marker mutation-pr-gate.py reads.
 // mutationGated came out of the merged gate-opt-in probe before Implement;
@@ -345,6 +346,7 @@ return result
     const byStage = Object.entries(stageSpend)
       .map(([name, spent]) => `${name} ${Math.round(spent / 1000)}k`).join(', ')
     return await halted(currentPhase, {
+      ...budgetHaltState(),
       note: `Run budget exhausted (${Math.round(runBudget / 1000)}k output ` +
         `tokens, ${runBudgetNote}). Spend at halt: ` +
         `${Math.round(runBudgetSpent.spent / 1000)}k output tokens (${byStage}). The ` +

@@ -206,6 +206,16 @@ log(`run budget: ${Math.round(runBudget / 1000)}k output tokens (${runBudgetNote
 // thrown error's identity, since a genuine failure (the planner or
 // implementer returning nothing, for instance) must still propagate rather
 // than being read as a budget halt.
+//
+// That catch also has to report the state the run had reached, but it cannot
+// read the `let` bindings this try declares. So each phase widens this
+// closure once the state it adds exists; reading a binding any earlier is the
+// TDZ failure recorded above `scored`.
+let budgetHaltState = () => ({})
+const widenBudgetHaltState = (more) => {
+  const prior = budgetHaltState
+  budgetHaltState = () => ({ ...prior(), ...more() })
+}
 try {
 
 // A plan an earlier run already produced arrives as args.plan and starts this
@@ -568,4 +578,5 @@ function checksPayload() {
 // Red but not blocking (existingBranch) reaches the fixer as nothing at
 // all: it is visibility for a human, not work to hand to an agent.
 const blockingChecksOpen = () => checksBlocking && redChecks.length > 0
+widenBudgetHaltState(() => ({ plan: plan.plan, checks: checksPayload() }))
 

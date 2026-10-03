@@ -29,7 +29,7 @@ export const meta = {
 // against the manifest in scripts/check-version-bump.sh, so drift is a
 // gate's job rather than something this script verifies about itself.
 const PLUGIN_NAME = 'touchstone'
-const PIPELINE_VERSION = '0.26.2'
+const PIPELINE_VERSION = '0.26.3'
 
 // Boundaries. Wall-clock deadlines are not expressible here (no Date.now, by
 // design); the bounds are rounds, counts, and token budget instead.
@@ -1632,6 +1632,16 @@ log(`run budget: ${Math.round(runBudget / 1000)}k output tokens (${runBudgetNote
 // thrown error's identity, since a genuine failure (the planner or
 // implementer returning nothing, for instance) must still propagate rather
 // than being read as a budget halt.
+//
+// That catch also has to report the state the run had reached, but it cannot
+// read the `let` bindings this try declares. So each phase widens this
+// closure once the state it adds exists; reading a binding any earlier is the
+// TDZ failure recorded above `scored`.
+let budgetHaltState = () => ({})
+const widenBudgetHaltState = (more) => {
+  const prior = budgetHaltState
+  budgetHaltState = () => ({ ...prior(), ...more() })
+}
 try {
 
 // A plan an earlier run already produced arrives as args.plan and starts this
@@ -1994,6 +2004,7 @@ function checksPayload() {
 // Red but not blocking (existingBranch) reaches the fixer as nothing at
 // all: it is visibility for a human, not work to hand to an agent.
 const blockingChecksOpen = () => checksBlocking && redChecks.length > 0
+widenBudgetHaltState(() => ({ plan: plan.plan, checks: checksPayload() }))
 
 const sImpl = stage('implement')
 const impl = await treeAgent(
@@ -2065,6 +2076,7 @@ let scored = impl.scored === true
 // says which.
 let scoredNote = scored ? (impl.gate_note ?? '') : ''
 let unscoredNote = scored ? '' : (impl.gate_note ?? '')
+widenBudgetHaltState(() => ({ implemented: impl.summary, gates: gatesPayload() }))
 
 // The only other outcome this phase can report, and the only one that must
 // not fall through to Draft PR: the schema has no other way to say "I
@@ -2944,6 +2956,7 @@ const notExecutedHalt = (at, notExecuted, extra) => {
 let settled = []
 let open = []
 let round = 0
+widenBudgetHaltState(() => ({ unresolved_findings: open, notes, fix_rounds: round }))
 if (reviewerCount) {
   const raised = await collapseDuplicates(await reviewOf(impl.commit_range, 'review', lenses))
   const { candidates, freshNotes } = classifyBatch(raised, null, 0)
@@ -2968,6 +2981,7 @@ const sFix = stage('fix')
 // targets), separate from stageSpend.fix which also carries the executor and
 // tail review.
 const fixRoundSpend = []
+widenBudgetHaltState(() => ({ fix_round_output: fixRoundSpend }))
 
 const fixStopReason = () =>
   !open.length && !blockingChecksOpen() ? 'every finding and check was resolved'
@@ -3303,6 +3317,7 @@ if (open.length || blockingChecksOpen()) {
 enterPhase('Mutation')
 const sMut = stage('mutation')
 let mutation = { green: false, detail: 'not run' }
+widenBudgetHaltState(() => ({ mutation }))
 
 // Mutation gating is opt-in, on the same marker mutation-pr-gate.py reads.
 // mutationGated came out of the merged gate-opt-in probe before Implement;
@@ -3641,6 +3656,7 @@ return result
     const byStage = Object.entries(stageSpend)
       .map(([name, spent]) => `${name} ${Math.round(spent / 1000)}k`).join(', ')
     return await halted(currentPhase, {
+      ...budgetHaltState(),
       note: `Run budget exhausted (${Math.round(runBudget / 1000)}k output ` +
         `tokens, ${runBudgetNote}). Spend at halt: ` +
         `${Math.round(runBudgetSpent.spent / 1000)}k output tokens (${byStage}). The ` +
