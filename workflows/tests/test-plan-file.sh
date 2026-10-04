@@ -80,8 +80,9 @@ async function scenarioPF3() {
   check('the plan is 6000 chars', plan.length, 6000)
   check('no planner:tighten call', callCount(captured, 'planner:tighten'), 0)
   const written = planFileIn(promptOf(captured, 'plan:write'))
-  check('the file content is the plan, a blank line, and the end line',
-    written?.content === `${plan}\n\nEND OF PLAN ${written?.id}\n`, true)
+  check('the text to copy is the plan alone', written?.content === `${plan}\n`, true)
+  check('the end line is appended by the given command',
+    promptOf(captured, 'plan:write').includes(planEndCommand(written?.id)), true)
 }
 
 // Scenario PF4 -- the planner is told the limit, and args.planMaxChars moves it.
@@ -128,7 +129,10 @@ async function scenarioPF6() {
   check('the whole plan is in the file content', written?.content.startsWith(plan), true)
   check('no brief truncation marker', p.includes('[brief truncated]'), false)
   check('the id is eight hex digits', /^[0-9a-f]{8}$/.test(written?.id ?? ''), true)
-  check('the file ends with the end line', written?.content.endsWith(`\nEND OF PLAN ${written?.id}\n`), true)
+  check('the text to copy holds no end line, so no model has to copy it',
+    written?.content.includes('END OF PLAN'), false)
+  check('the end line is appended by a command the script built',
+    p.includes(planEndCommand(written?.id)), true)
   check('it targets the worktree plan file', p.includes('/tmp/stub-worktree/.touchstone/plan.md'), true)
   check('it creates the directory and clears any file from an earlier run',
     p.includes('mkdir -p /tmp/stub-worktree/.touchstone && rm -f /tmp/stub-worktree/.touchstone/plan.md'), true)

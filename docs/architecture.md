@@ -327,8 +327,10 @@ The implementer never gets the plan as prompt text. `brief()` clamps to `briefCh
   same limit but never tightened: over it, the run halts at Plan before any agent is
   dispatched (no setup, branch or triage), so nothing has been created. The inline stub
   plan is not gated.
-- **Plan file.** On every plan path, a haiku `plan:write` agent writes the plan, a blank
-  line and `END OF PLAN <id>` to `<worktree>/.touchstone/plan.md`, adds `.touchstone/`
+- **Plan file.** On every plan path, a haiku `plan:write` agent copies the plan to
+  `<worktree>/.touchstone/plan.md`, then runs a `printf` the script built that appends a
+  blank line and `END OF PLAN <id>`. The model never copies the end line: when it sat
+  inside the copied text it read as one of the markers around it and was dropped. It adds `.touchstone/`
   to `info/exclude` under `git rev-parse --git-common-dir` (never a tracked
   `.gitignore`), and reports `wc -c`, `tail -n 1` and the `git check-ignore` exit. The
   script halts at Implement unless the byte count equals the UTF-8 length it computed

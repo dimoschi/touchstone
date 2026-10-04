@@ -87,6 +87,11 @@ function planFileIn(prompt) {
   return m ? { id: m[1], content: m[2] } : null
 }
 
+// The command the plan:write prompt gives for appending the end line.
+function planEndCommand(id) {
+  return `printf '\\nEND OF PLAN %s\\n' ${id} >> ${STUB_WT_PATH}/.touchstone/plan.md`
+}
+
 // The exact Bash invocation deliver-pipeline.js's own invocationFor builds
 // for a check, id included since the trailing echo names it. A checkRuns
 // stub uses this so a scenario testing the happy path does not have to
@@ -248,9 +253,16 @@ function makeAgent(scenario, captured) {
       const override = typeof scenario.planWrite === 'function'
         ? scenario.planWrite(attempt) : scenario.planWrite
       if (override === null) return null
-      const written = planFileIn(prompt)
-      return { bytes: written ? Buffer.byteLength(written.content, 'utf8') : 0,
-        last_line: written ? written.content.replace(/\n$/, '').split('\n').pop() : '',
+      const copied = planFileIn(prompt)
+      // The copied text, plus the end line only when the prompt carries the
+      // command that appends it, as the shell would run it.
+      const appends = copied && new RegExp(
+        `^4\\. Then run exactly: printf '\\\\nEND OF PLAN %s\\\\n' ${copied.id} >> \\S+/\\.touchstone/plan\\.md$`, 'm')
+        .test(prompt)
+      const appended = appends ? `\nEND OF PLAN ${copied.id}\n` : ''
+      const file = copied ? copied.content + appended : ''
+      return { bytes: Buffer.byteLength(file, 'utf8'),
+        last_line: file.replace(/\n$/, '').split('\n').pop(),
         ignored_exit: 0, ...(override ?? {}) }
     }
     // implPlanId: undefined omits plan_id from the response altogether.

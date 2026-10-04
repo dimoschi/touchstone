@@ -29,7 +29,7 @@ export const meta = {
 // against the manifest in scripts/check-version-bump.sh, so drift is a
 // gate's job rather than something this script verifies about itself.
 const PLUGIN_NAME = 'touchstone'
-const PIPELINE_VERSION = '0.29.0'
+const PIPELINE_VERSION = '0.29.1'
 
 // Boundaries. Wall-clock deadlines are not expressible here (no Date.now, by
 // design); the bounds are rounds, counts, and token budget instead.
@@ -1803,7 +1803,12 @@ const utf8Length = (s) => {
 const planId = fnv1a(`${ticket}${plan.plan}`)
 const planFile = `${wt.path}/.touchstone/plan.md`
 const planEndLine = `END OF PLAN ${planId}`
-const planContent = `${plan.plan}\n\n${planEndLine}\n`
+// The model copies the plan alone; the end line is appended by a command
+// built here, since a sentinel inside the copied text read as one of the
+// markers around it and was dropped.
+const planBody = `${plan.plan}\n`
+const planEndCommand = `printf '\\nEND OF PLAN %s\\n' ${planId} >> ${planFile}`
+const planContent = `${planBody}\n${planEndLine}\n`
 widenBudgetHaltState(() => ({ plan: plan.plan }))
 const planWritePrompt =
   `Write the plan file, then STOP. Do not implement anything and do not commit.\n` +
@@ -1815,15 +1820,16 @@ const planWritePrompt =
   `3. Write the text between the PLAN FILE BEGIN and PLAN FILE END lines below ` +
   `to ${planFile} with the Write tool. The file ` +
   `is exactly that text: it starts at the first character after the BEGIN ` +
-  `line's newline and ends with the newline after its last line, ` +
-  `${planEndLine}. Do not trim, reflow, translate, summarise or correct it, ` +
-  `and leave both marker lines out.\n` +
-  `4. Only after steps 1 to 3, run these and report what they print, never ` +
+  `line's newline and ends with the newline after its last line. Do not ` +
+  `trim, reflow, translate, summarise or correct it, and leave both marker ` +
+  `lines out.\n` +
+  `4. Then run exactly: ${planEndCommand}\n` +
+  `5. Only after steps 1 to 4, run these and report what they print, never ` +
   `what you expect them to print. bytes: the number printed by ` +
   `wc -c < ${planFile}. last_line: what tail -n 1 ${planFile} prints, exactly, ` +
   `without its newline. ignored_exit: the exit status of ` +
   `git -C ${wt.path} check-ignore -q .touchstone/plan.md (0 means ignored).\n` +
-  `PLAN FILE BEGIN ${planId}\n${planContent}PLAN FILE END ${planId}`
+  `PLAN FILE BEGIN ${planId}\n${planBody}PLAN FILE END ${planId}`
 const planWriteOpts = { schema: PLAN_WRITE, model: 'haiku', effort: 'low' }
 const planWriteProblemOf = (written) => !written
   ? 'the plan:write agent returned nothing'
