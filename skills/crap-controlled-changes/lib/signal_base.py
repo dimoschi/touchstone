@@ -195,9 +195,10 @@ def _status_of(text):
 
 def _diff(repo, base, head, *flags, specs=()):
     tail = ['--', *specs] if specs else []
-    # A user's diff.external (difftastic's setup) or GIT_EXTERNAL_DIFF replaces the
-    # hunks added_lines reads with the tool's own output.
-    return git(repo, 'diff', '--no-ext-diff', *flags, '--no-renames', base, head, *tail)
+    # added_lines parses hunks and the b/ prefix, so pin everything a user's diff config
+    # can rewrite: an external diff tool (difftastic), prefixes, hunk merging, textconv.
+    return git(repo, 'diff', '--no-ext-diff', '--no-textconv', '--src-prefix=a/', '--dst-prefix=b/',
+               '--inter-hunk-context=0', *flags, '--no-renames', base, head, *tail)
 
 
 def _paths(repo, base, head, specs):

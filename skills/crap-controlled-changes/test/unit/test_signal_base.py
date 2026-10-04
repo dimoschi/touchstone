@@ -279,6 +279,36 @@ def test_load_ctx_lists_added_lines_whatever_external_diff_tool_the_user_set(rep
     assert ctx.added == {"a.py": {2}}
 
 
+@pytest.mark.parametrize("setting,path,before,after,added", [
+    (("diff.dstPrefix", "X/"), "a.py", "a\n", "a\nb\n", {2}),
+    (("diff.noprefix", "true"), "b/a.py", "a\n", "a\nb\n", {2}),
+    (("diff.mnemonicPrefix", "true"), "a.py", "a\n", "a\nb\n", {2}),
+    (("diff.interHunkContext", "5"), "a.py", "1\n2\n3\n4\n", "1\nx\n2\n3\ny\n4\n", {2, 5}),
+])
+def test_load_ctx_lists_added_lines_whatever_diff_config_the_user_set(repo, setting, path, before, after, added):
+    repo.write(path, before)
+    base = repo.commit("base")
+    repo.write(path, after)
+    head = repo.commit("head")
+    repo.git("config", *setting)
+    ctx = sb.load_ctx(str(repo.root), f"{base}..{head}", no_settings())
+    assert ctx.added == {path: added}
+
+
+def test_load_ctx_lists_added_lines_whatever_textconv_driver_the_path_has(repo, tmp_path):
+    driver = tmp_path / "conv"
+    driver.write_text("#!/bin/sh\necho converted\n")
+    driver.chmod(0o755)
+    repo.write(".gitattributes", "*.txt diff=conv\n")
+    repo.write("a.txt", "a\n")
+    base = repo.commit("base")
+    repo.write("a.txt", "a\nb\n")
+    head = repo.commit("head")
+    repo.git("config", "diff.conv.textconv", str(driver))
+    ctx = sb.load_ctx(str(repo.root), f"{base}..{head}", no_settings())
+    assert ctx.added == {"a.txt": {2}}
+
+
 def test_load_ctx_without_exemptions_gates_every_changed_path(changed):
     repo, base, head = changed
     ctx = sb.load_ctx(str(repo.root), f"{base}..{head}", no_settings())
