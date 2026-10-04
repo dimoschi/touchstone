@@ -67,6 +67,14 @@ prints the repo root and branch it resolved as the first line of its output on
 every code path. Needs only git, bash and python3, since nothing in it mutates
 code.
 
+`skills/crap-controlled-changes/test/run-crap-rows.sh` and `run-change-signals.sh` cover
+`crap-check.sh` keeping the rows of a green run and `change-signals.sh` end to end. Neither
+needs a language toolchain: the first replaces the Python module with a stub, the second
+stubs `go` and reports the signals whose tools are absent as unmeasured. The unit suites
+behind the signals (`test_signal_base.py`, `test_signal_tools.py`, `test_change_signals.py`)
+put stub tools on a `PATH` that holds only `git` and `tar`, so what the host has installed
+never changes a result; `workflows/tests/test-change-signals.sh` covers the pipeline half.
+
 `skills/crap-controlled-changes/test/run-python-subproject.sh` covers a Python
 project living in a repo subdirectory: no `CRAP_PY_PROJECT_DIR` refuses and
 names it, the variable measures it for real, and a changed file no test

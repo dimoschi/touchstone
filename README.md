@@ -139,6 +139,11 @@ exit 2 (setup problem) rather than reporting a pass.
 
 Optional:
 
+- **Tools for the change-risk signals** the Draft PR phase records: `apidiff`, `gosec`
+  and `deadcode` (run through `go run`) for Go, `griffe` and `bandit` for Python,
+  `roave-backward-compatibility-check` and `opengrep` for PHP, and `difft` for every
+  language. A signal whose tool is absent is recorded as `unmeasured` with the reason,
+  never as false, and nothing in the run depends on any of them.
 - **Jira** via the Atlassian MCP server, for `PROJ-1234`-style keys. A bare number
   is read as a GitHub issue instead. A ticket that cannot be fetched is not fatal:
   the pipeline proceeds without its prose.
