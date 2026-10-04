@@ -126,8 +126,11 @@ function makeAgent(scenario, captured) {
     if (label === 'plan:write') {
       const m = /^PLAN FILE BEGIN ([0-9a-f]{8})\n([\s\S]*)^PLAN FILE END \1$/m.exec(prompt)
       captured.planId = m?.[1]
-      return { bytes: Buffer.byteLength(m?.[2] ?? '', 'utf8'),
-        last_line: (m?.[2] ?? '').replace(/\n$/, '').split('\n').pop(), ignored_exit: 0 }
+      // The copied body, plus the end line the prompt's printf appends.
+      const appends = m && prompt.includes(`printf '\\nEND OF PLAN %s\\n' ${m[1]} >> `)
+      const file = (m?.[2] ?? '') + (appends ? `\nEND OF PLAN ${m[1]}\n` : '')
+      return { bytes: Buffer.byteLength(file, 'utf8'),
+        last_line: file.replace(/\n$/, '').split('\n').pop(), ignored_exit: 0 }
     }
     if (label.startsWith('plan:leak:')) {
       const range = (/echo TOUCHSTONE_PLAN_LEAK ([^\s;]+);/.exec(prompt) ?? [])[1] ?? ''
