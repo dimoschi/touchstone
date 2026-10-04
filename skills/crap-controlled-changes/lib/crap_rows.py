@@ -19,6 +19,10 @@ that commit exists, so a row names the HEAD it ran against and the tree it
 scored; the commit is the one after that HEAD in the history asked about, with
 that tree. A commit rewritten into a different tree (amend, rebase) ends the claim
 of its rows.
+
+A run whose commit has not landed yet keeps the landed row it was merged over, as
+`prior`, one level deep. Until its own commit lands the row counts as that prior, so
+a second run at the same HEAD cannot cost a landed commit the tag it earned.
 """
 
 import argparse
@@ -63,25 +67,40 @@ def trees_after(repo, head, since):
     return set(done.stdout.split()) if done.returncode == 0 else set()
 
 
+def lands(repo, head, trees, claim):
+    """Whether the commit `claim` names is in the history of `head`; `trees` caches per `since`."""
+    since = claim.get('head', '')
+    if since not in trees:
+        trees[since] = trees_after(repo, head, since)
+    return claim.get('tree') in trees[since]
+
+
+def claim_of(repo, head, trees, row):
+    """`row` without its `prior` if its commit is in the history of `head`, else its `prior` the same way, else None."""
+    for claim in (row, row.get('prior')):
+        if claim and lands(repo, head, trees, claim):
+            return {k: v for k, v in claim.items() if k != 'prior'}
+    return None
+
+
 def landed(repo, rows, head):
-    """The `rows` whose commit is in the history of `head`."""
+    """The `rows` whose commit is in the history of `head`, each without its `prior`.
+
+    A row whose own commit is not there falls back to its `prior`; neither: dropped.
+    """
     trees = {}
-    kept = {}
-    for fid, row in rows.items():
-        since = row.get('head', '')
-        if since not in trees:
-            trees[since] = trees_after(repo, head, since)
-        if row.get('tree') in trees[since]:
-            kept[fid] = row
-    return kept
+    claims = {fid: claim_of(repo, head, trees, row) for fid, row in rows.items()}
+    return {fid: claim for fid, claim in claims.items() if claim}
 
 
 def record(path, branch, text, repo):
     head, tree = git(repo, 'rev-parse', 'HEAD'), git(repo, 'write-tree')
-    fresh = {fid: {**row, 'head': head, 'tree': tree} for fid, row in parse(text).items()}
     with scored_ledger.locked(path):
         store = scored_ledger.load(path)
-        store[branch] = merge(landed(repo, store.get(branch, {}), head), fresh)
+        kept = landed(repo, store.get(branch, {}), head)
+        fresh = {fid: {**row, 'head': head, 'tree': tree, 'prior': kept.get(fid)}
+                 for fid, row in parse(text).items()}
+        store[branch] = merge(kept, fresh)
         scored_ledger.save(path, store)
 
 

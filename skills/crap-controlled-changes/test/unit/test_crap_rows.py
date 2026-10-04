@@ -210,6 +210,69 @@ def test_latest_is_empty_for_rows_kept_without_a_head_and_tree(repo):
     assert crap_rows.latest(repo.rows_path, "feat", str(repo.root), head) == {}
 
 
+LANDED_F = "lib/a.py::f  complexity=5  coverage=100.0%  CRAP=5.0  OK  (new)\n"
+RERUN_F = "lib/a.py::f  complexity=2  coverage=90.0%  CRAP=2.1  OK  (unchanged)\n"
+
+
+def run_without_landing(repo, name):
+    """A green gate run against a staged change that no commit follows."""
+    repo.write(name, "x\n")
+    staged_tree(repo)
+    crap_rows.record(repo.rows_path, "feat", RERUN_F, str(repo.root))
+
+
+def test_two_runs_at_the_same_head_do_not_lose_the_tag_a_landed_commit_earned(repo):
+    repo.commit("base")
+    repo.land(LANDED_F)
+    run_without_landing(repo, "one.txt")
+    run_without_landing(repo, "two.txt")
+    head = repo.commit("lands the second run")
+    got = crap_rows.latest(repo.rows_path, "feat", str(repo.root), head)["lib/a.py::f"]
+    assert (got["tag"], got["crap"]) == ("new", "2.1")
+
+
+def test_latest_returns_the_landed_row_while_the_runs_after_it_are_pending(repo):
+    repo.commit("base")
+    head = repo.land(LANDED_F)
+    landed = crap_rows.latest(repo.rows_path, "feat", str(repo.root), head)
+    run_without_landing(repo, "one.txt")
+    run_without_landing(repo, "two.txt")
+    got = crap_rows.latest(repo.rows_path, "feat", str(repo.root), head)
+    assert got == landed
+    assert (got["lib/a.py::f"]["tag"], got["lib/a.py::f"]["crap"]) == ("new", "5.0")
+
+
+def test_latest_never_returns_the_prior_a_pending_row_keeps(repo):
+    repo.commit("base")
+    repo.land(LANDED_F)
+    run_without_landing(repo, "one.txt")
+    head = repo.commit("lands the run")
+    assert "prior" not in crap_rows.latest(repo.rows_path, "feat", str(repo.root), head)["lib/a.py::f"]
+
+
+def test_rows_stored_without_a_prior_are_read_as_before(repo):
+    base = repo.commit("base")
+    landed_tree = repo.git("write-tree")
+    head = repo.commit("lands the row")
+    old_shape = {"feat": {"x::landed": row(head=base, tree=landed_tree), "x::pending": row(head=base, tree="0" * 40)}}
+    with open(repo.rows_path, "w") as f:
+        json.dump(old_shape, f)
+    assert crap_rows.latest(repo.rows_path, "feat", str(repo.root), head) == {
+        "x::landed": row(head=base, tree=landed_tree)}
+
+
+def test_a_pending_row_whose_prior_was_rewritten_away_is_dropped(repo):
+    base = repo.commit("base")
+    repo.land(LANDED_F)
+    run_without_landing(repo, "one.txt")
+    repo.git("reset", "-q", "--hard", base)
+    head = repo.commit("work without a gate")
+    assert crap_rows.latest(repo.rows_path, "feat", str(repo.root), head) == {}
+    crap_rows.record(repo.rows_path, "feat", "lib/b.py::g  complexity=1  coverage=100.0%  CRAP=1.0  OK  (new)\n",
+                     str(repo.root))
+    assert sorted(stored(repo)) == ["lib/b.py::g"]
+
+
 def test_main_records_the_rows_on_stdin(repo, monkeypatch):
     repo.commit("base")
     monkeypatch.setattr("sys.stdin", io.StringIO(GREEN))
