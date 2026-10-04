@@ -195,7 +195,9 @@ def _status_of(text):
 
 def _diff(repo, base, head, *flags, specs=()):
     tail = ['--', *specs] if specs else []
-    return git(repo, 'diff', *flags, '--no-renames', base, head, *tail)
+    # A user's diff.external (difftastic's setup) or GIT_EXTERNAL_DIFF replaces the
+    # hunks added_lines reads with the tool's own output.
+    return git(repo, 'diff', '--no-ext-diff', *flags, '--no-renames', base, head, *tail)
 
 
 def _paths(repo, base, head, specs):

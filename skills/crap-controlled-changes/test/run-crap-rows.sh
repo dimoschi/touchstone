@@ -71,6 +71,21 @@ stage_change 4
 check "the gate is red again" "$(gate "$RED")" 1
 check "the rows file is unchanged" "$([ "$(cat "$ROWS_FILE")" = "$before" ] && echo same || echo changed)" same
 
+echo "== a green run in a linked worktree records into the common git dir"
+WT="$WORK/wt"
+git -C "$REPO" worktree add -q -b wtbranch "$WT"
+printf 'def f():\n    return 9\n' > "$WT/a.py"
+git -C "$WT" add a.py
+STUB_ROWS="$GREEN" "$WORK/skill/crap-check.sh" "$WT" > "$WORK/out.log" 2>&1
+check "the gate is green" "$?" 0
+check "the worktree's branch has its row in the common git dir" \
+  "$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["wtbranch"]["a.py::f"]["tag"])' "$ROWS_FILE")" new
+check "the worktree's own git dir holds none" \
+  "$([ -e "$(git -C "$WT" rev-parse --absolute-git-dir)/crap-check-rows.json" ] && echo yes || echo no)" no
+git -C "$REPO" worktree remove --force "$WT"
+check "removing the worktree leaves its branch's row" \
+  "$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["wtbranch"]["a.py::f"]["tag"])' "$ROWS_FILE")" new
+
 echo "== a record that cannot be written does not change the verdict"
 rm -f "$ROWS_FILE"
 mkdir "$ROWS_FILE"

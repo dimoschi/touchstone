@@ -246,15 +246,16 @@ def test_crap_signals_read_the_branch_of_a_detached_head_as_detached(rows_repo):
     assert cs.crap_signals(ctx)["crap_max"]["value"] == 7.5
 
 
-def test_crap_signals_read_the_record_of_a_linked_worktree_from_its_own_git_dir(rows_repo, tmp_path):
+def test_crap_signals_read_a_linked_worktrees_record_from_the_common_git_dir(rows_repo, tmp_path):
     repo, ctx = rows_repo
     repo.git("branch", "other")
     work = tmp_path / "wt"
     repo.git("worktree", "add", "-q", str(work), "other")
-    git_dir = repo.git("-C", str(work), "rev-parse", "--absolute-git-dir")
-    crap_rows.record(f"{git_dir}/crap-check-rows.json", "other", ROWS)
+    record(repo, ROWS, branch="other")
     linked = ctx._replace(repo=str(work))
-    assert cs.crap_signals(linked)["crap_max"]["value"] == 7.5
+    got = cs.crap_signals(linked)
+    assert got["crap_max"]["value"] == 7.5
+    assert got["crap_max"]["evidence"]["command"] == f"read {repo.root / '.git'}/crap-check-rows.json [other]"
 
 
 def runs_dir(repo):
@@ -289,6 +290,24 @@ def test_defect_files_counts_range_files_that_an_earlier_run_reproduced_a_defect
     assert got["evidence"]["output"] == "a.py\nd.py"
     assert got["evidence"]["exit"] == 0
     assert got["evidence"]["command"] == f"read {runs_dir(repo)}/*.json"
+
+
+@pytest.mark.parametrize("spelling", [
+    "{worktree}/a.py", "{root}/a.py", "a.py:7", "a.py:7-9", "./a.py:2", "{worktree}/a.py:7-9",
+])
+def test_defect_files_matches_a_finding_by_the_repo_relative_path_however_a_lens_wrote_it(defect_repo, spelling):
+    repo, ctx = defect_repo
+    worktree = repo.root / ".claude" / "worktrees" / "gh-9-earlier"
+    record_run(repo, "9", [finding(spelling.format(worktree=worktree, root=repo.root))])
+    got = cs.defect_files(ctx)
+    assert got["value"] == 1
+    assert got["evidence"]["output"] == "a.py"
+
+
+def test_defect_files_does_not_take_an_absolute_path_elsewhere_for_a_range_file(defect_repo, tmp_path):
+    repo, ctx = defect_repo
+    record_run(repo, "9", [finding(f"{tmp_path}/elsewhere/a.py"), finding(f"{repo.root}/.claude/worktrees/a.py")])
+    assert cs.defect_files(ctx)["value"] == 0
 
 
 def test_defect_files_is_zero_when_no_record_names_a_range_file(defect_repo):

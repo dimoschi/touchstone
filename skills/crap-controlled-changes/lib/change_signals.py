@@ -22,6 +22,7 @@ import fnmatch
 import json
 import os
 import posixpath
+import re
 import subprocess
 import sys
 from pathlib import PurePosixPath
@@ -37,6 +38,8 @@ DEPENDENCY_FILES = {'go.mod', 'go.sum', 'composer.json', 'composer.lock', 'pypro
 STRONG_TAGS = ('new', 'worsened')
 CRAP = {'key': 'crap', 'label': 'CRAP', 'pick': max, 'what': 'CRAP score'}
 COVERAGE = {'key': 'coverage', 'label': 'coverage', 'pick': min, 'what': 'coverage'}
+LINE_SUFFIX = re.compile(r':\d+(?:-\d+)?$')
+WORKTREE_DIR = re.compile(r'^\.claude/worktrees/[^/]+/')
 USAGE = 'usage: change-signals.sh <absolute-repo-path> <base>..<head>'
 
 
@@ -109,8 +112,8 @@ def branch_of(repo):
         return 'detached'
 
 
-def git_dir(repo):
-    return os.path.join(repo, git(repo, 'rev-parse', '--git-dir').strip())
+def common_git_dir(repo):
+    return os.path.join(repo, git(repo, 'rev-parse', '--git-common-dir').strip())
 
 
 def worst(rows, measure, command, branch):
@@ -131,7 +134,7 @@ def worst(rows, measure, command, branch):
 
 
 def crap_signals(ctx):
-    path = os.path.join(git_dir(ctx.repo), 'crap-check-rows.json')
+    path = os.path.join(common_git_dir(ctx.repo), 'crap-check-rows.json')
     branch = branch_of(ctx.repo)
     rows = {fid: row for fid, row in crap_rows.latest(path, branch).items() if row['tag'] in STRONG_TAGS}
     command = f'read {path} [{branch}]'
@@ -142,14 +145,22 @@ def crap_signals(ctx):
 
 
 def main_checkout(repo):
-    common = git(repo, 'rev-parse', '--git-common-dir').strip()
-    return os.path.dirname(os.path.normpath(os.path.join(repo, common)))
+    return os.path.dirname(os.path.normpath(common_git_dir(repo)))
 
 
-def reproduced_file(finding):
+def repo_relative(file, root):
+    """`file` as the repo-relative path a diff names, whether a lens wrote it absolute,
+    from inside a worktree of `root`, or with a trailing :line or :start-end."""
+    name = LINE_SUFFIX.sub('', file)
+    if os.path.isabs(name):
+        name = os.path.relpath(name, root)
+    return WORKTREE_DIR.sub('', posixpath.normpath(name))
+
+
+def reproduced_file(finding, root):
     run, file = finding.get('reproducer_run'), finding.get('file')
     if isinstance(run, dict) and run.get('outcome') == 'reproduced' and isinstance(file, str):
-        return posixpath.normpath(file)
+        return repo_relative(file, root)
     return None
 
 
@@ -173,16 +184,17 @@ def records_in(directory):
     return [record for record in map(load_record, paths) if record is not None]
 
 
-def reproduced_in(records):
-    return {reproduced_file(f) for record in records for f in findings_of(record)}
+def reproduced_in(records, root):
+    return {reproduced_file(f, root) for record in records for f in findings_of(record)}
 
 
 def defect_files(ctx):
-    directory = os.path.join(main_checkout(ctx.repo), '.claude', 'touchstone-runs')
+    root = main_checkout(ctx.repo)
+    directory = os.path.join(root, '.claude', 'touchstone-runs')
     if not os.path.isdir(directory):
         return unmeasured(f'no run records directory at {directory}')
     records = records_in(directory)
-    hit = sorted(reproduced_in(records) & set(changed_paths(ctx)))
+    hit = sorted(reproduced_in(records, root) & set(changed_paths(ctx)))
     return signal(len(hit), command=f'read {directory}/*.json', code=0,
                   output='\n'.join(hit) or f'no reproduced defect in a range file, in {len(records)} record(s)')
 

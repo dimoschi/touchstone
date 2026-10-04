@@ -232,7 +232,7 @@ if [ "$ran_any" -eq 1 ]; then
       | python3 "$LIB_DIR/scored_ledger.py" record "$LEDGER" "$BRANCH" measured >/dev/null
     # A record that cannot be kept must not turn a green gate red, so it only
     # says so.
-    python3 "$LIB_DIR/crap_rows.py" record "$(git rev-parse --git-dir)/crap-check-rows.json" \
+    python3 "$LIB_DIR/crap_rows.py" record "$(git rev-parse --git-common-dir)/crap-check-rows.json" \
       "$BRANCH" < "$CAPTURE" 2>/dev/null \
       || echo "crap-check: could not record the CRAP rows" >&2
   fi

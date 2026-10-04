@@ -31,6 +31,7 @@ PHP_BC = 'roave-backward-compatibility-check'
 HEAD_MOVED = ('HEAD is not the range head, so a tool run over the working tree '
               'would measure other code')
 GRIFFE_RECORD = re.compile(r'^\S[^:\n]*:\d+: [^:\n]+: \S')
+GO_LIST_BUILT = '{{range .GoFiles}}{{$.Dir}}/{{.}}{{"\\n"}}{{end}}{{range .CgoFiles}}{{$.Dir}}/{{.}}{{"\\n"}}{{end}}'
 
 
 def of_value(parts, wanted):
@@ -96,9 +97,17 @@ def only_tests(language):
     return [signal(False, output=f'only test files changed in {language}')]
 
 
-def go_modules_of(ctx, files):
+def module_files(ctx, files):
+    """{module directory: the `files` it owns}"""
     moddirs = go_modules.module_dirs(ctx.repo)
-    return {go_modules.owning_module(path, moddirs, ctx.repo) for path in files}
+    groups = {}
+    for path in files:
+        groups.setdefault(go_modules.owning_module(path, moddirs, ctx.repo), []).append(path)
+    return groups
+
+
+def go_modules_of(ctx, files):
+    return set(module_files(ctx, files))
 
 
 def at_base(ctx, path):
@@ -249,27 +258,65 @@ def opengrep_findings(ctx, data):
     return found, skipped(data.get('errors'))
 
 
+def existing(ctx, files):
+    return [path for path in files if ctx.status.get(path) != 'D']
+
+
+def gosec_reads(ctx, files):
+    """The changed files gosec scans: it leaves _test.go files out unless asked for them."""
+    return [path for path in existing(ctx, files) if not path.endswith('_test.go')]
+
+
+def unbuilt(ctx, changed, run):
+    """The `changed` files that a `go list` run does not list as built."""
+    built = {repo_path(ctx, line) for line in report_lines(run.out)}
+    return [path for path in changed if path not in built]
+
+
+def left_out(ctx, mod, files):
+    """The part for changed files gosec never loaded. It scans the packages `go list ./...`
+    finds for this host and does not say which file it dropped."""
+    changed = gosec_reads(ctx, files)
+    if not changed:
+        return []
+    run = run_tool(['go', 'list', '-e', '-f', GO_LIST_BUILT, './...'], cwd=os.path.join(ctx.repo, mod))
+    if failed(run):
+        return [of_run(UNMEASURED, run, reason=f'could not list the Go files the build holds: {why(run)}')]
+    missing = unbuilt(ctx, changed, run)
+    if not missing:
+        return []
+    return [of_run(UNMEASURED, run, reason='changed Go file(s) gosec could not load, because the build here '
+                   'leaves them out (a build constraint, or a directory ./... skips): ' + ', '.join(missing))]
+
+
 def go_security(ctx, files):
-    return [scan_part(ctx, run_tool(['gosec', '-fmt=json', '-no-fail', './...'],
-                                    cwd=os.path.join(ctx.repo, mod)), gosec_findings)
-            for mod in sorted(go_modules_of(ctx, files))]
+    parts = []
+    for mod, mod_files in sorted(module_files(ctx, files).items()):
+        run = run_tool(['gosec', '-fmt=json', '-no-fail', './...'], cwd=os.path.join(ctx.repo, mod))
+        parts.append(scan_part(ctx, run, gosec_findings))
+        parts.extend(left_out(ctx, mod, mod_files))
+    return parts
 
 
 def scannable(ctx, files):
-    return [path for path in sources(files) if ctx.status.get(path) != 'D']
+    return sources(existing(ctx, files))
+
+
+def nothing_added(language):
+    return [signal(False, output=f'every changed {language} file was deleted')]
 
 
 def python_security(ctx, files):
-    scan = scannable(ctx, files)
+    scan = existing(ctx, files)
     if not scan:
-        return only_tests('Python')
+        return nothing_added('Python')
     return [scan_part(ctx, run_tool(['bandit', '-f', 'json', *scan], cwd=ctx.repo), bandit_findings)]
 
 
 def php_security(ctx, files):
-    scan = scannable(ctx, files)
+    scan = existing(ctx, files)
     if not scan:
-        return only_tests('PHP')
+        return nothing_added('PHP')
     run = run_tool(['opengrep', 'scan', '-f', PHP_RULES, '--json', *scan], cwd=ctx.repo)
     return [scan_part(ctx, run, opengrep_findings)]
 
@@ -384,13 +431,23 @@ def by_module(ctx, funcs):
     return groups
 
 
+def beyond_go(ctx):
+    """The changed source files deadcode cannot read: Python, PHP, or a language no tool covers."""
+    others = [path for path in ctx.gated if lang_of(path) in ('python', 'php')]
+    return sorted(set(scannable(ctx, [*others, *ctx.unsupported])))
+
+
 def reachable(ctx):
     if not ctx.at_head:
         return unmeasured(HEAD_MOVED)
     groups = by_module(ctx, changed_functions(ctx, go_sources(ctx)))
-    if not groups:
-        return unmeasured('no changed Go function in a non-test file')
-    return combine([reach_part(ctx, mod, funcs) for mod, funcs in sorted(groups.items())])
+    parts = [reach_part(ctx, mod, funcs) for mod, funcs in sorted(groups.items())]
+    parts = parts or [unmeasured('no changed Go function in a non-test file')]
+    unread = beyond_go(ctx)
+    if unread:
+        parts.append(unmeasured('deadcode reads Go only, so these changed file(s) were not measured: '
+                                + ', '.join(unread)))
+    return combine(parts)
 
 
 SIGNALS = {

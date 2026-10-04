@@ -262,6 +262,23 @@ def test_load_ctx_lists_added_lines(changed):
     assert ctx.added["new dir/new.php"] == {1}
 
 
+@pytest.mark.parametrize("how", ["config", "environment"])
+def test_load_ctx_lists_added_lines_whatever_external_diff_tool_the_user_set(repo, tmp_path, monkeypatch, how):
+    tool = tmp_path / "fake-difft"
+    tool.write_text('#!/bin/sh\necho "$1 --- 1/1 --- Python"\n')
+    tool.chmod(0o755)
+    repo.write("a.py", "a\n")
+    base = repo.commit("base")
+    repo.write("a.py", "a\nb\n")
+    head = repo.commit("head")
+    if how == "config":
+        repo.git("config", "diff.external", str(tool))
+    else:
+        monkeypatch.setenv("GIT_EXTERNAL_DIFF", str(tool))
+    ctx = sb.load_ctx(str(repo.root), f"{base}..{head}", no_settings())
+    assert ctx.added == {"a.py": {2}}
+
+
 def test_load_ctx_without_exemptions_gates_every_changed_path(changed):
     repo, base, head = changed
     ctx = sb.load_ctx(str(repo.root), f"{base}..{head}", no_settings())

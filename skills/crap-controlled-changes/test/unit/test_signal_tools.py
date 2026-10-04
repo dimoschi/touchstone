@@ -395,6 +395,12 @@ def go_security_change(repo):
                   {"a.go": "package m\n\nfunc A() {}\n\nfunc B() {}\n\nfunc C() {}\n"})
 
 
+def go_builds(stubs, repo, *built):
+    """A `go list` that says the build holds `built` (paths in the repo), whatever directory it is asked in."""
+    paths = [str(repo.root.resolve() / rel) for rel in built]
+    stubs.add("go", f"sys.stdout.write(''.join(path + '\\n' for path in {paths!r}))")
+
+
 def test_security_pattern_in_go_flags_a_finding_on_an_added_line(repo, stubs):
     stubs.add("gosec", out=gosec_json(repo, "6"))
     got = st.security_pattern(go_security_change(repo))
@@ -404,6 +410,7 @@ def test_security_pattern_in_go_flags_a_finding_on_an_added_line(repo, stubs):
 
 def test_security_pattern_in_go_ignores_a_finding_on_a_line_the_range_did_not_add(repo, stubs):
     stubs.add("gosec", out=gosec_json(repo, "3"))
+    go_builds(stubs, repo, "a.go")
     got = st.security_pattern(go_security_change(repo))
     assert got["value"] is False
     assert got["evidence"]["output"] == "1 finding(s) in scanned files, none on added lines"
@@ -437,6 +444,7 @@ def test_security_pattern_in_go_still_reports_a_finding_beside_a_load_error(repo
 
 def test_security_pattern_in_go_is_unmeasured_when_gosec_prints_no_json(repo, stubs):
     stubs.add("gosec", err="gosec: fatal\n", code=1)
+    go_builds(stubs, repo, "a.go")
     got = st.security_pattern(go_security_change(repo))
     assert got["value"] == UNMEASURED
     assert got["reason"] == "exit 1: gosec: fatal"
@@ -445,6 +453,80 @@ def test_security_pattern_in_go_is_unmeasured_when_gosec_prints_no_json(repo, st
 def test_security_pattern_in_go_is_unmeasured_when_gosec_is_missing(repo, stubs):
     got = st.security_pattern(go_security_change(repo))
     assert got["value"] == UNMEASURED and "could not run gosec" in got["reason"]
+
+
+NOTHING_FOUND = json.dumps({"Golang errors": {}, "Issues": []})
+TAGGED = "//go:build never\n\npackage m\n\nfunc T() {}\n"
+LEFT_OUT = ("changed Go file(s) gosec could not load, because the build here leaves them out "
+            "(a build constraint, or a directory ./... skips): ")
+
+
+def tagged_change(repo):
+    return change(repo, {"go.mod": GO_MOD, "a.go": "package m\n"},
+                  {"a.go": "package m\n\nfunc A() {}\n", "tagged.go": TAGGED})
+
+
+def test_security_pattern_in_go_is_unmeasured_for_a_changed_file_the_host_build_leaves_out(repo, stubs):
+    stubs.add("gosec", out=NOTHING_FOUND)
+    go_builds(stubs, repo, "a.go")
+    got = st.security_pattern(tagged_change(repo))
+    assert got["value"] == UNMEASURED
+    assert got["reason"] == LEFT_OUT + "tagged.go"
+    assert got["evidence"]["command"].startswith("go list")
+
+
+def test_security_pattern_in_go_is_false_once_the_build_holds_every_changed_file(repo, stubs):
+    stubs.add("gosec", out=NOTHING_FOUND)
+    go_builds(stubs, repo, "a.go", "tagged.go")
+    assert st.security_pattern(tagged_change(repo))["value"] is False
+
+
+def test_security_pattern_in_go_still_reports_a_finding_beside_a_file_the_build_leaves_out(repo, stubs):
+    stubs.add("gosec", out=gosec_json(repo, "3"))
+    go_builds(stubs, repo, "a.go")
+    got = st.security_pattern(tagged_change(repo))
+    assert got["value"] is True
+    assert got["evidence"]["output"] == "a.go:3 G204"
+
+
+def test_security_pattern_in_go_asks_go_list_which_files_each_module_builds(repo, stubs):
+    stubs.add("gosec", out=NOTHING_FOUND)
+    go_builds(stubs, repo, "a.go")
+    st.security_pattern(go_security_change(repo))
+    [call] = stubs.calls("go")
+    assert call["args"] == ["list", "-e", "-f", st.GO_LIST_BUILT, "./..."]
+    assert os.path.realpath(call["cwd"]) == os.path.realpath(str(repo.root))
+
+
+def test_security_pattern_in_go_judges_each_module_against_its_own_build(repo, stubs):
+    stubs.add("gosec", out=NOTHING_FOUND)
+    built = {"one": [str(repo.root.resolve() / "one" / "a.go")], "two": []}
+    stubs.add("go", f"table = {built!r}\n"
+                    "sys.stdout.write(''.join(p + '\\n' for p in table[os.path.basename(os.getcwd())]))")
+    ctx = change(repo,
+                 {"one/go.mod": "module example.com/one\n", "one/a.go": "package one\n",
+                  "two/go.mod": "module example.com/two\n", "two/a.go": "package two\n"},
+                 {"one/a.go": "package one\n\nfunc B() {}\n", "two/a.go": "package two\n\nfunc B() {}\n"})
+    got = st.security_pattern(ctx)
+    assert got["value"] == UNMEASURED
+    assert got["reason"] == LEFT_OUT + "two/a.go"
+
+
+def test_security_pattern_in_go_is_unmeasured_when_go_list_fails(repo, stubs):
+    stubs.add("gosec", out=NOTHING_FOUND)
+    stubs.add("go", err="go: boom\n", code=1)
+    got = st.security_pattern(go_security_change(repo))
+    assert got["value"] == UNMEASURED
+    assert got["reason"] == "could not list the Go files the build holds: exit 1: go: boom"
+    assert got["evidence"]["exit"] == 1
+
+
+def test_security_pattern_in_go_does_not_ask_go_list_about_tests_or_deleted_files(repo, stubs):
+    stubs.add("gosec", out=NOTHING_FOUND)
+    ctx = change(repo, {"go.mod": GO_MOD, "a_test.go": "package m\n", "gone.go": "package m\n"},
+                 {"a_test.go": "package m\n\nfunc TestA() {}\n"}, delete=("gone.go",))
+    assert st.security_pattern(ctx)["value"] is False
+    assert stubs.calls("go") == []
 
 
 def bandit_json(results=(), errors=()):
@@ -480,11 +562,11 @@ def test_security_pattern_in_python_reads_every_line_of_a_multi_line_finding(rep
     assert st.security_pattern(py_security_change(repo))["value"] is True
 
 
-def test_security_pattern_in_python_scans_changed_source_that_still_exists(repo, stubs):
+def test_security_pattern_in_python_scans_every_changed_file_that_still_exists(repo, stubs):
     stubs.add("bandit", out=bandit_json())
     st.security_pattern(py_security_change(repo))
     [call] = stubs.calls("bandit")
-    assert call["args"] == ["-f", "json", "a.py", "b.py"]
+    assert call["args"] == ["-f", "json", "a.py", "b.py", "tests/test_a.py"]
     assert os.path.realpath(call["cwd"]) == os.path.realpath(str(repo.root))
 
 
@@ -511,11 +593,28 @@ def test_security_pattern_in_python_is_unmeasured_when_bandit_is_missing(repo, s
     assert got["value"] == UNMEASURED and "could not run bandit" in got["reason"]
 
 
-def test_security_pattern_in_python_has_nothing_to_scan_when_only_tests_changed(repo, stubs):
+def test_security_pattern_in_python_is_unmeasured_when_only_tests_changed_and_bandit_is_missing(repo, stubs):
     ctx = change(repo, {"tests/test_a.py": "x = 1\n"}, {"tests/test_a.py": "x = 2\n"})
     got = st.security_pattern(ctx)
+    assert got["value"] == UNMEASURED and "could not run bandit" in got["reason"]
+
+
+def test_security_pattern_in_python_reads_a_finding_in_a_file_under_a_tests_directory(repo, stubs):
+    stubs.add("bandit", out=bandit_json([bandit_result("./tests/helpers.py", lines=(5,))]), code=1)
+    ctx = change(repo, {"tests/helpers.py": "import subprocess\n"},
+                 {"tests/helpers.py": "import subprocess\n\n\ndef run(c):\n    subprocess.call(c, shell=True)\n"})
+    got = st.security_pattern(ctx)
+    assert got["value"] is True
+    assert got["evidence"]["output"] == "tests/helpers.py:5 B602"
+
+
+@pytest.mark.parametrize("language,name,path", [("Python", "bandit", "a.py"), ("PHP", "opengrep", "src/A.php")])
+def test_security_pattern_has_nothing_to_scan_when_every_changed_file_was_deleted(repo, stubs, language, name, path):
+    ctx = change(repo, {path: "x\n", "keep.txt": "k\n"}, {}, delete=(path,))
+    got = st.security_pattern(ctx)
     assert got["value"] is False
-    assert stubs.calls("bandit") == []
+    assert got["evidence"]["output"] == f"every changed {language} file was deleted"
+    assert stubs.calls(name) == []
 
 
 def opengrep_json(results=(), errors=()):
@@ -571,11 +670,19 @@ def test_security_pattern_in_php_is_unmeasured_when_opengrep_reports_errors(repo
     assert got["value"] == UNMEASURED and "parse error" in got["reason"]
 
 
-def test_security_pattern_in_php_has_nothing_to_scan_when_only_tests_changed(repo, stubs):
+def test_security_pattern_in_php_is_unmeasured_when_only_tests_changed_and_opengrep_is_missing(repo, stubs):
     ctx = change(repo, {"tests/FooTest.php": "<?php\n"}, {"tests/FooTest.php": "<?php\n// x\n"})
     got = st.security_pattern(ctx)
-    assert got["value"] is False
-    assert stubs.calls("opengrep") == []
+    assert got["value"] == UNMEASURED and "could not run opengrep" in got["reason"]
+
+
+def test_security_pattern_in_php_scans_a_test_file_and_reads_its_findings(repo, stubs):
+    stubs.add("opengrep", out=opengrep_json([opengrep_result(path="tests/FooTest.php", start=2, end=2)]))
+    ctx = change(repo, {"tests/FooTest.php": "<?php\n"}, {"tests/FooTest.php": "<?php\neval($x);\n"})
+    got = st.security_pattern(ctx)
+    assert got["value"] is True
+    assert got["evidence"]["output"] == "tests/FooTest.php:2 touchstone-php-eval"
+    assert stubs.calls("opengrep")[0]["args"][-1] == "tests/FooTest.php"
 
 
 def test_security_pattern_in_php_is_unmeasured_when_opengrep_is_missing(repo, stubs):
@@ -837,6 +944,39 @@ def test_reachable_ignores_test_files_and_deleted_files(repo, stubs):
 def test_reachable_is_unmeasured_when_head_is_not_the_range_head(repo, stubs):
     got = st.reachable(go_reach_change(repo)._replace(at_head=False))
     assert got["value"] == UNMEASURED and "HEAD" in got["reason"]
+
+
+@pytest.mark.parametrize("path,config", [
+    ("svc/h.py", {}), ("src/A.php", {}), ("web/app.ts", {"unsupported": ("*.ts",)}),
+])
+def test_reachable_cannot_say_false_beside_a_changed_file_deadcode_cannot_read(repo, stubs, path, config):
+    deadcode(stubs, {"repo": dead_json(("Live", 3), ("Dead", 7), ("Third", 11))})
+    ctx = change(repo, {"go.mod": GO_MOD, "a.go": "package m\n", path: "x\n"},
+                 {"a.go": GO_SRC, path: "y\n"}, **config)
+    got = st.reachable(ctx)
+    assert got["value"] == UNMEASURED
+    assert got["reason"] == f"deadcode reads Go only, so these changed file(s) were not measured: {path}"
+
+
+def test_reachable_still_reports_a_live_go_function_beside_a_file_deadcode_cannot_read(repo, stubs):
+    deadcode(stubs, {"repo": dead_json(("Dead", 7), ("Third", 11))})
+    ctx = change(repo, {"go.mod": GO_MOD, "a.go": "package m\n", "svc/h.py": "x = 1\n"},
+                 {"a.go": GO_SRC, "svc/h.py": "x = 2\n"})
+    assert st.reachable(ctx)["value"] is True
+
+
+def test_reachable_does_not_count_python_test_files_or_deleted_files_as_unread_code(repo, stubs):
+    deadcode(stubs, {"repo": dead_json(("Live", 3), ("Dead", 7), ("Third", 11))})
+    ctx = change(repo, {"go.mod": GO_MOD, "a.go": "package m\n", "tests/test_a.py": "x = 1\n", "gone.py": "x = 1\n"},
+                 {"a.go": GO_SRC, "tests/test_a.py": "x = 2\n"}, delete=("gone.py",))
+    assert st.reachable(ctx)["value"] is False
+
+
+def test_reachable_says_why_a_range_of_only_other_languages_has_nothing_to_measure(repo, stubs):
+    ctx = change(repo, {"a.py": "x = 1\n"}, {"a.py": "x = 2\n"})
+    got = st.reachable(ctx)
+    assert got["reason"] == ("no changed Go function in a non-test file; "
+                             "deadcode reads Go only, so these changed file(s) were not measured: a.py")
 
 
 def test_reachable_answers_for_go_only(repo, stubs):
