@@ -420,9 +420,10 @@ const measureSignals = async (range) => {
     const probe = await treeAgent(
       `Run exactly this and put all of its output verbatim in output, ` +
       `unsummarised, then STOP. change-signals.sh sits in the ` +
-      `crap-controlled-changes skill's directory, beside crap-check.sh. Run it ` +
-      `in the foreground with a Bash timeout of 600000, never in the ` +
-      `background, never twice, and change nothing.\n${signalsCommandFor(range)}`,
+      `crap-controlled-changes skill's directory, beside crap-check.sh: invoke ` +
+      `that skill to learn where that is. Run it in the foreground with a Bash ` +
+      `timeout of 600000, never in the background, never twice, and change ` +
+      `nothing.\n${signalsCommandFor(range)}`,
       { label: 'signals', phase: 'Draft PR', schema: SIGNALS_PROBE, model: 'haiku', effort: 'low' })
     const parsed = parseSignals(probe?.output, range)
     if (!parsed) {
