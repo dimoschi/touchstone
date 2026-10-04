@@ -355,6 +355,20 @@ async function scenarioPF15() {
   check('a mutation gate that committed nothing is not probed', callCount(unchanged.captured, 'plan:leak:Mutation'), 0)
 }
 
+// Scenario PF18 -- the appended end line lands in the plan file even when the
+// worktree path holds a space and a quote.
+async function scenarioPF18() {
+  console.log('\n== scenario PF18: the end-line command quotes a worktree path a bare word cannot hold')
+  const odd = "/tmp/touchstone o'clock/wt"
+  const { result, captured } = await run({ branchResult: { created: true, branch: 'feat/gh-21-stub',
+    base: 'main', path: odd, ticket: '21', detail: 'stub' }, triage: TEAM, ...CLEAN })
+  const p = promptOf(captured, 'plan:write')
+  check('the target is quoted as one shell word',
+    p.includes(">> '/tmp/touchstone o'\\''clock/wt/.touchstone/plan.md'\n"), true)
+  check('the run reaches the implementer', callCount(captured, 'implementer'), 1)
+  check('and does not halt on the plan file', result.halted_at, undefined)
+}
+
 async function scenarioPF16() {
   console.log('\n== scenario PF16: the probe command against a real repo catches add-then-delete')
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'plan-leak-'))
@@ -407,7 +421,7 @@ async function scenarioPF17() {
 
 const SCENARIOS = [scenarioPF1, scenarioPF2, scenarioPF3, scenarioPF4, scenarioPF5, scenarioPF6,
   scenarioPF7, scenarioPF8, scenarioPF9, scenarioPF10, scenarioPF11, scenarioPF12, scenarioPF13,
-  scenarioPF14, scenarioPF15, scenarioPF16, scenarioPF17]
+  scenarioPF14, scenarioPF15, scenarioPF16, scenarioPF17, scenarioPF18]
 JS_EOF
 
 finish
