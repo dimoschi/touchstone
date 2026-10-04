@@ -12,7 +12,7 @@ const has = (obj, key) => Object.prototype.hasOwnProperty.call(obj, key)
 // reported, and nothing the implementer would have produced is invented.
 async function scenarioBHA() {
   console.log('\n== scenario BHA: a refusal at the implementer reports the plan and nothing later')
-  const { result } = await run({ args: BUDGETED, spendAllAfter: 'triage' })
+  const { result } = await run({ args: BUDGETED, spendAllAfter: 'plan:write' })
   check('halted at Implement', result.halted_at, 'Implement')
   check('the implementer was the refused dispatch', (result.note ?? '').includes("'implementer'"), true)
   check('the plan is reported', typeof result.plan, 'string')
@@ -63,7 +63,7 @@ async function scenarioBHD() {
   console.log('\n== scenario BHD: a refusal in Fix keeps the open findings, notes and fix rounds')
   const { result } = await run({
     args: BUDGETED,
-    spendAllAfter: 'fix:1',
+    spendAllAfter: 'plan:leak:Fix',
     initialReview: {
       correctness: [{ title: 'Off-by-one', file: 'src/p.js', claim: 'c1', evidence: 'e1' }],
       advocate: [{ title: 'Unproven worry', file: 'src/q.js', claim: 'c2', evidence: 'e2',
@@ -90,7 +90,7 @@ async function scenarioBHE() {
   console.log('\n== scenario BHE: a refusal after Mutation keeps the mutation result')
   const { result } = await run({
     args: BUDGETED,
-    spendAllAfter: 'mutation:1',
+    spendAllAfter: 'plan:leak:Mutation',
     mutationGated: true,
     initialReview: { correctness: [], advocate: [] },
     mutationResult: () => ({ green: true, head_sha: 'mut00000000000000000000000000000000000001',
@@ -102,7 +102,17 @@ async function scenarioBHE() {
   check('the open findings are reported', result.unresolved_findings, [])
 }
 
-const SCENARIOS = [scenarioBHA, scenarioBHB, scenarioBHC, scenarioBHD, scenarioBHE]
+// Scenario BHF -- refused at the plan file write, the first dispatch after the
+// plan exists: the plan is still reported.
+async function scenarioBHF() {
+  console.log('\n== scenario BHF: a refusal at plan:write still reports the plan')
+  const { result } = await run({ args: BUDGETED, spendAllAfter: 'triage' })
+  check('halted at Implement', result.halted_at, 'Implement')
+  check('plan:write was the refused dispatch', (result.note ?? '').includes("'plan:write'"), true)
+  check('the plan is reported', typeof result.plan, 'string')
+}
+
+const SCENARIOS = [scenarioBHA, scenarioBHB, scenarioBHC, scenarioBHD, scenarioBHE, scenarioBHF]
 JS_EOF
 
 finish

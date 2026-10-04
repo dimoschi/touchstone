@@ -5,7 +5,7 @@ export const meta = {
   phases: [
     { title: 'Worktree', detail: 'canonically named branch and worktree from a freshly pulled base, then fetch the ticket once for every later phase' },
     { title: 'Triage', detail: 'one cheap agent checks the premise, sizes the job and judges its difficulty; a disproved premise halts, small work skips Plan, and the difficulty sets every later phase\'s reasoning effort' },
-    { title: 'Plan', detail: 'planner produces plan + acceptance criteria + risk areas' },
+    { title: 'Plan', detail: 'planner produces a concise plan + acceptance criteria + risk areas; the whole plan is written to an untracked file in the worktree, which the implementer must read to its last line' },
     { title: 'Implement', detail: 'one implementer, TDD via crap-controlled-changes, many small signed commits' },
     { title: 'Draft PR', detail: 'push the branch and open a draft PR, so the work is visible and any later halt has somewhere durable to be reported' },
     { title: 'Review', detail: 'a measured diffstat (code churn, with comments, tests and docs counted apart) decides the reviewer lenses: correctness and devil\'s advocate normally, plus requirements coverage on a large or wide change, none on a one-liner; support code (tests, docs, comments) far outweighing the actual change halts here before any lens runs. Only a wrong-result, crash, gate-bypass or unmet-criterion finding with a demonstrated reproducer can hold the run; everything else reaches the PR as a note. Runs again on any commits a later phase adds, and from the first re-review on a finding also has to fall inside what that range actually changed' },
@@ -29,7 +29,7 @@ export const meta = {
 // against the manifest in scripts/check-version-bump.sh, so drift is a
 // gate's job rather than something this script verifies about itself.
 const PLUGIN_NAME = 'touchstone'
-const PIPELINE_VERSION = '0.28.0'
+const PIPELINE_VERSION = '0.29.0'
 
 // Boundaries. Wall-clock deadlines are not expressible here (no Date.now, by
 // design); the bounds are rounds, counts, and token budget instead.
@@ -117,6 +117,9 @@ const brief = (s) => {
   const t = String(s ?? '')
   return t.length <= BRIEF_CHARS ? t : `${t.slice(0, BRIEF_CHARS)}\n[brief truncated]`
 }
+// The plan is never passed through brief(): the implementer reads it whole from
+// a file, so the planner is held to a length instead.
+const PLAN_MAX_CHARS = args?.planMaxChars ?? 6000
 
 // Shared by every prompt that reads or edits code (implement, checks:fix,
 // fix, reviewOf): a phase reaching for grep/sed/cat to read a file, or Bash
@@ -568,13 +571,16 @@ const TRIAGE = {
 // (part 40, `size` in the result) replaces it with a real, measured count.
 const IMPL = {
   type: 'object', additionalProperties: false,
-  required: ['summary', 'files_changed', 'commit_range', 'scored'],
+  required: ['summary', 'files_changed', 'commit_range', 'scored', 'plan_id'],
   properties: {
     summary: { type: 'string' },
     files_changed: { type: 'array', items: { type: 'string' } },
     commit_range: { type: 'string' },
     scored: { type: 'boolean' },
     gate_note: { type: 'string' },
+    // The id on the plan file's last line: returning it proves the whole file
+    // was read.
+    plan_id: { type: 'string' },
     // Set when the one halt this phase can hit -- a NEXT_ACTION of
     // UNSUPPORTED_LANGUAGE -- fires. Without a schema field for it, the phase
     // has no way to represent a halt at all: it would return a normal result
@@ -582,6 +588,19 @@ const IMPL = {
     // with the refused work never committed.
     unsupported_language: { type: 'boolean' },
   },
+}
+const PLAN_WRITE = {
+  type: 'object', additionalProperties: false,
+  required: ['bytes', 'last_line', 'ignored_exit'],
+  properties: {
+    bytes: { type: 'integer' },
+    last_line: { type: 'string' },
+    ignored_exit: { type: 'integer' },
+  },
+}
+const PLAN_LEAK_PROBE = {
+  type: 'object', additionalProperties: false, required: ['output'],
+  properties: { output: { type: 'string' } },
 }
 // head_sha is required, not optional: it is how the script learns what this
 // phase committed, and an absent one is indistinguishable from "committed
@@ -827,6 +846,23 @@ const SETUP = {
 // named: without the jira-/gh- marker the session is reported untracked
 // forever. Creating the worktree first means inline work happens in the right
 // place too. The cost is one unused worktree when triage rejects the premise.
+
+// A supplied plan is held to the same limit as a planner's, but there is no
+// planner to send it back to, so it halts rather than being tightened. Checked
+// before anything is dispatched: the verdict needs nothing from setup, branch
+// or triage, and a run that is going to halt should not pay for them first.
+const givenPlan = typeof args?.plan === 'string' && args.plan.trim()
+  ? args.plan.trim() : null
+if (givenPlan && givenPlan.length > PLAN_MAX_CHARS) {
+  enterPhase('Plan')
+  return await halted('Plan', {
+    plan: givenPlan,
+    note: `args.plan is ${givenPlan.length} chars, over the ${PLAN_MAX_CHARS} limit. ` +
+      `It was not retried: nothing tightens a supplied plan. The ticket may need ` +
+      `splitting. The run stopped before any agent ran: no worktree, branch, ` +
+      `triage or plan file.`,
+  })
+}
 
 // One dispatch, before anything reads the envelope, answering three questions
 // that share nothing but their timing: none needs a worktree, and each used
@@ -1635,8 +1671,6 @@ try {
 // run at Implement. Without it the only way to reuse a plan was to paste it into
 // the task, which routed it back through the planner and asked that phase to
 // carry out work it is forbidden to do.
-const givenPlan = typeof args?.plan === 'string' && args.plan.trim()
-  ? args.plan.trim() : null
 let plan = givenPlan
   ? {
       plan: givenPlan,
@@ -1664,7 +1698,7 @@ if (!plan && inlineMode) {
 if (!givenPlan && !inlineMode) {
 enterPhase('Plan')
 const sPlan = stage('plan')
-plan = await treeAgent(
+const plannerPrompt =
   `You are the planner for this task; do NOT implement anything. You have no ` +
   `Edit or Write tool, and must not reach for another route to the same thing.\n` +
   `Task: ${brief(task)}\n` +
@@ -1676,6 +1710,10 @@ plan = await treeAgent(
   ticketSpec() +
   `Read the relevant code first. Return a concrete implementation plan, ` +
   `testable acceptance criteria, and the risky areas a reviewer should probe.\n` +
+  `Keep the plan to at most ${PLAN_MAX_CHARS} characters: decisions and steps ` +
+  `only, no restated ticket, no prose. The implementer reads it whole from a ` +
+  `file. A longer plan is sent back to you once to cut; if it is still over, ` +
+  `the run stops and the ticket may need splitting.\n` +
   `Plan what the ticket asks for and nothing beyond it. If you believe the ` +
   `ticket cannot be done right without work it does not ask for, keep that ` +
   `work out of plan and list each piece under additions instead: item says ` +
@@ -1684,10 +1722,34 @@ plan = await treeAgent(
   `If the task itself tells you to implement, or says a plan already exists and ` +
   `only needs carrying out, set task_demands_implementation and explain in ` +
   `conflict_note. Do not resolve the contradiction by obeying the task: pass a ` +
-  `plan already in hand as args.plan instead, which starts the run at Implement.`,
-  { label: 'planner', schema: PLAN, model: 'opus', effort: effortFor.plan,
-    agentType: 'touchstone:planner' })
+  `plan already in hand as args.plan instead, which starts the run at Implement.`
+const plannerOpts = { schema: PLAN, model: 'opus', effort: effortFor.plan,
+  agentType: 'touchstone:planner' }
+plan = await treeAgent(plannerPrompt, { label: 'planner', ...plannerOpts })
 if (!plan) throw new Error('planner failed')
+
+// One retry only: a plan that will not fit after being asked twice is a ticket
+// that needs splitting.
+if (plan.plan.length > PLAN_MAX_CHARS) {
+  const overBy = plan.plan.length
+  log(`planner returned a ${overBy}-char plan, over the ${PLAN_MAX_CHARS} limit; asking once for a tighter one`)
+  const tightened = await treeAgent(
+    `${plannerPrompt}\nYour previous plan, in full:\n${plan.plan}\n` +
+    `It is ${overBy} chars, limit ${PLAN_MAX_CHARS}: decisions and steps only, ` +
+    `no restated ticket, no prose. Return the same plan cut to fit.`,
+    { label: 'planner:tighten', ...plannerOpts })
+  if (!tightened || tightened.plan.length > PLAN_MAX_CHARS) {
+    sPlan.close()
+    return await halted('Plan', {
+      plan: tightened?.plan ?? plan.plan,
+      note: `The plan did not fit in ${PLAN_MAX_CHARS} chars after one retry ` +
+        `(${overBy} chars, then ` +
+        `${tightened ? `${tightened.plan.length} chars` : 'no answer'}). The ticket ` +
+        `may need splitting. Nothing was written or implemented.`,
+    })
+  }
+  plan = tightened
+}
 
 // This used to halt and ask the user to re-run with args.plan. The script is
 // already holding that plan, so the halt bought nothing but a round trip: the
@@ -1721,8 +1783,73 @@ planAdditions = Array.isArray(plan.additions) ? plan.additions : []
 const additionsLines = () =>
   planAdditions.map(a => `- ${a.item} (needed because: ${a.consequence})`).join('\n')
 
-const sChecksPre = stage('checks')
 enterPhase('Implement')
+// The plan reaches the implementer as an untracked file it reads whole, never
+// as prompt text, which brief() would clamp. The script has no fs, so an agent
+// writes it and the script checks the measurements it reports.
+const fnv1a = (s) => {
+  let h = 0x811c9dc5
+  for (let i = 0; i < s.length; i++) { h ^= s.charCodeAt(i); h = Math.imul(h, 0x01000193) }
+  return (h >>> 0).toString(16).padStart(8, '0')
+}
+const utf8Length = (s) => {
+  let n = 0
+  for (const ch of s) {
+    const cp = ch.codePointAt(0)
+    n += cp < 0x80 ? 1 : cp < 0x800 ? 2 : cp < 0x10000 ? 3 : 4
+  }
+  return n
+}
+const planId = fnv1a(`${ticket}${plan.plan}`)
+const planFile = `${wt.path}/.touchstone/plan.md`
+const planEndLine = `END OF PLAN ${planId}`
+const planContent = `${plan.plan}\n\n${planEndLine}\n`
+widenBudgetHaltState(() => ({ plan: plan.plan }))
+const planWritePrompt =
+  `Write the plan file, then STOP. Do not implement anything and do not commit.\n` +
+  `1. mkdir -p ${wt.path}/.touchstone && rm -f ${planFile}\n` +
+  `2. Keep it out of git without touching any tracked file, before writing it. Run: ` +
+  `x="$(git -C ${wt.path} rev-parse --path-format=absolute --git-common-dir)/info/exclude"; ` +
+  `mkdir -p "$(dirname "$x")"; ` +
+  `grep -qxF '.touchstone/' "$x" || printf '\\n.touchstone/\\n' >> "$x"\n` +
+  `3. Write the text between the PLAN FILE BEGIN and PLAN FILE END lines below ` +
+  `to ${planFile} with the Write tool. The file ` +
+  `is exactly that text: it starts at the first character after the BEGIN ` +
+  `line's newline and ends with the newline after its last line, ` +
+  `${planEndLine}. Do not trim, reflow, translate, summarise or correct it, ` +
+  `and leave both marker lines out.\n` +
+  `4. Only after steps 1 to 3, run these and report what they print, never ` +
+  `what you expect them to print. bytes: the number printed by ` +
+  `wc -c < ${planFile}. last_line: what tail -n 1 ${planFile} prints, exactly, ` +
+  `without its newline. ignored_exit: the exit status of ` +
+  `git -C ${wt.path} check-ignore -q .touchstone/plan.md (0 means ignored).\n` +
+  `PLAN FILE BEGIN ${planId}\n${planContent}PLAN FILE END ${planId}`
+const planWriteOpts = { schema: PLAN_WRITE, model: 'haiku', effort: 'low' }
+const planWriteProblemOf = (written) => !written
+  ? 'the plan:write agent returned nothing'
+  : written.bytes !== utf8Length(planContent)
+  ? `the file is ${written.bytes} bytes, not the ${utf8Length(planContent)} the plan needs`
+  : written.last_line !== planEndLine
+  ? `its last line is ${JSON.stringify(written.last_line)}, not ${planEndLine}`
+  : written.ignored_exit !== 0
+  ? `git check-ignore exited ${written.ignored_exit}, so it is not ignored and a commit could pick it up`
+  : null
+let planWriteProblem = planWriteProblemOf(
+  await treeAgent(planWritePrompt, { label: 'plan:write', ...planWriteOpts }))
+if (planWriteProblem) {
+  log(`plan file not verified (${planWriteProblem}); asking once more`)
+  planWriteProblem = planWriteProblemOf(
+    await treeAgent(planWritePrompt, { label: 'plan:write:retry', ...planWriteOpts }))
+}
+if (planWriteProblem) {
+  return await halted('Implement', {
+    plan: plan.plan,
+    note: `The plan file ${planFile} could not be verified, even after a retry: ` +
+      `${planWriteProblem}. Nothing was implemented.`,
+  })
+}
+
+const sChecksPre = stage('checks')
 // wt.checks_source came back from the branch/branch:existing call itself
 // (its last step, done only when created=true), replacing a separate
 // checks:discover dispatch now that the worktree it needs to read is
@@ -2008,7 +2135,13 @@ const sImpl = stage('implement')
 const impl = await treeAgent(
   `Implement this task in the current repo.\n` +
   `${NATIVE_TOOLS(wt.path)} ${GENERATED_FILES}\n` +
-  `Task: ${brief(task)}\nPlan: ${brief(plan.plan)}\n` +
+  `Task: ${brief(task)}\n` +
+  `The plan is the file ${planFile}. Read all of it before any edit: use ` +
+  `Read, with offset and limit if it is long, until you have read its last ` +
+  `line, which reads END OF PLAN followed by an id. Return that id as ` +
+  `plan_id. If you cannot read the whole file, do not start: make no edit ` +
+  `and no commit, return plan_id as an empty string, and say why in ` +
+  `summary. The file is untracked on purpose, so never commit .touchstone/.\n` +
   (plan.acceptance_criteria.length
     ? `Acceptance criteria:\n- ${plan.acceptance_criteria.join('\n- ')}\n`
     : `Acceptance criteria: none were supplied with this plan. Derive them from ` +
@@ -2082,6 +2215,19 @@ let scoredNote = scored ? (impl.gate_note ?? '') : ''
 let unscoredNote = scored ? '' : (impl.gate_note ?? '')
 widenBudgetHaltState(() => ({ implemented: impl.summary, gates: gatesPayload() }))
 
+// Before anything else is read from impl: an implementer that never reached
+// the end of the plan cannot be trusted to have followed it.
+const returnedPlanId = String(impl.plan_id ?? '').trim()
+if (returnedPlanId !== planId) {
+  return await halted('Implement', {
+    plan: plan.plan, implemented: impl.summary, gates: gatesPayload(),
+    note: `The implementer returned plan_id ${JSON.stringify(returnedPlanId)}, ` +
+      `not ${planId}, so it did not read the whole plan file ${planFile}. Its ` +
+      `work is refused and nothing was pushed; any commits it made are still ` +
+      `on the branch.`,
+  })
+}
+
 // The only other outcome this phase can report, and the only one that must
 // not fall through to Draft PR: the schema has no other way to say "I
 // stopped", so an unhandled unsupported_language would read as a normal,
@@ -2106,6 +2252,8 @@ if (sImpl.over()) {
 // answers with an exit code.
 const sChecksPost = stage('checks')
 let lastCheckedHead = headOf(impl.commit_range)
+const implBase = impl.commit_range.includes('..')
+  ? impl.commit_range.split('..')[0].trim() : impl.commit_range.trim()
 ;({ red: redChecks, unmeasured: unmeasuredChecks } = await runChecks())
 if (redChecks.length) {
   log(`checks: ${redChecks.length} discovered check(s) red after Implement: ` +
@@ -2165,8 +2313,6 @@ if (blockingChecksOpen() && !sChecksPost.over()) {
   // reviewer sees, instead of arriving as a fix round after the fact.
   const preReviewHead = preReviewFixed?.head_sha?.trim()
   if (preReviewHead && preReviewHead !== lastCheckedHead) {
-    const implBase = impl.commit_range.includes('..')
-      ? impl.commit_range.split('..')[0].trim() : impl.commit_range.trim()
     impl.commit_range = `${implBase}..${preReviewHead}`
     lastCheckedHead = preReviewHead
     ;({ red: redChecks, unmeasured: unmeasuredChecks } = await runChecks())
@@ -2182,6 +2328,52 @@ if (blockingChecksOpen() && !sChecksPost.over()) {
 }
 sChecksPost.close()
 stageSpend.checks = checksPreSpend + (stageSpend.checks ?? 0)
+
+// Nothing under .touchstone/ may reach a commit. The range runs from the
+// implementer's own base, not from the previous head, so a commit that adds the
+// plan file and a later one that deletes it is still seen. Run before every
+// push, and again after each phase that commits.
+const PLAN_LEAK_MARKER = 'TOUCHSTONE_PLAN_LEAK'
+const planLeakCommandFor = (range) =>
+  `echo ${PLAN_LEAK_MARKER} ${range}; ` +
+  `git -C ${wt.path} log --format= --name-only ${range} -- .touchstone; ` +
+  `echo ${PLAN_LEAK_MARKER}_END`
+// null for output that is not the probe's: a missing marker, the wrong range,
+// or a line that is not a path under .touchstone. [] is the only clean answer.
+const parsePlanLeak = (output, range) => {
+  const lines = String(output ?? '').split(/\r?\n/)
+  while (lines.length && lines[0].trim() === '') lines.shift()
+  while (lines.length && lines[lines.length - 1].trim() === '') lines.pop()
+  if (lines.length < 2) return null
+  if (lines[0] !== `${PLAN_LEAK_MARKER} ${range}`) return null
+  if (lines[lines.length - 1] !== `${PLAN_LEAK_MARKER}_END`) return null
+  const paths = lines.slice(1, -1).filter(l => l.trim() !== '')
+  return paths.every(l => l === '.touchstone' || l.startsWith('.touchstone/')) ? paths : null
+}
+const planLeakHalt = async (head, at, extra = {}) => {
+  const range = `${implBase}..${head}`
+  const prompt =
+    `Run exactly this and put all of its output verbatim in output, ` +
+    `unsummarised, then STOP.\n${planLeakCommandFor(range)}`
+  const probe = async (label) => parsePlanLeak((await treeAgent(prompt,
+    { label, schema: PLAN_LEAK_PROBE, model: 'haiku', effort: 'low' }))?.output, range)
+  let leaked = await probe(`plan:leak:${at}`)
+  if (leaked === null) leaked = await probe(`plan:leak:${at}:retry`)
+  if (leaked?.length === 0) return null
+  return await halted(at, {
+    plan: plan.plan, implemented: impl.summary, gates: gatesPayload(),
+    checks: checksPayload(), ...extra,
+    note: leaked
+      ? `Commits in ${range} carry ${leaked.length} path(s) under .touchstone/, ` +
+        `which holds the untracked plan file: ${leaked.join(', ')}. The run ` +
+        `stopped before pushing them.`
+      : `Whether ${range} carries anything under .touchstone/ could not be ` +
+        `verified, even after a retry: the probe's output was missing or malformed. The run stopped ` +
+        `before pushing it.`,
+  })
+}
+const implLeak = await planLeakHalt(headOf(impl.commit_range), 'Implement')
+if (implLeak) return implLeak
 
 // A draft PR, opened as soon as there is a commit to hang it on.
 //
@@ -3168,6 +3360,12 @@ while ((open.length || blockingChecksOpen()) && round < MAX_REVIEW_ROUNDS && !ou
     })
   }
   const head = fixed?.head_sha?.trim()
+  if (head && head !== reviewedThrough) {
+    const leak = await planLeakHalt(head, 'Fix', {
+      unresolved_findings: open, fix_rounds: round, fix_round_output: fixRoundSpend, notes,
+    })
+    if (leak) { sFix.close(); return leak }
+  }
   const tailReviewable =
     reviewerCount && head && head !== reviewedThrough && !outOfBudget()
   const roundRange = head && head !== reviewedThrough
@@ -3467,6 +3665,10 @@ if (!mutation.green) {
 // The mutation gate commits: new tests, and real fixes when a survivor exposes
 // a genuine defect. Those are production changes nobody has read yet.
 const mutHead = mutation.head_sha?.trim()
+if (mutHead && mutHead !== reviewedThrough) {
+  const leak = await planLeakHalt(mutHead, 'Mutation', { mutation, unresolved_findings: open, notes })
+  if (leak) return leak
+}
 if (mutHead && mutHead !== reviewedThrough && settled.length) {
   const execSettledMut = await executeAtHead(settled, 'reproduce:settled:mutation')
   if (execSettledMut.dirty) return await dirtyReproducerHalt('Review', execSettledMut)

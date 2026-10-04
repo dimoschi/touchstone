@@ -2,7 +2,13 @@ const sImpl = stage('implement')
 const impl = await treeAgent(
   `Implement this task in the current repo.\n` +
   `${NATIVE_TOOLS(wt.path)} ${GENERATED_FILES}\n` +
-  `Task: ${brief(task)}\nPlan: ${brief(plan.plan)}\n` +
+  `Task: ${brief(task)}\n` +
+  `The plan is the file ${planFile}. Read all of it before any edit: use ` +
+  `Read, with offset and limit if it is long, until you have read its last ` +
+  `line, which reads END OF PLAN followed by an id. Return that id as ` +
+  `plan_id. If you cannot read the whole file, do not start: make no edit ` +
+  `and no commit, return plan_id as an empty string, and say why in ` +
+  `summary. The file is untracked on purpose, so never commit .touchstone/.\n` +
   (plan.acceptance_criteria.length
     ? `Acceptance criteria:\n- ${plan.acceptance_criteria.join('\n- ')}\n`
     : `Acceptance criteria: none were supplied with this plan. Derive them from ` +
@@ -76,6 +82,19 @@ let scoredNote = scored ? (impl.gate_note ?? '') : ''
 let unscoredNote = scored ? '' : (impl.gate_note ?? '')
 widenBudgetHaltState(() => ({ implemented: impl.summary, gates: gatesPayload() }))
 
+// Before anything else is read from impl: an implementer that never reached
+// the end of the plan cannot be trusted to have followed it.
+const returnedPlanId = String(impl.plan_id ?? '').trim()
+if (returnedPlanId !== planId) {
+  return await halted('Implement', {
+    plan: plan.plan, implemented: impl.summary, gates: gatesPayload(),
+    note: `The implementer returned plan_id ${JSON.stringify(returnedPlanId)}, ` +
+      `not ${planId}, so it did not read the whole plan file ${planFile}. Its ` +
+      `work is refused and nothing was pushed; any commits it made are still ` +
+      `on the branch.`,
+  })
+}
+
 // The only other outcome this phase can report, and the only one that must
 // not fall through to Draft PR: the schema has no other way to say "I
 // stopped", so an unhandled unsupported_language would read as a normal,
@@ -100,6 +119,8 @@ if (sImpl.over()) {
 // answers with an exit code.
 const sChecksPost = stage('checks')
 let lastCheckedHead = headOf(impl.commit_range)
+const implBase = impl.commit_range.includes('..')
+  ? impl.commit_range.split('..')[0].trim() : impl.commit_range.trim()
 ;({ red: redChecks, unmeasured: unmeasuredChecks } = await runChecks())
 if (redChecks.length) {
   log(`checks: ${redChecks.length} discovered check(s) red after Implement: ` +
@@ -159,8 +180,6 @@ if (blockingChecksOpen() && !sChecksPost.over()) {
   // reviewer sees, instead of arriving as a fix round after the fact.
   const preReviewHead = preReviewFixed?.head_sha?.trim()
   if (preReviewHead && preReviewHead !== lastCheckedHead) {
-    const implBase = impl.commit_range.includes('..')
-      ? impl.commit_range.split('..')[0].trim() : impl.commit_range.trim()
     impl.commit_range = `${implBase}..${preReviewHead}`
     lastCheckedHead = preReviewHead
     ;({ red: redChecks, unmeasured: unmeasuredChecks } = await runChecks())
@@ -176,6 +195,52 @@ if (blockingChecksOpen() && !sChecksPost.over()) {
 }
 sChecksPost.close()
 stageSpend.checks = checksPreSpend + (stageSpend.checks ?? 0)
+
+// Nothing under .touchstone/ may reach a commit. The range runs from the
+// implementer's own base, not from the previous head, so a commit that adds the
+// plan file and a later one that deletes it is still seen. Run before every
+// push, and again after each phase that commits.
+const PLAN_LEAK_MARKER = 'TOUCHSTONE_PLAN_LEAK'
+const planLeakCommandFor = (range) =>
+  `echo ${PLAN_LEAK_MARKER} ${range}; ` +
+  `git -C ${wt.path} log --format= --name-only ${range} -- .touchstone; ` +
+  `echo ${PLAN_LEAK_MARKER}_END`
+// null for output that is not the probe's: a missing marker, the wrong range,
+// or a line that is not a path under .touchstone. [] is the only clean answer.
+const parsePlanLeak = (output, range) => {
+  const lines = String(output ?? '').split(/\r?\n/)
+  while (lines.length && lines[0].trim() === '') lines.shift()
+  while (lines.length && lines[lines.length - 1].trim() === '') lines.pop()
+  if (lines.length < 2) return null
+  if (lines[0] !== `${PLAN_LEAK_MARKER} ${range}`) return null
+  if (lines[lines.length - 1] !== `${PLAN_LEAK_MARKER}_END`) return null
+  const paths = lines.slice(1, -1).filter(l => l.trim() !== '')
+  return paths.every(l => l === '.touchstone' || l.startsWith('.touchstone/')) ? paths : null
+}
+const planLeakHalt = async (head, at, extra = {}) => {
+  const range = `${implBase}..${head}`
+  const prompt =
+    `Run exactly this and put all of its output verbatim in output, ` +
+    `unsummarised, then STOP.\n${planLeakCommandFor(range)}`
+  const probe = async (label) => parsePlanLeak((await treeAgent(prompt,
+    { label, schema: PLAN_LEAK_PROBE, model: 'haiku', effort: 'low' }))?.output, range)
+  let leaked = await probe(`plan:leak:${at}`)
+  if (leaked === null) leaked = await probe(`plan:leak:${at}:retry`)
+  if (leaked?.length === 0) return null
+  return await halted(at, {
+    plan: plan.plan, implemented: impl.summary, gates: gatesPayload(),
+    checks: checksPayload(), ...extra,
+    note: leaked
+      ? `Commits in ${range} carry ${leaked.length} path(s) under .touchstone/, ` +
+        `which holds the untracked plan file: ${leaked.join(', ')}. The run ` +
+        `stopped before pushing them.`
+      : `Whether ${range} carries anything under .touchstone/ could not be ` +
+        `verified, even after a retry: the probe's output was missing or malformed. The run stopped ` +
+        `before pushing it.`,
+  })
+}
+const implLeak = await planLeakHalt(headOf(impl.commit_range), 'Implement')
+if (implLeak) return implLeak
 
 // A draft PR, opened as soon as there is a commit to hang it on.
 //

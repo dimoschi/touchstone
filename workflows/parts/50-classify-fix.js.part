@@ -523,6 +523,12 @@ while ((open.length || blockingChecksOpen()) && round < MAX_REVIEW_ROUNDS && !ou
     })
   }
   const head = fixed?.head_sha?.trim()
+  if (head && head !== reviewedThrough) {
+    const leak = await planLeakHalt(head, 'Fix', {
+      unresolved_findings: open, fix_rounds: round, fix_round_output: fixRoundSpend, notes,
+    })
+    if (leak) { sFix.close(); return leak }
+  }
   const tailReviewable =
     reviewerCount && head && head !== reviewedThrough && !outOfBudget()
   const roundRange = head && head !== reviewedThrough

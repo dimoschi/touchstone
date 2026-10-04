@@ -1,5 +1,6 @@
 import io
 import json
+import os
 import subprocess
 from pathlib import Path
 
@@ -621,3 +622,130 @@ def test_copilot_missing_path_ungated_repo_is_allowed(monkeypatch, tmp_path):
     monkeypatch.setenv(cse.STATE_ENV, str(tmp_path / "state"))
     repo = _repo(tmp_path, "bare", guides=[])
     assert _run(monkeypatch, _copilot_pre("copilot-bare", repo, "Edit", None)) == 0
+
+
+def _exclude(repo, pattern):
+    info = repo / ".git" / "info"
+    info.mkdir(exist_ok=True)
+    with open(info / "exclude", "a") as handle:
+        handle.write(pattern + "\n")
+
+
+def _claude_edit(monkeypatch, tmp_path, path):
+    missing = tmp_path / "missing.jsonl"
+    return _run(monkeypatch, _legacy_payload(missing, str(path)))
+
+
+def test_plan_file_in_the_touchstone_directory_is_allowed(monkeypatch, tmp_path):
+    repo = _repo(tmp_path, "guided", guides=[("CONTRIBUTING.md", "read me")])
+    (repo / ".touchstone").mkdir()
+    assert _claude_edit(monkeypatch, tmp_path, repo / ".touchstone" / "plan.md") == 0
+
+
+def test_path_under_a_missing_touchstone_subdirectory_is_allowed(monkeypatch, tmp_path):
+    repo = _repo(tmp_path, "guided", guides=[("CONTRIBUTING.md", "read me")])
+    assert _claude_edit(monkeypatch, tmp_path, repo / ".touchstone" / "a" / "plan.md") == 0
+
+
+def test_tracked_plan_file_in_the_touchstone_directory_is_allowed(monkeypatch, tmp_path):
+    repo = _repo(tmp_path, "guided", guides=[("CONTRIBUTING.md", "read me")])
+    (repo / ".touchstone").mkdir()
+    plan = repo / ".touchstone" / "plan.md"
+    plan.write_text("x")
+    subprocess.run(["git", "-C", str(repo), "add", "-f", ".touchstone/plan.md"], check=True)
+    assert _claude_edit(monkeypatch, tmp_path, plan) == 0
+
+
+def test_path_matched_by_an_exclude_entry_outside_touchstone_is_blocked(monkeypatch, tmp_path):
+    repo = _repo(tmp_path, "guided", guides=[("CONTRIBUTING.md", "read me")])
+    _exclude(repo, "notes/")
+    assert _claude_edit(monkeypatch, tmp_path, repo / "notes" / "x.md") == 2
+
+
+def test_nested_touchstone_directory_is_blocked(monkeypatch, tmp_path):
+    repo = _repo(tmp_path, "guided", guides=[("CONTRIBUTING.md", "read me")])
+    assert _claude_edit(monkeypatch, tmp_path, repo / "sub" / ".touchstone" / "plan.md") == 2
+
+
+def test_dotdot_out_of_the_touchstone_directory_is_blocked(monkeypatch, tmp_path):
+    repo = _repo(tmp_path, "guided", guides=[("CONTRIBUTING.md", "read me")])
+    assert _claude_edit(monkeypatch, tmp_path, repo / ".touchstone" / ".." / "x.md") == 2
+
+
+def test_touchstone_symlink_to_another_repo_directory_is_blocked(monkeypatch, tmp_path):
+    repo = _repo(tmp_path, "guided", guides=[("CONTRIBUTING.md", "read me")])
+    (repo / "src").mkdir()
+    (repo / ".touchstone").symlink_to(repo / "src")
+    assert _claude_edit(monkeypatch, tmp_path, repo / ".touchstone" / "x.md") == 2
+
+
+def test_new_file_outside_the_touchstone_directory_is_blocked(monkeypatch, tmp_path):
+    repo = _repo(tmp_path, "guided", guides=[("CONTRIBUTING.md", "read me")])
+    assert _claude_edit(monkeypatch, tmp_path, repo / "notes" / "plan.md") == 2
+
+
+def test_copilot_plan_file_in_the_touchstone_directory_is_allowed(monkeypatch, tmp_path):
+    monkeypatch.setenv(cse.STATE_ENV, str(tmp_path / "state"))
+    repo = _repo(tmp_path, "guided", guides=[("CONTRIBUTING.md", "read me")])
+    assert _run(monkeypatch, _copilot_pre("copilot-plan", repo, "Write", ".touchstone/plan.md")) == 0
+
+
+def test_copilot_path_matched_by_an_exclude_entry_outside_touchstone_is_blocked(
+        monkeypatch, tmp_path):
+    monkeypatch.setenv(cse.STATE_ENV, str(tmp_path / "state"))
+    repo = _repo(tmp_path, "guided", guides=[("CONTRIBUTING.md", "read me")])
+    _exclude(repo, "notes/")
+    assert _run(monkeypatch, _copilot_pre("copilot-exc", repo, "Write", "notes/x.md")) == 2
+
+
+def _match_marker_case_exactly(monkeypatch, repo):
+    """is_gated resolves the marker with Path.exists(), which a case-insensitive
+    filesystem answers for any spelling, so a misspelt marker would go unseen."""
+    real = gate.is_gated
+    monkeypatch.setattr(
+        gate, "is_gated",
+        lambda path, marker: real(path, marker) and marker in os.listdir(repo))
+
+
+def test_copilot_unsupported_payload_names_the_tool_and_each_guide(
+        monkeypatch, tmp_path, capsys):
+    monkeypatch.setenv(cse.STATE_ENV, str(tmp_path / "state"))
+    repo = _repo(tmp_path, "multi", guides=[
+        ("CONTRIBUTING.md", "main guide"),
+        ("docs/DEVELOPMENT.md", "dev guide"),
+    ])
+    _match_marker_case_exactly(monkeypatch, repo)
+    rc = _run(monkeypatch, _copilot_pre("copilot-unsupported", repo, "MultiEdit", None))
+    captured = capsys.readouterr()
+    assert rc == 2
+    assert "unsupported Copilot MultiEdit payload" in captured.err
+    assert f'  {repo / "CONTRIBUTING.md"}\n  {repo / "docs" / "DEVELOPMENT.md"}' in captured.err
+    assert captured.out == ""
+
+
+def test_copilot_refusal_lists_each_unread_guide_on_stderr(monkeypatch, tmp_path, capsys):
+    monkeypatch.setenv(cse.STATE_ENV, str(tmp_path / "state"))
+    repo = _repo(tmp_path, "multi", guides=[
+        ("CONTRIBUTING.md", "main guide"),
+        ("docs/DEVELOPMENT.md", "dev guide"),
+    ])
+    rc = _run(monkeypatch, _copilot_pre("copilot-refusal", repo, "Edit", "internal/app.go"))
+    captured = capsys.readouterr()
+    assert rc == 2
+    assert f'  {repo / "CONTRIBUTING.md"}\n  {repo / "docs" / "DEVELOPMENT.md"}' in captured.err
+    assert captured.out == ""
+
+
+def test_copilot_edit_is_gated_by_the_marker_spelt_exactly(monkeypatch, tmp_path):
+    monkeypatch.setenv(cse.STATE_ENV, str(tmp_path / "state"))
+    repo = _repo(tmp_path, "guided", guides=[("CONTRIBUTING.md", "read me")])
+    _match_marker_case_exactly(monkeypatch, repo)
+    assert _run(monkeypatch, _copilot_pre("copilot-exact", repo, "Edit", "internal/app.go")) == 2
+
+
+def test_claude_edit_is_gated_by_the_marker_spelt_exactly(monkeypatch, tmp_path):
+    repo = _repo(tmp_path, "guided", guides=[("CONTRIBUTING.md", "read me")])
+    _match_marker_case_exactly(monkeypatch, repo)
+    missing = tmp_path / "missing.jsonl"
+    rc = _run(monkeypatch, _legacy_payload(missing, str(repo / "internal" / "app.go")))
+    assert rc == 2

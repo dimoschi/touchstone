@@ -138,6 +138,10 @@ if (!mutation.green) {
 // The mutation gate commits: new tests, and real fixes when a survivor exposes
 // a genuine defect. Those are production changes nobody has read yet.
 const mutHead = mutation.head_sha?.trim()
+if (mutHead && mutHead !== reviewedThrough) {
+  const leak = await planLeakHalt(mutHead, 'Mutation', { mutation, unresolved_findings: open, notes })
+  if (leak) return leak
+}
 if (mutHead && mutHead !== reviewedThrough && settled.length) {
   const execSettledMut = await executeAtHead(settled, 'reproduce:settled:mutation')
   if (execSettledMut.dirty) return await dirtyReproducerHalt('Review', execSettledMut)
