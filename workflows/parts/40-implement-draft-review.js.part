@@ -219,11 +219,13 @@ const parsePlanLeak = (output, range) => {
 }
 const planLeakHalt = async (head, at, extra = {}) => {
   const range = `${implBase}..${head}`
-  const probed = await treeAgent(
+  const prompt =
     `Run exactly this and put all of its output verbatim in output, ` +
-    `unsummarised, then STOP.\n${planLeakCommandFor(range)}`,
-    { label: `plan:leak:${at}`, schema: PLAN_LEAK_PROBE, model: 'haiku', effort: 'low' })
-  const leaked = parsePlanLeak(probed?.output, range)
+    `unsummarised, then STOP.\n${planLeakCommandFor(range)}`
+  const probe = async (label) => parsePlanLeak((await treeAgent(prompt,
+    { label, schema: PLAN_LEAK_PROBE, model: 'haiku', effort: 'low' }))?.output, range)
+  let leaked = await probe(`plan:leak:${at}`)
+  if (leaked === null) leaked = await probe(`plan:leak:${at}:retry`)
   if (leaked?.length === 0) return null
   return await halted(at, {
     plan: plan.plan, implemented: impl.summary, gates: gatesPayload(),
@@ -233,7 +235,7 @@ const planLeakHalt = async (head, at, extra = {}) => {
         `which holds the untracked plan file: ${leaked.join(', ')}. The run ` +
         `stopped before pushing them.`
       : `Whether ${range} carries anything under .touchstone/ could not be ` +
-        `verified: the probe's output was missing or malformed. The run stopped ` +
+        `verified, even after a retry: the probe's output was missing or malformed. The run stopped ` +
         `before pushing it.`,
   })
 }

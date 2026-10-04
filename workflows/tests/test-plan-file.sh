@@ -57,7 +57,8 @@ async function scenarioPF1() {
 // stops at Plan, before anything is written or implemented.
 async function scenarioPF2() {
   console.log('\n== scenario PF2: a plan still over the limit after one retry halts at Plan')
-  for (const [name, tightenResult] of [['over again', plannerWith('c'.repeat(6001))], ['null', null]]) {
+  const STILL_OVER = 'c'.repeat(6001)
+  for (const [name, tightenResult, returned] of [['over again', plannerWith(STILL_OVER), STILL_OVER], ['null', null, OVER]]) {
     const { result, captured } = await run({
       triage: TEAM, plannerResult: plannerWith(OVER), tightenResult, ...CLEAN,
     })
@@ -65,6 +66,7 @@ async function scenarioPF2() {
     check(`${name}: the note says it did not fit`, /did not fit in 6000 chars after one retry/.test(result.note ?? ''), true)
     check(`${name}: the note says the ticket may need splitting`, /split/.test(result.note ?? ''), true)
     check(`${name}: one tighten call`, callCount(captured, 'planner:tighten'), 1)
+    check(`${name}: the halt returns the last attempt`, result.plan, returned)
     check(`${name}: no plan:write`, callCount(captured, 'plan:write'), 0)
     check(`${name}: no implementer`, callCount(captured, 'implementer'), 0)
   }
@@ -133,6 +135,8 @@ async function scenarioPF6() {
   check('it excludes through info/exclude under --git-common-dir',
     p.includes('--git-common-dir') && p.includes('info/exclude'), true)
   check('it never names a tracked ignore file', p.includes('.gitignore'), false)
+  check('the exclude comes before the Write, so the hook sees an ignored path',
+    p.indexOf('info/exclude') > 0 && p.indexOf('info/exclude') < p.indexOf('with the Write tool'), true)
   check('it asks for wc -c, tail -n 1 and check-ignore',
     p.includes('wc -c') && p.includes('tail -n 1') && p.includes('check-ignore -q .touchstone/plan.md'), true)
   check('it is dispatched on a cheap model', captured.calls.find(c => c.label === 'plan:write') !== undefined, true)
@@ -143,18 +147,31 @@ async function scenarioPF6() {
 }
 
 // Scenario PF7 -- plan:write has to prove the file is whole, or the run stops.
+// A failed answer is retried once; only a second failure halts.
 async function scenarioPF7() {
-  console.log('\n== scenario PF7: a wrong byte count, last line or ignore status halts at Implement')
+  console.log('\n== scenario PF7: a wrong byte count, last line or ignore status is retried once, then halts at Implement')
   const cases = [
     ['wrong byte count', { bytes: 1 }],
     ['wrong last line', { last_line: 'END OF PLAN 00000000' }],
     ['not ignored', { ignored_exit: 1 }],
     ['no answer', null],
   ]
-  for (const [name, planWrite] of cases) {
-    const { result, captured } = await run({ triage: TEAM, plannerResult: plannerWith('plan'), planWrite, ...CLEAN })
+  for (const [name, bad] of cases) {
+    const once = await run({ triage: TEAM, plannerResult: plannerWith('plan'), ...CLEAN,
+      planWrite: (attempt) => attempt === 1 ? bad : undefined })
+    check(`${name}: a good retry continues the run`, once.result.halted_at, undefined)
+    check(`${name}: one plan:write`, callCount(once.captured, 'plan:write'), 1)
+    check(`${name}: one plan:write:retry`, callCount(once.captured, 'plan:write:retry'), 1)
+    const body = (label) => promptOf(once.captured, label).replace(/^\[touchstone: [^\]]*\]\n/, '')
+    check(`${name}: the retry prompt is the same`, body('plan:write:retry'), body('plan:write'))
+    check(`${name}: the implementer ran`, callCount(once.captured, 'implementer'), 1)
+
+    const { result, captured } = await run({ triage: TEAM, plannerResult: plannerWith('plan'), ...CLEAN,
+      planWrite: () => bad })
     check(`${name}: halted at Implement`, result.halted_at, 'Implement')
     check(`${name}: the note names the plan file`, /plan file/.test(result.note ?? ''), true)
+    check(`${name}: the note says it was retried`, /even after a retry/.test(result.note ?? ''), true)
+    check(`${name}: exactly one retry`, callCount(captured, 'plan:write:retry'), 1)
     check(`${name}: no implementer`, callCount(captured, 'implementer'), 0)
     check(`${name}: no checks ran`, labelsOf(captured).some(l => l.startsWith('checks:run')), false)
   }
@@ -229,9 +246,9 @@ async function scenarioPF11() {
   check('and the draft PR is reached', callCount(clean.captured, 'draft-pr'), 1)
 }
 
-// Scenario PF12 -- a probe that cannot be read is never a pass.
+// Scenario PF12 -- a probe that cannot be read is retried once, and never a pass.
 async function scenarioPF12() {
-  console.log('\n== scenario PF12: malformed or missing probe output halts as unverified')
+  console.log('\n== scenario PF12: malformed or missing probe output is retried once, then halts as unverified')
   const bad = [
     ['null', () => null],
     ['empty', () => ''],
@@ -241,11 +258,25 @@ async function scenarioPF12() {
     ['a stray line', (r) => `TOUCHSTONE_PLAN_LEAK ${r}\nfatal: bad revision\nTOUCHSTONE_PLAN_LEAK_END`],
   ]
   for (const [name, out] of bad) {
-    const { result, captured } = await run({ triage: TEAM, ...CLEAN, planLeak: (at, r) => out(r) })
-    check(`${name}: halted at Implement`, result.halted_at, 'Implement')
-    check(`${name}: the note says it was not verified`, /could not be verified/.test(result.note ?? ''), true)
-    check(`${name}: no draft-pr`, callCount(captured, 'draft-pr'), 0)
+    const twice = await run({ triage: TEAM, ...CLEAN, planLeak: (at, r) => out(r) })
+    check(`${name}: halted at Implement`, twice.result.halted_at, 'Implement')
+    check(`${name}: the note says it was not verified`, /could not be verified/.test(twice.result.note ?? ''), true)
+    check(`${name}: the note says it was retried`, /even after a retry/.test(twice.result.note ?? ''), true)
+    check(`${name}: exactly one retry`, callCount(twice.captured, 'plan:leak:Implement:retry'), 1)
+    check(`${name}: no draft-pr`, callCount(twice.captured, 'draft-pr'), 0)
+
+    const once = await run({ triage: TEAM, ...CLEAN,
+      planLeak: (at, r, prompt, attempt) => attempt === 1 ? out(r) : undefined })
+    check(`${name}: a clean retry continues the run`, once.result.halted_at, undefined)
+    check(`${name}: the draft PR is reached`, callCount(once.captured, 'draft-pr'), 1)
   }
+  const leak = await run({ triage: TEAM, ...CLEAN, planLeak: (at, range) => leakOutput(range, LEAK) })
+  check('a real leak halts at once', leak.result.halted_at, 'Implement')
+  check('a real leak is not retried', callCount(leak.captured, 'plan:leak:Implement:retry'), 0)
+  const leakOnRetry = await run({ triage: TEAM, ...CLEAN,
+    planLeak: (at, range, prompt, attempt) => attempt === 1 ? 'garbage' : leakOutput(range, LEAK) })
+  check('a leak found by the retry halts naming the path',
+    (leakOnRetry.result.note ?? '').includes('.touchstone/plan.md'), true)
 }
 
 // Scenario PF13 -- the checks-only fix before Review is part of the range.
@@ -289,7 +320,8 @@ async function scenarioPF14() {
   const clean = await run(scenario)
   check('a clean probe lets the round go on', clean.result.halted_at, undefined)
   const malformed = await run({ ...scenario, planLeak: (at) => at === 'Fix' ? 'garbage' : undefined })
-  check('a malformed probe halts at Fix', malformed.result.halted_at, 'Fix')
+  check('a probe malformed on both attempts halts at Fix', malformed.result.halted_at, 'Fix')
+  check('and was retried once', callCount(malformed.captured, 'plan:leak:Fix:retry'), 1)
   const unchanged = await run({ ...scenario, fixHead: () => REVIEWED_THROUGH })
   check('a round that committed nothing is not probed', callCount(unchanged.captured, 'plan:leak:Fix'), 0)
 }
@@ -312,7 +344,8 @@ async function scenarioPF15() {
   const clean = await run(scenario)
   check('a clean probe lets the run continue', clean.result.halted_at, undefined)
   const malformed = await run({ ...scenario, planLeak: (at) => at === 'Mutation' ? null : undefined })
-  check('a missing probe halts at Mutation', malformed.result.halted_at, 'Mutation')
+  check('a probe missing on both attempts halts at Mutation', malformed.result.halted_at, 'Mutation')
+  check('and was retried once', callCount(malformed.captured, 'plan:leak:Mutation:retry'), 1)
   const unchanged = await run({ ...scenario, mutationResult: () => ({ green: true, head_sha: REVIEWED_THROUGH,
     detail: 'stub', scored: true }) })
   check('a mutation gate that committed nothing is not probed', callCount(unchanged.captured, 'plan:leak:Mutation'), 0)
@@ -348,9 +381,30 @@ async function scenarioPF16() {
   }
 }
 
+// Scenario PF17 -- args.plan is held to the same limit, but is never tightened.
+async function scenarioPF17() {
+  console.log('\n== scenario PF17: an args.plan over the limit halts at Plan; one at the limit goes on')
+  const { result, captured } = await run({ args: { plan: OVER }, triage: TEAM, ...CLEAN })
+  check('halted at Plan', result.halted_at, 'Plan')
+  check('the halt returns the supplied plan', result.plan, OVER)
+  check('the note names the length', (result.note ?? '').includes('6001'), true)
+  check('the note names the limit', (result.note ?? '').includes('6000'), true)
+  check('the note says it was not retried', /not retried/.test(result.note ?? ''), true)
+  check('the note says the ticket may need splitting', /split/.test(result.note ?? ''), true)
+  for (const l of ['planner', 'planner:tighten', 'plan:write', 'implementer']) {
+    check(`no ${l} call`, callCount(captured, l), 0)
+  }
+  const exact = 'h'.repeat(6000)
+  const ok = await run({ args: { plan: exact }, triage: TEAM, ...CLEAN })
+  check('a plan of exactly 6000 chars is not halted', ok.result.halted_at, undefined)
+  check('it is written unchanged', promptOf(ok.captured, 'plan:write').includes(exact), true)
+  const small = await run({ args: { plan: 'i'.repeat(3001), planMaxChars: 3000 }, triage: TEAM, ...CLEAN })
+  check('args.planMaxChars moves the limit', small.result.halted_at, 'Plan')
+}
+
 const SCENARIOS = [scenarioPF1, scenarioPF2, scenarioPF3, scenarioPF4, scenarioPF5, scenarioPF6,
   scenarioPF7, scenarioPF8, scenarioPF9, scenarioPF10, scenarioPF11, scenarioPF12, scenarioPF13,
-  scenarioPF14, scenarioPF15, scenarioPF16]
+  scenarioPF14, scenarioPF15, scenarioPF16, scenarioPF17]
 JS_EOF
 
 finish

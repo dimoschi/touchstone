@@ -241,13 +241,17 @@ function makeAgent(scenario, captured) {
         risky_areas: [], task_demands_implementation: false }
     }
     // Default answer is a correct write of whatever the prompt asked for;
-    // scenario.planWrite overrides fields of it, or is null for no answer.
-    if (label === 'plan:write') {
-      if (scenario.planWrite === null) return null
+    // scenario.planWrite overrides fields of it, or is null for no answer; a
+    // function of the attempt (1, or 2 on 'plan:write:retry') returns either.
+    if (label === 'plan:write' || label === 'plan:write:retry') {
+      const attempt = label === 'plan:write' ? 1 : 2
+      const override = typeof scenario.planWrite === 'function'
+        ? scenario.planWrite(attempt) : scenario.planWrite
+      if (override === null) return null
       const written = planFileIn(prompt)
       return { bytes: written ? Buffer.byteLength(written.content, 'utf8') : 0,
         last_line: written ? written.content.replace(/\n$/, '').split('\n').pop() : '',
-        ignored_exit: 0, ...(scenario.planWrite ?? {}) }
+        ignored_exit: 0, ...(override ?? {}) }
     }
     // implPlanId: undefined omits plan_id from the response altogether.
     const planIdOf = () => planFileIn(captured.calls.find(c => c.label === 'plan:write')?.prompt ?? '')?.id ?? ''
@@ -257,12 +261,14 @@ function makeAgent(scenario, captured) {
         plan_id: Object.prototype.hasOwnProperty.call(scenario, 'implPlanId') ? scenario.implPlanId : planIdOf(),
         ...(scenario.implGateNote ? { gate_note: scenario.implGateNote } : {}) }
     }
-    // Clean unless scenario.planLeak(at, range) returns the probe's raw
-    // output as a string, or null for no answer.
+    // Clean unless scenario.planLeak(at, range, prompt, attempt) returns the
+    // probe's raw output as a string, or null for no answer. attempt is 2 on
+    // the ':retry' rerun.
     if (label.startsWith('plan:leak:')) {
-      const at = label.slice('plan:leak:'.length)
+      const attempt = label.endsWith(':retry') ? 2 : 1
+      const at = label.slice('plan:leak:'.length).replace(/:retry$/, '')
       const range = (/echo TOUCHSTONE_PLAN_LEAK ([^\s;]+);/.exec(prompt) ?? [])[1] ?? ''
-      const custom = scenario.planLeak ? scenario.planLeak(at, range, prompt) : undefined
+      const custom = scenario.planLeak ? scenario.planLeak(at, range, prompt, attempt) : undefined
       if (custom === null) return null
       return { output: custom ?? `TOUCHSTONE_PLAN_LEAK ${range}\nTOUCHSTONE_PLAN_LEAK_END` }
     }

@@ -15,6 +15,8 @@ one action that clears the gate -- reading -- is always available, so there is
 no way to be stuck behind it. A subagent is its own reader: see
 evidence_transcript for why the parent session's transcript is the wrong file.
 
+A path git ignores is exempt: an ignored file is not a change to the repo.
+
 Exit 2 blocks, with the paths on stderr. Tests: test-contributing-gate.sh.
 """
 
@@ -99,6 +101,12 @@ def resolved(path):
         return str(Path(path).expanduser())
 
 
+def ignored(top, target):
+    """True when git ignores `target`. check-ignore exits 0 only for an untracked
+    ignored path, so a tracked file that matches a pattern stays gated."""
+    return git(top, 'check-ignore', '-q', '--', resolved(target)) is not None
+
+
 def read_in_session(transcript, guides):
     """Subset of `guides` this session's transcript records a Read of."""
     wanted = {resolved(guide): guide for guide in guides}
@@ -164,11 +172,11 @@ def gate_copilot(invocation):
         return 2
 
     target_path = Path(target)
-    top = repo_toplevel(target_path)
-    if not top or not is_gated(target_path, '.crap-gated'):
+    top = gated_top(target_path)
+    if not top:
         return 0
 
-    guides = [g for g in find_guides(Path(top)) if canonical_path(g) != target]
+    guides = [g for g in find_guides(top) if canonical_path(g) != target]
     if not guides:
         return 0
 
@@ -201,15 +209,13 @@ def claude_guides(data):
     """Guides this edit must have read, or [] when the gate does not apply.
 
     Empty covers every reason to stay out of the way: no usable target, an
-    ungated repo, no repo at all, no guide shipped, or the edit being to the
-    guide itself.
+    ungated repo, no repo at all, no guide shipped, the edit being to the
+    guide itself, or the path being one git ignores.
     """
     target = claude_target(data)
     if target is None:
         return []
-    if not is_gated(target, '.crap-gated'):
-        return []
-    top = repo_toplevel(target)
+    top = gated_top(target)
     if not top:
         return []
     return [g for g in find_guides(top) if resolved(g) != resolved(target)]
@@ -268,6 +274,17 @@ def gate_claude(data):
 
     print(HELP.format(paths='\n'.join(f'  {g}' for g in unread)), file=sys.stderr)
     return 2
+
+
+def gated_top(target):
+    """Root of the gated repo an edit to `target` falls under, or None when
+    the repo is ungated, absent, or git ignores the path."""
+    if not is_gated(target, '.crap-gated'):
+        return None
+    top = repo_toplevel(target)
+    if not top or ignored(top, target):
+        return None
+    return top
 
 
 def repo_toplevel(path):

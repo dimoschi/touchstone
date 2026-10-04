@@ -1668,6 +1668,18 @@ let plan = givenPlan
 
 if (givenPlan) log('Plan supplied in args; Plan phase skipped.')
 
+// A supplied plan is held to the same limit as a planner's, but there is no
+// planner to send it back to, so it halts rather than being tightened.
+if (givenPlan && givenPlan.length > PLAN_MAX_CHARS) {
+  enterPhase('Plan')
+  return await halted('Plan', {
+    plan: givenPlan,
+    note: `args.plan is ${givenPlan.length} chars, over the ${PLAN_MAX_CHARS} limit. ` +
+      `It was not retried: nothing tightens a supplied plan. The ticket may need ` +
+      `splitting. Nothing was written or implemented.`,
+  })
+}
+
 if (!plan && inlineMode) {
   plan = {
     plan: `Triage sized this as a small, self-contained change and no planning ` +
@@ -1726,7 +1738,7 @@ if (plan.plan.length > PLAN_MAX_CHARS) {
   if (!tightened || tightened.plan.length > PLAN_MAX_CHARS) {
     sPlan.close()
     return await halted('Plan', {
-      plan: plan.plan,
+      plan: tightened?.plan ?? plan.plan,
       note: `The plan did not fit in ${PLAN_MAX_CHARS} chars after one retry ` +
         `(${overBy} chars, then ` +
         `${tightened ? `${tightened.plan.length} chars` : 'no answer'}). The ticket ` +
@@ -1790,40 +1802,48 @@ const planFile = `${wt.path}/.touchstone/plan.md`
 const planEndLine = `END OF PLAN ${planId}`
 const planContent = `${plan.plan}\n\n${planEndLine}\n`
 widenBudgetHaltState(() => ({ plan: plan.plan }))
-const planWritten = await treeAgent(
+const planWritePrompt =
   `Write the plan file, then STOP. Do not implement anything and do not commit.\n` +
   `1. mkdir -p ${wt.path}/.touchstone && rm -f ${planFile}\n` +
-  `2. Write the text between the PLAN FILE BEGIN and PLAN FILE END lines below ` +
+  `2. Keep it out of git without touching any tracked file, before writing it: ` +
+  `a repo's edit hook only lets an ignored path through. Run: ` +
+  `x="$(git -C ${wt.path} rev-parse --path-format=absolute --git-common-dir)/info/exclude"; ` +
+  `mkdir -p "$(dirname "$x")"; ` +
+  `grep -qxF '.touchstone/' "$x" || printf '\\n.touchstone/\\n' >> "$x"\n` +
+  `3. Write the text between the PLAN FILE BEGIN and PLAN FILE END lines below ` +
   `to ${planFile} with the Write tool. The file ` +
   `is exactly that text: it starts at the first character after the BEGIN ` +
   `line's newline and ends with the newline after its last line, ` +
   `${planEndLine}. Do not trim, reflow, translate, summarise or correct it, ` +
   `and leave both marker lines out.\n` +
-  `3. Keep it out of git without touching any tracked file. Run: ` +
-  `x="$(git -C ${wt.path} rev-parse --path-format=absolute --git-common-dir)/info/exclude"; ` +
-  `mkdir -p "$(dirname "$x")"; ` +
-  `grep -qxF '.touchstone/' "$x" || printf '\\n.touchstone/\\n' >> "$x"\n` +
   `4. Only after steps 1 to 3, run these and report what they print, never ` +
   `what you expect them to print. bytes: the number printed by ` +
   `wc -c < ${planFile}. last_line: what tail -n 1 ${planFile} prints, exactly, ` +
   `without its newline. ignored_exit: the exit status of ` +
   `git -C ${wt.path} check-ignore -q .touchstone/plan.md (0 means ignored).\n` +
-  `PLAN FILE BEGIN ${planId}\n${planContent}PLAN FILE END ${planId}`,
-  { label: 'plan:write', schema: PLAN_WRITE, model: 'haiku', effort: 'low' })
-const planWriteProblem = !planWritten
+  `PLAN FILE BEGIN ${planId}\n${planContent}PLAN FILE END ${planId}`
+const planWriteOpts = { schema: PLAN_WRITE, model: 'haiku', effort: 'low' }
+const planWriteProblemOf = (written) => !written
   ? 'the plan:write agent returned nothing'
-  : planWritten.bytes !== utf8Length(planContent)
-  ? `the file is ${planWritten.bytes} bytes, not the ${utf8Length(planContent)} the plan needs`
-  : planWritten.last_line !== planEndLine
-  ? `its last line is ${JSON.stringify(planWritten.last_line)}, not ${planEndLine}`
-  : planWritten.ignored_exit !== 0
-  ? `git check-ignore exited ${planWritten.ignored_exit}, so it is not ignored and a commit could pick it up`
+  : written.bytes !== utf8Length(planContent)
+  ? `the file is ${written.bytes} bytes, not the ${utf8Length(planContent)} the plan needs`
+  : written.last_line !== planEndLine
+  ? `its last line is ${JSON.stringify(written.last_line)}, not ${planEndLine}`
+  : written.ignored_exit !== 0
+  ? `git check-ignore exited ${written.ignored_exit}, so it is not ignored and a commit could pick it up`
   : null
+let planWriteProblem = planWriteProblemOf(
+  await treeAgent(planWritePrompt, { label: 'plan:write', ...planWriteOpts }))
+if (planWriteProblem) {
+  log(`plan file not verified (${planWriteProblem}); asking once more`)
+  planWriteProblem = planWriteProblemOf(
+    await treeAgent(planWritePrompt, { label: 'plan:write:retry', ...planWriteOpts }))
+}
 if (planWriteProblem) {
   return await halted('Implement', {
     plan: plan.plan,
-    note: `The plan file ${planFile} could not be verified: ${planWriteProblem}. ` +
-      `Nothing was implemented.`,
+    note: `The plan file ${planFile} could not be verified, even after a retry: ` +
+      `${planWriteProblem}. Nothing was implemented.`,
   })
 }
 
@@ -2330,11 +2350,13 @@ const parsePlanLeak = (output, range) => {
 }
 const planLeakHalt = async (head, at, extra = {}) => {
   const range = `${implBase}..${head}`
-  const probed = await treeAgent(
+  const prompt =
     `Run exactly this and put all of its output verbatim in output, ` +
-    `unsummarised, then STOP.\n${planLeakCommandFor(range)}`,
-    { label: `plan:leak:${at}`, schema: PLAN_LEAK_PROBE, model: 'haiku', effort: 'low' })
-  const leaked = parsePlanLeak(probed?.output, range)
+    `unsummarised, then STOP.\n${planLeakCommandFor(range)}`
+  const probe = async (label) => parsePlanLeak((await treeAgent(prompt,
+    { label, schema: PLAN_LEAK_PROBE, model: 'haiku', effort: 'low' }))?.output, range)
+  let leaked = await probe(`plan:leak:${at}`)
+  if (leaked === null) leaked = await probe(`plan:leak:${at}:retry`)
   if (leaked?.length === 0) return null
   return await halted(at, {
     plan: plan.plan, implemented: impl.summary, gates: gatesPayload(),
@@ -2344,7 +2366,7 @@ const planLeakHalt = async (head, at, extra = {}) => {
         `which holds the untracked plan file: ${leaked.join(', ')}. The run ` +
         `stopped before pushing them.`
       : `Whether ${range} carries anything under .touchstone/ could not be ` +
-        `verified: the probe's output was missing or malformed. The run stopped ` +
+        `verified, even after a retry: the probe's output was missing or malformed. The run stopped ` +
         `before pushing it.`,
   })
 }
