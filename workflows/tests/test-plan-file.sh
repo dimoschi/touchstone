@@ -80,8 +80,9 @@ async function scenarioPF3() {
   check('the plan is 6000 chars', plan.length, 6000)
   check('no planner:tighten call', callCount(captured, 'planner:tighten'), 0)
   const written = planFileIn(promptOf(captured, 'plan:write'))
-  check('the file content is the plan, a blank line, and the end line',
-    written?.content === `${plan}\n\nEND OF PLAN ${written?.id}\n`, true)
+  check('the text to copy is the plan alone', written?.content === `${plan}\n`, true)
+  check('the end line is appended by the given command',
+    promptOf(captured, 'plan:write').includes(planEndCommand(written?.id)), true)
 }
 
 // Scenario PF4 -- the planner is told the limit, and args.planMaxChars moves it.
@@ -128,7 +129,10 @@ async function scenarioPF6() {
   check('the whole plan is in the file content', written?.content.startsWith(plan), true)
   check('no brief truncation marker', p.includes('[brief truncated]'), false)
   check('the id is eight hex digits', /^[0-9a-f]{8}$/.test(written?.id ?? ''), true)
-  check('the file ends with the end line', written?.content.endsWith(`\nEND OF PLAN ${written?.id}\n`), true)
+  check('the text to copy holds no end line, so no model has to copy it',
+    written?.content.includes('END OF PLAN'), false)
+  check('the end line is appended by a command the script built',
+    p.includes(planEndCommand(written?.id)), true)
   check('it targets the worktree plan file', p.includes('/tmp/stub-worktree/.touchstone/plan.md'), true)
   check('it creates the directory and clears any file from an earlier run',
     p.includes('mkdir -p /tmp/stub-worktree/.touchstone && rm -f /tmp/stub-worktree/.touchstone/plan.md'), true)
@@ -351,6 +355,20 @@ async function scenarioPF15() {
   check('a mutation gate that committed nothing is not probed', callCount(unchanged.captured, 'plan:leak:Mutation'), 0)
 }
 
+// Scenario PF18 -- the appended end line lands in the plan file even when the
+// worktree path holds a space and a quote.
+async function scenarioPF18() {
+  console.log('\n== scenario PF18: the end-line command quotes a worktree path a bare word cannot hold')
+  const odd = "/tmp/touchstone o'clock/wt"
+  const { result, captured } = await run({ branchResult: { created: true, branch: 'feat/gh-21-stub',
+    base: 'main', path: odd, ticket: '21', detail: 'stub' }, triage: TEAM, ...CLEAN })
+  const p = promptOf(captured, 'plan:write')
+  check('the target is quoted as one shell word',
+    p.includes(">> '/tmp/touchstone o'\\''clock/wt/.touchstone/plan.md'\n"), true)
+  check('the run reaches the implementer', callCount(captured, 'implementer'), 1)
+  check('and does not halt on the plan file', result.halted_at, undefined)
+}
+
 async function scenarioPF16() {
   console.log('\n== scenario PF16: the probe command against a real repo catches add-then-delete')
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'plan-leak-'))
@@ -403,7 +421,7 @@ async function scenarioPF17() {
 
 const SCENARIOS = [scenarioPF1, scenarioPF2, scenarioPF3, scenarioPF4, scenarioPF5, scenarioPF6,
   scenarioPF7, scenarioPF8, scenarioPF9, scenarioPF10, scenarioPF11, scenarioPF12, scenarioPF13,
-  scenarioPF14, scenarioPF15, scenarioPF16, scenarioPF17]
+  scenarioPF14, scenarioPF15, scenarioPF16, scenarioPF17, scenarioPF18]
 JS_EOF
 
 finish
