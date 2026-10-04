@@ -33,7 +33,8 @@ BANDIT_SKIPPED = 'B101'
 HEAD_MOVED = ('HEAD is not the range head, so a tool run over the working tree '
               'would measure other code')
 GRIFFE_RECORD = re.compile(r'^\S[^:\n]*:\d+: [^:\n]+: \S')
-GO_LIST_BUILT = '{{range .GoFiles}}{{$.Dir}}/{{.}}{{"\\n"}}{{end}}{{range .CgoFiles}}{{$.Dir}}/{{.}}{{"\\n"}}{{end}}'
+GO_LIST_BUILT = ''.join('{{range .%s}}{{$.Dir}}/{{.}}{{"\\n"}}{{end}}' % field
+                        for field in ('GoFiles', 'CgoFiles', 'TestGoFiles', 'XTestGoFiles'))
 
 
 def of_value(parts, wanted):
@@ -264,11 +265,6 @@ def existing(ctx, files):
     return [path for path in files if ctx.status.get(path) != 'D']
 
 
-def gosec_reads(ctx, files):
-    """The changed files gosec scans: it leaves _test.go files out unless asked for them."""
-    return [path for path in existing(ctx, files) if not path.endswith('_test.go')]
-
-
 def unbuilt(ctx, changed, run):
     """The `changed` files that a `go list` run does not list as built."""
     built = {repo_path(ctx, line) for line in report_lines(run.out)}
@@ -278,7 +274,7 @@ def unbuilt(ctx, changed, run):
 def left_out(ctx, mod, files):
     """The part for changed files gosec never loaded. It scans the packages `go list ./...`
     finds for this host and does not say which file it dropped."""
-    changed = gosec_reads(ctx, files)
+    changed = existing(ctx, files)
     if not changed:
         return []
     run = run_tool(['go', 'list', '-e', '-f', GO_LIST_BUILT, './...'], cwd=os.path.join(ctx.repo, mod))
@@ -294,7 +290,7 @@ def left_out(ctx, mod, files):
 def go_security(ctx, files):
     parts = []
     for mod, mod_files in sorted(module_files(ctx, files).items()):
-        run = run_tool(['gosec', '-fmt=json', '-no-fail', './...'], cwd=os.path.join(ctx.repo, mod))
+        run = run_tool(['gosec', '-fmt=json', '-no-fail', '-tests', './...'], cwd=os.path.join(ctx.repo, mod))
         parts.append(scan_part(ctx, run, gosec_findings))
         parts.extend(left_out(ctx, mod, mod_files))
     return parts

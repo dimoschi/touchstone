@@ -382,11 +382,11 @@ def test_api_broken_in_php_ignores_test_files(repo, stubs):
     assert got["value"] is False and "only test files" in got["evidence"]["output"]
 
 
-def gosec_json(repo, line, rule="G204", errors=None):
+def gosec_json(repo, line, rule="G204", errors=None, name="a.go"):
     return json.dumps({
         "Golang errors": errors or {},
         "Issues": [{"severity": "HIGH", "rule_id": rule, "details": "x",
-                    "file": str(repo.root.resolve() / "a.go"), "line": line}],
+                    "file": str(repo.root.resolve() / name), "line": line}],
         "Stats": {}})
 
 
@@ -425,7 +425,7 @@ def test_security_pattern_in_go_runs_gosec_over_each_changed_module(repo, stubs)
     stubs.add("gosec", out=json.dumps({"Golang errors": {}, "Issues": []}))
     st.security_pattern(go_security_change(repo))
     [call] = stubs.calls("gosec")
-    assert call["args"] == ["-fmt=json", "-no-fail", "./..."]
+    assert call["args"] == ["-fmt=json", "-no-fail", "-tests", "./..."]
     assert os.path.realpath(call["cwd"]) == os.path.realpath(str(repo.root))
 
 
@@ -498,6 +498,11 @@ def test_security_pattern_in_go_asks_go_list_which_files_each_module_builds(repo
     assert os.path.realpath(call["cwd"]) == os.path.realpath(str(repo.root))
 
 
+@pytest.mark.parametrize("field", ["GoFiles", "CgoFiles", "TestGoFiles", "XTestGoFiles"])
+def test_go_list_names_every_kind_of_file_gosec_loads(field):
+    assert "{{range ." + field + "}}{{$.Dir}}/{{.}}{{\"\\n\"}}{{end}}" in st.GO_LIST_BUILT
+
+
 def test_security_pattern_in_go_judges_each_module_against_its_own_build(repo, stubs):
     stubs.add("gosec", out=NOTHING_FOUND)
     built = {"one": [str(repo.root.resolve() / "one" / "a.go")], "two": []}
@@ -521,12 +526,31 @@ def test_security_pattern_in_go_is_unmeasured_when_go_list_fails(repo, stubs):
     assert got["evidence"]["exit"] == 1
 
 
-def test_security_pattern_in_go_does_not_ask_go_list_about_tests_or_deleted_files(repo, stubs):
+def go_test_change(repo, deleted=()):
+    base = {"go.mod": GO_MOD, "a_test.go": "package m\n", **{name: "package m\n" for name in deleted}}
+    return change(repo, base, {"a_test.go": "package m\n\nfunc TestA() {}\n"}, delete=deleted)
+
+
+def test_security_pattern_in_go_flags_a_finding_on_an_added_line_of_a_test_file(repo, stubs):
+    stubs.add("gosec", out=gosec_json(repo, "3", name="a_test.go"))
+    go_builds(stubs, repo, "a_test.go")
+    got = st.security_pattern(go_test_change(repo))
+    assert got["value"] is True
+    assert got["evidence"]["output"] == "a_test.go:3 G204"
+
+
+def test_security_pattern_in_go_is_unmeasured_for_a_changed_test_file_the_build_leaves_out(repo, stubs):
     stubs.add("gosec", out=NOTHING_FOUND)
-    ctx = change(repo, {"go.mod": GO_MOD, "a_test.go": "package m\n", "gone.go": "package m\n"},
-                 {"a_test.go": "package m\n\nfunc TestA() {}\n"}, delete=("gone.go",))
-    assert st.security_pattern(ctx)["value"] is False
-    assert stubs.calls("go") == []
+    go_builds(stubs, repo)
+    got = st.security_pattern(go_test_change(repo))
+    assert got["value"] == UNMEASURED
+    assert got["reason"] == LEFT_OUT + "a_test.go"
+
+
+def test_security_pattern_in_go_does_not_ask_go_list_about_a_deleted_file(repo, stubs):
+    stubs.add("gosec", out=NOTHING_FOUND)
+    go_builds(stubs, repo, "a_test.go")
+    assert st.security_pattern(go_test_change(repo, deleted=("gone.go",)))["value"] is False
 
 
 def bandit_json(results=(), errors=()):

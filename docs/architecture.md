@@ -559,7 +559,7 @@ unmeasured with the exception, never dropped.
 | `files`, `directories` | changed paths, binaries included, and the distinct directories holding them |
 | `dependency_surface` | a changed `go.mod`, `go.sum`, `composer.json`, `composer.lock`, `pyproject.toml`, `uv.lock` or `requirements*.txt` |
 | `api_broken` | Go: `apidiff -m` of the module at the base against HEAD. Python: `griffe check` per top-level package. PHP: `roave-backward-compatibility-check --from=<base>` |
-| `security_pattern` | a finding of `gosec`, `bandit` or `opengrep` (rules in `lib/opengrep-php.yml`) on a line the range added. Every changed Python and PHP file is scanned, test files included, with `bandit`'s B101 (`assert_used`) skipped because every test asserts; `gosec` skips `_test.go` files itself. A changed Go file that `go list ./...` does not build on this host (a build constraint, a directory it skips) makes it unmeasured, since `gosec` drops such a file without saying so |
+| `security_pattern` | a finding of `gosec`, `bandit` or `opengrep` (rules in `lib/opengrep-php.yml`) on a line the range added. Every changed Python and PHP file is scanned, test files included, with `bandit`'s B101 (`assert_used`) skipped because every test asserts; Go test files are scanned too (`gosec -tests`). A changed Go file that `go list ./...` does not build on this host (a build constraint, a directory it skips) makes it unmeasured, since `gosec` drops such a file without saying so |
 | `semantic_noop` | `difft --check-only --exit-code` over the base and head blob of each changed file: true only when no file changed syntactically |
 | `crap_max`, `coverage_min` | the worst CRAP and lowest coverage among the functions the branch added or made worse, from the rows below |
 | `reachable` | Go: a function the range changed that `deadcode` does not list as unreachable from some main package. A changed Python, PHP or unsupported-language source file makes it unmeasured unless a Go function proves it true |
@@ -591,8 +591,11 @@ index before that commit exists, so each row names the `HEAD` the run was agains
 tree it scored; the commit is the one after that `HEAD` with that tree. A write drops the
 rows that no longer qualify before it merges, and `change-signals.sh` reads only the ones
 that do, so a gate run whose commit never landed and an abandoned attempt both count for
-nothing. Parallel worktrees share the file, so a write takes the same lock as
-`crap-check-scored.json`.
+nothing. A row whose commit has not landed yet also keeps the landed row it was merged over
+(`prior`, one level deep) and counts as that row until its own commit lands, so a second run
+at the same `HEAD` cannot cost a landed commit its tag. Parallel worktrees share the file, so
+a write takes its own lock file, `crap-check-rows.json.lock`, which is not the scored
+ledger's.
 
 In the pipeline, a `signals` agent (haiku, low effort) runs the script once, right after
 `draft-pr`, over the same `impl.commit_range` the diffstat measured, and relays its
