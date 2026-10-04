@@ -4,6 +4,10 @@ Reads every `.claude/touchstone-runs/*.json` under a repo. A record whose
 outcome is still `open` is refreshed from `gh pr view` and rewritten first.
 Every measure reads only fields the pipeline wrote or gh returned; a record
 missing one is counted as missing, never estimated.
+
+Each change-risk signal the records carry is also reported per version, with
+runs grouped by the value it took: true, false, unmeasured, or a number below or
+above the median of the measured ones.
 """
 
 from __future__ import annotations
@@ -15,6 +19,8 @@ import sys
 from pathlib import Path
 
 OUTCOMES = ('merged', 'closed', 'open', 'none')
+UNMEASURED = 'unmeasured'
+BUCKET_ORDER = ('true', 'false', '<=', '>', UNMEASURED, 'missing')
 RUNS_DIR = Path('.claude') / 'touchstone-runs'
 
 
@@ -110,7 +116,52 @@ def _halts_of(recs):
     return halts
 
 
-def _summary_of(recs):
+def _values_of(rec):
+    signals = rec.get('signals')
+    values = signals.get('values') if isinstance(signals, dict) else None
+    return values if isinstance(values, dict) else {}
+
+
+def _value_of(rec, name):
+    entry = _values_of(rec).get(name)
+    return entry.get('value') if isinstance(entry, dict) else None
+
+
+def _bucket(value, split):
+    if isinstance(value, bool):
+        return 'true' if value else 'false'
+    if value == UNMEASURED:
+        return UNMEASURED
+    if _number(value):
+        return f'<= {split:.10g}' if value <= split else f'> {split:.10g}'
+    return 'missing'
+
+
+def _rank(bucket):
+    return next(i for i, prefix in enumerate(BUCKET_ORDER) if bucket.startswith(prefix))
+
+
+def _median_split(values):
+    numbers = [v for v in values if _number(v)]
+    return statistics.median(numbers) if numbers else None
+
+
+def _by_value(recs, name):
+    values = [_value_of(rec, name) for rec in recs]
+    split = _median_split(values)
+    groups = {}
+    for rec, value in zip(recs, values):
+        groups.setdefault(_bucket(value, split), []).append(rec)
+    return {'split': split,
+            'groups': {b: _measures_of(groups[b]) for b in sorted(groups, key=_rank)}}
+
+
+def _signals_of(recs):
+    names = dict.fromkeys(name for rec in recs for name in _values_of(rec))
+    return {name: _by_value(recs, name) for name in names}
+
+
+def _measures_of(recs):
     rounds = [r.get('fix_rounds') if _number(r.get('fix_rounds')) else None for r in recs]
     return {
         'runs': len(recs), 'outcomes': _outcomes_of(recs), 'halts': _halts_of(recs),
@@ -119,6 +170,10 @@ def _summary_of(recs):
         'blocking': _total_of([r.get('unresolved_findings') for r in recs]),
         'notes': _total_of([r.get('notes') for r in recs]),
     }
+
+
+def _summary_of(recs):
+    return {**_measures_of(recs), 'signals': _signals_of(recs)}
 
 
 def _version_key(version):
@@ -137,6 +192,23 @@ def _fmt(median):
     return 'n/a' if median is None else f'{median:.0f}'
 
 
+def _render_group(bucket, g):
+    fr, b = g['fix_rounds'], g['blocking']
+    return (f"      {bucket}: {g['runs']} run(s), fix rounds median {_fmt(fr['median'])}, "
+            f"halted {sum(g['halts'].values())}, blocking findings {b['total']} ({b['missing']} missing)\n")
+
+
+def _render_signal(name, signal):
+    split = '' if signal['split'] is None else f" (numbers split at the median {signal['split']:.10g})"
+    return f'    {name}{split}\n' + ''.join(_render_group(b, g) for b, g in signal['groups'].items())
+
+
+def _render_signals(signals):
+    if not signals:
+        return ''
+    return '  signals:\n' + ''.join(_render_signal(name, signal) for name, signal in signals.items())
+
+
 def _render_one(version, s):
     outcomes = ', '.join(f'{k} {n}' for k, n in s['outcomes'].items())
     halts = ', '.join(f'{k} {n}' for k, n in s['halts'].items()) or 'none'
@@ -150,7 +222,7 @@ def _render_one(version, s):
         f"  fix rounds: median {_fmt(fr['median'])} ({fr['measured']} measured, {fr['missing']} missing)\n"
         f"  blocking findings {b['total']} ({b['missing']} missing), "
         f"notes {n['total']} ({n['missing']} missing)\n"
-    )
+    ) + _render_signals(s['signals'])
 
 
 def render(summary):
