@@ -538,6 +538,13 @@ def test_security_pattern_in_php_flags_a_finding_on_an_added_line(repo, stubs):
     assert got["evidence"]["output"] == "src/A.php:3 touchstone-php-eval"
 
 
+def test_security_pattern_in_php_names_the_rule_without_the_path_opengrep_prefixes_it_with(repo, stubs):
+    qualified = "Users.me.plugin.skills.crap-controlled-changes.lib.touchstone-php-eval"
+    stubs.add("opengrep", out=opengrep_json([opengrep_result(rule=qualified)]))
+    got = st.security_pattern(php_security_change(repo))
+    assert got["evidence"]["output"] == "src/A.php:3 touchstone-php-eval"
+
+
 def test_security_pattern_in_php_ignores_a_finding_on_an_older_line(repo, stubs):
     stubs.add("opengrep", out=opengrep_json([opengrep_result(start=2, end=2)]))
     assert st.security_pattern(php_security_change(repo))["value"] is False

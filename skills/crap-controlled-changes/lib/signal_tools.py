@@ -241,8 +241,10 @@ def bandit_findings(ctx, data):
 
 
 def opengrep_findings(ctx, data):
+    # opengrep prefixes each rule id with the dotted path of the rules file's directory.
     found = [(repo_path(ctx, result['path']),
-              range(result['start']['line'], result['end']['line'] + 1), result['check_id'])
+              range(result['start']['line'], result['end']['line'] + 1),
+              result['check_id'].rsplit('.', 1)[-1])
              for result in data.get('results') or []]
     return found, skipped(data.get('errors'))
 
