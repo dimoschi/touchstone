@@ -1,5 +1,6 @@
 import io
 import json
+import os
 import subprocess
 from pathlib import Path
 
@@ -682,3 +683,56 @@ def test_copilot_tracked_file_matching_an_ignore_pattern_is_still_blocked(monkey
     (repo / ".touchstone" / "plan.md").write_text("x")
     subprocess.run(["git", "-C", str(repo), "add", "-f", ".touchstone/plan.md"], check=True)
     assert _run(monkeypatch, _copilot_pre("copilot-trk", repo, "Write", ".touchstone/plan.md")) == 2
+
+
+def _match_marker_case_exactly(monkeypatch, repo):
+    """is_gated resolves the marker with Path.exists(), which a case-insensitive
+    filesystem answers for any spelling, so a misspelt marker would go unseen."""
+    real = gate.is_gated
+    monkeypatch.setattr(
+        gate, "is_gated",
+        lambda path, marker: real(path, marker) and marker in os.listdir(repo))
+
+
+def test_copilot_unsupported_payload_names_the_tool_and_each_guide(
+        monkeypatch, tmp_path, capsys):
+    monkeypatch.setenv(cse.STATE_ENV, str(tmp_path / "state"))
+    repo = _repo(tmp_path, "multi", guides=[
+        ("CONTRIBUTING.md", "main guide"),
+        ("docs/DEVELOPMENT.md", "dev guide"),
+    ])
+    _match_marker_case_exactly(monkeypatch, repo)
+    rc = _run(monkeypatch, _copilot_pre("copilot-unsupported", repo, "MultiEdit", None))
+    captured = capsys.readouterr()
+    assert rc == 2
+    assert "unsupported Copilot MultiEdit payload" in captured.err
+    assert f'  {repo / "CONTRIBUTING.md"}\n  {repo / "docs" / "DEVELOPMENT.md"}' in captured.err
+    assert captured.out == ""
+
+
+def test_copilot_refusal_lists_each_unread_guide_on_stderr(monkeypatch, tmp_path, capsys):
+    monkeypatch.setenv(cse.STATE_ENV, str(tmp_path / "state"))
+    repo = _repo(tmp_path, "multi", guides=[
+        ("CONTRIBUTING.md", "main guide"),
+        ("docs/DEVELOPMENT.md", "dev guide"),
+    ])
+    rc = _run(monkeypatch, _copilot_pre("copilot-refusal", repo, "Edit", "internal/app.go"))
+    captured = capsys.readouterr()
+    assert rc == 2
+    assert f'  {repo / "CONTRIBUTING.md"}\n  {repo / "docs" / "DEVELOPMENT.md"}' in captured.err
+    assert captured.out == ""
+
+
+def test_copilot_edit_is_gated_by_the_marker_spelt_exactly(monkeypatch, tmp_path):
+    monkeypatch.setenv(cse.STATE_ENV, str(tmp_path / "state"))
+    repo = _repo(tmp_path, "guided", guides=[("CONTRIBUTING.md", "read me")])
+    _match_marker_case_exactly(monkeypatch, repo)
+    assert _run(monkeypatch, _copilot_pre("copilot-exact", repo, "Edit", "internal/app.go")) == 2
+
+
+def test_claude_edit_is_gated_by_the_marker_spelt_exactly(monkeypatch, tmp_path):
+    repo = _repo(tmp_path, "guided", guides=[("CONTRIBUTING.md", "read me")])
+    _match_marker_case_exactly(monkeypatch, repo)
+    missing = tmp_path / "missing.jsonl"
+    rc = _run(monkeypatch, _legacy_payload(missing, str(repo / "internal" / "app.go")))
+    assert rc == 2
