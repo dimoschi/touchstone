@@ -323,15 +323,19 @@ The implementer never gets the plan as prompt text. `brief()` clamps to `briefCh
 - **Length gate.** The planner is told to stay within `PLAN_MAX_CHARS` (6000;
   `args.planMaxChars` overrides). A longer plan is sent back once as
   `planner:tighten`, with the previous plan in full. Still over, or no answer, halts at
-  Plan: the ticket probably needs splitting. A plan passed as `args.plan`, and the
-  inline stub plan, are not gated.
+  Plan: the ticket probably needs splitting. A plan passed as `args.plan` is held to the
+  same limit but never tightened: over it, the run halts at Plan before any agent is
+  dispatched (no setup, branch or triage), so nothing has been created. The inline stub
+  plan is not gated.
 - **Plan file.** On every plan path, a haiku `plan:write` agent writes the plan, a blank
   line and `END OF PLAN <id>` to `<worktree>/.touchstone/plan.md`, adds `.touchstone/`
   to `info/exclude` under `git rev-parse --git-common-dir` (never a tracked
   `.gitignore`), and reports `wc -c`, `tail -n 1` and the `git check-ignore` exit. The
   script halts at Implement unless the byte count equals the UTF-8 length it computed
   itself, the last line is the end line, and the file is ignored. The id is an FNV-1a
-  hash of ticket and plan, computed by the script, so it is deterministic.
+  hash of ticket and plan, computed by the script, so it is deterministic. A failed
+  verification is retried once as `plan:write:retry` with the identical prompt; a second
+  failure halts at Implement.
 - **Proof of reading.** The implementer is told to read the whole file and return the id
   as `plan_id`, or to refuse to start (empty `plan_id`) if it cannot. A missing, empty or
   wrong id halts at Implement before the draft PR, review or any fix.
@@ -339,9 +343,10 @@ The implementer never gets the plan as prompt text. `brief()` clamps to `briefCh
   checks fix, after every fix round that moved the head, and after a mutation attempt
   that moved it, a `plan:leak:<phase>` agent runs a script-built `git log --name-only`
   over `<implementer base>..<new head>`. Using the range from the implementer's base
-  catches a commit that adds the file and a later one that deletes it. Any path, or
-  output that does not parse like the diffstat probe's, halts at that phase before a
-  push.
+  catches a commit that adds the file and a later one that deletes it. Missing or
+  unparseable output is retried once as `plan:leak:<phase>:retry`. A path found on
+  either attempt halts that phase at once, before a push; output unparseable twice halts
+  as unverified.
 
 ### What can hold a run: `classify()` and reproducers
 

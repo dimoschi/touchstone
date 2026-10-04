@@ -847,6 +847,23 @@ const SETUP = {
 // forever. Creating the worktree first means inline work happens in the right
 // place too. The cost is one unused worktree when triage rejects the premise.
 
+// A supplied plan is held to the same limit as a planner's, but there is no
+// planner to send it back to, so it halts rather than being tightened. Checked
+// before anything is dispatched: the verdict needs nothing from setup, branch
+// or triage, and a run that is going to halt should not pay for them first.
+const givenPlan = typeof args?.plan === 'string' && args.plan.trim()
+  ? args.plan.trim() : null
+if (givenPlan && givenPlan.length > PLAN_MAX_CHARS) {
+  enterPhase('Plan')
+  return await halted('Plan', {
+    plan: givenPlan,
+    note: `args.plan is ${givenPlan.length} chars, over the ${PLAN_MAX_CHARS} limit. ` +
+      `It was not retried: nothing tightens a supplied plan. The ticket may need ` +
+      `splitting. The run stopped before any agent ran: no worktree, branch, ` +
+      `triage or plan file.`,
+  })
+}
+
 // One dispatch, before anything reads the envelope, answering three questions
 // that share nothing but their timing: none needs a worktree, and each used
 // to cost its own haiku round trip (ticket, plugin:version, gate:opt-in). Not
@@ -1654,8 +1671,6 @@ try {
 // run at Implement. Without it the only way to reuse a plan was to paste it into
 // the task, which routed it back through the planner and asked that phase to
 // carry out work it is forbidden to do.
-const givenPlan = typeof args?.plan === 'string' && args.plan.trim()
-  ? args.plan.trim() : null
 let plan = givenPlan
   ? {
       plan: givenPlan,
@@ -1667,18 +1682,6 @@ let plan = givenPlan
   : null
 
 if (givenPlan) log('Plan supplied in args; Plan phase skipped.')
-
-// A supplied plan is held to the same limit as a planner's, but there is no
-// planner to send it back to, so it halts rather than being tightened.
-if (givenPlan && givenPlan.length > PLAN_MAX_CHARS) {
-  enterPhase('Plan')
-  return await halted('Plan', {
-    plan: givenPlan,
-    note: `args.plan is ${givenPlan.length} chars, over the ${PLAN_MAX_CHARS} limit. ` +
-      `It was not retried: nothing tightens a supplied plan. The ticket may need ` +
-      `splitting. Nothing was written or implemented.`,
-  })
-}
 
 if (!plan && inlineMode) {
   plan = {
@@ -1805,8 +1808,7 @@ widenBudgetHaltState(() => ({ plan: plan.plan }))
 const planWritePrompt =
   `Write the plan file, then STOP. Do not implement anything and do not commit.\n` +
   `1. mkdir -p ${wt.path}/.touchstone && rm -f ${planFile}\n` +
-  `2. Keep it out of git without touching any tracked file, before writing it: ` +
-  `a repo's edit hook only lets an ignored path through. Run: ` +
+  `2. Keep it out of git without touching any tracked file, before writing it. Run: ` +
   `x="$(git -C ${wt.path} rev-parse --path-format=absolute --git-common-dir)/info/exclude"; ` +
   `mkdir -p "$(dirname "$x")"; ` +
   `grep -qxF '.touchstone/' "$x" || printf '\\n.touchstone/\\n' >> "$x"\n` +

@@ -15,7 +15,8 @@ one action that clears the gate -- reading -- is always available, so there is
 no way to be stuck behind it. A subagent is its own reader: see
 evidence_transcript for why the parent session's transcript is the wrong file.
 
-A path git ignores is exempt: an ignored file is not a change to the repo.
+Only the worktree's own .touchstone/ (the pipeline's plan file) is exempt. A path
+git ignores is not: any agent can add an ignore rule, so that would be a bypass.
 
 Exit 2 blocks, with the paths on stderr. Tests: test-contributing-gate.sh.
 """
@@ -101,10 +102,14 @@ def resolved(path):
         return str(Path(path).expanduser())
 
 
-def ignored(top, target):
-    """True when git ignores `target`. check-ignore exits 0 only for an untracked
-    ignored path, so a tracked file that matches a pattern stays gated."""
-    return git(top, 'check-ignore', '-q', '--', resolved(target)) is not None
+def in_plan_dir(top, target):
+    """True when `target` is inside the worktree's own .touchstone/ directory.
+
+    Both sides are resolved, so `..` segments and a .touchstone symlink that
+    points elsewhere in the repo are judged by where they land. Only the
+    top-level directory counts: sub/.touchstone/ is an ordinary path."""
+    plan_dir = Path(resolved(top)) / '.touchstone'
+    return Path(resolved(target)).is_relative_to(plan_dir)
 
 
 def read_in_session(transcript, guides):
@@ -210,7 +215,8 @@ def claude_guides(data):
 
     Empty covers every reason to stay out of the way: no usable target, an
     ungated repo, no repo at all, no guide shipped, the edit being to the
-    guide itself, or the path being one git ignores.
+    guide itself, or the path being in the worktree's own .touchstone/. An
+    ignore rule is no exemption: any agent can add one.
     """
     target = claude_target(data)
     if target is None:
@@ -278,11 +284,11 @@ def gate_claude(data):
 
 def gated_top(target):
     """Root of the gated repo an edit to `target` falls under, or None when
-    the repo is ungated, absent, or git ignores the path."""
+    the repo is ungated, absent, or the path is in its own .touchstone/."""
     if not is_gated(target, '.crap-gated'):
         return None
     top = repo_toplevel(target)
-    if not top or ignored(top, target):
+    if not top or in_plan_dir(top, target):
         return None
     return top
 

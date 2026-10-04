@@ -135,8 +135,8 @@ async function scenarioPF6() {
   check('it excludes through info/exclude under --git-common-dir',
     p.includes('--git-common-dir') && p.includes('info/exclude'), true)
   check('it never names a tracked ignore file', p.includes('.gitignore'), false)
-  check('the exclude comes before the Write, so the hook sees an ignored path',
-    p.indexOf('info/exclude') > 0 && p.indexOf('info/exclude') < p.indexOf('with the Write tool'), true)
+  check('it no longer claims an edit hook only lets an ignored path through',
+    /edit hook/.test(p), false)
   check('it asks for wc -c, tail -n 1 and check-ignore',
     p.includes('wc -c') && p.includes('tail -n 1') && p.includes('check-ignore -q .touchstone/plan.md'), true)
   check('it is dispatched on a cheap model', captured.calls.find(c => c.label === 'plan:write') !== undefined, true)
@@ -391,9 +391,8 @@ async function scenarioPF17() {
   check('the note names the limit', (result.note ?? '').includes('6000'), true)
   check('the note says it was not retried', /not retried/.test(result.note ?? ''), true)
   check('the note says the ticket may need splitting', /split/.test(result.note ?? ''), true)
-  for (const l of ['planner', 'planner:tighten', 'plan:write', 'implementer']) {
-    check(`no ${l} call`, callCount(captured, l), 0)
-  }
+  check('the note says no agent ran', /before any agent ran/.test(result.note ?? ''), true)
+  check('no agent was dispatched at all', labelsOf(captured).length, 0)
   const exact = 'h'.repeat(6000)
   const ok = await run({ args: { plan: exact }, triage: TEAM, ...CLEAN })
   check('a plan of exactly 6000 chars is not halted', ok.result.halted_at, undefined)

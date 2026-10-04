@@ -631,58 +631,71 @@ def _exclude(repo, pattern):
         handle.write(pattern + "\n")
 
 
-def test_untracked_path_git_ignores_is_allowed(monkeypatch, tmp_path):
+def _claude_edit(monkeypatch, tmp_path, path):
+    missing = tmp_path / "missing.jsonl"
+    return _run(monkeypatch, _legacy_payload(missing, str(path)))
+
+
+def test_plan_file_in_the_touchstone_directory_is_allowed(monkeypatch, tmp_path):
     repo = _repo(tmp_path, "guided", guides=[("CONTRIBUTING.md", "read me")])
-    _exclude(repo, ".touchstone/")
     (repo / ".touchstone").mkdir()
-    missing = tmp_path / "missing.jsonl"
-    rc = _run(monkeypatch, _legacy_payload(missing, str(repo / ".touchstone" / "plan.md")))
-    assert rc == 0
+    assert _claude_edit(monkeypatch, tmp_path, repo / ".touchstone" / "plan.md") == 0
 
 
-def test_path_under_a_missing_ignored_directory_is_allowed(monkeypatch, tmp_path):
+def test_path_under_a_missing_touchstone_subdirectory_is_allowed(monkeypatch, tmp_path):
     repo = _repo(tmp_path, "guided", guides=[("CONTRIBUTING.md", "read me")])
-    _exclude(repo, ".touchstone/")
-    missing = tmp_path / "missing.jsonl"
-    rc = _run(monkeypatch, _legacy_payload(missing, str(repo / ".touchstone" / "a" / "plan.md")))
-    assert rc == 0
+    assert _claude_edit(monkeypatch, tmp_path, repo / ".touchstone" / "a" / "plan.md") == 0
 
 
-def test_tracked_file_matching_an_ignore_pattern_is_still_blocked(monkeypatch, tmp_path):
+def test_tracked_plan_file_in_the_touchstone_directory_is_allowed(monkeypatch, tmp_path):
     repo = _repo(tmp_path, "guided", guides=[("CONTRIBUTING.md", "read me")])
-    _exclude(repo, ".touchstone/")
     (repo / ".touchstone").mkdir()
     plan = repo / ".touchstone" / "plan.md"
     plan.write_text("x")
     subprocess.run(["git", "-C", str(repo), "add", "-f", ".touchstone/plan.md"], check=True)
-    missing = tmp_path / "missing.jsonl"
-    rc = _run(monkeypatch, _legacy_payload(missing, str(plan)))
-    assert rc == 2
+    assert _claude_edit(monkeypatch, tmp_path, plan) == 0
 
 
-def test_new_file_git_does_not_ignore_is_still_blocked(monkeypatch, tmp_path):
+def test_path_matched_by_an_exclude_entry_outside_touchstone_is_blocked(monkeypatch, tmp_path):
     repo = _repo(tmp_path, "guided", guides=[("CONTRIBUTING.md", "read me")])
-    _exclude(repo, ".touchstone/")
-    missing = tmp_path / "missing.jsonl"
-    rc = _run(monkeypatch, _legacy_payload(missing, str(repo / "notes" / "plan.md")))
-    assert rc == 2
+    _exclude(repo, "notes/")
+    assert _claude_edit(monkeypatch, tmp_path, repo / "notes" / "x.md") == 2
 
 
-def test_copilot_untracked_path_git_ignores_is_allowed(monkeypatch, tmp_path):
+def test_nested_touchstone_directory_is_blocked(monkeypatch, tmp_path):
+    repo = _repo(tmp_path, "guided", guides=[("CONTRIBUTING.md", "read me")])
+    assert _claude_edit(monkeypatch, tmp_path, repo / "sub" / ".touchstone" / "plan.md") == 2
+
+
+def test_dotdot_out_of_the_touchstone_directory_is_blocked(monkeypatch, tmp_path):
+    repo = _repo(tmp_path, "guided", guides=[("CONTRIBUTING.md", "read me")])
+    assert _claude_edit(monkeypatch, tmp_path, repo / ".touchstone" / ".." / "x.md") == 2
+
+
+def test_touchstone_symlink_to_another_repo_directory_is_blocked(monkeypatch, tmp_path):
+    repo = _repo(tmp_path, "guided", guides=[("CONTRIBUTING.md", "read me")])
+    (repo / "src").mkdir()
+    (repo / ".touchstone").symlink_to(repo / "src")
+    assert _claude_edit(monkeypatch, tmp_path, repo / ".touchstone" / "x.md") == 2
+
+
+def test_new_file_outside_the_touchstone_directory_is_blocked(monkeypatch, tmp_path):
+    repo = _repo(tmp_path, "guided", guides=[("CONTRIBUTING.md", "read me")])
+    assert _claude_edit(monkeypatch, tmp_path, repo / "notes" / "plan.md") == 2
+
+
+def test_copilot_plan_file_in_the_touchstone_directory_is_allowed(monkeypatch, tmp_path):
     monkeypatch.setenv(cse.STATE_ENV, str(tmp_path / "state"))
     repo = _repo(tmp_path, "guided", guides=[("CONTRIBUTING.md", "read me")])
-    _exclude(repo, ".touchstone/")
-    assert _run(monkeypatch, _copilot_pre("copilot-ign", repo, "Write", ".touchstone/plan.md")) == 0
+    assert _run(monkeypatch, _copilot_pre("copilot-plan", repo, "Write", ".touchstone/plan.md")) == 0
 
 
-def test_copilot_tracked_file_matching_an_ignore_pattern_is_still_blocked(monkeypatch, tmp_path):
+def test_copilot_path_matched_by_an_exclude_entry_outside_touchstone_is_blocked(
+        monkeypatch, tmp_path):
     monkeypatch.setenv(cse.STATE_ENV, str(tmp_path / "state"))
     repo = _repo(tmp_path, "guided", guides=[("CONTRIBUTING.md", "read me")])
-    _exclude(repo, ".touchstone/")
-    (repo / ".touchstone").mkdir()
-    (repo / ".touchstone" / "plan.md").write_text("x")
-    subprocess.run(["git", "-C", str(repo), "add", "-f", ".touchstone/plan.md"], check=True)
-    assert _run(monkeypatch, _copilot_pre("copilot-trk", repo, "Write", ".touchstone/plan.md")) == 2
+    _exclude(repo, "notes/")
+    assert _run(monkeypatch, _copilot_pre("copilot-exc", repo, "Write", "notes/x.md")) == 2
 
 
 def _match_marker_case_exactly(monkeypatch, repo):
