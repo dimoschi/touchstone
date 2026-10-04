@@ -233,7 +233,7 @@ if [ "$ran_any" -eq 1 ]; then
     # A record that cannot be kept must not turn a green gate red, so it only
     # says so.
     python3 "$LIB_DIR/crap_rows.py" record "$(git rev-parse --git-common-dir)/crap-check-rows.json" \
-      "$BRANCH" < "$CAPTURE" 2>/dev/null \
+      "$BRANCH" "$REPO_ROOT" < "$CAPTURE" 2>/dev/null \
       || echo "crap-check: could not record the CRAP rows" >&2
   fi
   exit "$NA_STATUS"

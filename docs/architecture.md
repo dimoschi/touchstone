@@ -559,7 +559,7 @@ unmeasured with the exception, never dropped.
 | `files`, `directories` | changed paths, binaries included, and the distinct directories holding them |
 | `dependency_surface` | a changed `go.mod`, `go.sum`, `composer.json`, `composer.lock`, `pyproject.toml`, `uv.lock` or `requirements*.txt` |
 | `api_broken` | Go: `apidiff -m` of the module at the base against HEAD. Python: `griffe check` per top-level package. PHP: `roave-backward-compatibility-check --from=<base>` |
-| `security_pattern` | a finding of `gosec`, `bandit` or `opengrep` (rules in `lib/opengrep-php.yml`) on a line the range added. Every changed Python and PHP file is scanned, test files included; `gosec` skips `_test.go` files itself. A changed Go file that `go list ./...` does not build on this host (a build constraint, a directory it skips) makes it unmeasured, since `gosec` drops such a file without saying so |
+| `security_pattern` | a finding of `gosec`, `bandit` or `opengrep` (rules in `lib/opengrep-php.yml`) on a line the range added. Every changed Python and PHP file is scanned, test files included, with `bandit`'s B101 (`assert_used`) skipped because every test asserts; `gosec` skips `_test.go` files itself. A changed Go file that `go list ./...` does not build on this host (a build constraint, a directory it skips) makes it unmeasured, since `gosec` drops such a file without saying so |
 | `semantic_noop` | `difft --check-only --exit-code` over the base and head blob of each changed file: true only when no file changed syntactically |
 | `crap_max`, `coverage_min` | the worst CRAP and lowest coverage among the functions the branch added or made worse, from the rows below |
 | `reachable` | Go: a function the range changed that `deadcode` does not list as unreachable from some main package. A changed Python, PHP or unsupported-language source file makes it unmeasured unless a Go function proves it true |
@@ -585,6 +585,15 @@ commit touches a function again (each run tags against the commit before it, so 
 the branch added reads `unchanged` on its second commit). Writing it never changes the
 gate's exit.
 
+The file outlives a branch, and a redone ticket cuts its branch again under the same name,
+so a row counts only while the commit that carried it is in history. The gate scores the
+index before that commit exists, so each row names the `HEAD` the run was against and the
+tree it scored; the commit is the one after that `HEAD` with that tree. A write drops the
+rows that no longer qualify before it merges, and `change-signals.sh` reads only the ones
+that do, so a gate run whose commit never landed and an abandoned attempt both count for
+nothing. Parallel worktrees share the file, so a write takes the same lock as
+`crap-check-scored.json`.
+
 In the pipeline, a `signals` agent (haiku, low effort) runs the script once, right after
 `draft-pr`, over the same `impl.commit_range` the diffstat measured, and relays its
 output. `parseSignals` accepts only an exact record: the begin line naming that range,
@@ -595,6 +604,8 @@ has to see it. `signals` sits beside `size` in the result and in every halt, `nu
 every halt before the draft.
 
 Limits worth knowing. The CRAP record keeps a row for a function that was later removed.
+A commit rewritten into a different tree (amend, rebase) no longer vouches for its rows, so
+`crap_max` and `coverage_min` then read over the rows that remain.
 `reachable` reads functions by gofmt's layout (`func` in column zero to `}` in column
 zero) and treats a root that never built a replaced module's package as not listing it.
 Python `api_broken` needs `__init__.py` packages; a file in none is unmeasured.

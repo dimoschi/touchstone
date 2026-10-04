@@ -566,7 +566,7 @@ def test_security_pattern_in_python_scans_every_changed_file_that_still_exists(r
     stubs.add("bandit", out=bandit_json())
     st.security_pattern(py_security_change(repo))
     [call] = stubs.calls("bandit")
-    assert call["args"] == ["-f", "json", "a.py", "b.py", "tests/test_a.py"]
+    assert call["args"] == ["-f", "json", "-s", "B101", "a.py", "b.py", "tests/test_a.py"]
     assert os.path.realpath(call["cwd"]) == os.path.realpath(str(repo.root))
 
 

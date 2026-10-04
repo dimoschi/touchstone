@@ -64,6 +64,9 @@ stage_change 3
 check "the gate is green" "$(gate "$GREEN")" 0
 check "the branch's row is there" \
   "$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["feature"]["a.py::f"]["tag"])' "$ROWS_FILE")" new
+check "the row names the head and the tree the gate ran against" \
+  "$(python3 -c 'import json,sys; r = json.load(open(sys.argv[1]))["feature"]["a.py::f"]; sys.stdout.write(r["head"] + " " + r["tree"])' "$ROWS_FILE")" \
+  "$(git -C "$REPO" rev-parse HEAD) $(git -C "$REPO" write-tree)"
 
 echo "== a later red run leaves the record as it was"
 before="$(cat "$ROWS_FILE")"
@@ -85,6 +88,43 @@ check "the worktree's own git dir holds none" \
 git -C "$REPO" worktree remove --force "$WT"
 check "removing the worktree leaves its branch's row" \
   "$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["wtbranch"]["a.py::f"]["tag"])' "$ROWS_FILE")" new
+
+commit_in() {
+  GIT_AUTHOR_NAME=t GIT_AUTHOR_EMAIL=t@t GIT_COMMITTER_NAME=t GIT_COMMITTER_EMAIL=t@t \
+    git -C "$1" -c commit.gpgsign=false commit -q -m "$2"
+}
+
+counted_rows() {
+  PYTHONPATH="$SKILL_DIR/lib" python3 -c '
+import sys, crap_rows
+sys.stdout.write(" ".join(sorted(crap_rows.latest(*sys.argv[1:5]))))' "$ROWS_FILE" "$1" "$2" "$3"
+}
+
+echo "== a ticket redone from scratch under the same branch name keeps none of the earlier attempt's rows"
+printf 'a.py::old  complexity=5  coverage=100.0%%  CRAP=5.0  OK  (new)\n' > "$WORK/first.txt"
+printf 'b.py::g  complexity=1  coverage=100.0%%  CRAP=1.0  OK  (new)\n' > "$WORK/second.txt"
+REDO="$WORK/redo"
+git -C "$REPO" worktree add -q -b redo "$REDO" main
+printf 'def old():\n    return 2\n' > "$REDO/a.py"
+git -C "$REDO" add a.py
+STUB_ROWS="$WORK/first.txt" "$WORK/skill/crap-check.sh" "$REDO" > "$WORK/out.log" 2>&1
+check "the first attempt's gate is green" "$?" 0
+commit_in "$REDO" first
+check "the first attempt's row counts while its commit is in history" \
+  "$(counted_rows redo "$REDO" "$(git -C "$REDO" rev-parse HEAD)")" "a.py::old"
+git -C "$REPO" worktree remove --force "$REDO"
+git -C "$REPO" branch -q -D redo
+git -C "$REPO" worktree add -q -b redo "$REDO" main
+printf 'def g():\n    return 3\n' > "$REDO/b.py"
+git -C "$REDO" add b.py
+STUB_ROWS="$WORK/second.txt" "$WORK/skill/crap-check.sh" "$REDO" > "$WORK/out.log" 2>&1
+check "the second attempt's gate is green" "$?" 0
+commit_in "$REDO" second
+check "only the second attempt's row counts" \
+  "$(counted_rows redo "$REDO" "$(git -C "$REDO" rev-parse HEAD)")" "b.py::g"
+check "the file holds only the second attempt's row" \
+  "$(python3 -c 'import json,sys; print(" ".join(sorted(json.load(open(sys.argv[1]))["redo"])))' "$ROWS_FILE")" "b.py::g"
+git -C "$REPO" worktree remove --force "$REDO"
 
 echo "== a record that cannot be written does not change the verdict"
 rm -f "$ROWS_FILE"

@@ -1,11 +1,14 @@
 """Fixtures shared by the unit suites in this directory."""
 
 import json
+import os
 import shutil
 import subprocess
 import sys
 
 import pytest
+
+import crap_rows
 
 
 class Repo:
@@ -34,6 +37,23 @@ class Repo:
         self.git("add", "-A")
         self.git("commit", "-q", "--allow-empty", "-m", message)
         return self.git("rev-parse", "HEAD")
+
+    def worktree(self, path, branch):
+        self.git("worktree", "add", "-q", "-b", branch, str(path))
+        return Repo(path)
+
+    @property
+    def rows_path(self):
+        common = self.git("rev-parse", "--path-format=absolute", "--git-common-dir")
+        return os.path.join(common, "crap-check-rows.json")
+
+    def land(self, rows, branch="feat"):
+        """One crap-commit.sh round: record the gate's rows against a staged change, then commit it."""
+        self.landings = getattr(self, "landings", 0) + 1
+        self.write(f"landed-{self.landings}.txt", "x\n")
+        self.git("add", "-A")
+        crap_rows.record(self.rows_path, branch, rows, str(self.root))
+        return self.commit(f"landing {self.landings}")
 
 
 @pytest.fixture

@@ -136,7 +136,8 @@ def worst(rows, measure, command, branch):
 def crap_signals(ctx):
     path = os.path.join(common_git_dir(ctx.repo), 'crap-check-rows.json')
     branch = branch_of(ctx.repo)
-    rows = {fid: row for fid, row in crap_rows.latest(path, branch).items() if row['tag'] in STRONG_TAGS}
+    rows = {fid: row for fid, row in crap_rows.latest(path, branch, ctx.repo, 'HEAD').items()
+            if row['tag'] in STRONG_TAGS}
     command = f'read {path} [{branch}]'
     return {
         'crap_max': worst(rows, CRAP, command, branch),

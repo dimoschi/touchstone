@@ -167,14 +167,13 @@ def test_dependency_surface_lists_every_manifest_that_changed(repo):
 @pytest.fixture
 def rows_repo(repo):
     repo.write("a.py", "x\n")
-    base = repo.commit("base")
-    repo.write("a.py", "y\n")
-    head = repo.commit("head")
-    return repo, ctx_of(repo, base, head)
+    repo.base = repo.commit("base")
+    return repo
 
 
-def record(repo, text, branch="feat"):
-    crap_rows.record(str(repo.root / ".git" / "crap-check-rows.json"), branch, text)
+def landed(repo, text, branch="feat"):
+    """The context of a range whose head commit was gated with `text` as its rows."""
+    return ctx_of(repo, repo.base, repo.land(text, branch))
 
 
 ROWS = (
@@ -185,77 +184,84 @@ ROWS = (
 
 
 def test_crap_max_and_coverage_min_read_the_new_and_worsened_rows_only(rows_repo):
-    repo, ctx = rows_repo
-    record(repo, ROWS)
-    got = cs.crap_signals(ctx)
+    got = cs.crap_signals(landed(rows_repo, ROWS))
     assert got["crap_max"]["value"] == 7.5
     assert got["coverage_min"]["value"] == 62.5
 
 
 def test_the_crap_evidence_names_the_record_and_the_row_it_came_from(rows_repo):
-    repo, ctx = rows_repo
-    record(repo, ROWS)
-    got = cs.crap_signals(ctx)
-    path = str(repo.root / ".git" / "crap-check-rows.json")
+    got = cs.crap_signals(landed(rows_repo, ROWS))
     assert got["crap_max"]["evidence"] == {
-        "command": f"read {path} [feat]", "exit": 0, "output": "lib/a.py::g CRAP=7.5 (2 row(s))"}
+        "command": f"read {rows_repo.rows_path} [feat]", "exit": 0, "output": "lib/a.py::g CRAP=7.5 (2 row(s))"}
     assert got["coverage_min"]["evidence"]["output"] == "lib/a.py::g coverage=62.5 (2 row(s))"
 
 
 def test_a_row_without_a_number_is_left_out(rows_repo):
-    repo, ctx = rows_repo
-    record(repo, ROWS + "lib/m.py::main  complexity=3  coverage=n/a  CRAP=n/a  OK_MAIN  (new)\n")
-    got = cs.crap_signals(ctx)
+    main_row = "lib/m.py::main  complexity=3  coverage=n/a  CRAP=n/a  OK_MAIN  (new)\n"
+    got = cs.crap_signals(landed(rows_repo, ROWS + main_row))
     assert got["crap_max"]["value"] == 7.5
     assert got["coverage_min"]["value"] == 62.5
 
 
 def test_crap_signals_are_unmeasured_when_no_row_has_a_number(rows_repo):
-    repo, ctx = rows_repo
-    record(repo, "lib/m.py::main  complexity=3  coverage=n/a  CRAP=n/a  OK_MAIN  (new)\n")
-    got = cs.crap_signals(ctx)
+    main_row = "lib/m.py::main  complexity=3  coverage=n/a  CRAP=n/a  OK_MAIN  (new)\n"
+    got = cs.crap_signals(landed(rows_repo, main_row))
     for name in ("crap_max", "coverage_min"):
         assert got[name]["value"] == UNMEASURED
         assert got[name]["reason"].startswith("no CRAP row tagged new or worsened with a ")
 
 
 def test_crap_signals_are_unmeasured_without_a_record(rows_repo):
-    repo, ctx = rows_repo
-    got = cs.crap_signals(ctx)
+    got = cs.crap_signals(ctx_of(rows_repo, rows_repo.base, rows_repo.commit("head")))
     assert got["crap_max"]["value"] == UNMEASURED
     assert got["crap_max"]["reason"] == "no CRAP row tagged new or worsened with a CRAP score on branch feat"
     assert got["coverage_min"]["reason"] == "no CRAP row tagged new or worsened with a coverage on branch feat"
 
 
 def test_crap_signals_ignore_rows_of_other_branches(rows_repo):
-    repo, ctx = rows_repo
-    record(repo, ROWS, branch="other")
-    assert cs.crap_signals(ctx)["crap_max"]["value"] == UNMEASURED
+    assert cs.crap_signals(landed(rows_repo, ROWS, branch="other"))["crap_max"]["value"] == UNMEASURED
 
 
 def test_crap_signals_are_unmeasured_when_only_unchanged_rows_exist(rows_repo):
-    repo, ctx = rows_repo
-    record(repo, "lib/a.py::h  complexity=9  coverage=10.0%  CRAP=12.0  OK  (unchanged)\n")
+    ctx = landed(rows_repo, "lib/a.py::h  complexity=9  coverage=10.0%  CRAP=12.0  OK  (unchanged)\n")
     assert cs.crap_signals(ctx)["coverage_min"]["value"] == UNMEASURED
 
 
 def test_crap_signals_read_the_branch_of_a_detached_head_as_detached(rows_repo):
-    repo, ctx = rows_repo
-    repo.git("checkout", "-q", "--detach")
-    record(repo, ROWS, branch="detached")
-    assert cs.crap_signals(ctx)["crap_max"]["value"] == 7.5
+    rows_repo.git("checkout", "-q", "--detach")
+    assert cs.crap_signals(landed(rows_repo, ROWS, branch="detached"))["crap_max"]["value"] == 7.5
 
 
 def test_crap_signals_read_a_linked_worktrees_record_from_the_common_git_dir(rows_repo, tmp_path):
-    repo, ctx = rows_repo
-    repo.git("branch", "other")
-    work = tmp_path / "wt"
-    repo.git("worktree", "add", "-q", str(work), "other")
-    record(repo, ROWS, branch="other")
-    linked = ctx._replace(repo=str(work))
-    got = cs.crap_signals(linked)
+    linked = rows_repo.worktree(tmp_path / "wt", "other")
+    got = cs.crap_signals(ctx_of(linked, rows_repo.base, linked.land(ROWS, branch="other")))
     assert got["crap_max"]["value"] == 7.5
-    assert got["crap_max"]["evidence"]["command"] == f"read {repo.root / '.git'}/crap-check-rows.json [other]"
+    assert got["crap_max"]["evidence"]["command"] == f"read {rows_repo.root / '.git'}/crap-check-rows.json [other]"
+
+
+def test_crap_signals_ignore_the_rows_of_a_gate_run_whose_commit_never_landed(rows_repo):
+    rows_repo.write("a.py", "y\n")
+    rows_repo.git("add", "-A")
+    crap_rows.record(rows_repo.rows_path, "feat", ROWS, str(rows_repo.root))
+    rows_repo.git("reset", "-q", "--hard")
+    ctx = ctx_of(rows_repo, rows_repo.base, rows_repo.commit("head"))
+    assert cs.crap_signals(ctx)["crap_max"]["value"] == UNMEASURED
+
+
+def test_crap_signals_ignore_the_rows_of_a_deleted_branch_cut_again_under_the_same_name(rows_repo):
+    rows_repo.land("lib/a.py::old  complexity=5  coverage=100.0%  CRAP=5.0  OK  (new)\n")
+    rows_repo.git("reset", "-q", "--hard", rows_repo.base)
+    got = cs.crap_signals(landed(rows_repo, "lib/b.py::g  complexity=1  coverage=100.0%  CRAP=1.0  OK  (new)\n"))
+    assert got["crap_max"]["value"] == 1.0
+    assert got["crap_max"]["evidence"]["output"] == "lib/b.py::g CRAP=1.0 (1 row(s))"
+
+
+def test_crap_signals_ignore_a_deleted_branchs_rows_when_the_new_branch_was_never_gated(rows_repo):
+    rows_repo.land(ROWS)
+    rows_repo.git("reset", "-q", "--hard", rows_repo.base)
+    rows_repo.commit("main moved on")
+    ctx = ctx_of(rows_repo, rows_repo.base, rows_repo.commit("docs only"))
+    assert cs.crap_signals(ctx)["crap_max"]["value"] == UNMEASURED
 
 
 def runs_dir(repo):

@@ -28,6 +28,8 @@ from signal_base import (UNMEASURED, git, is_test_file, lang_of, of_run, run_too
 LIB_DIR = os.path.dirname(os.path.abspath(__file__))
 PHP_RULES = os.path.join(LIB_DIR, 'opengrep-php.yml')
 PHP_BC = 'roave-backward-compatibility-check'
+# assert_used fires on every assert, so any change that adds a test would read as a security finding.
+BANDIT_SKIPPED = 'B101'
 HEAD_MOVED = ('HEAD is not the range head, so a tool run over the working tree '
               'would measure other code')
 GRIFFE_RECORD = re.compile(r'^\S[^:\n]*:\d+: [^:\n]+: \S')
@@ -310,7 +312,8 @@ def python_security(ctx, files):
     scan = existing(ctx, files)
     if not scan:
         return nothing_added('Python')
-    return [scan_part(ctx, run_tool(['bandit', '-f', 'json', *scan], cwd=ctx.repo), bandit_findings)]
+    run = run_tool(['bandit', '-f', 'json', '-s', BANDIT_SKIPPED, *scan], cwd=ctx.repo)
+    return [scan_part(ctx, run, bandit_findings)]
 
 
 def php_security(ctx, files):
