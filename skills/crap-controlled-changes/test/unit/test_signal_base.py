@@ -284,6 +284,7 @@ def test_load_ctx_lists_added_lines_whatever_external_diff_tool_the_user_set(rep
     (("diff.noprefix", "true"), "b/a.py", "a\n", "a\nb\n", {2}),
     (("diff.mnemonicPrefix", "true"), "a.py", "a\n", "a\nb\n", {2}),
     (("diff.interHunkContext", "5"), "a.py", "1\n2\n3\n4\n", "1\nx\n2\n3\ny\n4\n", {2, 5}),
+    (("color.diff", "always"), "a.py", "a\n", "a\nb\n", {2}),
 ])
 def test_load_ctx_lists_added_lines_whatever_diff_config_the_user_set(repo, setting, path, before, after, added):
     repo.write(path, before)
@@ -293,6 +294,21 @@ def test_load_ctx_lists_added_lines_whatever_diff_config_the_user_set(repo, sett
     repo.git("config", *setting)
     ctx = sb.load_ctx(str(repo.root), f"{base}..{head}", no_settings())
     assert ctx.added == {path: added}
+
+
+def test_load_ctx_reads_the_range_and_never_the_working_tree_beyond_it(repo):
+    repo.write("a.py", "a\n")
+    base = repo.commit("base")
+    repo.write("a.py", "a\nb\n")
+    head = repo.commit("head")
+    repo.write("a.py", "a\nb\nc\n")
+    repo.write("later.py", "x\n")
+    repo.commit("later")
+    ctx = sb.load_ctx(str(repo.root), f"{base}..{head}", no_settings())
+    assert ctx.added == {"a.py": {2}}
+    assert ctx.rows == [(1, 0, "a.py")]
+    assert ctx.status == {"a.py": "M"}
+    assert ctx.gated == ("a.py",)
 
 
 def test_load_ctx_lists_added_lines_whatever_textconv_driver_the_path_has(repo, tmp_path):

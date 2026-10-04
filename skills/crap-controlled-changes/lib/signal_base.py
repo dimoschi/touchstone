@@ -197,8 +197,8 @@ def _diff(repo, base, head, *flags, specs=()):
     tail = ['--', *specs] if specs else []
     # added_lines parses hunks and the b/ prefix, so pin everything a user's diff config
     # can rewrite: an external diff tool (difftastic), prefixes, hunk merging, textconv.
-    return git(repo, 'diff', '--no-ext-diff', '--no-textconv', '--src-prefix=a/', '--dst-prefix=b/',
-               '--inter-hunk-context=0', *flags, '--no-renames', base, head, *tail)
+    return git(repo, 'diff', '--no-ext-diff', '--no-textconv', '--dst-prefix=b/', '--inter-hunk-context=0',
+               *flags, '--no-renames', base, head, *tail)
 
 
 def _paths(repo, base, head, specs):

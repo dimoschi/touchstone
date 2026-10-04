@@ -503,18 +503,35 @@ def test_go_list_names_every_kind_of_file_gosec_loads(field):
     assert "{{range ." + field + "}}{{$.Dir}}/{{.}}{{\"\\n\"}}{{end}}" in st.GO_LIST_BUILT
 
 
+def two_module_change(repo):
+    return change(repo,
+                  {"one/go.mod": "module example.com/one\n", "one/a.go": "package one\n",
+                   "two/go.mod": "module example.com/two\n", "two/a.go": "package two\n"},
+                  {"one/a.go": "package one\n\nfunc B() {}\n", "two/a.go": "package two\n\nfunc B() {}\n"})
+
+
 def test_security_pattern_in_go_judges_each_module_against_its_own_build(repo, stubs):
     stubs.add("gosec", out=NOTHING_FOUND)
     built = {"one": [str(repo.root.resolve() / "one" / "a.go")], "two": []}
     stubs.add("go", f"table = {built!r}\n"
                     "sys.stdout.write(''.join(p + '\\n' for p in table[os.path.basename(os.getcwd())]))")
-    ctx = change(repo,
-                 {"one/go.mod": "module example.com/one\n", "one/a.go": "package one\n",
-                  "two/go.mod": "module example.com/two\n", "two/a.go": "package two\n"},
-                 {"one/a.go": "package one\n\nfunc B() {}\n", "two/a.go": "package two\n\nfunc B() {}\n"})
-    got = st.security_pattern(ctx)
+    got = st.security_pattern(two_module_change(repo))
     assert got["value"] == UNMEASURED
     assert got["reason"] == LEFT_OUT + "two/a.go"
+
+
+def test_security_pattern_in_go_runs_gosec_inside_each_module(repo, stubs):
+    stubs.add("gosec", out=NOTHING_FOUND)
+    go_builds(stubs, repo, "one/a.go", "two/a.go")
+    st.security_pattern(two_module_change(repo))
+    assert [os.path.basename(call["cwd"]) for call in stubs.calls("gosec")] == ["one", "two"]
+
+
+def test_security_pattern_in_go_names_every_changed_file_of_a_module_the_build_leaves_out(repo, stubs):
+    stubs.add("gosec", out=NOTHING_FOUND)
+    go_builds(stubs, repo)
+    got = st.security_pattern(tagged_change(repo))
+    assert got["reason"] == LEFT_OUT + "a.go, tagged.go"
 
 
 def test_security_pattern_in_go_is_unmeasured_when_go_list_fails(repo, stubs):

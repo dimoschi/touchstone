@@ -1,5 +1,6 @@
 import io
 import json
+import os
 import threading
 import time
 
@@ -80,6 +81,12 @@ def test_record_writes_rows_under_the_branch_and_keeps_other_branches(repo):
     saved = json.load(open(repo.rows_path))
     assert saved["other"] == {"x::y": row()}
     assert sorted(saved["feat"]) == ["lib/a.py::f", "lib/a.py::g", "lib/a.py::h"]
+
+
+def test_record_takes_its_own_lock_file_beside_the_rows_file(repo):
+    repo.commit("base")
+    crap_rows.record(repo.rows_path, "feat", GREEN, str(repo.root))
+    assert os.path.exists(repo.rows_path + ".lock")
 
 
 def test_record_stamps_each_row_with_the_head_and_the_staged_tree_it_was_measured_against(repo):
