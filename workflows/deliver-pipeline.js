@@ -29,7 +29,7 @@ export const meta = {
 // against the manifest in scripts/check-version-bump.sh, so drift is a
 // gate's job rather than something this script verifies about itself.
 const PLUGIN_NAME = 'touchstone'
-const PIPELINE_VERSION = '0.29.1'
+const PIPELINE_VERSION = '0.30.0'
 
 // Boundaries. Wall-clock deadlines are not expressible here (no Date.now, by
 // design); the bounds are rounds, counts, and token budget instead.
@@ -266,6 +266,11 @@ let draftPr = null
 // call site having to pass it through `extra` by hand.
 let size = null
 
+// The change-risk signals measured over that same range (part 40), null on
+// every halt before then and whenever the probe failed. Recorded only: nothing
+// in the run reads it to decide anything.
+let signals = null
+
 // executed never changes; base_branch and mismatch stay null until the
 // merged setup call (before Worktree) has something to report, which is why
 // a halt at Worktree carries the executed value with the other two still
@@ -302,7 +307,7 @@ const halted = async (at, extra) => {
   const split = scopeSplit()
   const payload = {
     task, halted_at: at, pipeline_version: pipelineVersion, stage_spend: stageSpend,
-    needs_user: true, record_file: runRecordFile, size,
+    needs_user: true, record_file: runRecordFile, size, signals,
     ...(planAdditions ? { plan_additions: planAdditions } : {}),
     ...(split ? { scope_split: split } : {}),
     ...extra,
@@ -2519,6 +2524,67 @@ const lensKeysFor = (size) =>
   : size.codeChurn > BIG_LOC || size.codeFiles > BIG_FILES ? ['correctness', 'advocate', 'requirements']
   : ['correctness', 'advocate']
 
+// Every name change-signals.sh prints. Recorded and read by nothing here: not
+// the lens count, the ratio halt, the round limit or a ceiling.
+const SIGNAL_NAMES = [
+  'la', 'ld', 'lt', 'la_lt', 'files', 'directories', 'dependency_surface',
+  'api_broken', 'security_pattern', 'semantic_noop', 'crap_max', 'coverage_min',
+  'reachable', 'defect_files']
+const SIGNALS_PROBE = {
+  type: 'object', additionalProperties: false, required: ['output'],
+  properties: { output: { type: 'string' } },
+}
+const signalsCommandFor = (range) => `change-signals.sh ${wt.path} ${range}`
+
+// As strict as parseDiffstat: the begin line names this exact range, one JSON
+// line follows, then the end line, and every name carries a well-formed value.
+// Anything else is null.
+const validSignal = (e) => !!e && typeof e === 'object' && (
+  e.value === true || e.value === false ||
+  (typeof e.value === 'number' && Number.isFinite(e.value)) ||
+  (e.value === 'unmeasured' && typeof e.reason === 'string' && e.reason.trim() !== ''))
+const parseSignals = (output, range) => {
+  const lines = String(output ?? '').split(/\r?\n/).map(l => l.trimEnd())
+  while (lines.length && lines[0].trim() === '') lines.shift()
+  while (lines.length && lines[lines.length - 1].trim() === '') lines.pop()
+  if (lines.length !== 3) return null
+  if (lines[0] !== `TOUCHSTONE_SIGNALS ${range}`) return null
+  if (lines[2] !== 'TOUCHSTONE_SIGNALS_END') return null
+  let parsed
+  try { parsed = JSON.parse(lines[1]) } catch { return null }
+  if (!parsed || parsed.range !== range || !parsed.values || typeof parsed.values !== 'object') return null
+  if (!SIGNAL_NAMES.every(name => validSignal(parsed.values[name]))) return null
+  return { range, values: Object.fromEntries(SIGNAL_NAMES.map(name => [name, parsed.values[name]])) }
+}
+
+// One try, no retry: a missing record is not worth a second dispatch, and a
+// failure here must not stop the run. A refused dispatch still propagates,
+// since the run budget's halt has to see it.
+const measureSignals = async (range) => {
+  try {
+    const probe = await treeAgent(
+      `Run exactly this and put all of its output verbatim in output, ` +
+      `unsummarised, then STOP. change-signals.sh sits in the ` +
+      `crap-controlled-changes skill's directory, beside crap-check.sh. Run it ` +
+      `in the foreground with a Bash timeout of 600000, never in the ` +
+      `background, never twice, and change nothing.\n${signalsCommandFor(range)}`,
+      { label: 'signals', phase: 'Draft PR', schema: SIGNALS_PROBE, model: 'haiku', effort: 'low' })
+    const parsed = parseSignals(probe?.output, range)
+    if (!parsed) {
+      log(`signals: no usable output for ${range}; continuing without them`)
+      return null
+    }
+    const unmeasured = SIGNAL_NAMES.filter(n => parsed.values[n].value === 'unmeasured')
+    log(`signals: ${SIGNAL_NAMES.length - unmeasured.length} of ${SIGNAL_NAMES.length} measured` +
+      (unmeasured.length ? `; unmeasured: ${unmeasured.join(', ')}` : ''))
+    return parsed
+  } catch (e) {
+    if (runBudgetSpent) throw e
+    log(`signals: probe failed (${e?.message ?? e}); continuing without them`)
+    return null
+  }
+}
+
 enterPhase('Draft PR')
 const draft = await treeAgent(
   `Make sure this branch has a pull request to hang the run's progress on, ` +
@@ -2560,6 +2626,8 @@ if (draft?.number) {
   log(`draft PR not opened (${draft?.detail ?? 'no detail'}); continuing. ` +
       `A halt from here on is only visible in this session`)
 }
+
+signals = await measureSignals(impl.commit_range)
 
 enterPhase('Review')
 const sReview = stage('review')
@@ -3859,6 +3927,7 @@ const result = {
   checks: checksPayload(),
   mutation,
   size,
+  signals,
   reviewers: reviewerCount,
   // Raised but never blocking: wrong category, no reproducer, an unmet
   // criterion whose quote was not found, out of range, or a residual of a
