@@ -427,7 +427,7 @@ def test_main_hands_the_settings_from_the_environment_to_the_signals(repo, stubs
     env["TOUCHSTONE_EXEMPT_SPEC"] = ":(glob,exclude,top)web/**\n"
     _, out, _ = run_main(capsys, [str(repo.root), rng], env)
     api = json.loads(out.split("\n")[1])["values"]["api_broken"]
-    assert api["reason"] == "no Go, PHP or Python file changed"
+    assert api["reason"] == "changed file(s) in a language no tool here covers: web/app.ts"
 
 
 @pytest.mark.parametrize("argv", [[], ["only-one"], ["a", "b", "c"]])

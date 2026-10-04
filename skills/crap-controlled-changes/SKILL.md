@@ -168,7 +168,8 @@ Env knobs: `MUTATION_GO_TEST_FLAGS`, `MUTATION_PHP_INFECTION`, `MUTATION_PHP_CON
 
 `change-signals.sh <absolute-repo-path> <base>..<head>` prints the deterministic
 change-risk signals of a range as one marked JSON record. The delivery pipeline runs it
-once per run; it is not part of the commit loop and has no verdict. A signal it could not
+once the implementer has returned (again if a pre-review fix moves the head); it is not
+part of the commit loop and has no verdict. A signal it could not
 measure says why. See docs/architecture.md in the plugin repository for what each one means.
 
 ## Out of Scope

@@ -238,6 +238,8 @@ async function scenarioUnsupportedLanguage() {
     },
   })
   check('halted at Implement', result.halted_at, 'Implement')
+  check('the halt carries the signals of the range the implementer left',
+    result.signals?.range, 'base00000000000000000000000000000000000000..base00000000000000000000000000000000000000')
   // The implementer may have committed and scored before hitting the refusal,
   // and commands/deliver.md tells the caller to report the gate result, so a
   // halt that omits it leaves the caller with nothing to report.

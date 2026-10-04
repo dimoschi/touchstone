@@ -425,8 +425,14 @@ def test_security_pattern_in_go_runs_gosec_over_each_changed_module(repo, stubs)
     stubs.add("gosec", out=json.dumps({"Golang errors": {}, "Issues": []}))
     st.security_pattern(go_security_change(repo))
     [call] = stubs.calls("gosec")
-    assert call["args"] == ["-fmt=json", "-no-fail", "-tests", "./..."]
+    assert call["args"] == ["-fmt=json", "-no-fail", "-tests", "-nosec", "./..."]
     assert os.path.realpath(call["cwd"]) == os.path.realpath(str(repo.root))
+
+
+def test_security_pattern_in_go_does_not_let_the_change_suppress_its_own_finding(repo, stubs):
+    stubs.add("gosec", out=NOTHING_FOUND)
+    st.security_pattern(go_security_change(repo))
+    assert "-nosec" in stubs.calls("gosec")[0]["args"]
 
 
 def test_security_pattern_in_go_is_unmeasured_when_gosec_could_not_load_a_package(repo, stubs):
@@ -457,8 +463,9 @@ def test_security_pattern_in_go_is_unmeasured_when_gosec_is_missing(repo, stubs)
 
 NOTHING_FOUND = json.dumps({"Golang errors": {}, "Issues": []})
 TAGGED = "//go:build never\n\npackage m\n\nfunc T() {}\n"
-LEFT_OUT = ("changed Go file(s) gosec could not load, because the build here leaves them out "
-            "(a build constraint, or a directory ./... skips): ")
+LEFT_OUT = ("changed Go file(s) gosec did not scan, because the build here leaves them out "
+            "(a build constraint, or a directory ./... skips) or gosec skips their directory "
+            "(its default -exclude-dir matches any path holding \"vendor\"): ")
 
 
 def tagged_change(repo):
@@ -494,7 +501,7 @@ def test_security_pattern_in_go_asks_go_list_which_files_each_module_builds(repo
     go_builds(stubs, repo, "a.go")
     st.security_pattern(go_security_change(repo))
     [call] = stubs.calls("go")
-    assert call["args"] == ["list", "-e", "-f", st.GO_LIST_BUILT, "./..."]
+    assert call["args"] == ["list", "-e", "-tags=", "-f", st.GO_LIST_BUILT, "./..."]
     assert os.path.realpath(call["cwd"]) == os.path.realpath(str(repo.root))
 
 
@@ -541,6 +548,45 @@ def test_security_pattern_in_go_is_unmeasured_when_go_list_fails(repo, stubs):
     assert got["value"] == UNMEASURED
     assert got["reason"] == "could not list the Go files the build holds: exit 1: go: boom"
     assert got["evidence"]["exit"] == 1
+
+
+def vendor_named_change(repo, directory, module=""):
+    prefix = f"{module}/" if module else ""
+    path = f"{prefix}{directory}/a.go"
+    return change(repo, {f"{prefix}go.mod": GO_MOD, path: "package x\n"}, {path: "package x\n\nfunc A() {}\n"}), path
+
+
+@pytest.mark.parametrize("directory", ["vendorclient", "internal/vendors", "vendor", "a/b/my-vendor-pkg"])
+def test_security_pattern_in_go_is_unmeasured_for_a_changed_file_in_a_directory_gosec_skips_by_name(
+        repo, stubs, directory):
+    ctx, path = vendor_named_change(repo, directory)
+    stubs.add("gosec", out=NOTHING_FOUND)
+    go_builds(stubs, repo, path)
+    got = st.security_pattern(ctx)
+    assert got["value"] == UNMEASURED
+    assert got["reason"] == LEFT_OUT + path
+
+
+@pytest.mark.parametrize("directory", ["internal/client", "pkg"])
+def test_security_pattern_in_go_scans_a_directory_whose_name_does_not_hold_vendor(repo, stubs, directory):
+    ctx, path = vendor_named_change(repo, directory)
+    stubs.add("gosec", out=NOTHING_FOUND)
+    go_builds(stubs, repo, path)
+    assert st.security_pattern(ctx)["value"] is False
+
+
+def test_security_pattern_in_go_reads_a_directory_name_from_the_module_gosec_runs_in(repo, stubs):
+    ctx, path = vendor_named_change(repo, "pkg", module="vendored-tools")
+    stubs.add("gosec", out=NOTHING_FOUND)
+    go_builds(stubs, repo, path)
+    assert st.security_pattern(ctx)["value"] is False
+
+
+def test_security_pattern_in_go_still_reports_a_finding_in_a_directory_gosec_skips_by_name(repo, stubs):
+    ctx, path = vendor_named_change(repo, "vendorclient")
+    stubs.add("gosec", out=gosec_json(repo, "3", name=path))
+    go_builds(stubs, repo, path)
+    assert st.security_pattern(ctx)["value"] is True
 
 
 def go_test_change(repo, deleted=()):
@@ -607,8 +653,14 @@ def test_security_pattern_in_python_scans_every_changed_file_that_still_exists(r
     stubs.add("bandit", out=bandit_json())
     st.security_pattern(py_security_change(repo))
     [call] = stubs.calls("bandit")
-    assert call["args"] == ["-f", "json", "-s", "B101", "a.py", "b.py", "tests/test_a.py"]
+    assert call["args"] == ["-f", "json", "-s", "B101", "--ignore-nosec", "a.py", "b.py", "tests/test_a.py"]
     assert os.path.realpath(call["cwd"]) == os.path.realpath(str(repo.root))
+
+
+def test_security_pattern_in_python_does_not_let_the_change_suppress_its_own_finding(repo, stubs):
+    stubs.add("bandit", out=bandit_json())
+    st.security_pattern(py_security_change(repo))
+    assert "--ignore-nosec" in stubs.calls("bandit")[0]["args"]
 
 
 def test_security_pattern_in_python_is_unmeasured_when_bandit_skipped_a_file(repo, stubs):
@@ -694,8 +746,14 @@ def test_security_pattern_in_php_scans_with_the_rules_this_plugin_ships(repo, st
     stubs.add("opengrep", out=opengrep_json())
     st.security_pattern(php_security_change(repo))
     [call] = stubs.calls("opengrep")
-    assert call["args"] == ["scan", "-f", st.PHP_RULES, "--json", "src/A.php", "src/Old.php"]
+    assert call["args"] == ["scan", "-f", st.PHP_RULES, "--json", "--disable-nosem", "src/A.php", "src/Old.php"]
     assert os.path.isfile(st.PHP_RULES)
+
+
+def test_security_pattern_in_php_does_not_let_the_change_suppress_its_own_finding(repo, stubs):
+    stubs.add("opengrep", out=opengrep_json())
+    st.security_pattern(php_security_change(repo))
+    assert "--disable-nosem" in stubs.calls("opengrep")[0]["args"]
 
 
 def test_the_php_rules_name_each_pattern_they_exist_for():

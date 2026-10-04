@@ -280,6 +280,39 @@ def test_a_pending_row_whose_prior_was_rewritten_away_is_dropped(repo):
     assert sorted(stored(repo)) == ["lib/b.py::g"]
 
 
+def test_a_run_that_never_lands_does_not_cost_a_reset_the_tag_of_an_earlier_commit(repo):
+    repo.commit("base")
+    first = repo.land(LANDED_F)
+    repo.land(RERUN_F)
+    run_without_landing(repo, "pending.txt")
+    repo.git("reset", "-q", "--hard", first)
+    got = crap_rows.latest(repo.rows_path, "feat", str(repo.root), first)["lib/a.py::f"]
+    assert (got["tag"], got["crap"]) == ("new", "5.0")
+
+
+def test_a_row_not_rerun_keeps_the_commits_it_was_earned_in_for_a_reset(repo):
+    repo.commit("base")
+    first = repo.land(LANDED_F)
+    repo.land(RERUN_F)
+    repo.land("lib/b.py::g  complexity=1  coverage=100.0%  CRAP=1.0  OK  (new)\n")
+    repo.git("reset", "-q", "--hard", first)
+    got = crap_rows.latest(repo.rows_path, "feat", str(repo.root), first)
+    assert {fid: (r["tag"], r["crap"]) for fid, r in got.items()} == {"lib/a.py::f": ("new", "5.0")}
+
+
+def test_a_reset_to_each_commit_that_touched_a_function_reads_the_row_it_had_there(repo):
+    repo.commit("base")
+    first = repo.land("lib/a.py::f  complexity=2  coverage=100.0%  CRAP=2.0  OK  (new)\n")
+    second = repo.land("lib/a.py::f  complexity=3  coverage=100.0%  CRAP=3.0  OK  (worsened)\n")
+    third = repo.land("lib/a.py::f  complexity=4  coverage=100.0%  CRAP=4.0  OK  (worsened)\n")
+    seen = {}
+    for name, commit in (("third", third), ("second", second), ("first", first)):
+        repo.git("reset", "-q", "--hard", commit)
+        got = crap_rows.latest(repo.rows_path, "feat", str(repo.root), commit)["lib/a.py::f"]
+        seen[name] = (got["tag"], got["crap"])
+    assert seen == {"third": ("new", "4.0"), "second": ("new", "3.0"), "first": ("new", "2.0")}
+
+
 def test_main_records_the_rows_on_stdin(repo, monkeypatch):
     repo.commit("base")
     monkeypatch.setattr("sys.stdin", io.StringIO(GREEN))

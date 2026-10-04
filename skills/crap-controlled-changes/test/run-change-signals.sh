@@ -80,11 +80,13 @@ echo "== a change in a language no tool covers makes the semantic signals unmeas
 check "api_broken names the file" \
   "$(printf '%s\n' "$OUT" | field '"web/app.ts" in v["api_broken"]["reason"]')" True
 
-echo "== the marker's exemptions take that file out of the question"
+echo "== the marker's exemptions do not take it out of the question: no tool read it either way"
 printf 'web/**\n' > "$REPO/.crap-gated"
 run "$REPO" "$RANGE"
-check "api_broken no longer names it" \
-  "$(printf '%s\n' "$OUT" | field '"web/app.ts" in v["api_broken"].get("reason", "")')" False
+check "api_broken still names it" \
+  "$(printf '%s\n' "$OUT" | field '"web/app.ts" in v["api_broken"].get("reason", "")')" True
+check "so does security_pattern" \
+  "$(printf '%s\n' "$OUT" | field '"web/app.ts" in v["security_pattern"].get("reason", "")')" True
 rm -f "$REPO/.crap-gated"
 
 echo "== deadcode is run at the version the gates pin"
@@ -97,6 +99,26 @@ check "the pinned version reaches go run" \
 DEADCODE_GO_VERSION=v9.9.9 run "$REPO" "$RANGE"
 check "the gate's own override reaches it too" \
   "$(grep -c "deadcode@v9.9.9 " "$WORK/go.log")" 1
+
+echo "== a shell script is a language no tool covers, though the CRAP gate leaves it alone"
+printf '#!/bin/sh\necho hi\n' > "$REPO/run.sh"
+printf 'notes\n' > "$REPO/README.md"
+commit base-shell
+SHELL_BASE="$(git -C "$REPO" rev-parse HEAD)"
+printf 'package m\n\nfunc A() {}\n\nfunc B() {}\n' > "$REPO/a.go"
+printf '#!/bin/sh\necho hi\neval "$1"\n' > "$REPO/run.sh"
+printf 'more notes\n' > "$REPO/README.md"
+commit head-shell
+SHELL_HEAD="$(git -C "$REPO" rev-parse HEAD)"
+run "$REPO" "$SHELL_BASE..$SHELL_HEAD"
+check "security_pattern is not false" \
+  "$(printf '%s\n' "$OUT" | field 'v["security_pattern"]["value"]')" unmeasured
+check "security_pattern names the script" \
+  "$(printf '%s\n' "$OUT" | field '"run.sh" in v["security_pattern"]["reason"]')" True
+check "and not the document beside it" \
+  "$(printf '%s\n' "$OUT" | field '"README.md" in v["security_pattern"]["reason"]')" False
+check "reachable does not count the script as read" \
+  "$(printf '%s\n' "$OUT" | field '"run.sh" in v["reachable"]["reason"]')" True
 
 echo "== refusals exit 2 and print nothing on stdout"
 run

@@ -20,9 +20,10 @@ scored; the commit is the one after that HEAD in the history asked about, with
 that tree. A commit rewritten into a different tree (amend, rebase) ends the claim
 of its rows.
 
-A run whose commit has not landed yet keeps the landed row it was merged over, as
-`prior`, one level deep. Until its own commit lands the row counts as that prior, so
-a second run at the same HEAD cannot cost a landed commit the tag it earned.
+A row keeps the rows it was merged over, newest first, as a chain of `prior`s, each
+holding its own. Only a row whose commit is in history counts, and the first one of
+the chain that does is the one read, so a run whose commit never lands, or a reset
+back to an earlier commit, cannot cost a landed commit the tag it earned.
 """
 
 import argparse
@@ -76,28 +77,33 @@ def lands(repo, head, trees, claim):
 
 
 def claim_of(repo, head, trees, row):
-    """`row` without its `prior` if its commit is in the history of `head`, else its `prior` the same way, else None."""
-    for claim in (row, row.get('prior')):
-        if claim and lands(repo, head, trees, claim):
-            return {k: v for k, v in claim.items() if k != 'prior'}
-    return None
+    """The first of `row` and its `prior`s whose commit is in the history of `head`, else None."""
+    while row and not lands(repo, head, trees, row):
+        row = row.get('prior')
+    return row or None
 
 
-def landed(repo, rows, head):
-    """The `rows` whose commit is in the history of `head`, each without its `prior`.
+def alive(repo, rows, head):
+    """For each of `rows`, its first claim whose commit is in the history of `head`, still holding its `prior`s.
 
-    A row whose own commit is not there falls back to its `prior`; neither: dropped.
+    A row none of whose claims is there is dropped.
     """
     trees = {}
     claims = {fid: claim_of(repo, head, trees, row) for fid, row in rows.items()}
     return {fid: claim for fid, claim in claims.items() if claim}
 
 
+def landed(repo, rows, head):
+    """The `rows` whose commit is in the history of `head`, each without its `prior`s."""
+    return {fid: {k: v for k, v in claim.items() if k != 'prior'}
+            for fid, claim in alive(repo, rows, head).items()}
+
+
 def record(path, branch, text, repo):
     head, tree = git(repo, 'rev-parse', 'HEAD'), git(repo, 'write-tree')
     with scored_ledger.locked(path):
         store = scored_ledger.load(path)
-        kept = landed(repo, store.get(branch, {}), head)
+        kept = alive(repo, store.get(branch, {}), head)
         fresh = {fid: {**row, 'head': head, 'tree': tree, 'prior': kept.get(fid)}
                  for fid, row in parse(text).items()}
         store[branch] = merge(kept, fresh)

@@ -37,7 +37,11 @@ REPO_ROOT="$(resolve_repo_root change-signals "$1")" || exit 2
 # See crap-check.sh's identical line: these outrank -C for every git call.
 unset GIT_DIR GIT_WORK_TREE
 
-TOUCHSTONE_UNSUPPORTED_SPEC="$(printf '%s\n' "${UNSUPPORTED_SPEC[@]}")" \
+# UNSUPPORTED_SPEC leaves shell out because the CRAP gate has nothing to say about it, but no
+# signal tool reads shell either, so here a changed script is a file nothing measured.
+SIGNALS_UNSUPPORTED_SPEC=("${UNSUPPORTED_SPEC[@]}" '*.sh' '*.bash' '*.zsh' '*.ksh')
+
+TOUCHSTONE_UNSUPPORTED_SPEC="$(printf '%s\n' "${SIGNALS_UNSUPPORTED_SPEC[@]}")" \
 TOUCHSTONE_EXEMPT_SPEC="$(crap_exempt_pathspecs "$REPO_ROOT")" \
 TOUCHSTONE_DEADCODE_VERSION="${DEADCODE_GO_VERSION:-$DEADCODE_VERSION_DEFAULT}" \
   exec python3 "$LIB_DIR/change_signals.py" "$REPO_ROOT" "$2"

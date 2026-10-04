@@ -139,7 +139,7 @@ exit 2 (setup problem) rather than reporting a pass.
 
 Optional:
 
-- **Tools for the change-risk signals** the Draft PR phase records: `apidiff`, `gosec`
+- **Tools for the change-risk signals** the Implement phase records: `apidiff`, `gosec`
   and `deadcode` (run through `go run`) for Go, `griffe` and `bandit` for Python,
   `roave-backward-compatibility-check` and `opengrep` for PHP, and `difft` for every
   language. A signal whose tool is absent is recorded as `unmeasured` with the reason,

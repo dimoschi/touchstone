@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
-# The change-risk signals the Draft PR phase records: one probe, over the range
-# the diffstat measured, that is parsed strictly, carried in the result and in
-# every halt after it, and read by nothing that decides how the run goes. See
-# harness.sh for what run()/captured share.
+# The change-risk signals the Implement phase records: one probe as soon as the
+# implementer returns a range (again if a pre-review fix moves the head), parsed
+# strictly, carried in the result and in every halt after it, and read by nothing
+# that decides how the run goes. See harness.sh for what run()/captured share.
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/harness.sh"
 
 echo "== static: the bounds the signals must not move"
@@ -50,8 +50,8 @@ async function scenarioSignalsReachTheResult() {
     captured.logs.includes('signals: 13 of 14 measured; unmeasured: reachable'), true)
 }
 
-async function scenarioSignalsAreOneDispatchAfterTheDraft() {
-  console.log('\n== scenario: one cheap probe, after the draft PR and before any review')
+async function scenarioSignalsAreOneDispatchRightAfterTheImplementer() {
+  console.log('\n== scenario: one cheap probe, right after the implementer and before the checks, the draft PR and any review')
   const { captured } = await run({
     initialReview: { correctness: [], advocate: [] },
     verify: () => undefined,
@@ -60,11 +60,12 @@ async function scenarioSignalsAreOneDispatchAfterTheDraft() {
   const labels = captured.calls.map(c => c.label)
   const probe = signalsCalls(captured)
   check('dispatched once', probe.length, 1)
-  check('right after draft-pr', labels[labels.indexOf('draft-pr') + 1], 'signals')
+  check('right after the implementer', labels[labels.indexOf('implementer') + 1], 'signals')
+  check('before the draft PR', labels.indexOf('signals') < labels.indexOf('draft-pr'), true)
   check('before the first review lens', labels.indexOf('signals') < labels.findIndex(l => l.startsWith('review:')), true)
   check('on the cheapest model', probe[0].model, 'haiku')
   check('at low effort', probe[0].effort, 'low')
-  check('grouped with the Draft PR phase', probe[0].phase, 'Draft PR')
+  check('grouped with the Implement phase', probe[0].phase, 'Implement')
   check('the command is on a line of its own', probe[0].prompt.split('\n').includes(
     `change-signals.sh ${STUB_WT_PATH} ${STUB_RANGE}`), true)
   check('it is the crap-controlled-changes skill\'s script, found by invoking the skill',
@@ -78,7 +79,7 @@ async function scenarioSignalsAreOneDispatchAfterTheDraft() {
 }
 
 async function scenarioSignalsAreMeasuredOverTheDiffstatRange() {
-  console.log('\n== scenario: a pre-review fix that moves the head moves the range the signals are measured over')
+  console.log('\n== scenario: a pre-review fix that moves the head is measured again, over the range the diffstat reads')
   const folded = 'checksfix00000000000000000000000000000002'
   const { result, captured } = await run({
     args: { openPr: true },
@@ -94,8 +95,28 @@ async function scenarioSignalsAreMeasuredOverTheDiffstatRange() {
   const diffstat = captured.calls.find(c => c.label === 'draft-pr').prompt
   check('the diffstat was measured over the folded range', diffstat.includes(`TOUCHSTONE_DIFFSTAT ${range};`), true)
   check('so were the signals', result.signals?.range, range)
-  check('the probe was asked about that range',
-    signalsCalls(captured)[0].prompt.split('\n').includes(`change-signals.sh ${STUB_WT_PATH} ${range}`), true)
+  const asked = signalsCalls(captured).map(c => /^change-signals\.sh \S+ (\S+)$/m.exec(c.prompt)?.[1])
+  check('the probe was asked about the implementer\'s range, then that one', asked, [STUB_RANGE, range])
+  const labels = captured.calls.map(c => c.label)
+  check('the second probe follows the fix', labels.indexOf('signals', labels.indexOf('checks:fix')) > labels.indexOf('checks:fix'), true)
+}
+
+async function scenarioAFailedSecondProbeKeepsTheFirstRecord() {
+  console.log('\n== scenario: a pre-review fix whose probe fails keeps the record the first one made')
+  const folded = 'checksfix00000000000000000000000000000002'
+  const { result } = await run({
+    args: { openPr: true },
+    discovery: { file: '/repo/AGENTS.md',
+      sections: [{ heading: '## Checks', fence: 'bash scripts/run-tests.sh' }], detail: 'stub' },
+    checkRuns: (attempt) => attempt === 2
+      ? { results: [checkRow('check:1', 'bash scripts/run-tests.sh', 1, 'FAILURE')], dirty: false }
+      : { results: [checkRow('check:1', 'bash scripts/run-tests.sh', 0, 'ok')], dirty: false },
+    checksFixResult: { head_sha: folded, note: 'bumped', scored: true },
+    prResult: { opened: true, url: 'https://example.invalid/pr/141', note: 'stub ready' },
+    signalsReply: (range) => range === STUB_RANGE ? undefined : null,
+  })
+  check('the run does not halt', result.halted_at, undefined)
+  check('the record is the first one, and says which range it is', result.signals?.range, STUB_RANGE)
 }
 
 async function scenarioSignalsAreInEveryHaltAfterTheDraft() {
@@ -122,12 +143,52 @@ async function scenarioSignalsAreInEveryHaltAfterTheDraft() {
   check('carries them', mutation.result.signals?.range, STUB_RANGE)
 }
 
-async function scenarioSignalsAreNullInEveryHaltBeforeTheDraft() {
-  console.log('\n== scenario: a halt before the draft has no signals, and the probe never ran')
-  const { result, captured } = await run({ implPlanId: 'not-the-plan-id' })
-  check('halted at Implement', result.halted_at, 'Implement')
+const LEAK = (at, range) => `TOUCHSTONE_PLAN_LEAK ${range}\n.touchstone/plan.md\nTOUCHSTONE_PLAN_LEAK_END`
+
+async function scenarioSignalsAreInEveryHaltAfterTheImplementerReturned() {
+  console.log('\n== scenario: a halt at Implement carries the signals measured over the implementer\'s range')
+  const halts = {
+    'a refused plan_id': { implPlanId: 'not-the-plan-id' },
+    'a plan file under .touchstone': { planLeak: LEAK },
+    'a check that could not be measured': {
+      discovery: { file: '/repo/AGENTS.md', sections: [{ heading: '## Checks', fence: 'make run' }], detail: 'stub' },
+      checkRuns: () => ({ results: [{ id: 'check:1', command: 'timeout 10 make run', exit_code: 0,
+        output: 'TOUCHSTONE_CHECK_EXIT check:1 0\nok' }], dirty: false }),
+    },
+    'a run budget refusal during the checks': { args: { runBudget: 1000 }, spendAllAfter: 'signals' },
+    'an implementer over its ceiling': { args: { stageBudgets: { implement: 1000 } }, budgetPerAgentCall: 5000 },
+  }
+  for (const [what, scenario] of Object.entries(halts)) {
+    const { result, captured } = await run(scenario)
+    check(`${what}: halted at Implement`, result.halted_at, 'Implement')
+    check(`${what}: signals are carried`, result.signals?.range, STUB_RANGE)
+    check(`${what}: every name is there`, Object.keys(result.signals?.values ?? {}), SIGNAL_NAMES)
+    check(`${what}: one probe`, signalsCalls(captured).length, 1)
+    check(`${what}: no draft PR yet`, callCount(captured, 'draft-pr'), 0)
+  }
+}
+
+async function scenarioSignalsAreNullInEveryHaltBeforeTheImplementer() {
+  console.log('\n== scenario: a halt before the implementer has no range, so no signals and no probe')
+  const { result, captured } = await run({
+    args: { existingBranch: true },
+    existingBranchResult: { created: false, branch: '', base: '', path: '', detail: 'no worktree', dirty: false },
+  })
+  check('halted at Worktree', result.halted_at, 'Worktree')
   check('signals is null, not absent', result.signals, null)
   check('the probe was not dispatched', signalsCalls(captured).length, 0)
+}
+
+async function scenarioTheProbeDoesNotCountAgainstTheImplementersCeiling() {
+  console.log('\n== scenario: the probe\'s spend is not charged to the implementer\'s stage')
+  const { result } = await run({
+    args: { stageBudgets: { implement: 1000 }, openPr: false },
+    budgetPerAgentCall: 600,
+    initialReview: { correctness: [], advocate: [] },
+    staleness: () => [],
+  })
+  check('an implementer within its ceiling does not halt for the probe that follows it', result.halted_at, undefined)
+  check('the signals are carried', result.signals?.range, STUB_RANGE)
 }
 
 async function scenarioAProbeThatFailsLeavesNullAndTheRunGoesOn() {
@@ -221,16 +282,18 @@ async function scenarioParseSignalsAccepts() {
   check('a name the script does not know is left out', Object.keys(result.signals?.values ?? {}), SIGNAL_NAMES)
 }
 
-async function scenarioARefusedDispatchStillReachesTheBudgetHalt() {
-  console.log('\n== scenario: a run budget refusal at the probe is a budget halt, not a swallowed failure')
-  const { result, captured } = await run({
-    args: { runBudget: 1000 },
-    spendAllAfter: 'draft-pr',
-  })
-  check('halted at the phase the probe belongs to', result.halted_at, 'Draft PR')
-  check('the note names the refused dispatch', (result.note ?? '').includes("'signals' dispatch was refused"), true)
-  check('nothing was reviewed', captured.calls.some(c => c.label.startsWith('review:')), false)
-  check('signals is null, present', result.signals, null)
+async function scenarioASpentRunBudgetSkipsTheProbeAndLeavesTheHaltsOwnNote() {
+  console.log('\n== scenario: a spent run budget skips the probe, so it cannot stand in for the halt the run was making')
+  const spent = await run({ args: { runBudget: 1000 }, spendAllAfter: 'implementer' })
+  check('the probe was not dispatched', signalsCalls(spent.captured).length, 0)
+  check('it says so', spent.captured.logs.some(l => l.startsWith('signals: run budget spent')), true)
+  check('the budget halts the run at its next dispatch', (spent.result.note ?? '').includes('Run budget exhausted'), true)
+  check('halted at Implement', spent.result.halted_at, 'Implement')
+  check('signals is null, present', spent.result.signals, null)
+  const refused = await run({ args: { runBudget: 1000 }, spendAllAfter: 'implementer', implPlanId: 'not-the-plan-id' })
+  check('a refused plan_id is still reported as that', (refused.result.note ?? '').includes('plan_id'), true)
+  check('not as a budget halt', (refused.result.note ?? '').includes('Run budget exhausted'), false)
+  check('with no signals, since none could be measured', refused.result.signals, null)
 }
 
 // The same run, three ways: every signal raised, every one clear, and the probe
@@ -296,14 +359,17 @@ async function scenarioNothingTheRunDecidesReadsTheSignals() {
 
 const SCENARIOS = [
   scenarioSignalsReachTheResult,
-  scenarioSignalsAreOneDispatchAfterTheDraft,
+  scenarioSignalsAreOneDispatchRightAfterTheImplementer,
   scenarioSignalsAreMeasuredOverTheDiffstatRange,
+  scenarioAFailedSecondProbeKeepsTheFirstRecord,
   scenarioSignalsAreInEveryHaltAfterTheDraft,
-  scenarioSignalsAreNullInEveryHaltBeforeTheDraft,
+  scenarioSignalsAreInEveryHaltAfterTheImplementerReturned,
+  scenarioSignalsAreNullInEveryHaltBeforeTheImplementer,
+  scenarioTheProbeDoesNotCountAgainstTheImplementersCeiling,
   scenarioAProbeThatFailsLeavesNullAndTheRunGoesOn,
   scenarioParseSignalsRejects,
   scenarioParseSignalsAccepts,
-  scenarioARefusedDispatchStillReachesTheBudgetHalt,
+  scenarioASpentRunBudgetSkipsTheProbeAndLeavesTheHaltsOwnNote,
   scenarioNothingTheRunDecidesReadsTheSignals,
 ]
 JS_EOF

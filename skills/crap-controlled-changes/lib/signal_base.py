@@ -205,14 +205,24 @@ def _paths(repo, base, head, specs):
     return tuple(_names(_diff(repo, base, head, '--name-only', '-z', specs=specs)))
 
 
+def tree_is_head(repo, head):
+    """Whether the working tree holds `head`: HEAD is it and no tracked file is edited, staged or not.
+
+    The tools that read the working tree report lines of the files as they are on disk, and
+    those lines are matched against the ones the commit range added.
+    """
+    return resolve(repo, 'HEAD') == head and not git(repo, 'status', '--porcelain', '--untracked-files=no')
+
+
 def load_ctx(repo, rng, settings):
     base_ref, head_ref = split_range(rng)
     base, head = resolve(repo, base_ref), resolve(repo, head_ref)
-    unsupported = (_paths(repo, base, head, [*settings.unsupported, *settings.exempt])
-                   if settings.unsupported else ())
+    # Not minus the marker's exemptions: a path it exempts is out of the CRAP gate's scope,
+    # and no tool here reads a language that has none, exempt or not.
+    unsupported = _paths(repo, base, head, settings.unsupported) if settings.unsupported else ()
     return Ctx(
         repo=repo, rng=rng, base=base, head=head,
-        at_head=resolve(repo, 'HEAD') == head,
+        at_head=tree_is_head(repo, head),
         rows=_numstat_rows(_diff(repo, base, head, '--numstat', '-z')),
         status=_status_of(_diff(repo, base, head, '--name-status', '-z')),
         gated=_paths(repo, base, head, ['.', *settings.exempt]),

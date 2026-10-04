@@ -9,8 +9,8 @@ record, since the same exit code also means the tool broke. And a proof stands
 whatever else could not be checked: one language showing a break is true even if
 another language's tool was missing.
 
-The tools that read the working tree run at HEAD, so they only count when HEAD
-is the range's head.
+The tools that read the working tree only count when it is the range's head: HEAD
+is that commit and no tracked file has an edit that is not in it.
 """
 
 import json
@@ -30,8 +30,8 @@ PHP_RULES = os.path.join(LIB_DIR, 'opengrep-php.yml')
 PHP_BC = 'roave-backward-compatibility-check'
 # assert_used fires on every assert, so any change that adds a test would read as a security finding.
 BANDIT_SKIPPED = 'B101'
-HEAD_MOVED = ('HEAD is not the range head, so a tool run over the working tree '
-              'would measure other code')
+HEAD_MOVED = ('the working tree is not the range head (HEAD is elsewhere, or a tracked file has an '
+              'uncommitted edit), so a tool run over it would measure other code')
 GRIFFE_RECORD = re.compile(r'^\S[^:\n]*:\d+: [^:\n]+: \S')
 GO_LIST_BUILT = ''.join('{{range .%s}}{{$.Dir}}/{{.}}{{"\\n"}}{{end}}' % field
                         for field in ('GoFiles', 'CgoFiles', 'TestGoFiles', 'XTestGoFiles'))
@@ -265,32 +265,44 @@ def existing(ctx, files):
     return [path for path in files if ctx.status.get(path) != 'D']
 
 
-def unbuilt(ctx, changed, run):
-    """The `changed` files that a `go list` run does not list as built."""
+def gosec_excludes(mod, path):
+    """Whether gosec's default -exclude-dir drops the directory of `path`. It reads `vendor` as
+    a regex over the directory under the module, so vendorclient/ and internal/vendors/ go too."""
+    return 'vendor' in os.path.relpath(os.path.dirname(path) or '.', mod)
+
+
+def unscanned(ctx, mod, changed, run):
+    """The `changed` files gosec does not scan: not in the build a `go list` run lists, or in a
+    directory it excludes by name."""
     built = {repo_path(ctx, line) for line in report_lines(run.out)}
-    return [path for path in changed if path not in built]
+    return [path for path in changed if path not in built or gosec_excludes(mod, path)]
 
 
 def left_out(ctx, mod, files):
-    """The part for changed files gosec never loaded. It scans the packages `go list ./...`
-    finds for this host and does not say which file it dropped."""
+    """The part for changed files gosec never scanned. It picks its files itself, from the
+    packages under `./...` that the default build constraints keep, and does not say which it
+    dropped. `go list` stands in for that pick: `-tags=` undoes GOFLAGS tags, which gosec
+    ignores and `go list` would honour."""
     changed = existing(ctx, files)
     if not changed:
         return []
-    run = run_tool(['go', 'list', '-e', '-f', GO_LIST_BUILT, './...'], cwd=os.path.join(ctx.repo, mod))
+    run = run_tool(['go', 'list', '-e', '-tags=', '-f', GO_LIST_BUILT, './...'], cwd=os.path.join(ctx.repo, mod))
     if failed(run):
         return [of_run(UNMEASURED, run, reason=f'could not list the Go files the build holds: {why(run)}')]
-    missing = unbuilt(ctx, changed, run)
+    missing = unscanned(ctx, mod, changed, run)
     if not missing:
         return []
-    return [of_run(UNMEASURED, run, reason='changed Go file(s) gosec could not load, because the build here '
-                   'leaves them out (a build constraint, or a directory ./... skips): ' + ', '.join(missing))]
+    return [of_run(UNMEASURED, run, reason='changed Go file(s) gosec did not scan, because the build here '
+                   'leaves them out (a build constraint, or a directory ./... skips) or gosec skips their '
+                   'directory (its default -exclude-dir matches any path holding "vendor"): '
+                   + ', '.join(missing))]
 
 
 def go_security(ctx, files):
     parts = []
     for mod, mod_files in sorted(module_files(ctx, files).items()):
-        run = run_tool(['gosec', '-fmt=json', '-no-fail', '-tests', './...'], cwd=os.path.join(ctx.repo, mod))
+        run = run_tool(['gosec', '-fmt=json', '-no-fail', '-tests', '-nosec', './...'],
+                       cwd=os.path.join(ctx.repo, mod))
         parts.append(scan_part(ctx, run, gosec_findings))
         parts.extend(left_out(ctx, mod, mod_files))
     return parts
@@ -308,7 +320,7 @@ def python_security(ctx, files):
     scan = existing(ctx, files)
     if not scan:
         return nothing_added('Python')
-    run = run_tool(['bandit', '-f', 'json', '-s', BANDIT_SKIPPED, *scan], cwd=ctx.repo)
+    run = run_tool(['bandit', '-f', 'json', '-s', BANDIT_SKIPPED, '--ignore-nosec', *scan], cwd=ctx.repo)
     return [scan_part(ctx, run, bandit_findings)]
 
 
@@ -316,7 +328,7 @@ def php_security(ctx, files):
     scan = existing(ctx, files)
     if not scan:
         return nothing_added('PHP')
-    run = run_tool(['opengrep', 'scan', '-f', PHP_RULES, '--json', *scan], cwd=ctx.repo)
+    run = run_tool(['opengrep', 'scan', '-f', PHP_RULES, '--json', '--disable-nosem', *scan], cwd=ctx.repo)
     return [scan_part(ctx, run, opengrep_findings)]
 
 

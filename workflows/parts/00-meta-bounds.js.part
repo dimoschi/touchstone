@@ -266,9 +266,9 @@ let draftPr = null
 // call site having to pass it through `extra` by hand.
 let size = null
 
-// The change-risk signals measured over that same range (part 40), null on
-// every halt before then and whenever the probe failed. Recorded only: nothing
-// in the run reads it to decide anything.
+// The change-risk signals measured over the implementer's range (part 40), null
+// on every halt before the implementer has returned one and whenever the probe
+// failed. Recorded only: nothing in the run reads it to decide anything.
 let signals = null
 
 // executed never changes; base_branch and mismatch stay null until the

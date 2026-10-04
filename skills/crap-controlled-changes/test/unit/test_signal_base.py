@@ -240,6 +240,25 @@ def test_load_ctx_knows_when_head_is_not_the_range_head(changed):
     assert sb.load_ctx(str(repo.root), f"{base}..{head}", no_settings()).at_head is False
 
 
+def test_load_ctx_knows_when_a_tracked_file_has_an_uncommitted_edit(changed):
+    repo, base, head = changed
+    repo.write("keep.py", "a\nedited\nc\nd\n")
+    assert sb.load_ctx(str(repo.root), f"{base}..{head}", no_settings()).at_head is False
+
+
+def test_load_ctx_knows_when_an_edit_is_staged_and_not_committed(changed):
+    repo, base, head = changed
+    repo.write("keep.py", "a\nedited\nc\nd\n")
+    repo.git("add", "keep.py")
+    assert sb.load_ctx(str(repo.root), f"{base}..{head}", no_settings()).at_head is False
+
+
+def test_load_ctx_does_not_count_an_untracked_file_against_the_head(changed):
+    repo, base, head = changed
+    repo.write("scratch.txt", "x\n")
+    assert sb.load_ctx(str(repo.root), f"{base}..{head}", no_settings()).at_head is True
+
+
 def test_load_ctx_reads_numstat_rows_with_binaries_as_none(changed):
     repo, base, head = changed
     rows = sb.load_ctx(str(repo.root), f"{base}..{head}", no_settings()).rows
@@ -346,10 +365,12 @@ def test_load_ctx_names_changed_files_in_an_unsupported_language(changed):
     assert ctx.unsupported == ("web/app.ts",)
 
 
-def test_load_ctx_does_not_count_an_exempt_path_as_unsupported(changed):
+def test_load_ctx_still_names_an_exempt_file_in_an_unsupported_language(changed):
     repo, base, head = changed
     settings = no_settings(unsupported=("*.ts",), exempt=(":(glob,exclude,top)web/**",))
-    assert sb.load_ctx(str(repo.root), f"{base}..{head}", settings).unsupported == ()
+    ctx = sb.load_ctx(str(repo.root), f"{base}..{head}", settings)
+    assert ctx.unsupported == ("web/app.ts",)
+    assert "web/app.ts" not in ctx.gated
 
 
 @pytest.mark.parametrize("rng", ["", "abc", "..abc", "abc..", "a...b", "a..b..c"])
