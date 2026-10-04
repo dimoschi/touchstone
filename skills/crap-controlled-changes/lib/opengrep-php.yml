@@ -1,0 +1,38 @@
+rules:
+  - id: touchstone-php-eval
+    languages: [php]
+    severity: ERROR
+    message: eval() runs a string as code
+    pattern: eval(...)
+
+  - id: touchstone-php-exec-family
+    languages: [php]
+    severity: ERROR
+    message: Runs a shell command
+    pattern-either:
+      - pattern: exec(...)
+      - pattern: shell_exec(...)
+      - pattern: system(...)
+      - pattern: passthru(...)
+      - pattern: popen(...)
+      - pattern: proc_open(...)
+
+  - id: touchstone-php-unserialize
+    languages: [php]
+    severity: ERROR
+    message: unserialize() can instantiate arbitrary classes from its input
+    pattern: unserialize(...)
+
+  - id: touchstone-php-include-variable
+    languages: [php]
+    severity: ERROR
+    message: include or require of a path built from a variable
+    patterns:
+      - pattern-either:
+          - pattern: include $PATH;
+          - pattern: include_once $PATH;
+          - pattern: require $PATH;
+          - pattern: require_once $PATH;
+      - metavariable-regex:
+          metavariable: $PATH
+          regex: .*\$[A-Za-z_]

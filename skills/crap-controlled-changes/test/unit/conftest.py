@@ -1,6 +1,9 @@
 """Fixtures shared by the unit suites in this directory."""
 
+import json
+import shutil
 import subprocess
+import sys
 
 import pytest
 
@@ -40,3 +43,46 @@ def repo(tmp_path):
     subprocess.run(["git", "init", "-q", str(root)], check=True)
     subprocess.run(["git", "-C", str(root), "symbolic-ref", "HEAD", "refs/heads/feat"], check=True)
     return Repo(root)
+
+
+STUB = """#!{python}
+import json, os, sys
+with open({log!r}, 'a') as _log:
+    _log.write(json.dumps({{'tool': {name!r}, 'args': sys.argv[1:], 'cwd': os.getcwd()}}) + '\\n')
+{body}
+"""
+
+
+class Stubs:
+    """Command-line tools that are not the real ones, on a PATH holding nothing else.
+
+    Every call is logged, so a test can say what a tool was asked and from where.
+    """
+
+    def __init__(self, directory):
+        self.directory = directory
+        self.log = directory / "calls.jsonl"
+
+    def add(self, name, body="", *, out="", err="", code=0, into=None):
+        body = body or (f"sys.stdout.write({out!r}); sys.stderr.write({err!r}); sys.exit({code})")
+        path = (into or self.directory) / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(STUB.format(python=sys.executable, log=str(self.log), name=name, body=body))
+        path.chmod(0o755)
+        return path
+
+    def calls(self, name=None):
+        if not self.log.exists():
+            return []
+        rows = [json.loads(line) for line in self.log.read_text().splitlines()]
+        return [r for r in rows if name is None or r["tool"] == name]
+
+
+@pytest.fixture
+def stubs(tmp_path, monkeypatch):
+    directory = tmp_path / "stub-bin"
+    directory.mkdir()
+    for real in ("git", "tar"):
+        (directory / real).symlink_to(shutil.which(real))
+    monkeypatch.setenv("PATH", str(directory))
+    return Stubs(directory)

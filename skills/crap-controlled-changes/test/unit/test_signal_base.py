@@ -307,3 +307,8 @@ def test_load_ctx_refuses_a_ref_it_cannot_resolve(changed):
 def test_load_ctx_refuses_a_directory_that_is_not_a_repository(tmp_path):
     with pytest.raises(sb.SignalError):
         sb.load_ctx(str(tmp_path), "a..b", no_settings())
+
+
+def test_git_reports_a_failing_command_with_what_git_said(tmp_path):
+    with pytest.raises(sb.SignalError, match="git status failed: .*not a git repository"):
+        sb.git(str(tmp_path), "status")

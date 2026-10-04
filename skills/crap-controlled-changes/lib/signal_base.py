@@ -85,13 +85,11 @@ def is_test_file(path):
 
 def _target(header):
     """The path a diff's `+++` header names, None for a deleted file."""
-    for line in header.splitlines():
-        if line.startswith('+++ '):
-            name = line[4:].split('\t')[0]
-            if name == '/dev/null':
-                return None
-            return name[2:] if name.startswith('b/') else name
-    return None
+    plus = next((line for line in header.splitlines() if line.startswith('+++ ')), '+++ /dev/null')
+    name = plus[4:].split('\t')[0]
+    if name == '/dev/null':
+        return None
+    return name[2:] if name.startswith('b/') else name
 
 
 def _chunk_added(chunk):
