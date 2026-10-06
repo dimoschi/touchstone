@@ -81,6 +81,11 @@ Workflow({ name: 'touchstone:deliver-pipeline', args: { ticket: "...", existingB
   priorRun: { reviewed_through: "<sha>", unresolved_findings: [...], notes: [...] } } })
 ```
 
+Pass `priorRun` only from a record whose `pipeline_version.executed` is 0.30.0 or later.
+Compare it number by number on each dot-separated part, never as text, so 0.9.0 is older
+than 0.30.0. For an older record, or one with no `pipeline_version.executed`, pass no
+`priorRun`: in those records `reviewed_through` could sit past commits no review read.
+
 `reviewed_through` is the last head a review finished at; the workflow verifies it is
 still an ancestor of the branch, and otherwise ignores the record, reviewing the whole
 branch and carrying nothing. When a merge, such as updating the branch from its base,
@@ -88,8 +93,14 @@ came after that head, a range from it would carry the base's own changes, so the
 branch is reviewed but the record is still carried.
 `unresolved_findings` and `notes` are carried as tracked, so they reach the fixer and are
 not raised again; a carried finding whose reproducer was never run, because no executor
-row ever came back for it, is run first, like a fresh one. A run that halts before
-reviewing anything returns the record as it was. Pass
+row ever came back for it, is run first, like a fresh one. A halt before the branch
+step's head check, or after that check confirmed the head but before any review
+finished, returns the record's head, findings and notes unchanged. A head that is not a
+40-character SHA is dropped with its record from the start, and a head the check does
+not confirm as an ancestor is dropped at the check. Either way, every later halt and the
+result report `reviewed_through` as null (or the head this run's own review reached) and
+none of the record's findings or notes, and writing that payload replaces the record
+file. Pass
 `reviewedThrough: "<40-char sha>"` as well to start from a commit you choose; it wins over
 the record's. Both are ignored without `--existing`. Pass nothing when there is no record.
 

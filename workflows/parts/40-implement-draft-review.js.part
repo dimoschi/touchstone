@@ -458,15 +458,18 @@ if (!sizeParsed) {
 }
 size = sizeOf(sizeParsed)
 
-// Triage sized the ticket, but a resumed run's first review range is whatever
-// the last run left unreviewed, and a large ticket's leftover can be bigger than
-// that estimate. Raised, never lowered, and never over an explicit args.runBudget.
+// The budget was set from Triage's estimate, or a flat default when it gave none,
+// but a resumed run's first review range is whatever the last run left unreviewed,
+// and a large ticket's leftover can be bigger than that budget allows for. Raised,
+// never lowered, and never over an explicit args.runBudget.
 if (resumeFrom && typeof args?.runBudget !== 'number') {
   const needed = budgetForLoc(size.totalChurn)
   if (needed > runBudget) {
+    const wasBudget = runBudget
+    const wasNote = runBudgetNote
     runBudget = needed
     runBudgetNote = `raised to fit the ${size.totalChurn} changed lines of the first review ` +
-      `range ${firstReviewRange}, more than triage estimated`
+      `range ${firstReviewRange}, from ${Math.round(wasBudget / 1000)}k (${wasNote})`
     log(`run budget raised to ${Math.round(runBudget / 1000)}k (first review range ` +
         `${firstReviewRange}, ${size.totalChurn} changed lines)`)
   }

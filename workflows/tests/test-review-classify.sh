@@ -443,8 +443,8 @@ async function scenarioT() {
   check('the residual note references the settled finding',
     result.notes?.some(n => n.reason === 'residual' && n.residual_of === 'f1'), true)
   const lensPrompt = captured.calls.find(c => c.label.startsWith('review:mutation:'))?.prompt ?? ''
-  check('the lens is told settled fixes were already re-run, not to report them again',
-    lensPrompt.includes('already been re-run at their head'), true)
+  check('the lens is told known findings are tracked and an undone fix is caught by its reproducer, not to report them again',
+    lensPrompt.includes('already tracked, and an undone fix is caught by re-running its reproducer, so do not report one of them again'), true)
   check('the lens is told a defect outside this range is not a finding here',
     lensPrompt.includes('commits do not touch is not a finding'), true)
 }

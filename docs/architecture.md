@@ -279,9 +279,11 @@ direct `agent()`-style call (`setup`, `branch`, `branch:existing`, `collapseDupl
 and `dispatch()` never refuses; right after Triage, it is set to `100_000 + 1_500 *
 estimated_loc` output tokens, clamped `300_000..1_000_000`, or a flat `300_000`/`600_000`
 default by scope when triage gave no estimate, and `args.runBudget` overrides either.
-A resumed `--existing` run whose first review range then measures more changed lines than
-triage estimated raises the budget to the same formula applied to the measured lines, and
-logs it, unless `args.runBudget` was passed. From there, `dispatch()` refuses any call once `budget.spent()` has reached it.
+A resumed `--existing` run raises the budget to the same formula applied to its first
+review range's measured changed lines, and logs it, when that figure is above the budget
+set after Triage, whether that budget came from triage's estimate or from the flat default.
+`args.runBudget` is never raised. A halt note after a raise says what the budget was raised
+to fit and what it was raised from, including why that figure was set. From there, `dispatch()` refuses any call once `budget.spent()` has reached it.
 
 Everything after that point runs inside one `try`/`catch`, so a refusal anywhere in the
 run unwinds to a single halt rather than needing its own latch at every call site. Two

@@ -2702,15 +2702,18 @@ if (!sizeParsed) {
 }
 size = sizeOf(sizeParsed)
 
-// Triage sized the ticket, but a resumed run's first review range is whatever
-// the last run left unreviewed, and a large ticket's leftover can be bigger than
-// that estimate. Raised, never lowered, and never over an explicit args.runBudget.
+// The budget was set from Triage's estimate, or a flat default when it gave none,
+// but a resumed run's first review range is whatever the last run left unreviewed,
+// and a large ticket's leftover can be bigger than that budget allows for. Raised,
+// never lowered, and never over an explicit args.runBudget.
 if (resumeFrom && typeof args?.runBudget !== 'number') {
   const needed = budgetForLoc(size.totalChurn)
   if (needed > runBudget) {
+    const wasBudget = runBudget
+    const wasNote = runBudgetNote
     runBudget = needed
     runBudgetNote = `raised to fit the ${size.totalChurn} changed lines of the first review ` +
-      `range ${firstReviewRange}, more than triage estimated`
+      `range ${firstReviewRange}, from ${Math.round(wasBudget / 1000)}k (${wasNote})`
     log(`run budget raised to ${Math.round(runBudget / 1000)}k (first review range ` +
         `${firstReviewRange}, ${size.totalChurn} changed lines)`)
   }
@@ -3876,6 +3879,9 @@ if (mutHead && mutHead !== reviewedThrough && settled.length) {
 if (reviewerCount && mutHead && mutHead !== reviewedThrough && !outOfBudget()) {
   enterPhase('Review')
   const mutRange = `${reviewStart()}..${mutHead}`
+  // False when no review has read the first range yet (it got no lens), so
+  // mutRange also holds commits that are not the gate's own.
+  const mutOnly = reviewStart() === reviewedThrough
   // Fetches this range's own new-side hunks before the lens runs, the same
   // rule classify() applies to every review after the initial one: a finding
   // whose span the mutation commits never touched is not a finding against
@@ -3885,10 +3891,10 @@ if (reviewerCount && mutHead && mutHead !== reviewedThrough && !outOfBudget()) {
   // An undone fix is already caught above by executing its reproducer, so the
   // lens is not asked to report one.
   const raisedMut = await reviewOf(mutRange, 'review:mutation', [LENS.correctness], knownForRound(),
-    `\nEach of those was fixed before the commits you are reviewing, and its ` +
-    `reproducer has already been re-run at their head, so do not report one ` +
-    `of them again. A defect you still perceive in code these commits do not ` +
-    `touch is not a finding against this range: leave it out.`)
+    `\nEach of those is already tracked, and an undone fix is caught by ` +
+    `re-running its reproducer, so do not report one of them again. A defect ` +
+    `you still perceive in code these commits do not touch is not a finding ` +
+    `against this range: leave it out.`)
   const { candidates, freshNotes } = classifyBatch(raisedMut, execHunks.hunks ?? null, 'mutation')
   notes.push(...freshNotes)
   let freshOpen = []
@@ -3910,8 +3916,11 @@ if (reviewerCount && mutHead && mutHead !== reviewedThrough && !outOfBudget()) {
       gates: gatesPayload(),
       unresolved_findings: freshOpen, fix_rounds: round, fix_round_output: fixRoundSpend,
       notes,
-      note: `The mutation gate's own commits (${mutRange}) introduced ` +
-            `${freshOpen.length} finding(s) with a demonstrated reproducer. The ` +
+      note: (mutOnly
+              ? `The mutation gate's own commits (${mutRange})`
+              : `The commits in ${mutRange}, the mutation gate's own ` +
+                `(${reviewedThrough}..${mutHead}) and earlier ones no review had read,`) +
+            ` introduced ${freshOpen.length} finding(s) with a demonstrated reproducer. The ` +
             `fix rounds are spent. ${prNote()}. Judge each: fix it, or reject ` +
             `it as wrong.`,
     })

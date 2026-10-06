@@ -149,4 +149,28 @@ check "commands/deliver.md no longer calls agent-eval" \
 check "commands/deliver.md takes the outcome from gh" \
   "$(grep -Fc "gh pr view '<branch>' --json number,state,mergedAt" "$REPO_ROOT/commands/deliver.md" || true)" 1
 
+# Prose wraps, so a phrase is searched for across line breaks.
+docHas() { tr '\n' ' ' < "$1" | grep -Fc -- "$2" || true; }
+DELIVER_MD="$REPO_ROOT/commands/deliver.md"
+ARCH_MD="$REPO_ROOT/docs/architecture.md"
+
+echo ""
+echo "== static: gh-154 -- the docs say what the resume record does"
+check "deliver.md passes priorRun only from a record at 0.30.0 or later" \
+  "$(docHas "$DELIVER_MD" 'Pass `priorRun` only from a record whose `pipeline_version.executed` is 0.30.0 or later')" 1
+check "and compares that version number by number, never as text" \
+  "$(docHas "$DELIVER_MD" 'Compare it number by number on each dot-separated part, never as text')" 1
+check "and passes no priorRun for an older record or one without the field" \
+  "$(docHas "$DELIVER_MD" 'pass no `priorRun`: in those records `reviewed_through` could sit past commits no review read')" 1
+check "deliver.md says the record survives a halt before the head check or after it confirmed the head" \
+  "$(docHas "$DELIVER_MD" "A halt before the branch step's head check, or after that check confirmed the head but before any review finished, returns the record's head, findings and notes unchanged")" 1
+check "and that an unconfirmed head drops it from every later halt and the result" \
+  "$(docHas "$DELIVER_MD" "a head the check does not confirm as an ancestor is dropped at the check. Either way, every later halt and the result report")" 1
+check "deliver.md no longer says a halt before reviewing returns the record as it was" \
+  "$(docHas "$DELIVER_MD" 'A run that halts before reviewing anything returns the record as it was')" 0
+check "architecture.md raises the budget whether it came from an estimate or the flat default" \
+  "$(docHas "$ARCH_MD" "whether that budget came from triage's estimate or from the flat default")" 1
+check "and no longer says the range was bigger than triage estimated" \
+  "$(docHas "$ARCH_MD" 'more changed lines than triage estimated')" 0
+
 finish

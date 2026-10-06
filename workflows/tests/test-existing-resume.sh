@@ -138,9 +138,9 @@ async function scenarioR3() {
 async function scenarioR4() {
   console.log('\n== scenario R4: a resumed run\'s budget is raised to fit a first review range bigger than triage estimated')
   const range = `${P}..${REVIEWED_THROUGH}`
-  const raisedRun = (spend) => resumed({}, {
+  const raisedRun = (spend, triage = { estimated_loc: 100 }) => resumed({}, {
     args: { runBudget: undefined },
-    triage: { estimated_loc: 100 },
+    triage,
     diffstatFiles: [['a.js', 1000, 0]],
     initialReview: { correctness: [{ title: 'Needs a fix', file: 'a.js', claim: 'c', evidence: 'e' }],
       advocate: [], requirements: [] },
@@ -161,6 +161,21 @@ async function scenarioR4() {
   check('the raised figure is the one dispatch() refuses at',
     (refused.result.note ?? '').includes('Run budget exhausted (1000k output tokens'), true)
   check('the halt note says the budget was raised', /raised/.test(refused.result.note ?? ''), true)
+  check('the halt note names the line count and range it was raised to fit',
+    (refused.result.note ?? '').includes(`raised to fit the 1000 changed lines of the first review range ${range}`), true)
+  check('and still names triage\'s estimate, as the figure it was raised from',
+    (refused.result.note ?? '').includes(`from 300k (derived from triage's ~100 estimated LOC)`), true)
+
+  const unestimated = await run(raisedRun({ v: 0, after: 1_100_000 }, { estimated_loc: null }))
+  const unestimatedNote = unestimated.result.note ?? ''
+  check('with no triage estimate the raise is still logged with the range and the line count',
+    unestimated.captured.logs.includes(`run budget raised to 1000k (first review range ${range}, 1000 changed lines)`), true)
+  check('the halt note says the budget was raised to fit the measured lines',
+    unestimatedNote.includes('raised to fit the 1000 changed lines'), true)
+  check('and keeps the note that triage gave no estimate, with the default it was raised from',
+    unestimatedNote.includes('from 300k (triage gave no estimated_loc; using the inline default)'), true)
+  check('and never claims a triage estimate that did not exist',
+    unestimatedNote.includes('triage estimated'), false)
 
   const small = await run(resumed({}, { args: { runBudget: undefined },
     triage: { estimated_loc: 1000 }, diffstatFiles: [['a.js', 50, 0]] }))
@@ -340,6 +355,33 @@ async function scenarioR7() {
   check('the mutation review starts at the record\'s head too',
     mutTail.includes(`Commit range: ${P}..${MUT_HEAD}\n`), true)
   check('and moves the head it reports to the mutation head', mutated.result.reviewed_through, MUT_HEAD)
+
+  const mutFinding = [{ title: 'Mutation commits introduced Z', file: 'a.js', claim: 'c', evidence: 'e' }]
+  const gateOwn = (note, head) => note.includes(`The mutation gate's own commits (${head}..${MUT_HEAD})`)
+  const floorMut = await run(resumed(prior, { ...base, fixHead: () => REVIEWED_THROUGH,
+    mutationGated: true, mutationResult: mutationAt(MUT_HEAD), postMutationReview: mutFinding }))
+  const floorNote = floorMut.result.note ?? ''
+  check('a reproduced finding in the mutation review halts at Review',
+    [floorMut.result.halted_at, floorMut.result.unresolved_findings?.length], ['Review', 1])
+  check('the halt note does not blame the mutation gate for commits that start at the record\'s head',
+    floorNote.includes(`gate's own commits (${P}..`), false)
+  check('it names the range the review read', floorNote.includes(`${P}..${MUT_HEAD}`), true)
+  check('and the gate\'s own range inside it', floorNote.includes(`(${REVIEWED_THROUGH}..${MUT_HEAD})`), true)
+  const floorLens = floorMut.captured.calls.find(c => c.label === 'review:mutation:correctness')?.prompt ?? ''
+  check('the mutation lens is not told the known findings were fixed before the commits it reads',
+    floorLens.includes('fixed before the commits you are reviewing'), false)
+  check('it is still told not to report a known finding again',
+    floorLens.includes('do not report one of them again'), true)
+  check('and that a defect in untouched code is not a finding here',
+    floorLens.includes('commits do not touch is not a finding'), true)
+
+  const lensedMut = await run(resumed({}, { mutationGated: true, mutationResult: mutationAt(MUT_HEAD),
+    postMutationReview: mutFinding, verify: () => false }))
+  check('a resumed run whose first range got its lenses still names only the gate\'s own commits',
+    gateOwn(lensedMut.result.note ?? '', REVIEWED_THROUGH), true)
+  const freshMut = await run({ mutationGated: true, mutationResult: mutationAt(MUT_HEAD),
+    postMutationReview: mutFinding, verify: () => false })
+  check('and so does a run that never resumed', gateOwn(freshMut.result.note ?? '', REVIEWED_THROUGH), true)
 }
 
 async function scenarioR8() {
