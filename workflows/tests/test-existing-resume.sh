@@ -10,9 +10,11 @@ const P = 'a1b2c3d4e5f60718293a4b5c6d7e8f9012345678'
 const Q = '0123456789abcdef0123456789abcdef01234567'
 const FIX_HEAD = 'fix00000000000000000000000000000000000001'
 const MUT_HEAD = 'mut00000000000000000000000000000000000001'
-const PRIOR_OK = 'TOUCHSTONE_PRIOR_HEAD 0'
+const PRIOR_OK = 'TOUCHSTONE_PRIOR_HEAD_LINEAR 0'
 const ANCESTRY_STEP = (sha) =>
-  `git -C <path> merge-base --is-ancestor ${sha} HEAD; echo TOUCHSTONE_PRIOR_HEAD $?`
+  `git -C <path> merge-base --is-ancestor ${sha} HEAD && ` +
+  `test "$(git -C <path> rev-list --merges --count ${sha}..HEAD)" = 0; ` +
+  `echo TOUCHSTONE_PRIOR_HEAD_LINEAR $?`
 
 function existing(over) {
   return { created: true, branch: 'feat/gh-21-stub', base: 'main', path: '/tmp/stub-worktree',
@@ -208,14 +210,16 @@ async function scenarioR5() {
       args: { existingBranch: true, reviewedThrough: 'nope', priorRun: { reviewed_through: P, ...prior } },
       ancestry: false },
     { name: 'an ancestry check that printed 1', args: withHead,
-      check: 'TOUCHSTONE_PRIOR_HEAD 1', ancestry: true, why: 'not confirmed as an ancestor' },
+      check: 'TOUCHSTONE_PRIOR_HEAD_LINEAR 1', ancestry: true, why: 'not confirmed as an ancestor' },
+    { name: 'the ancestry-only answer an earlier version asked for', args: withHead,
+      check: 'TOUCHSTONE_PRIOR_HEAD 0', ancestry: true, why: 'not confirmed as an ancestor' },
     { name: 'an ancestry check that was never answered', args: withHead,
       check: undefined, ancestry: true, why: 'not confirmed as an ancestor' },
     { name: 'an empty ancestry check', args: withHead, check: '', ancestry: true },
     { name: 'an ancestry check with trailing text', args: withHead,
-      check: 'TOUCHSTONE_PRIOR_HEAD 0 ', ancestry: true },
+      check: 'TOUCHSTONE_PRIOR_HEAD_LINEAR 0 ', ancestry: true },
     { name: 'an ancestry check in the wrong case', args: withHead,
-      check: 'touchstone_prior_head 0', ancestry: true },
+      check: 'touchstone_prior_head_linear 0', ancestry: true },
   ]
   for (const c of cases) {
     const { result, captured } = await run({
@@ -307,10 +311,10 @@ async function scenarioR7() {
   check('the fix round ran', callCount(captured, 'fix:1'), 1)
   check('its commits got a tail review', callCount(captured, 'review:fix:1:correctness'), 1)
   const tail = captured.calls.find(c => c.label === 'review:fix:1:correctness')?.prompt ?? ''
-  check('the tail review reads the fix round\'s own range',
-    tail.includes(`Commit range: ${REVIEWED_THROUGH}..${FIX_HEAD}\n`), true)
+  check('the tail review starts at the record\'s head, so the first range\'s commits are read too',
+    tail.includes(`Commit range: ${P}..${FIX_HEAD}\n`), true)
   check('the run reports one reviewer', result.reviewers, 1)
-  check('the head it reports is the fix round\'s', result.reviewed_through, FIX_HEAD)
+  check('the head it reports is the fix round\'s, which that review read up to', result.reviewed_through, FIX_HEAD)
   const pr = captured.calls.find(c => c.label === 'pr')?.prompt ?? ''
   check('the PR phase still guards against unreviewed commits',
     pr.includes(`git rev-list --count ${FIX_HEAD}..HEAD`), true)
@@ -321,6 +325,17 @@ async function scenarioR7() {
 
   const notesOnly = await run(resumed({ notes: [carriedNote('f5')] }, { diffstatFiles: [['a.js', 5, 0]] }))
   check('carried notes alone do not raise the floor', notesOnly.result.reviewers, 0)
+
+  const uncommitted = await run(resumed(prior, { ...base, fixHead: () => REVIEWED_THROUGH }))
+  check('a fix round that commits nothing is not reviewed, so the record\'s head stays',
+    [callCount(uncommitted.captured, 'review:fix:1:correctness'), uncommitted.result.reviewed_through], [0, P])
+
+  const mutated = await run(resumed(prior, { ...base, fixHead: () => REVIEWED_THROUGH,
+    mutationGated: true, mutationResult: mutationAt(MUT_HEAD) }))
+  const mutTail = mutated.captured.calls.find(c => c.label === 'review:mutation:correctness')?.prompt ?? ''
+  check('the mutation review starts at the record\'s head too',
+    mutTail.includes(`Commit range: ${P}..${MUT_HEAD}\n`), true)
+  check('and moves the head it reports to the mutation head', mutated.result.reviewed_through, MUT_HEAD)
 }
 
 async function scenarioR8() {
@@ -344,10 +359,150 @@ async function scenarioR8() {
     check(`${name}: no marker line`, p.includes('TOUCHSTONE_PRIOR_HEAD'), false)
     check(`${name}: no prior_head_check mention`, p.includes('prior_head_check'), false)
   }
+
+  const gitIn = (repo, ...a) => execFileSync('git',
+    ['-C', repo, '-c', 'commit.gpgsign=false', '-c', 'gpg.format=openpgp', '-c', 'core.hooksPath=/dev/null', ...a],
+    { encoding: 'utf8', env: { ...process.env, GIT_AUTHOR_NAME: 'test', GIT_AUTHOR_EMAIL: 't@t',
+      GIT_COMMITTER_NAME: 'test', GIT_COMMITTER_EMAIL: 't@t' } }).trim()
+  const commit = (repo, file) => {
+    fs.writeFileSync(path.join(repo, file), file)
+    gitIn(repo, 'add', '-A')
+    gitIn(repo, 'commit', '-q', '-m', file)
+    return gitIn(repo, 'rev-parse', 'HEAD')
+  }
+  const printed = async (repo, sha) => {
+    const { captured } = await run({ args: { existingBranch: true, reviewedThrough: sha },
+      existingBranchResult: existing() })
+    const command = captured.calls.find(c => c.label === 'branch:existing').prompt.split('\n').pop()
+    return execFileSync('bash', ['-c', command.split('<path>').join(repo)], { encoding: 'utf8' }).trim()
+  }
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ts-ancestry-'))
+  try {
+    const repo = path.join(dir, 'repo')
+    fs.mkdirSync(repo)
+    gitIn(repo, 'init', '-q', '-b', 'main')
+    const base = commit(repo, 'base.txt')
+    gitIn(repo, 'checkout', '-q', '-b', 'other')
+    const stray = commit(repo, 'stray.txt')
+    gitIn(repo, 'checkout', '-q', '-b', 'feat', base)
+    const reviewed = commit(repo, 'b1.txt')
+    commit(repo, 'b2.txt')
+    check('the command prints the confirming line for an ancestor with no merge after it',
+      await printed(repo, reviewed), 'TOUCHSTONE_PRIOR_HEAD_LINEAR 0')
+    check('and not for a commit that is not on the branch',
+      await printed(repo, stray), 'TOUCHSTONE_PRIOR_HEAD_LINEAR 1')
+    gitIn(repo, 'checkout', '-q', 'main')
+    commit(repo, 'main-only.txt')
+    gitIn(repo, 'checkout', '-q', 'feat')
+    gitIn(repo, 'merge', '-q', '--no-ff', '-m', 'Merge main', 'main')
+    commit(repo, 'b3.txt')
+    check('and not once the base was merged in after it, whose changes a range from it would carry',
+      await printed(repo, reviewed), 'TOUCHSTONE_PRIOR_HEAD_LINEAR 1')
+    check('a head after that merge is confirmed again', await printed(repo, gitIn(repo, 'rev-parse', 'HEAD~1')),
+      'TOUCHSTONE_PRIOR_HEAD_LINEAR 0')
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true })
+  }
+}
+
+async function scenarioR9() {
+  console.log('\n== scenario R9: a halt before the carry hands the record back whole')
+  const prior = { unresolved_findings: [carriedFinding('f3')], notes: [carriedNote('f5')] }
+  const worktreeHalt = (over) => ({ created: false, dirty: false, branch: 'feat/gh-21-stub', base: 'main',
+    path: '/tmp/stub-worktree', ticket: '21', detail: 'stub', halt_reason: 'none', ...over })
+  const kept = (name, result, at) => {
+    check(`${name}: halts at ${at}`, result.halted_at, at)
+    check(`${name}: reviewed_through is the record's`, result.reviewed_through, P)
+    check(`${name}: the findings are the record's`, idsOf(result.unresolved_findings), ['f3'])
+    check(`${name}: the notes are the record's`, idsOf(result.notes), ['f5'])
+  }
+  for (const [name, halt] of [
+    ['a dirty checkout', { dirty: true, detail: 'M some-file' }],
+    ['an ambiguous match', { halt_reason: 'ambiguous' }],
+    ['an already merged branch', { halt_reason: 'merged' }],
+    ['an occupied directory', { halt_reason: 'occupied' }],
+    ['another ticket\'s branch', { halt_reason: 'wrong-ticket' }],
+    ['no branch found', {}],
+  ]) {
+    kept(name, (await run(resumed(prior, { existingBranchResult: worktreeHalt(halt) }))).result, 'Worktree')
+  }
+  kept('an oversized supplied plan', (await run(resumed(prior, { args: { plan: 'x'.repeat(6001) } }))).result, 'Plan')
+
+  const noHead = await run({ args: { existingBranch: true, priorRun: prior },
+    existingBranchResult: worktreeHalt({ dirty: true }) })
+  check('a record with no head hands back nothing',
+    [noHead.result.reviewed_through, noHead.result.unresolved_findings, noHead.result.notes], [null, undefined, undefined])
+  const fresh = await run({ args: { priorRun: { reviewed_through: P, ...prior } },
+    branchResult: worktreeHalt({ dirty: true }) })
+  check('a run that is not --existing hands back nothing either',
+    [fresh.result.reviewed_through, fresh.result.unresolved_findings, fresh.result.notes], [null, undefined, undefined])
+
+  const dropped = await run(resumed(prior, { existingBranchResult: existing({ prior_head_check: 'TOUCHSTONE_PRIOR_HEAD_LINEAR 1' }),
+    args: { runBudget: 1_000_000 }, spendAllAfter: 'implementer' }))
+  check('a head that is not confirmed is dropped from a later halt, record and all',
+    [dropped.result.halted_at !== undefined, dropped.result.reviewed_through,
+     dropped.result.unresolved_findings, dropped.result.notes], [true, null, undefined, undefined])
+}
+
+async function scenarioR10() {
+  console.log('\n== scenario R10: a carried finding whose reproducer nobody ran is measured again, not held open')
+  const unmeasured = (id, over) => carriedFinding(id, { reproducer_run: { outcome: 'not-executed' }, ...over })
+  const small = { diffstatFiles: [['a.js', 5, 0]], staleness: () => [] }
+  const withF2 = { unresolved_findings: [unmeasured('f2')] }
+
+  const cannotRun = await run(resumed(withF2, { ...small, verify: () => 127 }))
+  check('its reproducer is run once, before any review or fix', callCount(cannotRun.captured, 'reproduce:carried'), 1)
+  check('a reproducer that cannot run makes it a note, as it would a fresh candidate',
+    [idsOf(cannotRun.result.notes), cannotRun.result.notes[0]?.reason], [['f2'], 'reproducer-could-not-run'])
+  check('so nothing is open and no fix round runs',
+    [idsOf(cannotRun.result.unresolved_findings), callCount(cannotRun.captured, 'fix:1'), cannotRun.result.halted_at],
+    [[], 0, undefined])
+
+  const errored = await run(resumed(withF2, { ...small, verify: () => 2,
+    outputFor: () => 'crashed, no marker' }))
+  check('a reproducer that errors without the marker makes it a note too',
+    [idsOf(errored.result.notes), errored.result.notes[0]?.reason, callCount(errored.captured, 'fix:1')],
+    [['f2'], 'reproducer-errored', 0])
+
+  const passed = await run(resumed(withF2, { ...small, verify: () => true }))
+  check('a reproducer that passes makes it a note',
+    [idsOf(passed.result.notes), passed.result.notes[0]?.reason, callCount(passed.captured, 'fix:1')],
+    [['f2'], 'did-not-reproduce', 0])
+
+  const reproduced = await run(resumed(withF2, { ...small, verify: (id, round) => round === 0 ? 1 : true }))
+  const fix1 = reproduced.captured.calls.find(c => c.label === 'fix:1')?.prompt ?? ''
+  check('one that reproduces is open, handed to the fixer with its reproducer',
+    fix1.includes('Carried f2 (src/f2.js:1): claim of f2 [reproduce: carried-repro f2]'), true)
+  check('and is settled once the fix passes', [idsOf(reproduced.result.unresolved_findings), reproduced.result.halted_at],
+    [[], undefined])
+
+  const stillUnmeasured = await run(resumed(withF2, { ...small, verify: () => 'norow' }))
+  check('one still unmeasured after the retry halts the run on measurement',
+    [stillUnmeasured.result.halted_at, callCount(stillUnmeasured.captured, 'reproduce:carried:retry'),
+     idsOf(stillUnmeasured.result.unresolved_findings)], ['Review', 1, ['f2']])
+  check('the halt reports the record\'s head, since no review finished', stillUnmeasured.result.reviewed_through, P)
+  check('and the finding as still unmeasured',
+    stillUnmeasured.result.unresolved_findings?.[0]?.reproducer_run?.outcome, 'not-executed')
+
+  const dirty = await run(resumed(withF2, { ...small, dirtyAt: 'reproduce:carried' }))
+  check('a reproducer that leaves the tree dirty halts and keeps the finding',
+    [dirty.result.halted_at, idsOf(dirty.result.unresolved_findings)], ['Review', ['f2']])
+
+  const mixed = await run(resumed({ unresolved_findings: [unmeasured('f2'), carriedFinding('f3')] },
+    { ...small, verify: (id, round) => round === 0 ? 127 : id === 'f3' }))
+  const mixedFix = mixed.captured.calls.find(c => c.label === 'fix:1')?.prompt ?? ''
+  check('only the unmeasured one is run first; a measured one goes straight to the fixer',
+    [mixedFix.includes('Carried f3'), mixedFix.includes('Carried f2'), idsOf(mixed.result.notes)],
+    [true, false, ['f2']])
+
+  const reviewed = await run(resumed(withF2, { verify: () => 127, staleness: () => [] }))
+  const lenses = initialLensCalls(reviewed.captured)
+  check('the lenses run after it and are told the outcome by id',
+    [lenses.length, lenses.every(c => c.prompt.includes('[f2] Carried f2 (src/f2.js)'))], [2, true])
 }
 
 const SCENARIOS = [scenarioR1, scenarioR2, scenarioR3, scenarioR4, scenarioR5, scenarioR6, scenarioR7,
-  scenarioR8]
+  scenarioR8, scenarioR9, scenarioR10]
 JS_EOF
 
 finish

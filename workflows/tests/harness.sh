@@ -366,6 +366,9 @@ function makeAgent(scenario, captured) {
       return reproduceResponse(prompt, scenario,
         (id) => scenario.initialExit ? scenario.initialExit(id, retry) : 1)
     }
+    if (base === 'reproduce:carried') {
+      return reproduceResponse(prompt, scenario, (id) => exitFor(scenario, id, 0, retry))
+    }
     if (/^reproduce:fix:\d+:fresh$/.test(base)) {
       const round = Number(base.slice('reproduce:fix:'.length, -':fresh'.length))
       return reproduceResponse(prompt, scenario, (id) => exitFor(scenario, id, round, retry))

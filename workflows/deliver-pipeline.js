@@ -269,9 +269,21 @@ let size = null
 // reviewedHead is reported as reviewed_through by every halt and the result: the
 // last head a review finished at. Not reviewedThrough (part 50), which also
 // moves past commits no review read, so the next run would skip them.
-let reviewedHead = null
-let carriedOpen = []
-let carriedNotes = []
+//
+// An --existing run starts holding the record it was given (args.priorRun; the
+// script has no fs), unverified: the invoking session writes every payload over
+// the record file, so a halt before the ancestry check in part 20 (a dirty
+// checkout, an oversized plan) would otherwise overwrite it with nothing. That
+// check drops it when the head is not confirmed.
+const asSha = (v) => typeof v === 'string' && /^[0-9a-f]{40}$/.test(v.trim()) ? v.trim() : null
+const SCOPES = ['ticket', 'addition', 'unattributed']
+const carry = (list) => (Array.isArray(list) ? list : [])
+  .filter(f => typeof f?.id === 'string' && /^f\d+$/.test(f.id))
+  .map(f => ({ ...f, scope: SCOPES.includes(f.scope) ? f.scope : 'unattributed' }))
+const recordHead = args?.existingBranch ? asSha(args.priorRun?.reviewed_through) : null
+let reviewedHead = recordHead
+let carriedOpen = recordHead ? carry(args.priorRun.unresolved_findings) : []
+let carriedNotes = recordHead ? carry(args.priorRun.notes) : []
 
 // executed never changes; base_branch and mismatch stay null until the
 // merged setup call (before Worktree) has something to report, which is why
@@ -1054,23 +1066,27 @@ const checksDiscoveryStep = (n, whichPath) =>
 // args.reviewedThrough wins over the record's. Only a full SHA is a candidate,
 // and only the branch:existing step below can say whether it is still on the
 // branch, so nothing is carried until then.
-const PRIOR_HEAD_OK = 'TOUCHSTONE_PRIOR_HEAD 0'
+const PRIOR_HEAD_MARKER = 'TOUCHSTONE_PRIOR_HEAD_LINEAR'
+const PRIOR_HEAD_OK = `${PRIOR_HEAD_MARKER} 0`
 const priorHeadGiven = !args?.existingBranch ? null
   : typeof args.reviewedThrough === 'string' ? args.reviewedThrough
   : args.priorRun?.reviewed_through
-const priorHead = typeof priorHeadGiven === 'string' && /^[0-9a-f]{40}$/.test(priorHeadGiven.trim())
-  ? priorHeadGiven.trim() : null
+const priorHead = asSha(priorHeadGiven)
 if (priorHeadGiven != null && !priorHead) {
   log(`ignoring reviewed head ${JSON.stringify(priorHeadGiven)}: not a 40-character SHA; ` +
       `reviewing the whole branch`)
 }
+// A merge since the head means the whole branch: git diff A..B is a tree diff,
+// so a range from a head that predates merging the base in holds all the base
+// gained too, and the lenses would review that as this branch's work.
 const priorHeadStep = (n) =>
   `${n}. Also before you return, only if step 8 returned created=true: run ` +
   `exactly the command below, with <path> the absolute path from step 8, and ` +
   `put the one line it prints in prior_head_check, verbatim and alone. Do not ` +
   `interpret it; the script reads it.\n` +
-  `git -C <path> merge-base --is-ancestor ${priorHead} HEAD; ` +
-  `echo TOUCHSTONE_PRIOR_HEAD $?`
+  `git -C <path> merge-base --is-ancestor ${priorHead} HEAD && ` +
+  `test "$(git -C <path> rev-list --merges --count ${priorHead}..HEAD)" = 0; ` +
+  `echo ${PRIOR_HEAD_MARKER} $?`
 
 // existingBranch is for follow-up work on an open PR: review feedback, or scope
 // added to a ticket already in flight. Cutting a fresh branch there strands the
@@ -1350,15 +1366,17 @@ log(args?.existingBranch
   ? `worktree ${wt.path} reused for branch ${wt.branch} (base ${wt.base})`
   : `worktree ${wt.path} created for branch ${wt.branch} (base ${wt.base})`)
 
-if (priorHead && wt.prior_head_check !== PRIOR_HEAD_OK) {
-  log(`reviewed head ${priorHead} is not confirmed as an ancestor of branch ` +
-      `${wt.branch} (check printed ${JSON.stringify(wt.prior_head_check ?? null)}); ` +
-      `reviewing the whole branch, carrying nothing`)
-} else if (priorHead) {
-  const SCOPES = ['ticket', 'addition', 'unattributed']
-  const carry = (list) => (Array.isArray(list) ? list : [])
-    .filter(f => typeof f?.id === 'string' && /^f\d+$/.test(f.id))
-    .map(f => ({ ...f, scope: SCOPES.includes(f.scope) ? f.scope : 'unattributed' }))
+if (!priorHead || wt.prior_head_check !== PRIOR_HEAD_OK) {
+  reviewedHead = null
+  carriedOpen = []
+  carriedNotes = []
+  if (priorHead) {
+    log(`reviewed head ${priorHead} is not confirmed as an ancestor of branch ` +
+        `${wt.branch} with no merge commit since (check printed ` +
+        `${JSON.stringify(wt.prior_head_check ?? null)}); reviewing the whole branch, ` +
+        `carrying nothing`)
+  }
+} else {
   reviewedHead = priorHead
   carriedOpen = carry(args.priorRun?.unresolved_findings)
   carriedNotes = carry(args.priorRun?.notes)
@@ -2926,6 +2944,10 @@ const reviewOf = async (range, tag, picked, known = [], knownCharge = '') => {
 // review, so a phase that commits without one leaves it behind and the PR
 // guard below refuses.
 let reviewedThrough = headOf(impl.commit_range)
+// Where the next review starts. reviewedHead trails reviewedThrough when a
+// resumed run's first range got no lens: nobody read those commits, and a review
+// starting at reviewedThrough would skip them yet still move reviewedHead past.
+const reviewStart = () => reviewedHead ?? reviewedThrough
 
 // Lenses cannot see each other, and contentKeyOf cannot merge them: two
 // reviewers describe one bug in different words. A failure keeps everything,
@@ -3246,13 +3268,34 @@ const notExecutedHalt = (at, notExecuted, extra) => {
 }
 
 let settled = []
-let open = [...carriedOpen]
+// A carried finding whose reproducer nobody ran (notExecutedHalt recorded it)
+// is a candidate, not a verdict: held in open it would stay open through every
+// fix round on a reproducer that may not even run.
+const unmeasured = (f) => f.reproducer_run?.outcome === 'not-executed'
+let awaiting = carriedOpen.filter(unmeasured)
+let open = carriedOpen.filter(f => !unmeasured(f))
 let round = 0
-widenBudgetHaltState(() => ({ unresolved_findings: open, notes, fix_rounds: round }))
+widenBudgetHaltState(() => ({
+  unresolved_findings: [...open, ...awaiting], notes, fix_rounds: round }))
 scopeSplit = () => {
   const split = { ticket: 0, addition: 0, unattributed: 0 }
-  for (const f of [...settled, ...open]) split[f.scope]++
+  for (const f of [...settled, ...open, ...awaiting]) split[f.scope]++
   return split
+}
+if (awaiting.length) {
+  const disposed = await executeAndDispose(awaiting, 'reproduce:carried', 0)
+  open.push(...disposed.opened)
+  notes.push(...disposed.asNotes)
+  const placed = new Set([...disposed.opened, ...disposed.asNotes].map(f => f.id))
+  const unplaced = awaiting.filter(f => !placed.has(f.id))
+  awaiting = unplaced
+  if (disposed.dirty) { sReview.close(); return await dirtyReproducerHalt('Review', disposed.exec, unplaced) }
+  if (disposed.notExecuted.length) {
+    sReview.close()
+    return await notExecutedHalt('Review', disposed.notExecuted, {
+      unresolved_findings: [...open, ...disposed.notExecuted], notes, fix_rounds: round,
+    })
+  }
 }
 if (lenses.length) {
   const carriedCharge = carriedOpen.length || carriedNotes.length
@@ -3461,7 +3504,7 @@ while ((open.length || blockingChecksOpen()) && round < MAX_REVIEW_ROUNDS && !ou
   const tailReviewable =
     reviewerCount && head && head !== reviewedThrough && !outOfBudget()
   const roundRange = head && head !== reviewedThrough
-    ? `${reviewedThrough}..${head}` : reviewedThrough
+    ? `${reviewStart()}..${head}` : reviewedThrough
 
   // One at a time, never beside another agent in this worktree. executeAtHead
   // judges a reproducer by the tree's porcelain before and after its own
@@ -3789,7 +3832,7 @@ if (mutHead && mutHead !== reviewedThrough && settled.length) {
 }
 if (reviewerCount && mutHead && mutHead !== reviewedThrough && !outOfBudget()) {
   enterPhase('Review')
-  const mutRange = `${reviewedThrough}..${mutHead}`
+  const mutRange = `${reviewStart()}..${mutHead}`
   // Fetches this range's own new-side hunks before the lens runs, the same
   // rule classify() applies to every review after the initial one: a finding
   // whose span the mutation commits never touched is not a finding against

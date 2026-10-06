@@ -82,11 +82,14 @@ Workflow({ name: 'touchstone:deliver-pipeline', args: { ticket: "...", existingB
 ```
 
 `reviewed_through` is the last head a review finished at; the workflow verifies it is
-still an ancestor of the branch and otherwise ignores the record, reviewing the whole
-branch and carrying nothing. `unresolved_findings` and `notes` are carried as tracked,
-so they reach the fixer and are not raised again. Pass `reviewedThrough: "<40-char sha>"`
-as well to start from a commit you choose; it wins over the record's. Both are ignored
-without `--existing`. Pass nothing when there is no record.
+still an ancestor of the branch with no merge commit after it, and otherwise ignores the
+record, reviewing the whole branch and carrying nothing. A merge, such as updating the
+branch from its base, would put the base's own changes into a range from that head.
+`unresolved_findings` and `notes` are carried as tracked, so they reach the fixer and are
+not raised again; a carried finding whose reproducer was never run is run first, like a
+fresh one. A run that halts before reviewing anything returns the record as it was. Pass
+`reviewedThrough: "<40-char sha>"` as well to start from a commit you choose; it wins over
+the record's. Both are ignored without `--existing`. Pass nothing when there is no record.
 
 Say that `/touchstone:deliver` requires a ticket, and show the correct form. Do not scan the
 task text for something ticket-shaped, do not offer to proceed without one, and do

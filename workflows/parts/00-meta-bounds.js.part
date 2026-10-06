@@ -269,9 +269,21 @@ let size = null
 // reviewedHead is reported as reviewed_through by every halt and the result: the
 // last head a review finished at. Not reviewedThrough (part 50), which also
 // moves past commits no review read, so the next run would skip them.
-let reviewedHead = null
-let carriedOpen = []
-let carriedNotes = []
+//
+// An --existing run starts holding the record it was given (args.priorRun; the
+// script has no fs), unverified: the invoking session writes every payload over
+// the record file, so a halt before the ancestry check in part 20 (a dirty
+// checkout, an oversized plan) would otherwise overwrite it with nothing. That
+// check drops it when the head is not confirmed.
+const asSha = (v) => typeof v === 'string' && /^[0-9a-f]{40}$/.test(v.trim()) ? v.trim() : null
+const SCOPES = ['ticket', 'addition', 'unattributed']
+const carry = (list) => (Array.isArray(list) ? list : [])
+  .filter(f => typeof f?.id === 'string' && /^f\d+$/.test(f.id))
+  .map(f => ({ ...f, scope: SCOPES.includes(f.scope) ? f.scope : 'unattributed' }))
+const recordHead = args?.existingBranch ? asSha(args.priorRun?.reviewed_through) : null
+let reviewedHead = recordHead
+let carriedOpen = recordHead ? carry(args.priorRun.unresolved_findings) : []
+let carriedNotes = recordHead ? carry(args.priorRun.notes) : []
 
 // executed never changes; base_branch and mismatch stay null until the
 // merged setup call (before Worktree) has something to report, which is why

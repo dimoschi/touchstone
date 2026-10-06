@@ -3,6 +3,10 @@
 // review, so a phase that commits without one leaves it behind and the PR
 // guard below refuses.
 let reviewedThrough = headOf(impl.commit_range)
+// Where the next review starts. reviewedHead trails reviewedThrough when a
+// resumed run's first range got no lens: nobody read those commits, and a review
+// starting at reviewedThrough would skip them yet still move reviewedHead past.
+const reviewStart = () => reviewedHead ?? reviewedThrough
 
 // Lenses cannot see each other, and contentKeyOf cannot merge them: two
 // reviewers describe one bug in different words. A failure keeps everything,
@@ -323,13 +327,34 @@ const notExecutedHalt = (at, notExecuted, extra) => {
 }
 
 let settled = []
-let open = [...carriedOpen]
+// A carried finding whose reproducer nobody ran (notExecutedHalt recorded it)
+// is a candidate, not a verdict: held in open it would stay open through every
+// fix round on a reproducer that may not even run.
+const unmeasured = (f) => f.reproducer_run?.outcome === 'not-executed'
+let awaiting = carriedOpen.filter(unmeasured)
+let open = carriedOpen.filter(f => !unmeasured(f))
 let round = 0
-widenBudgetHaltState(() => ({ unresolved_findings: open, notes, fix_rounds: round }))
+widenBudgetHaltState(() => ({
+  unresolved_findings: [...open, ...awaiting], notes, fix_rounds: round }))
 scopeSplit = () => {
   const split = { ticket: 0, addition: 0, unattributed: 0 }
-  for (const f of [...settled, ...open]) split[f.scope]++
+  for (const f of [...settled, ...open, ...awaiting]) split[f.scope]++
   return split
+}
+if (awaiting.length) {
+  const disposed = await executeAndDispose(awaiting, 'reproduce:carried', 0)
+  open.push(...disposed.opened)
+  notes.push(...disposed.asNotes)
+  const placed = new Set([...disposed.opened, ...disposed.asNotes].map(f => f.id))
+  const unplaced = awaiting.filter(f => !placed.has(f.id))
+  awaiting = unplaced
+  if (disposed.dirty) { sReview.close(); return await dirtyReproducerHalt('Review', disposed.exec, unplaced) }
+  if (disposed.notExecuted.length) {
+    sReview.close()
+    return await notExecutedHalt('Review', disposed.notExecuted, {
+      unresolved_findings: [...open, ...disposed.notExecuted], notes, fix_rounds: round,
+    })
+  }
 }
 if (lenses.length) {
   const carriedCharge = carriedOpen.length || carriedNotes.length
@@ -538,7 +563,7 @@ while ((open.length || blockingChecksOpen()) && round < MAX_REVIEW_ROUNDS && !ou
   const tailReviewable =
     reviewerCount && head && head !== reviewedThrough && !outOfBudget()
   const roundRange = head && head !== reviewedThrough
-    ? `${reviewedThrough}..${head}` : reviewedThrough
+    ? `${reviewStart()}..${head}` : reviewedThrough
 
   // One at a time, never beside another agent in this worktree. executeAtHead
   // judges a reproducer by the tree's porcelain before and after its own

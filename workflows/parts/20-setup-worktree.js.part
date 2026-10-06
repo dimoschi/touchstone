@@ -199,23 +199,27 @@ const checksDiscoveryStep = (n, whichPath) =>
 // args.reviewedThrough wins over the record's. Only a full SHA is a candidate,
 // and only the branch:existing step below can say whether it is still on the
 // branch, so nothing is carried until then.
-const PRIOR_HEAD_OK = 'TOUCHSTONE_PRIOR_HEAD 0'
+const PRIOR_HEAD_MARKER = 'TOUCHSTONE_PRIOR_HEAD_LINEAR'
+const PRIOR_HEAD_OK = `${PRIOR_HEAD_MARKER} 0`
 const priorHeadGiven = !args?.existingBranch ? null
   : typeof args.reviewedThrough === 'string' ? args.reviewedThrough
   : args.priorRun?.reviewed_through
-const priorHead = typeof priorHeadGiven === 'string' && /^[0-9a-f]{40}$/.test(priorHeadGiven.trim())
-  ? priorHeadGiven.trim() : null
+const priorHead = asSha(priorHeadGiven)
 if (priorHeadGiven != null && !priorHead) {
   log(`ignoring reviewed head ${JSON.stringify(priorHeadGiven)}: not a 40-character SHA; ` +
       `reviewing the whole branch`)
 }
+// A merge since the head means the whole branch: git diff A..B is a tree diff,
+// so a range from a head that predates merging the base in holds all the base
+// gained too, and the lenses would review that as this branch's work.
 const priorHeadStep = (n) =>
   `${n}. Also before you return, only if step 8 returned created=true: run ` +
   `exactly the command below, with <path> the absolute path from step 8, and ` +
   `put the one line it prints in prior_head_check, verbatim and alone. Do not ` +
   `interpret it; the script reads it.\n` +
-  `git -C <path> merge-base --is-ancestor ${priorHead} HEAD; ` +
-  `echo TOUCHSTONE_PRIOR_HEAD $?`
+  `git -C <path> merge-base --is-ancestor ${priorHead} HEAD && ` +
+  `test "$(git -C <path> rev-list --merges --count ${priorHead}..HEAD)" = 0; ` +
+  `echo ${PRIOR_HEAD_MARKER} $?`
 
 // existingBranch is for follow-up work on an open PR: review feedback, or scope
 // added to a ticket already in flight. Cutting a fresh branch there strands the
@@ -495,15 +499,17 @@ log(args?.existingBranch
   ? `worktree ${wt.path} reused for branch ${wt.branch} (base ${wt.base})`
   : `worktree ${wt.path} created for branch ${wt.branch} (base ${wt.base})`)
 
-if (priorHead && wt.prior_head_check !== PRIOR_HEAD_OK) {
-  log(`reviewed head ${priorHead} is not confirmed as an ancestor of branch ` +
-      `${wt.branch} (check printed ${JSON.stringify(wt.prior_head_check ?? null)}); ` +
-      `reviewing the whole branch, carrying nothing`)
-} else if (priorHead) {
-  const SCOPES = ['ticket', 'addition', 'unattributed']
-  const carry = (list) => (Array.isArray(list) ? list : [])
-    .filter(f => typeof f?.id === 'string' && /^f\d+$/.test(f.id))
-    .map(f => ({ ...f, scope: SCOPES.includes(f.scope) ? f.scope : 'unattributed' }))
+if (!priorHead || wt.prior_head_check !== PRIOR_HEAD_OK) {
+  reviewedHead = null
+  carriedOpen = []
+  carriedNotes = []
+  if (priorHead) {
+    log(`reviewed head ${priorHead} is not confirmed as an ancestor of branch ` +
+        `${wt.branch} with no merge commit since (check printed ` +
+        `${JSON.stringify(wt.prior_head_check ?? null)}); reviewing the whole branch, ` +
+        `carrying nothing`)
+  }
+} else {
   reviewedHead = priorHead
   carriedOpen = carry(args.priorRun?.unresolved_findings)
   carriedNotes = carry(args.priorRun?.notes)

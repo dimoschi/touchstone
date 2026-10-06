@@ -169,7 +169,7 @@ if (mutHead && mutHead !== reviewedThrough && settled.length) {
 }
 if (reviewerCount && mutHead && mutHead !== reviewedThrough && !outOfBudget()) {
   enterPhase('Review')
-  const mutRange = `${reviewedThrough}..${mutHead}`
+  const mutRange = `${reviewStart()}..${mutHead}`
   // Fetches this range's own new-side hunks before the lens runs, the same
   // rule classify() applies to every review after the initial one: a finding
   // whose span the mutation commits never touched is not a finding against
