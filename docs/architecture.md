@@ -334,9 +334,13 @@ The implementer never gets the plan as prompt text. `brief()` clamps to `briefCh
   blank line and `END OF PLAN <id>`. The model never copies the end line: when it sat
   inside the copied text it read as one of the markers around it and was dropped. It adds `.touchstone/`
   to `info/exclude` under `git rev-parse --git-common-dir` (never a tracked
-  `.gitignore`), and reports `wc -c`, `tail -n 1` and the `git check-ignore` exit. The
-  script halts at Implement unless the byte count equals the UTF-8 length it computed
-  itself, the last line is the end line, and the file is ignored. The id is an FNV-1a
+  `.gitignore`), and reports a content digest, `tail -n 1` and the `git check-ignore`
+  exit. The digest is FNV-1a over the file's UTF-8 bytes with every run of spaces, tabs
+  and newlines collapsed to one space, printed by a `python3` command the script built;
+  the script computes the same over the plan. A byte count failed runs on harmless
+  whitespace slips in the model's copy, while a changed or dropped word still changes the
+  digest. The script halts at Implement unless the digests match, the last line is the
+  end line, and the file is ignored. The id is an FNV-1a
   hash of ticket and plan, computed by the script, so it is deterministic. A failed
   verification is retried once as `plan:write:retry` with the identical prompt; a second
   failure halts at Implement.

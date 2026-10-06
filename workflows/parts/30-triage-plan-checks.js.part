@@ -359,13 +359,21 @@ const fnv1a = (s) => {
   for (let i = 0; i < s.length; i++) { h ^= s.charCodeAt(i); h = Math.imul(h, 0x01000193) }
   return (h >>> 0).toString(16).padStart(8, '0')
 }
-const utf8Length = (s) => {
-  let n = 0
-  for (const ch of s) {
+// FNV-1a over the UTF-8 bytes of the text with every run of spaces, tabs and
+// newlines collapsed to one space and the ends trimmed. A model copying
+// thousands of characters slips on whitespace now and then (a line indented
+// by two spaces halted a run), so the copy is held to its words, not its bytes.
+const contentDigest = (s) => {
+  let h = 0x811c9dc5
+  const add = (b) => { h ^= b; h = Math.imul(h, 0x01000193) }
+  for (const ch of s.replace(/[ \t\n\r]+/g, ' ').replace(/^ | $/g, '')) {
     const cp = ch.codePointAt(0)
-    n += cp < 0x80 ? 1 : cp < 0x800 ? 2 : cp < 0x10000 ? 3 : 4
+    if (cp < 0x80) add(cp)
+    else if (cp < 0x800) { add(0xc0 | cp >> 6); add(0x80 | cp & 0x3f) }
+    else if (cp < 0x10000) { add(0xe0 | cp >> 12); add(0x80 | cp >> 6 & 0x3f); add(0x80 | cp & 0x3f) }
+    else { add(0xf0 | cp >> 18); add(0x80 | cp >> 12 & 0x3f); add(0x80 | cp >> 6 & 0x3f); add(0x80 | cp & 0x3f) }
   }
-  return n
+  return (h >>> 0).toString(16).padStart(8, '0')
 }
 const planId = fnv1a(`${ticket}${plan.plan}`)
 const planFile = `${wt.path}/.touchstone/plan.md`
@@ -376,6 +384,11 @@ const planEndLine = `END OF PLAN ${planId}`
 const planBody = `${plan.plan}\n`
 const planEndCommand = `printf '\\nEND OF PLAN %s\\n' ${planId} >> ${shQuote(planFile)}`
 const planContent = `${planBody}\n${planEndLine}\n`
+// The same digest, computed over the written file in the worktree.
+const planDigestCommand = `python3 -c 'import functools,re,sys;` +
+  `t=re.sub(r"[ \\t\\n\\r]+"," ",open(sys.argv[1],encoding="utf-8").read()).strip(" ");` +
+  `print("%08x"%functools.reduce(lambda h,c:((h^c)*16777619)&4294967295,t.encode("utf-8"),2166136261))' ` +
+  `${shQuote(planFile)}`
 widenBudgetHaltState(() => ({ plan: plan.plan }))
 const planWritePrompt =
   `Write the plan file, then STOP. Do not implement anything and do not commit.\n` +
@@ -392,16 +405,17 @@ const planWritePrompt =
   `lines out.\n` +
   `4. Then run exactly: ${planEndCommand}\n` +
   `5. Only after steps 1 to 4, run these and report what they print, never ` +
-  `what you expect them to print. bytes: the number printed by ` +
-  `wc -c < ${planFile}. last_line: what tail -n 1 ${planFile} prints, exactly, ` +
-  `without its newline. ignored_exit: the exit status of ` +
+  `what you expect them to print.\n` +
+  `digest: what ${planDigestCommand} prints.\n` +
+  `last_line: what tail -n 1 ${planFile} prints, exactly, without its newline.\n` +
+  `ignored_exit: the exit status of ` +
   `git -C ${wt.path} check-ignore -q .touchstone/plan.md (0 means ignored).\n` +
   `PLAN FILE BEGIN ${planId}\n${planBody}PLAN FILE END ${planId}`
 const planWriteOpts = { schema: PLAN_WRITE, model: 'haiku', effort: 'low' }
 const planWriteProblemOf = (written) => !written
   ? 'the plan:write agent returned nothing'
-  : written.bytes !== utf8Length(planContent)
-  ? `the file is ${written.bytes} bytes, not the ${utf8Length(planContent)} the plan needs`
+  : written.digest !== contentDigest(planContent)
+  ? `its content digest is ${JSON.stringify(written.digest)}, not the plan's ${contentDigest(planContent)}`
   : written.last_line !== planEndLine
   ? `its last line is ${JSON.stringify(written.last_line)}, not ${planEndLine}`
   : written.ignored_exit !== 0
