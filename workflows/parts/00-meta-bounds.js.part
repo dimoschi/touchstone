@@ -29,7 +29,7 @@ export const meta = {
 // against the manifest in scripts/check-version-bump.sh, so drift is a
 // gate's job rather than something this script verifies about itself.
 const PLUGIN_NAME = 'touchstone'
-const PIPELINE_VERSION = '0.29.1'
+const PIPELINE_VERSION = '0.30.0'
 
 // Boundaries. Wall-clock deadlines are not expressible here (no Date.now, by
 // design); the bounds are rounds, counts, and token budget instead.
@@ -266,6 +266,13 @@ let draftPr = null
 // call site having to pass it through `extra` by hand.
 let size = null
 
+// reviewedHead is reported as reviewed_through by every halt and the result: the
+// last head a review finished at. Not reviewedThrough (part 50), which also
+// moves past commits no review read, so the next run would skip them.
+let reviewedHead = null
+let carriedOpen = []
+let carriedNotes = []
+
 // executed never changes; base_branch and mismatch stay null until the
 // merged setup call (before Worktree) has something to report, which is why
 // a halt at Worktree carries the executed value with the other two still
@@ -303,6 +310,9 @@ const halted = async (at, extra) => {
   const payload = {
     task, halted_at: at, pipeline_version: pipelineVersion, stage_spend: stageSpend,
     needs_user: true, record_file: runRecordFile, size,
+    reviewed_through: reviewedHead,
+    ...(carriedOpen.length ? { unresolved_findings: carriedOpen } : {}),
+    ...(carriedNotes.length ? { notes: carriedNotes } : {}),
     ...(planAdditions ? { plan_additions: planAdditions } : {}),
     ...(split ? { scope_split: split } : {}),
     ...extra,

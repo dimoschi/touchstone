@@ -196,6 +196,10 @@ if (blockingChecksOpen() && !sChecksPost.over()) {
 sChecksPost.close()
 stageSpend.checks = checksPreSpend + (stageSpend.checks ?? 0)
 
+// Taken here, after the pre-review fix may have moved impl.commit_range's head.
+const firstReviewRange = reviewedHead
+  ? `${reviewedHead}..${headOf(impl.commit_range)}` : impl.commit_range
+
 // Nothing under .touchstone/ may reach a commit. The range runs from the
 // implementer's own base, not from the previous head, so a commit that adds the
 // plan file and a later one that deletes it is still seen. Run before every
@@ -408,7 +412,7 @@ const draft = await treeAgent(
   `Separately, measure the diff: run exactly this and put all of its output ` +
   `verbatim in diffstat, unsummarised: neither this measurement nor the PR ` +
   `it goes with reads what the commits changed as well as running the exact ` +
-  `command does.\n${diffstatCommandFor(impl.commit_range)}`,
+  `command does.\n${diffstatCommandFor(firstReviewRange)}`,
   { label: 'draft-pr', phase: 'Draft PR', schema: DRAFT, model: 'haiku',
     effort: 'low' })
 // number, not opened: the PR phase addresses the draft by number to update and
@@ -429,7 +433,7 @@ const sReview = stage('review')
 // unmeasured after that halts here: this is a measurement problem, not a
 // code problem, the same principle unmeasuredChecksHalt and notExecutedHalt
 // apply elsewhere in this file.
-let sizeParsed = parseDiffstat(draft?.diffstat, impl.commit_range)
+let sizeParsed = parseDiffstat(draft?.diffstat, firstReviewRange)
 if (!sizeParsed) {
   const SIZE_PROBE = {
     type: 'object', additionalProperties: false, required: ['diffstat'],
@@ -437,9 +441,9 @@ if (!sizeParsed) {
   }
   const retried = await treeAgent(
     `Run exactly this and put all of its output verbatim in diffstat, ` +
-    `unsummarised, then STOP.\n${diffstatCommandFor(impl.commit_range)}`,
+    `unsummarised, then STOP.\n${diffstatCommandFor(firstReviewRange)}`,
     { label: 'size', schema: SIZE_PROBE, model: 'haiku', effort: 'low' })
-  sizeParsed = parseDiffstat(retried?.diffstat, impl.commit_range)
+  sizeParsed = parseDiffstat(retried?.diffstat, firstReviewRange)
 }
 if (!sizeParsed) {
   sReview.close()
@@ -447,12 +451,26 @@ if (!sizeParsed) {
     plan: plan.plan, implemented: impl.summary, gates: gatesPayload(), checks: checksPayload(),
     note: `The diff could not be measured, even after a retry: the diffstat ` +
       `probe's output did not have the shape parseDiffstat requires (the ` +
-      `begin/end markers naming ${impl.commit_range}, or a well-formed ` +
+      `begin/end markers naming ${firstReviewRange}, or a well-formed ` +
       `numstat/comment-count row). This is a measurement problem, not a ` +
       `code problem; re-run.`,
   })
 }
 size = sizeOf(sizeParsed)
+
+// Triage sized the ticket, but a resumed run's first review range is whatever
+// the last run left unreviewed, and a large ticket's leftover can be bigger than
+// that estimate. Raised, never lowered, and never over an explicit args.runBudget.
+if (reviewedHead && typeof args?.runBudget !== 'number') {
+  const needed = budgetForLoc(size.totalChurn)
+  if (needed > runBudget) {
+    runBudget = needed
+    runBudgetNote = `raised to fit the ${size.totalChurn} changed lines of the first review ` +
+      `range ${firstReviewRange}, more than triage estimated`
+    log(`run budget raised to ${Math.round(runBudget / 1000)}k (first review range ` +
+        `${firstReviewRange}, ${size.totalChurn} changed lines)`)
+  }
+}
 
 // Below RATIO_MIN_CODE the ratio does not apply at all: an ordinary TDD
 // change reads well over 1:1 test-to-code and must not halt on that alone.
@@ -535,11 +553,19 @@ const lenses = (args?.reviewers != null
     : lensKeys)
   .filter(k => !(k === 'advocate' && args?.devilsAdvocate === false))
   .map(k => LENS[k])
-const reviewerCount = lenses.length
-if (!reviewerCount) {
+// A resumed run's first range can be under the bar while its carried findings
+// still get fixed; reviewerCount 0 would ship those fixes unreviewed, since it
+// also switches off the tail reviews, the mutation review and the PR guard.
+const reviewerCount = lenses.length ||
+  (carriedOpen.length && args?.reviewers == null ? 1 : 0)
+if (!lenses.length) {
   log(`review skipped: ${size.files} file(s), ${size.codeChurn} code churn ` +
       `line(s) is under the ${INLINE_LOC}-line bar; adversarial lenses on a ` +
-      `one-liner is the ratio this workflow is trying to avoid`)
+      `one-liner is the ratio this workflow is trying to avoid` +
+      (reviewerCount
+        ? `; the ${carriedOpen.length} carried finding(s) are still tracked, and ` +
+          `their fix rounds are still reviewed`
+        : ''))
 } else {
   log(`review: ${lenses.map(l => l.label).join(', ')}`)
   if (!settledDecisions) {
@@ -553,7 +579,7 @@ if (!reviewerCount) {
 // and the post-mutation review all return through reviewOf. Neither is asked
 // of the model -- a model-supplied id is exactly as unreliable as the
 // model-supplied title this replaces, so the script stamps its own.
-let findingSeq = 0
+let findingSeq = Math.max(0, ...[...carriedOpen, ...carriedNotes].map(f => Number(f.id.slice(1))))
 // A verifier told to copy an id "in brackets" sometimes copies the brackets
 // too. Strip a matching pair before joining, so [f1] lines up with f1.
 const stripBrackets = (s) => {

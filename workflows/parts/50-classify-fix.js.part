@@ -231,7 +231,7 @@ const dirtyReproducerHalt = async (phaseName, exec, extraOpen = []) => halted(ph
 // demonstrated, not blocking-category, not in range, or a residual of a fix
 // already verified. Separate from unresolved_findings, which stays reserved
 // for what actually holds the run.
-let notes = []
+let notes = [...carriedNotes]
 const knownForRound = () => [...settled, ...open, ...notes]
 // Splits a batch of freshly raised findings into candidates (subject to an
 // executeAtHead call next) and notes, via classify() alone.
@@ -323,7 +323,7 @@ const notExecutedHalt = (at, notExecuted, extra) => {
 }
 
 let settled = []
-let open = []
+let open = [...carriedOpen]
 let round = 0
 widenBudgetHaltState(() => ({ unresolved_findings: open, notes, fix_rounds: round }))
 scopeSplit = () => {
@@ -331,8 +331,13 @@ scopeSplit = () => {
   for (const f of [...settled, ...open]) split[f.scope]++
   return split
 }
-if (reviewerCount) {
-  const raised = await collapseDuplicates(await reviewOf(impl.commit_range, 'review', lenses))
+if (lenses.length) {
+  const carriedCharge = carriedOpen.length || carriedNotes.length
+    ? `\nThose came from an earlier run on this branch and are still tracked. ` +
+      `Reference one by its id in duplicate_of; never raise it again.`
+    : ''
+  const raised = await collapseDuplicates(
+    await reviewOf(firstReviewRange, 'review', lenses, knownForRound(), carriedCharge))
   const { candidates, freshNotes } = classifyBatch(raised, null, 0)
   notes.push(...freshNotes)
   if (candidates.length) {
@@ -347,6 +352,7 @@ if (reviewerCount) {
       })
     }
   }
+  reviewedHead = headOf(firstReviewRange)
 }
 sReview.close()
 
@@ -604,6 +610,7 @@ while ((open.length || blockingChecksOpen()) && round < MAX_REVIEW_ROUNDS && !ou
       }
     }
     reviewedThrough = head
+    reviewedHead = head
   } else if (head) {
     reviewedThrough = head
   }

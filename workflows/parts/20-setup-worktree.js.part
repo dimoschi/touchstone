@@ -194,6 +194,29 @@ const checksDiscoveryStep = (n, whichPath) =>
   `it; a later step decides what it means. Set checks_source.detail to one ` +
   `line saying what you found.`
 
+// The head an earlier run's review finished at, from the run record the invoking
+// session passes in as args.priorRun (the script has no fs). An explicit
+// args.reviewedThrough wins over the record's. Only a full SHA is a candidate,
+// and only the branch:existing step below can say whether it is still on the
+// branch, so nothing is carried until then.
+const PRIOR_HEAD_OK = 'TOUCHSTONE_PRIOR_HEAD 0'
+const priorHeadGiven = !args?.existingBranch ? null
+  : typeof args.reviewedThrough === 'string' ? args.reviewedThrough
+  : args.priorRun?.reviewed_through
+const priorHead = typeof priorHeadGiven === 'string' && /^[0-9a-f]{40}$/.test(priorHeadGiven.trim())
+  ? priorHeadGiven.trim() : null
+if (priorHeadGiven != null && !priorHead) {
+  log(`ignoring reviewed head ${JSON.stringify(priorHeadGiven)}: not a 40-character SHA; ` +
+      `reviewing the whole branch`)
+}
+const priorHeadStep = (n) =>
+  `${n}. Also before you return, only if step 8 returned created=true: run ` +
+  `exactly the command below, with <path> the absolute path from step 8, and ` +
+  `put the one line it prints in prior_head_check, verbatim and alone. Do not ` +
+  `interpret it; the script reads it.\n` +
+  `git -C <path> merge-base --is-ancestor ${priorHead} HEAD; ` +
+  `echo TOUCHSTONE_PRIOR_HEAD $?`
+
 // existingBranch is for follow-up work on an open PR: review feedback, or scope
 // added to a ticket already in flight. Cutting a fresh branch there strands the
 // delta away from the PR it belongs to. The ticket stays mandatory either way.
@@ -306,7 +329,8 @@ const wt = args?.existingBranch
       `(step 4), the worktree-less branch (step 5), or the fallback (step 6), ` +
       `whether that path is the main checkout or a linked worktree, and ` +
       `whether the branch name carries a jira- or gh- marker.\n` +
-      checksDiscoveryStep(9, 'that path'),
+      checksDiscoveryStep(9, 'that path') +
+      (priorHead ? `\n${priorHeadStep(10)}` : ''),
       { label: 'branch:existing', schema: EXISTING_BRANCH, model: 'haiku', effort: 'low' })
   // A worktree is a separate checkout, so the main tree's state is irrelevant
   // to it; cutting from origin/<base> is what removes the need to touch the
@@ -470,6 +494,22 @@ wt.base = (baseOverride || wt.base).replace(/^origin\//, '')
 log(args?.existingBranch
   ? `worktree ${wt.path} reused for branch ${wt.branch} (base ${wt.base})`
   : `worktree ${wt.path} created for branch ${wt.branch} (base ${wt.base})`)
+
+if (priorHead && wt.prior_head_check !== PRIOR_HEAD_OK) {
+  log(`reviewed head ${priorHead} is not confirmed as an ancestor of branch ` +
+      `${wt.branch} (check printed ${JSON.stringify(wt.prior_head_check ?? null)}); ` +
+      `reviewing the whole branch, carrying nothing`)
+} else if (priorHead) {
+  const SCOPES = ['ticket', 'addition', 'unattributed']
+  const carry = (list) => (Array.isArray(list) ? list : [])
+    .filter(f => typeof f?.id === 'string' && /^f\d+$/.test(f.id))
+    .map(f => ({ ...f, scope: SCOPES.includes(f.scope) ? f.scope : 'unattributed' }))
+  reviewedHead = priorHead
+  carriedOpen = carry(args.priorRun?.unresolved_findings)
+  carriedNotes = carry(args.priorRun?.notes)
+  log(`resuming from reviewed head ${priorHead}: ${carriedOpen.length} open, ` +
+      `${carriedNotes.length} notes carried`)
+}
 
 
 // Every agent dispatch below inherits the session's working directory, which

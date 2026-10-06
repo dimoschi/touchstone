@@ -68,6 +68,26 @@ run did exactly that: the plan agent made 51 edits and 6 commits, blew the Plan
 ceiling, and the review, mutation and PR phases that would have checked the code
 never ran. The planner now refuses such a task and halts, pointing here.
 
+## Resuming review with `--existing`
+
+An `--existing` run reviews only what an earlier run did not, so a large ticket
+converges across runs instead of re-reviewing the whole branch each time. When
+`<main checkout>/.claude/touchstone-runs/<ticket>.json` exists, where `<ticket>` is
+the `--ticket` value with every character outside `A-Za-z0-9_-` replaced by `-` (the
+same name `record_file` carries), pass three of its fields through:
+
+```
+Workflow({ name: 'touchstone:deliver-pipeline', args: { ticket: "...", existingBranch: true,
+  priorRun: { reviewed_through: "<sha>", unresolved_findings: [...], notes: [...] } } })
+```
+
+`reviewed_through` is the last head a review finished at; the workflow verifies it is
+still an ancestor of the branch and otherwise ignores the record, reviewing the whole
+branch and carrying nothing. `unresolved_findings` and `notes` are carried as tracked,
+so they reach the fixer and are not raised again. Pass `reviewedThrough: "<40-char sha>"`
+as well to start from a commit you choose; it wins over the record's. Both are ignored
+without `--existing`. Pass nothing when there is no record.
+
 Say that `/touchstone:deliver` requires a ticket, and show the correct form. Do not scan the
 task text for something ticket-shaped, do not offer to proceed without one, and do
 not invent one. If the user genuinely wants agent work with no ticket, they can

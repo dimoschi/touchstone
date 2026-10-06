@@ -211,6 +211,7 @@ if (reviewerCount && mutHead && mutHead !== reviewedThrough && !outOfBudget()) {
     })
   }
   reviewedThrough = mutHead
+  reviewedHead = mutHead
 } else if (mutHead) {
   reviewedThrough = mutHead
 }
@@ -331,7 +332,7 @@ const result = {
   // fix already verified. Separate from unresolved_findings, which is
   // reserved for what actually held the run.
   notes,
-  reviewed_through: reviewedThrough,
+  reviewed_through: reviewedHead,
   fix_rounds: round,
   fix_round_output: fixRoundSpend,
   unresolved_findings: open,
