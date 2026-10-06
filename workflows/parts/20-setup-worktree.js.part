@@ -216,14 +216,16 @@ if (priorHeadGiven != null && !priorHead) {
 // from a head that predates merging the base in holds all the base gained too, and
 // the lenses would review that as this branch's work. A merge costs the narrowed
 // range, never the carried record.
+const priorHeadCommand = (path, head) =>
+  `git -C ${path} merge-base --is-ancestor ${priorHead} ${head}; a=$?; ` +
+  `m=$(git -C ${path} rev-list --merges --count ${priorHead}..${head}); ` +
+  `echo ${PRIOR_HEAD_MARKER} $((a ? 1 : (m ? 2 : 0)))`
 const priorHeadStep = (n) =>
   `${n}. Also before you return, only if step 8 returned created=true: run ` +
   `exactly the command below, with <path> the absolute path from step 8, and ` +
   `put the one line it prints in prior_head_check, verbatim and alone. Do not ` +
   `interpret it; the script reads it.\n` +
-  `git -C <path> merge-base --is-ancestor ${priorHead} HEAD; a=$?; ` +
-  `m=$(git -C <path> rev-list --merges --count ${priorHead}..HEAD); ` +
-  `echo ${PRIOR_HEAD_MARKER} $((a ? 1 : (m ? 2 : 0)))`
+  priorHeadCommand('<path>', 'HEAD')
 
 // existingBranch is for follow-up work on an open PR: review feedback, or scope
 // added to a ticket already in flight. Cutting a fresh branch there strands the

@@ -635,6 +635,10 @@ const PLAN_LEAK_PROBE = {
   type: 'object', additionalProperties: false, required: ['output'],
   properties: { output: { type: 'string' } },
 }
+const HEAD_CHECK_PROBE = {
+  type: 'object', additionalProperties: false, required: ['output'],
+  properties: { output: { type: 'string' } },
+}
 // head_sha is required, not optional: it is how the script learns what this
 // phase committed, and an absent one is indistinguishable from "committed
 // nothing" -- which is exactly the case that must not silently skip review.
@@ -1092,14 +1096,16 @@ if (priorHeadGiven != null && !priorHead) {
 // from a head that predates merging the base in holds all the base gained too, and
 // the lenses would review that as this branch's work. A merge costs the narrowed
 // range, never the carried record.
+const priorHeadCommand = (path, head) =>
+  `git -C ${path} merge-base --is-ancestor ${priorHead} ${head}; a=$?; ` +
+  `m=$(git -C ${path} rev-list --merges --count ${priorHead}..${head}); ` +
+  `echo ${PRIOR_HEAD_MARKER} $((a ? 1 : (m ? 2 : 0)))`
 const priorHeadStep = (n) =>
   `${n}. Also before you return, only if step 8 returned created=true: run ` +
   `exactly the command below, with <path> the absolute path from step 8, and ` +
   `put the one line it prints in prior_head_check, verbatim and alone. Do not ` +
   `interpret it; the script reads it.\n` +
-  `git -C <path> merge-base --is-ancestor ${priorHead} HEAD; a=$?; ` +
-  `m=$(git -C <path> rev-list --merges --count ${priorHead}..HEAD); ` +
-  `echo ${PRIOR_HEAD_MARKER} $((a ? 1 : (m ? 2 : 0)))`
+  priorHeadCommand('<path>', 'HEAD')
 
 // existingBranch is for follow-up work on an open PR: review feedback, or scope
 // added to a ticket already in flight. Cutting a fresh branch there strands the
@@ -2441,8 +2447,28 @@ sChecksPost.close()
 stageSpend.checks = checksPreSpend + (stageSpend.checks ?? 0)
 
 // Taken here, after the pre-review fix may have moved impl.commit_range's head.
-const firstReviewRange = resumeFrom
-  ? `${resumeFrom}..${headOf(impl.commit_range)}` : impl.commit_range
+// The branch step's merge check ran before the implementer, who is often told to
+// bring the branch up to date first, so it is asked again at the head Implement
+// left: a merge after resumeFrom would put the base's own changes in the range.
+// A probe that cannot say the range is clean gives the whole branch, which costs
+// tokens, never coverage.
+let firstReviewRange = impl.commit_range
+if (resumeFrom) {
+  const rangeHead = headOf(impl.commit_range)
+  const checked = await treeAgent(
+    `Run exactly this and put all of its output verbatim in output, ` +
+    `unsummarised, then STOP.\n${priorHeadCommand(wt.path, rangeHead)}`,
+    { label: 'resume:range-check', schema: HEAD_CHECK_PROBE, model: 'haiku', effort: 'low' })
+  const printed = String(checked?.output ?? '').trim()
+  if (printed === PRIOR_HEAD_LINEAR) {
+    firstReviewRange = `${resumeFrom}..${rangeHead}`
+  } else {
+    log(`reviewed head ${resumeFrom} is not a clean start for a range ending at ${rangeHead} ` +
+        `(check printed ${JSON.stringify(printed)}): a merge came after it, or it could not ` +
+        `be checked; reviewing the whole branch`)
+    resumeFrom = null
+  }
+}
 
 // Nothing under .touchstone/ may reach a commit. The range runs from the
 // implementer's own base, not from the previous head, so a commit that adds the
@@ -2704,9 +2730,10 @@ size = sizeOf(sizeParsed)
 
 // The budget was set from Triage's estimate, or a flat default when it gave none,
 // but a resumed run's first review range is whatever the last run left unreviewed,
-// and a large ticket's leftover can be bigger than that budget allows for. Raised,
-// never lowered, and never over an explicit args.runBudget.
-if (resumeFrom && typeof args?.runBudget !== 'number') {
+// or the whole branch when a merge came after the record's head, and either can be
+// bigger than that budget allows for. Raised, never lowered, and never over an
+// explicit args.runBudget.
+if (recordedHead && typeof args?.runBudget !== 'number') {
   const needed = budgetForLoc(size.totalChurn)
   if (needed > runBudget) {
     const wasBudget = runBudget

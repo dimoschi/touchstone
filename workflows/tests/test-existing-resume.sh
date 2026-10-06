@@ -18,6 +18,17 @@ const ANCESTRY_STEP = (sha) =>
   `m=$(git -C <path> rev-list --merges --count ${sha}..HEAD); ` +
   `echo TOUCHSTONE_PRIOR_HEAD_LINEAR $((a ? 1 : (m ? 2 : 0)))`
 
+const gitIn = (repo, ...a) => execFileSync('git',
+  ['-C', repo, '-c', 'commit.gpgsign=false', '-c', 'gpg.format=openpgp', '-c', 'core.hooksPath=/dev/null', ...a],
+  { encoding: 'utf8', env: { ...process.env, GIT_AUTHOR_NAME: 'test', GIT_AUTHOR_EMAIL: 't@t',
+    GIT_COMMITTER_NAME: 'test', GIT_COMMITTER_EMAIL: 't@t' } }).trim()
+const commit = (repo, file) => {
+  fs.writeFileSync(path.join(repo, file), file)
+  gitIn(repo, 'add', '-A')
+  gitIn(repo, 'commit', '-q', '-m', file)
+  return gitIn(repo, 'rev-parse', 'HEAD')
+}
+
 function existing(over) {
   return { created: true, branch: 'feat/gh-21-stub', base: 'main', path: '/tmp/stub-worktree',
     ticket: '21', detail: 'stub', prior_head_check: PRIOR_OK, ...over }
@@ -61,6 +72,10 @@ async function scenarioR1() {
     draft.includes(`echo TOUCHSTONE_DIFFSTAT ${range};`) &&
     draft.includes(`diff --numstat --no-renames ${range};`), true)
   check('the draft-pr prompt does not name the whole-branch range', draft.includes(COMMIT_RANGE), false)
+  const labels = captured.calls.map(c => c.label)
+  check('the head is checked once, and before the range is measured',
+    [callCount(captured, 'resume:range-check'), labels.indexOf('resume:range-check') < labels.indexOf('draft-pr')],
+    [1, true])
 
   const retried = await run(resumed({}, { diffstat: 'not a diffstat' }))
   const size = retried.captured.calls.find(c => c.label === 'size')?.prompt ?? ''
@@ -406,16 +421,6 @@ async function scenarioR8() {
     check(`${name}: no prior_head_check mention`, p.includes('prior_head_check'), false)
   }
 
-  const gitIn = (repo, ...a) => execFileSync('git',
-    ['-C', repo, '-c', 'commit.gpgsign=false', '-c', 'gpg.format=openpgp', '-c', 'core.hooksPath=/dev/null', ...a],
-    { encoding: 'utf8', env: { ...process.env, GIT_AUTHOR_NAME: 'test', GIT_AUTHOR_EMAIL: 't@t',
-      GIT_COMMITTER_NAME: 'test', GIT_COMMITTER_EMAIL: 't@t' } }).trim()
-  const commit = (repo, file) => {
-    fs.writeFileSync(path.join(repo, file), file)
-    gitIn(repo, 'add', '-A')
-    gitIn(repo, 'commit', '-q', '-m', file)
-    return gitIn(repo, 'rev-parse', 'HEAD')
-  }
   const printed = async (repo, sha) => {
     const { captured } = await run({ args: { existingBranch: true, reviewedThrough: sha },
       existingBranchResult: existing() })
@@ -566,8 +571,10 @@ async function scenarioR11() {
     (reviewed.captured.calls.find(c => c.label === 'fix:1')?.prompt ?? '').includes('Carried f3'), true)
   check('the carried finding and note are in the result',
     [idsOf(reviewed.result.unresolved_findings), idsOf(reviewed.result.notes)], [['f3'], ['f5']])
-  check('the whole-branch range is the one triage already sized, so the budget is not raised',
-    reviewed.captured.logs.some(l => l.startsWith('run budget raised')), false)
+  check('the whole branch is what the first review reads, so the budget is raised to fit it, not left at triage\'s estimate of the narrowed task',
+    reviewed.captured.logs.includes(`run budget raised to 1000k (first review range ${COMMIT_RANGE}, 1000 changed lines)`), true)
+  check('the head check is not repeated once the branch step found the merge',
+    callCount(reviewed.captured, 'resume:range-check'), 0)
   check('the head it reports is the one that review read up to', reviewed.result.reviewed_through, REVIEWED_THROUGH)
 
   const tiny = await run(resumed(prior, { existingBranchResult: merged, diffstatFiles: [['a.js', 5, 0]],
@@ -620,8 +627,78 @@ async function scenarioR12() {
   check('and is the only kind a resumed run measures first', callCount(remeasured.captured, 'reproduce:carried'), 1)
 }
 
+async function scenarioR13() {
+  console.log('\n== scenario R13: a base merge made during the run is not reviewed as this branch\'s work')
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ts-merge-in-run-'))
+  try {
+    const repo = path.join(dir, 'repo')
+    fs.mkdirSync(repo)
+    gitIn(repo, 'init', '-q', '-b', 'main')
+    commit(repo, 'base.txt')
+    gitIn(repo, 'checkout', '-q', '-b', 'feat')
+    const reviewed = commit(repo, 'b1.txt')
+    gitIn(repo, 'checkout', '-q', 'main')
+    commit(repo, 'main-only.txt')
+    gitIn(repo, 'checkout', '-q', 'feat')
+    gitIn(repo, 'merge', '-q', '--no-ff', '-m', 'Merge main', 'main')
+    const head = commit(repo, 'b2.txt')
+    const whole = `${gitIn(repo, 'merge-base', head, 'main')}..${head}`
+    const rangeOf = (c) => (/Commit range: (\S+)\n/.exec(c.prompt) ?? [])[1]
+    const prior = { reviewed_through: reviewed, unresolved_findings: [carriedFinding('f3')], notes: [carriedNote('f5')] }
+    const inRun = (over) => resumed(prior, {
+      existingBranchResult: existing({ path: repo }), implRange: whole,
+      args: { maxReviewRounds: 1, runBudget: undefined },
+      triage: { estimated_loc: 100 }, diffstatFiles: [['a.js', 1000, 0]],
+      verify: () => undefined, staleness: () => [], fixHead: () => head, ...over })
+
+    const merged = await run(inRun())
+    const lenses = initialLensCalls(merged.captured)
+    check('the head is checked once, at the head Implement left',
+      (merged.captured.calls.filter(c => c.label === 'resume:range-check').map(c => c.prompt.split('\n').pop())), [
+        `git -C ${repo} merge-base --is-ancestor ${reviewed} ${head}; a=$?; ` +
+        `m=$(git -C ${repo} rev-list --merges --count ${reviewed}..${head}); ` +
+        `echo TOUCHSTONE_PRIOR_HEAD_LINEAR $((a ? 1 : (m ? 2 : 0)))`])
+    check('the lenses review the whole branch', lenses.length > 0 && lenses.every(c => rangeOf(c) === whole), true)
+    check('no lens range holds the base\'s own changes',
+      lenses.flatMap(c => gitIn(repo, 'diff', '--name-only', rangeOf(c)).split('\n')).includes('main-only.txt'), false)
+    check('the diffstat measures the whole branch, not the range from the record\'s head',
+      (merged.captured.calls.find(c => c.label === 'draft-pr')?.prompt ?? '').includes(`echo TOUCHSTONE_DIFFSTAT ${whole};`), true)
+    check('the budget is raised to fit the whole branch it now reviews',
+      merged.captured.logs.includes(`run budget raised to 1000k (first review range ${whole}, 1000 changed lines)`), true)
+    check('the record is still carried',
+      [idsOf(merged.result.unresolved_findings), idsOf(merged.result.notes)], [['f3'], ['f5']])
+    check('the head reported is the one the whole-branch review read up to', merged.result.reviewed_through, head)
+    check('the fallback is logged', merged.captured.logs.some(
+      l => l.includes(`reviewed head ${reviewed}`) && l.includes('reviewing the whole branch')), true)
+
+    const rangesOf = (r) => [...new Set(initialLensCalls(r.captured).map(rangeOf))]
+    const follow = commit(repo, 'b3.txt')
+    const linear = await run(inRun({ implRange: `${whole.split('..')[0]}..${follow}`, fixHead: () => follow,
+      args: { maxReviewRounds: 1, runBudget: undefined, reviewedThrough: head } }))
+    check('with no merge after the record\'s head the first review is still narrowed to it',
+      rangesOf(linear), [`${head}..${follow}`])
+
+    for (const [name, out] of [['no answer', null], ['an unreadable answer', 'not the marker'],
+      ['a head no longer on the branch', 'TOUCHSTONE_PRIOR_HEAD_LINEAR 1']]) {
+      const unsure = await run(inRun({ rangeCheck: () => out }))
+      check(`${name} reviews the whole branch rather than trusting the narrowed range`,
+        rangesOf(unsure), [whole])
+    }
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true })
+  }
+
+  for (const [name, args] of [
+    ['a run with no record', { existingBranch: true }],
+    ['a run whose head the branch step did not confirm', { existingBranch: true, priorRun: { reviewed_through: P } }],
+  ]) {
+    const { captured } = await run({ args, existingBranchResult: existing({ prior_head_check: PRIOR(1) }) })
+    check(`${name} never repeats the head check`, callCount(captured, 'resume:range-check'), 0)
+  }
+}
+
 const SCENARIOS = [scenarioR1, scenarioR2, scenarioR3, scenarioR4, scenarioR5, scenarioR6, scenarioR7,
-  scenarioR8, scenarioR9, scenarioR10, scenarioR11, scenarioR12]
+  scenarioR8, scenarioR9, scenarioR10, scenarioR11, scenarioR12, scenarioR13]
 JS_EOF
 
 finish

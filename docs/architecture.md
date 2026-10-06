@@ -282,6 +282,10 @@ default by scope when triage gave no estimate, and `args.runBudget` overrides ei
 A resumed `--existing` run raises the budget to the same formula applied to its first
 review range's measured changed lines, and logs it, when that figure is above the budget
 set after Triage, whether that budget came from triage's estimate or from the flat default.
+The range is the whole branch, not the part after the record's head, when a merge came
+after that head. The branch step checks that once; the implementer may merge the base
+too, so a `resume:range-check` probe asks the same question at the head Implement left,
+and a probe that is missing or not the marker line is read as a merge.
 `args.runBudget` is never raised. A halt note after a raise says what the budget was raised
 to fit and what it was raised from, including why that figure was set. From there, `dispatch()` refuses any call once `budget.spent()` has reached it.
 

@@ -318,6 +318,17 @@ function makeAgent(scenario, captured) {
         (scenario.sizeUnmeasured ? 'not a real diffstat' : goodDiffstat)
       return { diffstat, ...(scenario.draftPr ?? { opened: false, detail: 'no draft in this test' }) }
     }
+    // The command is run for real when its worktree exists on disk, as an agent
+    // would; otherwise (the stub path) the head is clean. scenario.rangeCheck(command)
+    // returns the output instead, or null for none.
+    if (label === 'resume:range-check') {
+      const command = prompt.split('\n').pop()
+      const worktree = (/^git -C (\S+) /.exec(command) ?? [])[1]
+      const out = scenario.rangeCheck ? scenario.rangeCheck(command)
+        : worktree && fs.existsSync(worktree) ? execFileSync('bash', ['-c', command], { encoding: 'utf8' }).trim()
+        : 'TOUCHSTONE_PRIOR_HEAD_LINEAR 0'
+      return out === null ? null : { output: out }
+    }
     // Opening the PR is the workflow's only write to GitHub. These two labels
     // posted comments on it; throwing rather than stubbing them means any
     // scenario that brings either back fails here, not just the ones whose

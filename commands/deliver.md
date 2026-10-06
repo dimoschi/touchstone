@@ -89,8 +89,8 @@ than 0.30.0. For an older record, or one with no `pipeline_version.executed`, pa
 `reviewed_through` is the last head a review finished at; the workflow verifies it is
 still an ancestor of the branch, and otherwise ignores the record, reviewing the whole
 branch and carrying nothing. When a merge, such as updating the branch from its base,
-came after that head, a range from it would carry the base's own changes, so the whole
-branch is reviewed but the record is still carried.
+came after that head, whether before the run or during it, a range from it would carry
+the base's own changes, so the whole branch is reviewed but the record is still carried.
 `unresolved_findings` and `notes` are carried as tracked, so they reach the fixer and are
 not raised again; a carried finding whose reproducer was never run, because no executor
 row ever came back for it, is run first, like a fresh one. A halt before the branch

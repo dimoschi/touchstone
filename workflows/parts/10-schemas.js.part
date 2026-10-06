@@ -260,6 +260,10 @@ const PLAN_LEAK_PROBE = {
   type: 'object', additionalProperties: false, required: ['output'],
   properties: { output: { type: 'string' } },
 }
+const HEAD_CHECK_PROBE = {
+  type: 'object', additionalProperties: false, required: ['output'],
+  properties: { output: { type: 'string' } },
+}
 // head_sha is required, not optional: it is how the script learns what this
 // phase committed, and an absent one is indistinguishable from "committed
 // nothing" -- which is exactly the case that must not silently skip review.
