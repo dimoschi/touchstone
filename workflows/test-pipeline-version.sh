@@ -109,6 +109,14 @@ const SCRIPT_PLUGIN_NAME = /^const PLUGIN_NAME = '([^']*)'/m.exec(src)?.[1]
 const SCRIPT_PIPELINE_VERSION = /^const PIPELINE_VERSION = '([^']*)'/m.exec(src)?.[1]
 
 let failures = 0
+// What the plan:write prompt's digest command prints for a file's text.
+function planDigest(text) {
+  const bytes = Buffer.from(text.replace(/[ \t\n\r]+/g, ' ').replace(/^ | $/g, ''), 'utf8')
+  let h = 0x811c9dc5
+  for (const b of bytes) { h ^= b; h = Math.imul(h, 0x01000193) >>> 0 }
+  return h.toString(16).padStart(8, '0')
+}
+
 function check(label, got, want) {
   const gotStr = JSON.stringify(got)
   const wantStr = JSON.stringify(want)
@@ -180,7 +188,7 @@ function makeAgent(scenario, captured) {
       // The copied body, plus the end line the prompt's printf appends.
       const appends = m && prompt.includes(`printf '\\nEND OF PLAN %s\\n' ${m[1]} >> `)
       const file = (m?.[2] ?? '') + (appends ? `\nEND OF PLAN ${m[1]}\n` : '')
-      return { bytes: Buffer.byteLength(file, 'utf8'),
+      return { digest: planDigest(file),
         last_line: file.replace(/\n$/, '').split('\n').pop(), ignored_exit: 0 }
     }
     if (label.startsWith('plan:leak:')) {

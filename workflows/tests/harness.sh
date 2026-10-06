@@ -105,6 +105,14 @@ function planFileIn(prompt) {
   return m ? { id: m[1], content: m[2] } : null
 }
 
+// What the plan:write prompt's digest command prints for a file's text.
+function planDigest(text) {
+  const bytes = Buffer.from(text.replace(/[ \t\n\r]+/g, ' ').replace(/^ | $/g, ''), 'utf8')
+  let h = 0x811c9dc5
+  for (const b of bytes) { h ^= b; h = Math.imul(h, 0x01000193) >>> 0 }
+  return h.toString(16).padStart(8, '0')
+}
+
 // The command the plan:write prompt gives for appending the end line.
 function planEndCommand(id) {
   return `printf '\\nEND OF PLAN %s\\n' ${id} >> ${STUB_WT_PATH}/.touchstone/plan.md`
@@ -280,7 +288,7 @@ function makeAgent(scenario, captured) {
         .test(prompt)
       const appended = appends ? `\nEND OF PLAN ${copied.id}\n` : ''
       const file = copied ? copied.content + appended : ''
-      return { bytes: Buffer.byteLength(file, 'utf8'),
+      return { digest: planDigest(file),
         last_line: file.replace(/\n$/, '').split('\n').pop(),
         ignored_exit: 0, ...(override ?? {}) }
     }
@@ -342,6 +350,17 @@ function makeAgent(scenario, captured) {
       if (custom !== undefined && typeof custom === 'object') return custom
       return { output: custom ?? signalsOutput(range, scenario.signalValues) }
     }
+    // The command is run for real when its worktree exists on disk, as an agent
+    // would; otherwise (the stub path) the head is clean. scenario.rangeCheck(command)
+    // returns the output instead, or null for none.
+    if (label === 'resume:range-check') {
+      const command = prompt.split('\n').pop()
+      const worktree = (/^git -C (\S+) /.exec(command) ?? [])[1]
+      const out = scenario.rangeCheck ? scenario.rangeCheck(command)
+        : worktree && fs.existsSync(worktree) ? execFileSync('bash', ['-c', command], { encoding: 'utf8' }).trim()
+        : 'TOUCHSTONE_PRIOR_HEAD_LINEAR 0'
+      return out === null ? null : { output: out }
+    }
     // Opening the PR is the workflow's only write to GitHub. These two labels
     // posted comments on it; throwing rather than stubbing them means any
     // scenario that brings either back fails here, not just the ones whose
@@ -397,6 +416,9 @@ function makeAgent(scenario, captured) {
     if (base === 'reproduce:review') {
       return reproduceResponse(prompt, scenario,
         (id) => scenario.initialExit ? scenario.initialExit(id, retry) : 1)
+    }
+    if (base === 'reproduce:carried') {
+      return reproduceResponse(prompt, scenario, (id) => exitFor(scenario, id, 0, retry))
     }
     if (/^reproduce:fix:\d+:fresh$/.test(base)) {
       const round = Number(base.slice('reproduce:fix:'.length, -':fresh'.length))

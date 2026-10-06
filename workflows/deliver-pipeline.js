@@ -29,7 +29,7 @@ export const meta = {
 // against the manifest in scripts/check-version-bump.sh, so drift is a
 // gate's job rather than something this script verifies about itself.
 const PLUGIN_NAME = 'touchstone'
-const PIPELINE_VERSION = '0.30.0'
+const PIPELINE_VERSION = '0.31.0'
 
 // Boundaries. Wall-clock deadlines are not expressible here (no Date.now, by
 // design); the bounds are rounds, counts, and token budget instead.
@@ -271,6 +271,34 @@ let size = null
 // failed. Recorded only: nothing in the run reads it to decide anything.
 let signals = null
 
+// reportedHead() is reported as reviewed_through by every halt and the result: the
+// last head a review finished at. Not reviewedThrough (part 50), which also
+// moves past commits no review read, so the next run would skip them.
+// reviewedHead is the last head a review in this run read up to; until one
+// finishes, a resumed run reports the head of the record it was given.
+//
+// An --existing run starts holding that record (args.priorRun; the script has no
+// fs), unverified: the invoking session writes every payload over the record
+// file, so a halt before the ancestry check in part 20 (a dirty checkout, an
+// oversized plan) would otherwise overwrite it with nothing. That check drops
+// it when the head is not confirmed.
+const asSha = (v) => typeof v === 'string' && /^[0-9a-f]{40}$/.test(v.trim()) ? v.trim() : null
+const SCOPES = ['ticket', 'addition', 'unattributed']
+const carry = (list) => (Array.isArray(list) ? list : [])
+  .filter(f => typeof f?.id === 'string' && /^f\d+$/.test(f.id))
+  .map(f => ({ ...f, scope: SCOPES.includes(f.scope) ? f.scope : 'unattributed' }))
+const recordHead = args?.existingBranch ? asSha(args.priorRun?.reviewed_through) : null
+let recordedHead = recordHead
+let reviewedHead = null
+const reportedHead = () => reviewedHead ?? recordedHead
+// Where the first review range may start: the record's head, but only while
+// nothing was merged after it (part 20). A merge leaves that head an ancestor,
+// so the record still holds, but a range from it would carry the merged base's
+// own changes.
+let resumeFrom = null
+let carriedOpen = recordHead ? carry(args.priorRun.unresolved_findings) : []
+let carriedNotes = recordHead ? carry(args.priorRun.notes) : []
+
 // executed never changes; base_branch and mismatch stay null until the
 // merged setup call (before Worktree) has something to report, which is why
 // a halt at Worktree carries the executed value with the other two still
@@ -308,6 +336,9 @@ const halted = async (at, extra) => {
   const payload = {
     task, halted_at: at, pipeline_version: pipelineVersion, stage_spend: stageSpend,
     needs_user: true, record_file: runRecordFile, size, signals,
+    reviewed_through: reportedHead(),
+    ...(carriedOpen.length ? { unresolved_findings: carriedOpen } : {}),
+    ...(carriedNotes.length ? { notes: carriedNotes } : {}),
     ...(planAdditions ? { plan_additions: planAdditions } : {}),
     ...(split ? { scope_split: split } : {}),
     ...extra,
@@ -409,6 +440,8 @@ const EXISTING_BRANCH = {
   properties: {
     ...BRANCH.properties,
     halt_reason: { type: 'string', enum: ['none', 'ambiguous', 'wrong-ticket', 'merged', 'occupied'] },
+    // Optional: asked for only when a prior reviewed head was passed in.
+    prior_head_check: { type: 'string' },
   },
 }
 
@@ -596,14 +629,18 @@ const IMPL = {
 }
 const PLAN_WRITE = {
   type: 'object', additionalProperties: false,
-  required: ['bytes', 'last_line', 'ignored_exit'],
+  required: ['digest', 'last_line', 'ignored_exit'],
   properties: {
-    bytes: { type: 'integer' },
+    digest: { type: 'string' },
     last_line: { type: 'string' },
     ignored_exit: { type: 'integer' },
   },
 }
 const PLAN_LEAK_PROBE = {
+  type: 'object', additionalProperties: false, required: ['output'],
+  properties: { output: { type: 'string' } },
+}
+const HEAD_CHECK_PROBE = {
   type: 'object', additionalProperties: false, required: ['output'],
   properties: { output: { type: 'string' } },
 }
@@ -1042,6 +1079,39 @@ const checksDiscoveryStep = (n, whichPath) =>
   `it; a later step decides what it means. Set checks_source.detail to one ` +
   `line saying what you found.`
 
+// The head an earlier run's review finished at, from the run record the invoking
+// session passes in as args.priorRun (the script has no fs). An explicit
+// args.reviewedThrough wins over the record's. Only a full SHA is a candidate,
+// and only the branch:existing step below can say whether it is still on the
+// branch, so nothing is carried until then.
+const PRIOR_HEAD_MARKER = 'TOUCHSTONE_PRIOR_HEAD_LINEAR'
+const PRIOR_HEAD_LINEAR = `${PRIOR_HEAD_MARKER} 0`
+const PRIOR_HEAD_MERGED = `${PRIOR_HEAD_MARKER} 2`
+const priorHeadGiven = !args?.existingBranch ? null
+  : typeof args.reviewedThrough === 'string' ? args.reviewedThrough
+  : args.priorRun?.reviewed_through
+const priorHead = asSha(priorHeadGiven)
+if (priorHeadGiven != null && !priorHead) {
+  log(`ignoring reviewed head ${JSON.stringify(priorHeadGiven)}: not a 40-character SHA; ` +
+      `reviewing the whole branch`)
+}
+// Prints 0 for an ancestor with no merge after it, 2 for an ancestor with one,
+// and 1 for anything else. Two facts, not one: an ancestor keeps its findings'
+// recorded_at and reproducers valid, but git diff A..B is a tree diff, so a range
+// from a head that predates merging the base in holds all the base gained too, and
+// the lenses would review that as this branch's work. A merge costs the narrowed
+// range, never the carried record.
+const priorHeadCommand = (path, head) =>
+  `git -C ${path} merge-base --is-ancestor ${priorHead} ${head}; a=$?; ` +
+  `m=$(git -C ${path} rev-list --merges --count ${priorHead}..${head}); ` +
+  `echo ${PRIOR_HEAD_MARKER} $((a ? 1 : (m ? 2 : 0)))`
+const priorHeadStep = (n) =>
+  `${n}. Also before you return, only if step 8 returned created=true: run ` +
+  `exactly the command below, with <path> the absolute path from step 8, and ` +
+  `put the one line it prints in prior_head_check, verbatim and alone. Do not ` +
+  `interpret it; the script reads it.\n` +
+  priorHeadCommand('<path>', 'HEAD')
+
 // existingBranch is for follow-up work on an open PR: review feedback, or scope
 // added to a ticket already in flight. Cutting a fresh branch there strands the
 // delta away from the PR it belongs to. The ticket stays mandatory either way.
@@ -1154,7 +1224,8 @@ const wt = args?.existingBranch
       `(step 4), the worktree-less branch (step 5), or the fallback (step 6), ` +
       `whether that path is the main checkout or a linked worktree, and ` +
       `whether the branch name carries a jira- or gh- marker.\n` +
-      checksDiscoveryStep(9, 'that path'),
+      checksDiscoveryStep(9, 'that path') +
+      (priorHead ? `\n${priorHeadStep(10)}` : ''),
       { label: 'branch:existing', schema: EXISTING_BRANCH, model: 'haiku', effort: 'low' })
   // A worktree is a separate checkout, so the main tree's state is irrelevant
   // to it; cutting from origin/<base> is what removes the need to touch the
@@ -1318,6 +1389,30 @@ wt.base = (baseOverride || wt.base).replace(/^origin\//, '')
 log(args?.existingBranch
   ? `worktree ${wt.path} reused for branch ${wt.branch} (base ${wt.base})`
   : `worktree ${wt.path} created for branch ${wt.branch} (base ${wt.base})`)
+
+const priorHeadAnswer = wt.prior_head_check
+if (!priorHead || (priorHeadAnswer !== PRIOR_HEAD_LINEAR && priorHeadAnswer !== PRIOR_HEAD_MERGED)) {
+  recordedHead = null
+  carriedOpen = []
+  carriedNotes = []
+  if (priorHead) {
+    log(`reviewed head ${priorHead} is not confirmed as an ancestor of branch ` +
+        `${wt.branch} (check printed ${JSON.stringify(wt.prior_head_check ?? null)}); ` +
+        `reviewing the whole branch, carrying nothing`)
+  }
+} else {
+  recordedHead = priorHead
+  carriedOpen = carry(args.priorRun?.unresolved_findings)
+  carriedNotes = carry(args.priorRun?.notes)
+  const carried = `${carriedOpen.length} open, ${carriedNotes.length} notes carried`
+  if (priorHeadAnswer === PRIOR_HEAD_LINEAR) {
+    resumeFrom = priorHead
+    log(`resuming from reviewed head ${priorHead}: ${carried}`)
+  } else {
+    log(`reviewed head ${priorHead} is still an ancestor of branch ${wt.branch}, but a ` +
+        `merge commit came after it; reviewing the whole branch, ${carried}`)
+  }
+}
 
 
 // Every agent dispatch below inherits the session's working directory, which
@@ -1641,11 +1736,12 @@ sTriage.close()
 // changed lines, and an inline-sized gate fix that spent 141k in Implement
 // alone): a budget halt strands work mid-run, so it is for a run that has
 // gone wrong, not a tight fit.
+const budgetForLoc = (loc) => Math.min(1_000_000, Math.max(300_000, 100_000 + 1_500 * loc))
 if (typeof args?.runBudget === 'number') {
   runBudget = args.runBudget
   runBudgetNote = `set explicitly via args.runBudget`
 } else if (triage.estimated_loc != null) {
-  runBudget = Math.min(1_000_000, Math.max(300_000, 100_000 + 1_500 * triage.estimated_loc))
+  runBudget = budgetForLoc(triage.estimated_loc)
   runBudgetNote = `derived from triage's ~${triage.estimated_loc} estimated LOC`
 } else {
   runBudget = inlineMode ? 300_000 : 600_000
@@ -1812,13 +1908,21 @@ const fnv1a = (s) => {
   for (let i = 0; i < s.length; i++) { h ^= s.charCodeAt(i); h = Math.imul(h, 0x01000193) }
   return (h >>> 0).toString(16).padStart(8, '0')
 }
-const utf8Length = (s) => {
-  let n = 0
-  for (const ch of s) {
+// FNV-1a over the UTF-8 bytes of the text with every run of spaces, tabs and
+// newlines collapsed to one space and the ends trimmed. A model copying
+// thousands of characters slips on whitespace now and then (a line indented
+// by two spaces halted a run), so the copy is held to its words, not its bytes.
+const contentDigest = (s) => {
+  let h = 0x811c9dc5
+  const add = (b) => { h ^= b; h = Math.imul(h, 0x01000193) }
+  for (const ch of s.replace(/[ \t\n\r]+/g, ' ').replace(/^ | $/g, '')) {
     const cp = ch.codePointAt(0)
-    n += cp < 0x80 ? 1 : cp < 0x800 ? 2 : cp < 0x10000 ? 3 : 4
+    if (cp < 0x80) add(cp)
+    else if (cp < 0x800) { add(0xc0 | cp >> 6); add(0x80 | cp & 0x3f) }
+    else if (cp < 0x10000) { add(0xe0 | cp >> 12); add(0x80 | cp >> 6 & 0x3f); add(0x80 | cp & 0x3f) }
+    else { add(0xf0 | cp >> 18); add(0x80 | cp >> 12 & 0x3f); add(0x80 | cp >> 6 & 0x3f); add(0x80 | cp & 0x3f) }
   }
-  return n
+  return (h >>> 0).toString(16).padStart(8, '0')
 }
 const planId = fnv1a(`${ticket}${plan.plan}`)
 const planFile = `${wt.path}/.touchstone/plan.md`
@@ -1829,6 +1933,11 @@ const planEndLine = `END OF PLAN ${planId}`
 const planBody = `${plan.plan}\n`
 const planEndCommand = `printf '\\nEND OF PLAN %s\\n' ${planId} >> ${shQuote(planFile)}`
 const planContent = `${planBody}\n${planEndLine}\n`
+// The same digest, computed over the written file in the worktree.
+const planDigestCommand = `python3 -c 'import functools,re,sys;` +
+  `t=re.sub(r"[ \\t\\n\\r]+"," ",open(sys.argv[1],encoding="utf-8").read()).strip(" ");` +
+  `print("%08x"%functools.reduce(lambda h,c:((h^c)*16777619)&4294967295,t.encode("utf-8"),2166136261))' ` +
+  `${shQuote(planFile)}`
 widenBudgetHaltState(() => ({ plan: plan.plan }))
 const planWritePrompt =
   `Write the plan file, then STOP. Do not implement anything and do not commit.\n` +
@@ -1845,16 +1954,17 @@ const planWritePrompt =
   `lines out.\n` +
   `4. Then run exactly: ${planEndCommand}\n` +
   `5. Only after steps 1 to 4, run these and report what they print, never ` +
-  `what you expect them to print. bytes: the number printed by ` +
-  `wc -c < ${planFile}. last_line: what tail -n 1 ${planFile} prints, exactly, ` +
-  `without its newline. ignored_exit: the exit status of ` +
+  `what you expect them to print.\n` +
+  `digest: what ${planDigestCommand} prints.\n` +
+  `last_line: what tail -n 1 ${planFile} prints, exactly, without its newline.\n` +
+  `ignored_exit: the exit status of ` +
   `git -C ${wt.path} check-ignore -q .touchstone/plan.md (0 means ignored).\n` +
   `PLAN FILE BEGIN ${planId}\n${planBody}PLAN FILE END ${planId}`
 const planWriteOpts = { schema: PLAN_WRITE, model: 'haiku', effort: 'low' }
 const planWriteProblemOf = (written) => !written
   ? 'the plan:write agent returned nothing'
-  : written.bytes !== utf8Length(planContent)
-  ? `the file is ${written.bytes} bytes, not the ${utf8Length(planContent)} the plan needs`
+  : written.digest !== contentDigest(planContent)
+  ? `its content digest is ${JSON.stringify(written.digest)}, not the plan's ${contentDigest(planContent)}`
   : written.last_line !== planEndLine
   ? `its last line is ${JSON.stringify(written.last_line)}, not ${planEndLine}`
   : written.ignored_exit !== 0
@@ -2416,6 +2526,30 @@ if (blockingChecksOpen() && !sChecksPost.over()) {
 sChecksPost.close()
 stageSpend.checks = checksPreSpend + (stageSpend.checks ?? 0)
 
+// Taken here, after the pre-review fix may have moved impl.commit_range's head.
+// The branch step's merge check ran before the implementer, who is often told to
+// bring the branch up to date first, so it is asked again at the head Implement
+// left: a merge after resumeFrom would put the base's own changes in the range.
+// A probe that cannot say the range is clean gives the whole branch, which costs
+// tokens, never coverage.
+let firstReviewRange = impl.commit_range
+if (resumeFrom) {
+  const rangeHead = headOf(impl.commit_range)
+  const checked = await treeAgent(
+    `Run exactly this and put all of its output verbatim in output, ` +
+    `unsummarised, then STOP.\n${priorHeadCommand(wt.path, rangeHead)}`,
+    { label: 'resume:range-check', schema: HEAD_CHECK_PROBE, model: 'haiku', effort: 'low' })
+  const printed = String(checked?.output ?? '').trim()
+  if (printed === PRIOR_HEAD_LINEAR) {
+    firstReviewRange = `${resumeFrom}..${rangeHead}`
+  } else {
+    log(`reviewed head ${resumeFrom} is not a clean start for a range ending at ${rangeHead} ` +
+        `(check printed ${JSON.stringify(printed)}): a merge came after it, or it could not ` +
+        `be checked; reviewing the whole branch`)
+    resumeFrom = null
+  }
+}
+
 // Nothing under .touchstone/ may reach a commit. The range runs from the
 // implementer's own base, not from the previous head, so a commit that adds the
 // plan file and a later one that deletes it is still seen. Run before every
@@ -2628,7 +2762,7 @@ const draft = await treeAgent(
   `Separately, measure the diff: run exactly this and put all of its output ` +
   `verbatim in diffstat, unsummarised: neither this measurement nor the PR ` +
   `it goes with reads what the commits changed as well as running the exact ` +
-  `command does.\n${diffstatCommandFor(impl.commit_range)}`,
+  `command does.\n${diffstatCommandFor(firstReviewRange)}`,
   { label: 'draft-pr', phase: 'Draft PR', schema: DRAFT, model: 'haiku',
     effort: 'low' })
 // number, not opened: the PR phase addresses the draft by number to update and
@@ -2649,7 +2783,7 @@ const sReview = stage('review')
 // unmeasured after that halts here: this is a measurement problem, not a
 // code problem, the same principle unmeasuredChecksHalt and notExecutedHalt
 // apply elsewhere in this file.
-let sizeParsed = parseDiffstat(draft?.diffstat, impl.commit_range)
+let sizeParsed = parseDiffstat(draft?.diffstat, firstReviewRange)
 if (!sizeParsed) {
   const SIZE_PROBE = {
     type: 'object', additionalProperties: false, required: ['diffstat'],
@@ -2657,9 +2791,9 @@ if (!sizeParsed) {
   }
   const retried = await treeAgent(
     `Run exactly this and put all of its output verbatim in diffstat, ` +
-    `unsummarised, then STOP.\n${diffstatCommandFor(impl.commit_range)}`,
+    `unsummarised, then STOP.\n${diffstatCommandFor(firstReviewRange)}`,
     { label: 'size', schema: SIZE_PROBE, model: 'haiku', effort: 'low' })
-  sizeParsed = parseDiffstat(retried?.diffstat, impl.commit_range)
+  sizeParsed = parseDiffstat(retried?.diffstat, firstReviewRange)
 }
 if (!sizeParsed) {
   sReview.close()
@@ -2667,12 +2801,30 @@ if (!sizeParsed) {
     plan: plan.plan, implemented: impl.summary, gates: gatesPayload(), checks: checksPayload(),
     note: `The diff could not be measured, even after a retry: the diffstat ` +
       `probe's output did not have the shape parseDiffstat requires (the ` +
-      `begin/end markers naming ${impl.commit_range}, or a well-formed ` +
+      `begin/end markers naming ${firstReviewRange}, or a well-formed ` +
       `numstat/comment-count row). This is a measurement problem, not a ` +
       `code problem; re-run.`,
   })
 }
 size = sizeOf(sizeParsed)
+
+// The budget was set from Triage's estimate, or a flat default when it gave none,
+// but a resumed run's first review range is whatever the last run left unreviewed,
+// or the whole branch when a merge came after the record's head, and either can be
+// bigger than that budget allows for. Raised, never lowered, and never over an
+// explicit args.runBudget.
+if (recordedHead && typeof args?.runBudget !== 'number') {
+  const needed = budgetForLoc(size.totalChurn)
+  if (needed > runBudget) {
+    const wasBudget = runBudget
+    const wasNote = runBudgetNote
+    runBudget = needed
+    runBudgetNote = `raised to fit the ${size.totalChurn} changed lines of the first review ` +
+      `range ${firstReviewRange}, from ${Math.round(wasBudget / 1000)}k (${wasNote})`
+    log(`run budget raised to ${Math.round(runBudget / 1000)}k (first review range ` +
+        `${firstReviewRange}, ${size.totalChurn} changed lines)`)
+  }
+}
 
 // Below RATIO_MIN_CODE the ratio does not apply at all: an ordinary TDD
 // change reads well over 1:1 test-to-code and must not halt on that alone.
@@ -2755,11 +2907,19 @@ const lenses = (args?.reviewers != null
     : lensKeys)
   .filter(k => !(k === 'advocate' && args?.devilsAdvocate === false))
   .map(k => LENS[k])
-const reviewerCount = lenses.length
-if (!reviewerCount) {
+// A resumed run's first range can be under the bar while its carried findings
+// still get fixed; reviewerCount 0 would ship those fixes unreviewed, since it
+// also switches off the tail reviews, the mutation review and the PR guard.
+const reviewerCount = lenses.length ||
+  (carriedOpen.length && args?.reviewers == null ? 1 : 0)
+if (!lenses.length) {
   log(`review skipped: ${size.files} file(s), ${size.codeChurn} code churn ` +
       `line(s) is under the ${INLINE_LOC}-line bar; adversarial lenses on a ` +
-      `one-liner is the ratio this workflow is trying to avoid`)
+      `one-liner is the ratio this workflow is trying to avoid` +
+      (reviewerCount
+        ? `; the ${carriedOpen.length} carried finding(s) are still tracked, and ` +
+          `their fix rounds are still reviewed`
+        : ''))
 } else {
   log(`review: ${lenses.map(l => l.label).join(', ')}`)
   if (!settledDecisions) {
@@ -2773,7 +2933,7 @@ if (!reviewerCount) {
 // and the post-mutation review all return through reviewOf. Neither is asked
 // of the model -- a model-supplied id is exactly as unreliable as the
 // model-supplied title this replaces, so the script stamps its own.
-let findingSeq = 0
+let findingSeq = Math.max(0, ...[...carriedOpen, ...carriedNotes].map(f => Number(f.id.slice(1))))
 // A verifier told to copy an id "in brackets" sometimes copies the brackets
 // too. Strip a matching pair before joining, so [f1] lines up with f1.
 const stripBrackets = (s) => {
@@ -2927,6 +3087,12 @@ const reviewOf = async (range, tag, picked, known = [], knownCharge = '') => {
 // review, so a phase that commits without one leaves it behind and the PR
 // guard below refuses.
 let reviewedThrough = headOf(impl.commit_range)
+// Where the next review starts. Until one has read something, that is the start
+// of the first range: a resumed run's first range can get no lens (under the bar,
+// kept only for the carried findings' fixes), and a review starting at
+// reviewedThrough would skip those commits yet still move reviewedHead past them.
+const startOf = (range) => (range.includes('..') ? range.split('..')[0] : range).trim()
+const reviewStart = () => reviewedHead ?? startOf(firstReviewRange)
 
 // Lenses cannot see each other, and contentKeyOf cannot merge them: two
 // reviewers describe one bug in different words. A failure keeps everything,
@@ -3155,7 +3321,7 @@ const dirtyReproducerHalt = async (phaseName, exec, extraOpen = []) => halted(ph
 // demonstrated, not blocking-category, not in range, or a residual of a fix
 // already verified. Separate from unresolved_findings, which stays reserved
 // for what actually holds the run.
-let notes = []
+let notes = [...carriedNotes]
 const knownForRound = () => [...settled, ...open, ...notes]
 // Splits a batch of freshly raised findings into candidates (subject to an
 // executeAtHead call next) and notes, via classify() alone.
@@ -3247,16 +3413,49 @@ const notExecutedHalt = (at, notExecuted, extra) => {
 }
 
 let settled = []
-let open = []
+// A carried finding whose reproducer nobody ran (notExecutedHalt recorded it)
+// is a candidate, not a verdict: held in open it would stay open through every
+// fix round on a reproducer that may not even run.
+const unmeasured = (f) => f.reproducer_run?.outcome === 'not-executed'
+// What keeps `unmeasured` true only of a candidate no row ever came back for: a
+// finding that was demonstrated and whose later row the executor dropped keeps
+// the last run that happened. Recorded as not-executed it would be measured again
+// on resume as a candidate, and a reproducer that then errors or passes would turn
+// a finding that was demonstrated into a note.
+const latestRun = (f, run) =>
+  run.outcome === 'not-executed' && f.reproducer_run ? f.reproducer_run : run
+let awaiting = carriedOpen.filter(unmeasured)
+let open = carriedOpen.filter(f => !unmeasured(f))
 let round = 0
-widenBudgetHaltState(() => ({ unresolved_findings: open, notes, fix_rounds: round }))
+widenBudgetHaltState(() => ({
+  unresolved_findings: [...open, ...awaiting], notes, fix_rounds: round }))
 scopeSplit = () => {
   const split = { ticket: 0, addition: 0, unattributed: 0 }
-  for (const f of [...settled, ...open]) split[f.scope]++
+  for (const f of [...settled, ...open, ...awaiting]) split[f.scope]++
   return split
 }
-if (reviewerCount) {
-  const raised = await collapseDuplicates(await reviewOf(impl.commit_range, 'review', lenses))
+if (awaiting.length) {
+  const disposed = await executeAndDispose(awaiting, 'reproduce:carried', 0)
+  open.push(...disposed.opened)
+  notes.push(...disposed.asNotes)
+  const placed = new Set([...disposed.opened, ...disposed.asNotes].map(f => f.id))
+  const unplaced = awaiting.filter(f => !placed.has(f.id))
+  awaiting = unplaced
+  if (disposed.dirty) { sReview.close(); return await dirtyReproducerHalt('Review', disposed.exec, unplaced) }
+  if (disposed.notExecuted.length) {
+    sReview.close()
+    return await notExecutedHalt('Review', disposed.notExecuted, {
+      unresolved_findings: [...open, ...disposed.notExecuted], notes, fix_rounds: round,
+    })
+  }
+}
+if (lenses.length) {
+  const carriedCharge = carriedOpen.length || carriedNotes.length
+    ? `\nThose came from an earlier run on this branch and are still tracked. ` +
+      `Reference one by its id in duplicate_of; never raise it again.`
+    : ''
+  const raised = await collapseDuplicates(
+    await reviewOf(firstReviewRange, 'review', lenses, knownForRound(), carriedCharge))
   const { candidates, freshNotes } = classifyBatch(raised, null, 0)
   notes.push(...freshNotes)
   if (candidates.length) {
@@ -3271,6 +3470,7 @@ if (reviewerCount) {
       })
     }
   }
+  reviewedHead = headOf(firstReviewRange)
 }
 sReview.close()
 
@@ -3351,7 +3551,8 @@ const regressedOf = (items, exec, round) => {
     const row = exec?.runs?.get(f.id)
     const reproducer_run = reproducerRunOf(row, round)
     if (reproducer_run.outcome === 'passed') continue
-    ;(reproducer_run.outcome === 'errored' ? errored : regressed).push({ ...f, reproducer_run })
+    ;(reproducer_run.outcome === 'errored' ? errored : regressed)
+      .push({ ...f, reproducer_run: latestRun(f, reproducer_run) })
   }
   return { regressed, errored }
 }
@@ -3456,7 +3657,7 @@ while ((open.length || blockingChecksOpen()) && round < MAX_REVIEW_ROUNDS && !ou
   const tailReviewable =
     reviewerCount && head && head !== reviewedThrough && !outOfBudget()
   const roundRange = head && head !== reviewedThrough
-    ? `${reviewedThrough}..${head}` : reviewedThrough
+    ? `${reviewStart()}..${head}` : reviewedThrough
 
   // One at a time, never beside another agent in this worktree. executeAtHead
   // judges a reproducer by the tree's porcelain before and after its own
@@ -3479,7 +3680,7 @@ while ((open.length || blockingChecksOpen()) && round < MAX_REVIEW_ROUNDS && !ou
   // head; anything else stays open, carrying the latest reproducer_run
   // (never accumulated) so the next fix brief can render it. A missing row
   // (the agent dropped it) still leaves it open rather than guessing it was
-  // resolved.
+  // resolved, and keeps the last run that did happen (latestRun).
   const stillOpen = []
   let erroredOpen = 0
   for (const f of open) {
@@ -3487,7 +3688,7 @@ while ((open.length || blockingChecksOpen()) && round < MAX_REVIEW_ROUNDS && !ou
     const outcome = outcomeOf(row)
     if (outcome === 'passed') { settled.push(f); continue }
     if (outcome === 'errored') erroredOpen++
-    stillOpen.push({ ...f, reproducer_run: reproducerRunOf(row, round) })
+    stillOpen.push({ ...f, reproducer_run: latestRun(f, reproducerRunOf(row, round)) })
   }
   open = stillOpen
   if (erroredOpen) {
@@ -3528,6 +3729,7 @@ while ((open.length || blockingChecksOpen()) && round < MAX_REVIEW_ROUNDS && !ou
       }
     }
     reviewedThrough = head
+    reviewedHead = head
   } else if (head) {
     reviewedThrough = head
   }
@@ -3783,7 +3985,10 @@ if (mutHead && mutHead !== reviewedThrough && settled.length) {
 }
 if (reviewerCount && mutHead && mutHead !== reviewedThrough && !outOfBudget()) {
   enterPhase('Review')
-  const mutRange = `${reviewedThrough}..${mutHead}`
+  const mutRange = `${reviewStart()}..${mutHead}`
+  // False when no review has read the first range yet (it got no lens), so
+  // mutRange also holds commits that are not the gate's own.
+  const mutOnly = reviewStart() === reviewedThrough
   // Fetches this range's own new-side hunks before the lens runs, the same
   // rule classify() applies to every review after the initial one: a finding
   // whose span the mutation commits never touched is not a finding against
@@ -3793,10 +3998,10 @@ if (reviewerCount && mutHead && mutHead !== reviewedThrough && !outOfBudget()) {
   // An undone fix is already caught above by executing its reproducer, so the
   // lens is not asked to report one.
   const raisedMut = await reviewOf(mutRange, 'review:mutation', [LENS.correctness], knownForRound(),
-    `\nEach of those was fixed before the commits you are reviewing, and its ` +
-    `reproducer has already been re-run at their head, so do not report one ` +
-    `of them again. A defect you still perceive in code these commits do not ` +
-    `touch is not a finding against this range: leave it out.`)
+    `\nEach of those is already tracked, and an undone fix is caught by ` +
+    `re-running its reproducer, so do not report one of them again. A defect ` +
+    `you still perceive in code these commits do not touch is not a finding ` +
+    `against this range: leave it out.`)
   const { candidates, freshNotes } = classifyBatch(raisedMut, execHunks.hunks ?? null, 'mutation')
   notes.push(...freshNotes)
   let freshOpen = []
@@ -3818,13 +4023,17 @@ if (reviewerCount && mutHead && mutHead !== reviewedThrough && !outOfBudget()) {
       gates: gatesPayload(),
       unresolved_findings: freshOpen, fix_rounds: round, fix_round_output: fixRoundSpend,
       notes,
-      note: `The mutation gate's own commits (${mutRange}) introduced ` +
-            `${freshOpen.length} finding(s) with a demonstrated reproducer. The ` +
+      note: (mutOnly
+              ? `The mutation gate's own commits (${mutRange})`
+              : `The commits in ${mutRange}, the mutation gate's own ` +
+                `(${reviewedThrough}..${mutHead}) and earlier ones no review had read,`) +
+            ` introduced ${freshOpen.length} finding(s) with a demonstrated reproducer. The ` +
             `fix rounds are spent. ${prNote()}. Judge each: fix it, or reject ` +
             `it as wrong.`,
     })
   }
   reviewedThrough = mutHead
+  reviewedHead = mutHead
 } else if (mutHead) {
   reviewedThrough = mutHead
 }
@@ -3946,7 +4155,7 @@ const result = {
   // fix already verified. Separate from unresolved_findings, which is
   // reserved for what actually held the run.
   notes,
-  reviewed_through: reviewedThrough,
+  reviewed_through: reportedHead(),
   fix_rounds: round,
   fix_round_output: fixRoundSpend,
   unresolved_findings: open,

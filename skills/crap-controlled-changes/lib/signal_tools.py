@@ -64,14 +64,23 @@ def language_parts(ctx, handlers):
     return parts
 
 
+def unread_parts(ctx):
+    """An unmeasured part for each set of changed files that no tool here was given."""
+    parts = []
+    if ctx.unsupported:
+        parts.append(unmeasured('changed file(s) in a language no tool here covers: '
+                                + ', '.join(ctx.unsupported)))
+    if ctx.exempted:
+        parts.append(unmeasured("changed file(s) the repo's .crap-gated exempts, so no tool here read them: "
+                                + ', '.join(ctx.exempted)))
+    return parts
+
+
 def semantic(ctx, handlers):
     """Run each language's handler over its changed files and combine what they say."""
     if not ctx.at_head:
         return unmeasured(HEAD_MOVED)
-    parts = language_parts(ctx, handlers)
-    if ctx.unsupported:
-        parts.append(unmeasured('changed file(s) in a language no tool here covers: '
-                                + ', '.join(ctx.unsupported)))
+    parts = [*language_parts(ctx, handlers), *unread_parts(ctx)]
     return combine(parts) if parts else unmeasured('no Go, PHP or Python file changed')
 
 

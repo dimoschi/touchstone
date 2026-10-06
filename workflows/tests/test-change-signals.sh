@@ -147,7 +147,19 @@ const LEAK = (at, range) => `TOUCHSTONE_PLAN_LEAK ${range}\n.touchstone/plan.md\
 
 async function scenarioSignalsAreInEveryHaltAfterTheImplementerReturned() {
   console.log('\n== scenario: a halt at Implement carries the signals measured over the implementer\'s range')
+  const preReviewFix = {
+    discovery: { file: '/repo/AGENTS.md',
+      sections: [{ heading: '## Checks', fence: 'bash scripts/run-tests.sh' }], detail: 'stub' },
+    checkRuns: (attempt) => ({ results: [attempt === 2
+      ? checkRow('check:1', 'bash scripts/run-tests.sh', 1, 'FAILURE')
+      : attempt === 1 ? checkRow('check:1', 'bash scripts/run-tests.sh', 0, 'ok')
+      : { id: 'check:1', command: 'timeout 10 bash scripts/run-tests.sh', exit_code: 0,
+          output: 'TOUCHSTONE_CHECK_EXIT check:1 0\nok' }], dirty: false }),
+  }
   const halts = {
+    'a pre-review fixer that stops on an unsupported language': { ...preReviewFix,
+      checksFixResult: { head_sha: 'checksfix00000000000000000000000000000001',
+        note: 'NEXT_ACTION is UNSUPPORTED_LANGUAGE: three options', scored: false, unsupported_language: true } },
     'a refused plan_id': { implPlanId: 'not-the-plan-id' },
     'a plan file under .touchstone': { planLeak: LEAK },
     'a check that could not be measured': {
@@ -166,6 +178,15 @@ async function scenarioSignalsAreInEveryHaltAfterTheImplementerReturned() {
     check(`${what}: one probe`, signalsCalls(captured).length, 1)
     check(`${what}: no draft PR yet`, callCount(captured, 'draft-pr'), 0)
   }
+  // Past the pre-review fix the range has moved, so this halt carries the second
+  // probe's record, not the implementer's.
+  const folded = 'checksfix00000000000000000000000000000002'
+  const { result, captured } = await run({ ...preReviewFix,
+    checksFixResult: { head_sha: folded, note: 'bumped', scored: true } })
+  check('checks unmeasured after the pre-review fix: halted at Implement', result.halted_at, 'Implement')
+  check('the signals are the folded range\'s', result.signals?.range, `${COMMIT_RANGE.split('..')[0]}..${folded}`)
+  check('measured twice, once per range', signalsCalls(captured).length, 2)
+  check('no draft PR yet', callCount(captured, 'draft-pr'), 0)
 }
 
 async function scenarioSignalsAreNullInEveryHaltBeforeTheImplementer() {

@@ -60,6 +60,8 @@ const EXISTING_BRANCH = {
   properties: {
     ...BRANCH.properties,
     halt_reason: { type: 'string', enum: ['none', 'ambiguous', 'wrong-ticket', 'merged', 'occupied'] },
+    // Optional: asked for only when a prior reviewed head was passed in.
+    prior_head_check: { type: 'string' },
   },
 }
 
@@ -247,14 +249,18 @@ const IMPL = {
 }
 const PLAN_WRITE = {
   type: 'object', additionalProperties: false,
-  required: ['bytes', 'last_line', 'ignored_exit'],
+  required: ['digest', 'last_line', 'ignored_exit'],
   properties: {
-    bytes: { type: 'integer' },
+    digest: { type: 'string' },
     last_line: { type: 'string' },
     ignored_exit: { type: 'integer' },
   },
 }
 const PLAN_LEAK_PROBE = {
+  type: 'object', additionalProperties: false, required: ['output'],
+  properties: { output: { type: 'string' } },
+}
+const HEAD_CHECK_PROBE = {
   type: 'object', additionalProperties: false, required: ['output'],
   properties: { output: { type: 'string' } },
 }

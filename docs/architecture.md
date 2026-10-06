@@ -279,7 +279,15 @@ direct `agent()`-style call (`setup`, `branch`, `branch:existing`, `collapseDupl
 and `dispatch()` never refuses; right after Triage, it is set to `100_000 + 1_500 *
 estimated_loc` output tokens, clamped `300_000..1_000_000`, or a flat `300_000`/`600_000`
 default by scope when triage gave no estimate, and `args.runBudget` overrides either.
-From there, `dispatch()` refuses any call once `budget.spent()` has reached it.
+A resumed `--existing` run raises the budget to the same formula applied to its first
+review range's measured changed lines, and logs it, when that figure is above the budget
+set after Triage, whether that budget came from triage's estimate or from the flat default.
+The range is the whole branch, not the part after the record's head, when a merge came
+after that head. The branch step checks that once; the implementer may merge the base
+too, so a `resume:range-check` probe asks the same question at the head Implement left,
+and a probe that is missing or not the marker line is read as a merge.
+`args.runBudget` is never raised. A halt note after a raise says what the budget was raised
+to fit and what it was raised from, including why that figure was set. From there, `dispatch()` refuses any call once `budget.spent()` has reached it.
 
 Everything after that point runs inside one `try`/`catch`, so a refusal anywhere in the
 run unwinds to a single halt rather than needing its own latch at every call site. Two
@@ -332,9 +340,13 @@ The implementer never gets the plan as prompt text. `brief()` clamps to `briefCh
   blank line and `END OF PLAN <id>`. The model never copies the end line: when it sat
   inside the copied text it read as one of the markers around it and was dropped. It adds `.touchstone/`
   to `info/exclude` under `git rev-parse --git-common-dir` (never a tracked
-  `.gitignore`), and reports `wc -c`, `tail -n 1` and the `git check-ignore` exit. The
-  script halts at Implement unless the byte count equals the UTF-8 length it computed
-  itself, the last line is the end line, and the file is ignored. The id is an FNV-1a
+  `.gitignore`), and reports a content digest, `tail -n 1` and the `git check-ignore`
+  exit. The digest is FNV-1a over the file's UTF-8 bytes with every run of spaces, tabs
+  and newlines collapsed to one space, printed by a `python3` command the script built;
+  the script computes the same over the plan. A byte count failed runs on harmless
+  whitespace slips in the model's copy, while a changed or dropped word still changes the
+  digest. The script halts at Implement unless the digests match, the last line is the
+  end line, and the file is ignored. The id is an FNV-1a
   hash of ticket and plan, computed by the script, so it is deterministic. A failed
   verification is retried once as `plan:write:retry` with the identical prompt; a second
   failure halts at Implement.
@@ -397,7 +409,11 @@ model reading the code and declaring the criterion met, is the judgement blockin
 not rest on.
 
 An open finding carries its latest `reproducer_run` into every fix brief, replaced each
-round rather than accumulated. Exit 0 settles it regardless of the marker; nonzero with
+round rather than accumulated. A round whose row the executor dropped is no run, so the
+finding (open, or a settled one reopened by its recheck) keeps the last run that
+happened: `not-executed` in a record therefore only ever names a candidate no row came
+back for, which is what a resumed `--existing` run measures again before anything else.
+Exit 0 settles it regardless of the marker; nonzero with
 the marker keeps it open as `reproduced`; nonzero without it keeps it open as `errored`,
 and the brief says the reproducer itself failed to run, with its exit code and output, so
 the fixer is not sent chasing a defect nobody demonstrated.
@@ -571,9 +587,11 @@ errors or runs past 90 seconds, a changed file in a language no tool here covers
 Go, PHP or Python file at all each make it unmeasured. The languages no tool covers are
 `UNSUPPORTED_SPEC` plus shell (`*.sh`, `*.bash`, `*.zsh`, `*.ksh`, which the CRAP gate
 leaves out on purpose), and a path the repo's marker exempts is still one of them: the
-exemption is about the CRAP gate, and no tool here read the file. A non-zero exit counts
-as a finding only when the output holds that tool's own finding record, because the same
-exit code also means the tool broke. A proof stands over what could not be checked: one
+exemption is about the CRAP gate, and no tool here read the file. A changed Go, PHP or
+Python file the marker exempts is not handed to any tool either, so it makes `api_broken`
+and `security_pattern` unmeasured as well. A non-zero exit counts as a finding only when
+the output holds that tool's own finding record, because the same exit code also means
+the tool broke. A proof stands over what could not be checked: one
 language showing a break is true even if another's tool was missing. Tools that read the
 working tree are unmeasured unless it is the range's head: `HEAD` is that commit and no
 tracked file has an edit that is not in it, since the tools report lines of the files as

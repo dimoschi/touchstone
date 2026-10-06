@@ -109,6 +109,23 @@ def test_semantic_with_only_an_unsupported_file_is_unmeasured_for_that_reason():
     assert got["value"] == UNMEASURED and "web/app.ts" in got["reason"]
 
 
+def test_semantic_cannot_say_false_with_an_exempt_file_no_tool_was_given():
+    ctx = fake(gated=("a.py",), exempted=("fixtures/b.py",))
+    got = st.semantic(ctx, {"python": lambda c, f: [part(False)]})
+    assert got["value"] == UNMEASURED
+    assert "exempts" in got["reason"] and "fixtures/b.py" in got["reason"]
+
+
+def test_semantic_still_reports_a_proof_beside_an_exempt_file():
+    ctx = fake(gated=("a.py",), exempted=("fixtures/b.py",))
+    assert st.semantic(ctx, {"python": lambda c, f: [part(True)]})["value"] is True
+
+
+def test_semantic_with_only_an_exempt_file_is_unmeasured_for_that_reason():
+    got = st.semantic(fake(exempted=("fixtures/b.py",)), {})
+    assert got["value"] == UNMEASURED and "fixtures/b.py" in got["reason"]
+
+
 APIDIFF = """
 args = sys.argv[1:]
 if '-w' in args:
@@ -661,6 +678,17 @@ def test_security_pattern_in_python_does_not_let_the_change_suppress_its_own_fin
     stubs.add("bandit", out=bandit_json())
     st.security_pattern(py_security_change(repo))
     assert "--ignore-nosec" in stubs.calls("bandit")[0]["args"]
+
+
+def test_security_pattern_in_python_is_unmeasured_when_the_change_also_touches_an_exempt_file(repo, stubs):
+    stubs.add("bandit", out=bandit_json())
+    ctx = change(repo, {"a.py": "x = 1\n", "fixtures/b.py": "y = 1\n"},
+                 {"a.py": "x = 2\n", "fixtures/b.py": "y = 1\neval(input())\n"},
+                 exempt=(":(glob,exclude,top)fixtures/**",))
+    got = st.security_pattern(ctx)
+    assert got["value"] == UNMEASURED
+    assert "fixtures/b.py" in got["reason"]
+    assert stubs.calls("bandit")[0]["args"][-1] == "a.py"
 
 
 def test_security_pattern_in_python_is_unmeasured_when_bandit_skipped_a_file(repo, stubs):

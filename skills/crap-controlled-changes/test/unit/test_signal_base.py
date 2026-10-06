@@ -349,6 +349,7 @@ def test_load_ctx_without_exemptions_gates_every_changed_path(changed):
     ctx = sb.load_ctx(str(repo.root), f"{base}..{head}", no_settings())
     assert sorted(ctx.gated) == ["bin.dat", "gone.go", "keep.py", "new dir/new.php", "web/app.ts"]
     assert ctx.unsupported == ()
+    assert ctx.exempted == ()
 
 
 def test_load_ctx_drops_exempt_paths_from_the_gated_ones(changed):
@@ -371,6 +372,24 @@ def test_load_ctx_still_names_an_exempt_file_in_an_unsupported_language(changed)
     ctx = sb.load_ctx(str(repo.root), f"{base}..{head}", settings)
     assert ctx.unsupported == ("web/app.ts",)
     assert "web/app.ts" not in ctx.gated
+
+
+def test_load_ctx_names_the_exempt_files_in_a_language_a_tool_reads(repo):
+    repo.write("lib/a.py", "a\n")
+    repo.write("fixtures/b.py", "b\n")
+    repo.write("fixtures/c.go", "package c\n")
+    repo.write("fixtures/d.md", "d\n")
+    base = repo.commit("base")
+    repo.write("lib/a.py", "a\na2\n")
+    repo.write("fixtures/b.py", "b\nb2\n")
+    (repo.root / "fixtures/c.go").unlink()
+    repo.write("fixtures/d.md", "d\nd2\n")
+    repo.write("fixtures/e.php", "<?php\n")
+    head = repo.commit("head")
+    settings = no_settings(exempt=(":(glob,exclude,top)fixtures/**",))
+    ctx = sb.load_ctx(str(repo.root), f"{base}..{head}", settings)
+    assert ctx.exempted == ("fixtures/b.py", "fixtures/e.php")
+    assert ctx.gated == ("lib/a.py",)
 
 
 @pytest.mark.parametrize("rng", ["", "abc", "..abc", "abc..", "a...b", "a..b..c"])

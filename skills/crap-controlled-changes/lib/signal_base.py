@@ -150,6 +150,7 @@ class Ctx(NamedTuple):
     unsupported: tuple
     added: dict
     settings: Settings
+    exempted: tuple = ()
 
 
 def git(repo, *args):
@@ -214,18 +215,28 @@ def tree_is_head(repo, head):
     return resolve(repo, 'HEAD') == head and not git(repo, 'status', '--porcelain', '--untracked-files=no')
 
 
+def exempted_sources(status, gated):
+    """The changed Go, PHP and Python files the marker exempts. They are not in `gated`, so no
+    tool is handed them; a deleted one has nothing left to scan."""
+    kept = set(gated)
+    return tuple(path for path, code in status.items() if code != 'D' and lang_of(path) and path not in kept)
+
+
 def load_ctx(repo, rng, settings):
     base_ref, head_ref = split_range(rng)
     base, head = resolve(repo, base_ref), resolve(repo, head_ref)
     # Not minus the marker's exemptions: a path it exempts is out of the CRAP gate's scope,
     # and no tool here reads a language that has none, exempt or not.
     unsupported = _paths(repo, base, head, settings.unsupported) if settings.unsupported else ()
+    status = _status_of(_diff(repo, base, head, '--name-status', '-z'))
+    gated = _paths(repo, base, head, ['.', *settings.exempt])
     return Ctx(
         repo=repo, rng=rng, base=base, head=head,
         at_head=tree_is_head(repo, head),
         rows=_numstat_rows(_diff(repo, base, head, '--numstat', '-z')),
-        status=_status_of(_diff(repo, base, head, '--name-status', '-z')),
-        gated=_paths(repo, base, head, ['.', *settings.exempt]),
+        status=status,
+        gated=gated,
         unsupported=unsupported,
         added=added_lines(_diff(repo, base, head, '-U0', '--no-color')),
-        settings=settings)
+        settings=settings,
+        exempted=exempted_sources(status, gated))

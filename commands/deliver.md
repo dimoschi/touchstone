@@ -68,6 +68,42 @@ run did exactly that: the plan agent made 51 edits and 6 commits, blew the Plan
 ceiling, and the review, mutation and PR phases that would have checked the code
 never ran. The planner now refuses such a task and halts, pointing here.
 
+## Resuming review with `--existing`
+
+An `--existing` run reviews only what an earlier run did not, so a large ticket
+converges across runs instead of re-reviewing the whole branch each time. When
+`<main checkout>/.claude/touchstone-runs/<ticket>.json` exists, where `<ticket>` is
+the `--ticket` value with every character outside `A-Za-z0-9_-` replaced by `-` (the
+same name `record_file` carries), pass three of its fields through:
+
+```
+Workflow({ name: 'touchstone:deliver-pipeline', args: { ticket: "...", existingBranch: true,
+  priorRun: { reviewed_through: "<sha>", unresolved_findings: [...], notes: [...] } } })
+```
+
+Pass `priorRun` only from a record whose `pipeline_version.executed` is 0.30.0 or later.
+Compare it number by number on each dot-separated part, never as text, so 0.9.0 is older
+than 0.30.0. For an older record, or one with no `pipeline_version.executed`, pass no
+`priorRun`: in those records `reviewed_through` could sit past commits no review read.
+
+`reviewed_through` is the last head a review finished at; the workflow verifies it is
+still an ancestor of the branch, and otherwise ignores the record, reviewing the whole
+branch and carrying nothing. When a merge, such as updating the branch from its base,
+came after that head, whether before the run or during it, a range from it would carry
+the base's own changes, so the whole branch is reviewed but the record is still carried.
+`unresolved_findings` and `notes` are carried as tracked, so they reach the fixer and are
+not raised again; a carried finding whose reproducer was never run, because no executor
+row ever came back for it, is run first, like a fresh one. A halt before the branch
+step's head check, or after that check confirmed the head but before any review
+finished, returns the record's head, findings and notes unchanged. A head that is not a
+40-character SHA is dropped with its record from the start, and a head the check does
+not confirm as an ancestor is dropped at the check. Either way, every later halt and the
+result report `reviewed_through` as null (or the head this run's own review reached) and
+none of the record's findings or notes, and writing that payload replaces the record
+file. Pass
+`reviewedThrough: "<40-char sha>"` as well to start from a commit you choose; it wins over
+the record's. Both are ignored without `--existing`. Pass nothing when there is no record.
+
 Say that `/touchstone:deliver` requires a ticket, and show the correct form. Do not scan the
 task text for something ticket-shaped, do not offer to proceed without one, and do
 not invent one. If the user genuinely wants agent work with no ticket, they can
