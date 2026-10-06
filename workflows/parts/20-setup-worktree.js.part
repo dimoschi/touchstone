@@ -200,7 +200,8 @@ const checksDiscoveryStep = (n, whichPath) =>
 // and only the branch:existing step below can say whether it is still on the
 // branch, so nothing is carried until then.
 const PRIOR_HEAD_MARKER = 'TOUCHSTONE_PRIOR_HEAD_LINEAR'
-const PRIOR_HEAD_OK = `${PRIOR_HEAD_MARKER} 0`
+const PRIOR_HEAD_LINEAR = `${PRIOR_HEAD_MARKER} 0`
+const PRIOR_HEAD_MERGED = `${PRIOR_HEAD_MARKER} 2`
 const priorHeadGiven = !args?.existingBranch ? null
   : typeof args.reviewedThrough === 'string' ? args.reviewedThrough
   : args.priorRun?.reviewed_through
@@ -209,17 +210,20 @@ if (priorHeadGiven != null && !priorHead) {
   log(`ignoring reviewed head ${JSON.stringify(priorHeadGiven)}: not a 40-character SHA; ` +
       `reviewing the whole branch`)
 }
-// A merge since the head means the whole branch: git diff A..B is a tree diff,
-// so a range from a head that predates merging the base in holds all the base
-// gained too, and the lenses would review that as this branch's work.
+// Prints 0 for an ancestor with no merge after it, 2 for an ancestor with one,
+// and 1 for anything else. Two facts, not one: an ancestor keeps its findings'
+// recorded_at and reproducers valid, but git diff A..B is a tree diff, so a range
+// from a head that predates merging the base in holds all the base gained too, and
+// the lenses would review that as this branch's work. A merge costs the narrowed
+// range, never the carried record.
 const priorHeadStep = (n) =>
   `${n}. Also before you return, only if step 8 returned created=true: run ` +
   `exactly the command below, with <path> the absolute path from step 8, and ` +
   `put the one line it prints in prior_head_check, verbatim and alone. Do not ` +
   `interpret it; the script reads it.\n` +
-  `git -C <path> merge-base --is-ancestor ${priorHead} HEAD && ` +
-  `test "$(git -C <path> rev-list --merges --count ${priorHead}..HEAD)" = 0; ` +
-  `echo ${PRIOR_HEAD_MARKER} $?`
+  `git -C <path> merge-base --is-ancestor ${priorHead} HEAD; a=$?; ` +
+  `m=$(git -C <path> rev-list --merges --count ${priorHead}..HEAD); ` +
+  `echo ${PRIOR_HEAD_MARKER} $((a ? 1 : (m ? 2 : 0)))`
 
 // existingBranch is for follow-up work on an open PR: review feedback, or scope
 // added to a ticket already in flight. Cutting a fresh branch there strands the
@@ -499,22 +503,28 @@ log(args?.existingBranch
   ? `worktree ${wt.path} reused for branch ${wt.branch} (base ${wt.base})`
   : `worktree ${wt.path} created for branch ${wt.branch} (base ${wt.base})`)
 
-if (!priorHead || wt.prior_head_check !== PRIOR_HEAD_OK) {
-  reviewedHead = null
+const priorHeadAnswer = wt.prior_head_check
+if (!priorHead || (priorHeadAnswer !== PRIOR_HEAD_LINEAR && priorHeadAnswer !== PRIOR_HEAD_MERGED)) {
+  recordedHead = null
   carriedOpen = []
   carriedNotes = []
   if (priorHead) {
     log(`reviewed head ${priorHead} is not confirmed as an ancestor of branch ` +
-        `${wt.branch} with no merge commit since (check printed ` +
-        `${JSON.stringify(wt.prior_head_check ?? null)}); reviewing the whole branch, ` +
-        `carrying nothing`)
+        `${wt.branch} (check printed ${JSON.stringify(wt.prior_head_check ?? null)}); ` +
+        `reviewing the whole branch, carrying nothing`)
   }
 } else {
-  reviewedHead = priorHead
+  recordedHead = priorHead
   carriedOpen = carry(args.priorRun?.unresolved_findings)
   carriedNotes = carry(args.priorRun?.notes)
-  log(`resuming from reviewed head ${priorHead}: ${carriedOpen.length} open, ` +
-      `${carriedNotes.length} notes carried`)
+  const carried = `${carriedOpen.length} open, ${carriedNotes.length} notes carried`
+  if (priorHeadAnswer === PRIOR_HEAD_LINEAR) {
+    resumeFrom = priorHead
+    log(`resuming from reviewed head ${priorHead}: ${carried}`)
+  } else {
+    log(`reviewed head ${priorHead} is still an ancestor of branch ${wt.branch}, but a ` +
+        `merge commit came after it; reviewing the whole branch, ${carried}`)
+  }
 }
 
 

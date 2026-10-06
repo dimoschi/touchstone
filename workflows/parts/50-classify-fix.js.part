@@ -3,10 +3,12 @@
 // review, so a phase that commits without one leaves it behind and the PR
 // guard below refuses.
 let reviewedThrough = headOf(impl.commit_range)
-// Where the next review starts. reviewedHead trails reviewedThrough when a
-// resumed run's first range got no lens: nobody read those commits, and a review
-// starting at reviewedThrough would skip them yet still move reviewedHead past.
-const reviewStart = () => reviewedHead ?? reviewedThrough
+// Where the next review starts. Until one has read something, that is the start
+// of the first range: a resumed run's first range can get no lens (under the bar,
+// kept only for the carried findings' fixes), and a review starting at
+// reviewedThrough would skip those commits yet still move reviewedHead past them.
+const startOf = (range) => (range.includes('..') ? range.split('..')[0] : range).trim()
+const reviewStart = () => reviewedHead ?? startOf(firstReviewRange)
 
 // Lenses cannot see each other, and contentKeyOf cannot merge them: two
 // reviewers describe one bug in different words. A failure keeps everything,
@@ -331,6 +333,13 @@ let settled = []
 // is a candidate, not a verdict: held in open it would stay open through every
 // fix round on a reproducer that may not even run.
 const unmeasured = (f) => f.reproducer_run?.outcome === 'not-executed'
+// What keeps `unmeasured` true only of a candidate no row ever came back for: a
+// finding that was demonstrated and whose later row the executor dropped keeps
+// the last run that happened. Recorded as not-executed it would be measured again
+// on resume as a candidate, and a reproducer that then errors or passes would turn
+// a finding that was demonstrated into a note.
+const latestRun = (f, run) =>
+  run.outcome === 'not-executed' && f.reproducer_run ? f.reproducer_run : run
 let awaiting = carriedOpen.filter(unmeasured)
 let open = carriedOpen.filter(f => !unmeasured(f))
 let round = 0
@@ -458,7 +467,8 @@ const regressedOf = (items, exec, round) => {
     const row = exec?.runs?.get(f.id)
     const reproducer_run = reproducerRunOf(row, round)
     if (reproducer_run.outcome === 'passed') continue
-    ;(reproducer_run.outcome === 'errored' ? errored : regressed).push({ ...f, reproducer_run })
+    ;(reproducer_run.outcome === 'errored' ? errored : regressed)
+      .push({ ...f, reproducer_run: latestRun(f, reproducer_run) })
   }
   return { regressed, errored }
 }
@@ -586,7 +596,7 @@ while ((open.length || blockingChecksOpen()) && round < MAX_REVIEW_ROUNDS && !ou
   // head; anything else stays open, carrying the latest reproducer_run
   // (never accumulated) so the next fix brief can render it. A missing row
   // (the agent dropped it) still leaves it open rather than guessing it was
-  // resolved.
+  // resolved, and keeps the last run that did happen (latestRun).
   const stillOpen = []
   let erroredOpen = 0
   for (const f of open) {
@@ -594,7 +604,7 @@ while ((open.length || blockingChecksOpen()) && round < MAX_REVIEW_ROUNDS && !ou
     const outcome = outcomeOf(row)
     if (outcome === 'passed') { settled.push(f); continue }
     if (outcome === 'errored') erroredOpen++
-    stillOpen.push({ ...f, reproducer_run: reproducerRunOf(row, round) })
+    stillOpen.push({ ...f, reproducer_run: latestRun(f, reproducerRunOf(row, round)) })
   }
   open = stillOpen
   if (erroredOpen) {

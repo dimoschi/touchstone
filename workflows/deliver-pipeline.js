@@ -266,22 +266,31 @@ let draftPr = null
 // call site having to pass it through `extra` by hand.
 let size = null
 
-// reviewedHead is reported as reviewed_through by every halt and the result: the
+// reportedHead() is reported as reviewed_through by every halt and the result: the
 // last head a review finished at. Not reviewedThrough (part 50), which also
 // moves past commits no review read, so the next run would skip them.
+// reviewedHead is the last head a review in this run read up to; until one
+// finishes, a resumed run reports the head of the record it was given.
 //
-// An --existing run starts holding the record it was given (args.priorRun; the
-// script has no fs), unverified: the invoking session writes every payload over
-// the record file, so a halt before the ancestry check in part 20 (a dirty
-// checkout, an oversized plan) would otherwise overwrite it with nothing. That
-// check drops it when the head is not confirmed.
+// An --existing run starts holding that record (args.priorRun; the script has no
+// fs), unverified: the invoking session writes every payload over the record
+// file, so a halt before the ancestry check in part 20 (a dirty checkout, an
+// oversized plan) would otherwise overwrite it with nothing. That check drops
+// it when the head is not confirmed.
 const asSha = (v) => typeof v === 'string' && /^[0-9a-f]{40}$/.test(v.trim()) ? v.trim() : null
 const SCOPES = ['ticket', 'addition', 'unattributed']
 const carry = (list) => (Array.isArray(list) ? list : [])
   .filter(f => typeof f?.id === 'string' && /^f\d+$/.test(f.id))
   .map(f => ({ ...f, scope: SCOPES.includes(f.scope) ? f.scope : 'unattributed' }))
 const recordHead = args?.existingBranch ? asSha(args.priorRun?.reviewed_through) : null
-let reviewedHead = recordHead
+let recordedHead = recordHead
+let reviewedHead = null
+const reportedHead = () => reviewedHead ?? recordedHead
+// Where the first review range may start: the record's head, but only while
+// nothing was merged after it (part 20). A merge leaves that head an ancestor,
+// so the record still holds, but a range from it would carry the merged base's
+// own changes.
+let resumeFrom = null
 let carriedOpen = recordHead ? carry(args.priorRun.unresolved_findings) : []
 let carriedNotes = recordHead ? carry(args.priorRun.notes) : []
 
@@ -322,7 +331,7 @@ const halted = async (at, extra) => {
   const payload = {
     task, halted_at: at, pipeline_version: pipelineVersion, stage_spend: stageSpend,
     needs_user: true, record_file: runRecordFile, size,
-    reviewed_through: reviewedHead,
+    reviewed_through: reportedHead(),
     ...(carriedOpen.length ? { unresolved_findings: carriedOpen } : {}),
     ...(carriedNotes.length ? { notes: carriedNotes } : {}),
     ...(planAdditions ? { plan_additions: planAdditions } : {}),
@@ -1067,7 +1076,8 @@ const checksDiscoveryStep = (n, whichPath) =>
 // and only the branch:existing step below can say whether it is still on the
 // branch, so nothing is carried until then.
 const PRIOR_HEAD_MARKER = 'TOUCHSTONE_PRIOR_HEAD_LINEAR'
-const PRIOR_HEAD_OK = `${PRIOR_HEAD_MARKER} 0`
+const PRIOR_HEAD_LINEAR = `${PRIOR_HEAD_MARKER} 0`
+const PRIOR_HEAD_MERGED = `${PRIOR_HEAD_MARKER} 2`
 const priorHeadGiven = !args?.existingBranch ? null
   : typeof args.reviewedThrough === 'string' ? args.reviewedThrough
   : args.priorRun?.reviewed_through
@@ -1076,17 +1086,20 @@ if (priorHeadGiven != null && !priorHead) {
   log(`ignoring reviewed head ${JSON.stringify(priorHeadGiven)}: not a 40-character SHA; ` +
       `reviewing the whole branch`)
 }
-// A merge since the head means the whole branch: git diff A..B is a tree diff,
-// so a range from a head that predates merging the base in holds all the base
-// gained too, and the lenses would review that as this branch's work.
+// Prints 0 for an ancestor with no merge after it, 2 for an ancestor with one,
+// and 1 for anything else. Two facts, not one: an ancestor keeps its findings'
+// recorded_at and reproducers valid, but git diff A..B is a tree diff, so a range
+// from a head that predates merging the base in holds all the base gained too, and
+// the lenses would review that as this branch's work. A merge costs the narrowed
+// range, never the carried record.
 const priorHeadStep = (n) =>
   `${n}. Also before you return, only if step 8 returned created=true: run ` +
   `exactly the command below, with <path> the absolute path from step 8, and ` +
   `put the one line it prints in prior_head_check, verbatim and alone. Do not ` +
   `interpret it; the script reads it.\n` +
-  `git -C <path> merge-base --is-ancestor ${priorHead} HEAD && ` +
-  `test "$(git -C <path> rev-list --merges --count ${priorHead}..HEAD)" = 0; ` +
-  `echo ${PRIOR_HEAD_MARKER} $?`
+  `git -C <path> merge-base --is-ancestor ${priorHead} HEAD; a=$?; ` +
+  `m=$(git -C <path> rev-list --merges --count ${priorHead}..HEAD); ` +
+  `echo ${PRIOR_HEAD_MARKER} $((a ? 1 : (m ? 2 : 0)))`
 
 // existingBranch is for follow-up work on an open PR: review feedback, or scope
 // added to a ticket already in flight. Cutting a fresh branch there strands the
@@ -1366,22 +1379,28 @@ log(args?.existingBranch
   ? `worktree ${wt.path} reused for branch ${wt.branch} (base ${wt.base})`
   : `worktree ${wt.path} created for branch ${wt.branch} (base ${wt.base})`)
 
-if (!priorHead || wt.prior_head_check !== PRIOR_HEAD_OK) {
-  reviewedHead = null
+const priorHeadAnswer = wt.prior_head_check
+if (!priorHead || (priorHeadAnswer !== PRIOR_HEAD_LINEAR && priorHeadAnswer !== PRIOR_HEAD_MERGED)) {
+  recordedHead = null
   carriedOpen = []
   carriedNotes = []
   if (priorHead) {
     log(`reviewed head ${priorHead} is not confirmed as an ancestor of branch ` +
-        `${wt.branch} with no merge commit since (check printed ` +
-        `${JSON.stringify(wt.prior_head_check ?? null)}); reviewing the whole branch, ` +
-        `carrying nothing`)
+        `${wt.branch} (check printed ${JSON.stringify(wt.prior_head_check ?? null)}); ` +
+        `reviewing the whole branch, carrying nothing`)
   }
 } else {
-  reviewedHead = priorHead
+  recordedHead = priorHead
   carriedOpen = carry(args.priorRun?.unresolved_findings)
   carriedNotes = carry(args.priorRun?.notes)
-  log(`resuming from reviewed head ${priorHead}: ${carriedOpen.length} open, ` +
-      `${carriedNotes.length} notes carried`)
+  const carried = `${carriedOpen.length} open, ${carriedNotes.length} notes carried`
+  if (priorHeadAnswer === PRIOR_HEAD_LINEAR) {
+    resumeFrom = priorHead
+    log(`resuming from reviewed head ${priorHead}: ${carried}`)
+  } else {
+    log(`reviewed head ${priorHead} is still an ancestor of branch ${wt.branch}, but a ` +
+        `merge commit came after it; reviewing the whole branch, ${carried}`)
+  }
 }
 
 
@@ -2408,8 +2427,8 @@ sChecksPost.close()
 stageSpend.checks = checksPreSpend + (stageSpend.checks ?? 0)
 
 // Taken here, after the pre-review fix may have moved impl.commit_range's head.
-const firstReviewRange = reviewedHead
-  ? `${reviewedHead}..${headOf(impl.commit_range)}` : impl.commit_range
+const firstReviewRange = resumeFrom
+  ? `${resumeFrom}..${headOf(impl.commit_range)}` : impl.commit_range
 
 // Nothing under .touchstone/ may reach a commit. The range runs from the
 // implementer's own base, not from the previous head, so a commit that adds the
@@ -2672,7 +2691,7 @@ size = sizeOf(sizeParsed)
 // Triage sized the ticket, but a resumed run's first review range is whatever
 // the last run left unreviewed, and a large ticket's leftover can be bigger than
 // that estimate. Raised, never lowered, and never over an explicit args.runBudget.
-if (reviewedHead && typeof args?.runBudget !== 'number') {
+if (resumeFrom && typeof args?.runBudget !== 'number') {
   const needed = budgetForLoc(size.totalChurn)
   if (needed > runBudget) {
     runBudget = needed
@@ -2944,10 +2963,12 @@ const reviewOf = async (range, tag, picked, known = [], knownCharge = '') => {
 // review, so a phase that commits without one leaves it behind and the PR
 // guard below refuses.
 let reviewedThrough = headOf(impl.commit_range)
-// Where the next review starts. reviewedHead trails reviewedThrough when a
-// resumed run's first range got no lens: nobody read those commits, and a review
-// starting at reviewedThrough would skip them yet still move reviewedHead past.
-const reviewStart = () => reviewedHead ?? reviewedThrough
+// Where the next review starts. Until one has read something, that is the start
+// of the first range: a resumed run's first range can get no lens (under the bar,
+// kept only for the carried findings' fixes), and a review starting at
+// reviewedThrough would skip those commits yet still move reviewedHead past them.
+const startOf = (range) => (range.includes('..') ? range.split('..')[0] : range).trim()
+const reviewStart = () => reviewedHead ?? startOf(firstReviewRange)
 
 // Lenses cannot see each other, and contentKeyOf cannot merge them: two
 // reviewers describe one bug in different words. A failure keeps everything,
@@ -3272,6 +3293,13 @@ let settled = []
 // is a candidate, not a verdict: held in open it would stay open through every
 // fix round on a reproducer that may not even run.
 const unmeasured = (f) => f.reproducer_run?.outcome === 'not-executed'
+// What keeps `unmeasured` true only of a candidate no row ever came back for: a
+// finding that was demonstrated and whose later row the executor dropped keeps
+// the last run that happened. Recorded as not-executed it would be measured again
+// on resume as a candidate, and a reproducer that then errors or passes would turn
+// a finding that was demonstrated into a note.
+const latestRun = (f, run) =>
+  run.outcome === 'not-executed' && f.reproducer_run ? f.reproducer_run : run
 let awaiting = carriedOpen.filter(unmeasured)
 let open = carriedOpen.filter(f => !unmeasured(f))
 let round = 0
@@ -3399,7 +3427,8 @@ const regressedOf = (items, exec, round) => {
     const row = exec?.runs?.get(f.id)
     const reproducer_run = reproducerRunOf(row, round)
     if (reproducer_run.outcome === 'passed') continue
-    ;(reproducer_run.outcome === 'errored' ? errored : regressed).push({ ...f, reproducer_run })
+    ;(reproducer_run.outcome === 'errored' ? errored : regressed)
+      .push({ ...f, reproducer_run: latestRun(f, reproducer_run) })
   }
   return { regressed, errored }
 }
@@ -3527,7 +3556,7 @@ while ((open.length || blockingChecksOpen()) && round < MAX_REVIEW_ROUNDS && !ou
   // head; anything else stays open, carrying the latest reproducer_run
   // (never accumulated) so the next fix brief can render it. A missing row
   // (the agent dropped it) still leaves it open rather than guessing it was
-  // resolved.
+  // resolved, and keeps the last run that did happen (latestRun).
   const stillOpen = []
   let erroredOpen = 0
   for (const f of open) {
@@ -3535,7 +3564,7 @@ while ((open.length || blockingChecksOpen()) && round < MAX_REVIEW_ROUNDS && !ou
     const outcome = outcomeOf(row)
     if (outcome === 'passed') { settled.push(f); continue }
     if (outcome === 'errored') erroredOpen++
-    stillOpen.push({ ...f, reproducer_run: reproducerRunOf(row, round) })
+    stillOpen.push({ ...f, reproducer_run: latestRun(f, reproducerRunOf(row, round)) })
   }
   open = stillOpen
   if (erroredOpen) {
@@ -3995,7 +4024,7 @@ const result = {
   // fix already verified. Separate from unresolved_findings, which is
   // reserved for what actually held the run.
   notes,
-  reviewed_through: reviewedHead,
+  reviewed_through: reportedHead(),
   fix_rounds: round,
   fix_round_output: fixRoundSpend,
   unresolved_findings: open,

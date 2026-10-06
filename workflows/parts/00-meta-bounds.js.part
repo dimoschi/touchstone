@@ -266,22 +266,31 @@ let draftPr = null
 // call site having to pass it through `extra` by hand.
 let size = null
 
-// reviewedHead is reported as reviewed_through by every halt and the result: the
+// reportedHead() is reported as reviewed_through by every halt and the result: the
 // last head a review finished at. Not reviewedThrough (part 50), which also
 // moves past commits no review read, so the next run would skip them.
+// reviewedHead is the last head a review in this run read up to; until one
+// finishes, a resumed run reports the head of the record it was given.
 //
-// An --existing run starts holding the record it was given (args.priorRun; the
-// script has no fs), unverified: the invoking session writes every payload over
-// the record file, so a halt before the ancestry check in part 20 (a dirty
-// checkout, an oversized plan) would otherwise overwrite it with nothing. That
-// check drops it when the head is not confirmed.
+// An --existing run starts holding that record (args.priorRun; the script has no
+// fs), unverified: the invoking session writes every payload over the record
+// file, so a halt before the ancestry check in part 20 (a dirty checkout, an
+// oversized plan) would otherwise overwrite it with nothing. That check drops
+// it when the head is not confirmed.
 const asSha = (v) => typeof v === 'string' && /^[0-9a-f]{40}$/.test(v.trim()) ? v.trim() : null
 const SCOPES = ['ticket', 'addition', 'unattributed']
 const carry = (list) => (Array.isArray(list) ? list : [])
   .filter(f => typeof f?.id === 'string' && /^f\d+$/.test(f.id))
   .map(f => ({ ...f, scope: SCOPES.includes(f.scope) ? f.scope : 'unattributed' }))
 const recordHead = args?.existingBranch ? asSha(args.priorRun?.reviewed_through) : null
-let reviewedHead = recordHead
+let recordedHead = recordHead
+let reviewedHead = null
+const reportedHead = () => reviewedHead ?? recordedHead
+// Where the first review range may start: the record's head, but only while
+// nothing was merged after it (part 20). A merge leaves that head an ancestor,
+// so the record still holds, but a range from it would carry the merged base's
+// own changes.
+let resumeFrom = null
 let carriedOpen = recordHead ? carry(args.priorRun.unresolved_findings) : []
 let carriedNotes = recordHead ? carry(args.priorRun.notes) : []
 
@@ -322,7 +331,7 @@ const halted = async (at, extra) => {
   const payload = {
     task, halted_at: at, pipeline_version: pipelineVersion, stage_spend: stageSpend,
     needs_user: true, record_file: runRecordFile, size,
-    reviewed_through: reviewedHead,
+    reviewed_through: reportedHead(),
     ...(carriedOpen.length ? { unresolved_findings: carriedOpen } : {}),
     ...(carriedNotes.length ? { notes: carriedNotes } : {}),
     ...(planAdditions ? { plan_additions: planAdditions } : {}),

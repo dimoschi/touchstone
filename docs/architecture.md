@@ -399,7 +399,11 @@ model reading the code and declaring the criterion met, is the judgement blockin
 not rest on.
 
 An open finding carries its latest `reproducer_run` into every fix brief, replaced each
-round rather than accumulated. Exit 0 settles it regardless of the marker; nonzero with
+round rather than accumulated. A round whose row the executor dropped is no run, so the
+finding (open, or a settled one reopened by its recheck) keeps the last run that
+happened: `not-executed` in a record therefore only ever names a candidate no row came
+back for, which is what a resumed `--existing` run measures again before anything else.
+Exit 0 settles it regardless of the marker; nonzero with
 the marker keeps it open as `reproduced`; nonzero without it keeps it open as `errored`,
 and the brief says the reproducer itself failed to run, with its exit code and output, so
 the fixer is not sent chasing a defect nobody demonstrated.

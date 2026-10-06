@@ -10,11 +10,13 @@ const P = 'a1b2c3d4e5f60718293a4b5c6d7e8f9012345678'
 const Q = '0123456789abcdef0123456789abcdef01234567'
 const FIX_HEAD = 'fix00000000000000000000000000000000000001'
 const MUT_HEAD = 'mut00000000000000000000000000000000000001'
-const PRIOR_OK = 'TOUCHSTONE_PRIOR_HEAD_LINEAR 0'
+const PRIOR = (n) => `TOUCHSTONE_PRIOR_HEAD_LINEAR ${n}`
+const PRIOR_OK = PRIOR(0)
+const PRIOR_MERGED = PRIOR(2)
 const ANCESTRY_STEP = (sha) =>
-  `git -C <path> merge-base --is-ancestor ${sha} HEAD && ` +
-  `test "$(git -C <path> rev-list --merges --count ${sha}..HEAD)" = 0; ` +
-  `echo TOUCHSTONE_PRIOR_HEAD_LINEAR $?`
+  `git -C <path> merge-base --is-ancestor ${sha} HEAD; a=$?; ` +
+  `m=$(git -C <path> rev-list --merges --count ${sha}..HEAD); ` +
+  `echo TOUCHSTONE_PRIOR_HEAD_LINEAR $((a ? 1 : (m ? 2 : 0)))`
 
 function existing(over) {
   return { created: true, branch: 'feat/gh-21-stub', base: 'main', path: '/tmp/stub-worktree',
@@ -210,16 +212,18 @@ async function scenarioR5() {
       args: { existingBranch: true, reviewedThrough: 'nope', priorRun: { reviewed_through: P, ...prior } },
       ancestry: false },
     { name: 'an ancestry check that printed 1', args: withHead,
-      check: 'TOUCHSTONE_PRIOR_HEAD_LINEAR 1', ancestry: true, why: 'not confirmed as an ancestor' },
+      check: PRIOR(1), ancestry: true, why: 'not confirmed as an ancestor' },
+    { name: 'an ancestry check that printed a status it was never asked for', args: withHead,
+      check: PRIOR(128), ancestry: true, why: 'not confirmed as an ancestor' },
     { name: 'the ancestry-only answer an earlier version asked for', args: withHead,
       check: 'TOUCHSTONE_PRIOR_HEAD 0', ancestry: true, why: 'not confirmed as an ancestor' },
     { name: 'an ancestry check that was never answered', args: withHead,
       check: undefined, ancestry: true, why: 'not confirmed as an ancestor' },
     { name: 'an empty ancestry check', args: withHead, check: '', ancestry: true },
     { name: 'an ancestry check with trailing text', args: withHead,
-      check: 'TOUCHSTONE_PRIOR_HEAD_LINEAR 0 ', ancestry: true },
+      check: `${PRIOR_OK} `, ancestry: true },
     { name: 'an ancestry check in the wrong case', args: withHead,
-      check: 'touchstone_prior_head_linear 0', ancestry: true },
+      check: PRIOR_OK.toLowerCase(), ancestry: true },
   ]
   for (const c of cases) {
     const { result, captured } = await run({
@@ -387,19 +391,19 @@ async function scenarioR8() {
     gitIn(repo, 'checkout', '-q', '-b', 'feat', base)
     const reviewed = commit(repo, 'b1.txt')
     commit(repo, 'b2.txt')
-    check('the command prints the confirming line for an ancestor with no merge after it',
-      await printed(repo, reviewed), 'TOUCHSTONE_PRIOR_HEAD_LINEAR 0')
-    check('and not for a commit that is not on the branch',
-      await printed(repo, stray), 'TOUCHSTONE_PRIOR_HEAD_LINEAR 1')
+    check('the command prints 0 for an ancestor with no merge after it',
+      await printed(repo, reviewed), PRIOR_OK)
+    check('and 1 for a commit that is not on the branch', await printed(repo, stray), PRIOR(1))
+    check('and 1 for a commit git cannot resolve', await printed(repo, 'e'.repeat(40)), PRIOR(1))
     gitIn(repo, 'checkout', '-q', 'main')
     commit(repo, 'main-only.txt')
     gitIn(repo, 'checkout', '-q', 'feat')
     gitIn(repo, 'merge', '-q', '--no-ff', '-m', 'Merge main', 'main')
     commit(repo, 'b3.txt')
-    check('and not once the base was merged in after it, whose changes a range from it would carry',
-      await printed(repo, reviewed), 'TOUCHSTONE_PRIOR_HEAD_LINEAR 1')
-    check('a head after that merge is confirmed again', await printed(repo, gitIn(repo, 'rev-parse', 'HEAD~1')),
-      'TOUCHSTONE_PRIOR_HEAD_LINEAR 0')
+    check('and 2 once the base was merged in after it: still an ancestor, but a range from it carries the base',
+      await printed(repo, reviewed), PRIOR_MERGED)
+    check('a head after that merge prints 0 again', await printed(repo, gitIn(repo, 'rev-parse', 'HEAD~1')),
+      PRIOR_OK)
   } finally {
     fs.rmSync(dir, { recursive: true, force: true })
   }
@@ -437,7 +441,7 @@ async function scenarioR9() {
   check('a run that is not --existing hands back nothing either',
     [fresh.result.reviewed_through, fresh.result.unresolved_findings, fresh.result.notes], [null, undefined, undefined])
 
-  const dropped = await run(resumed(prior, { existingBranchResult: existing({ prior_head_check: 'TOUCHSTONE_PRIOR_HEAD_LINEAR 1' }),
+  const dropped = await run(resumed(prior, { existingBranchResult: existing({ prior_head_check: PRIOR(1) }),
     args: { runBudget: 1_000_000 }, spendAllAfter: 'implementer' }))
   check('a head that is not confirmed is dropped from a later halt, record and all',
     [dropped.result.halted_at !== undefined, dropped.result.reviewed_through,
@@ -501,8 +505,81 @@ async function scenarioR10() {
     [lenses.length, lenses.every(c => c.prompt.includes('[f2] Carried f2 (src/f2.js)'))], [2, true])
 }
 
+async function scenarioR11() {
+  console.log('\n== scenario R11: a head the base was merged after is still an ancestor, so its record is kept and the whole branch is reviewed')
+  const prior = { unresolved_findings: [carriedFinding('f3')], notes: [carriedNote('f5')] }
+  const merged = existing({ prior_head_check: PRIOR_MERGED })
+  const BASE = COMMIT_RANGE.split('..')[0]
+
+  const reviewed = await run(resumed(prior, { existingBranchResult: merged, args: { maxReviewRounds: 1, runBudget: undefined },
+    triage: { estimated_loc: 100 }, diffstatFiles: [['a.js', 1000, 0]],
+    verify: () => undefined, staleness: () => [] }))
+  const lenses = initialLensCalls(reviewed.captured)
+  check('the lenses review the whole branch', lenses.length > 0 &&
+    lenses.every(c => c.prompt.includes(`Commit range: ${COMMIT_RANGE}\n`)), true)
+  check('no lens is given a range from the record\'s head', lenses.some(c => c.prompt.includes(P)), false)
+  check('the carried finding and note are still tracked, so the lenses are told of them',
+    lenses.every(c => c.prompt.includes('[f3] Carried f3 (src/f3.js)') && c.prompt.includes('[f5] Note f5 (src/f5.js)')), true)
+  check('the carried finding reaches the fixer',
+    (reviewed.captured.calls.find(c => c.label === 'fix:1')?.prompt ?? '').includes('Carried f3'), true)
+  check('the carried finding and note are in the result',
+    [idsOf(reviewed.result.unresolved_findings), idsOf(reviewed.result.notes)], [['f3'], ['f5']])
+  check('the whole-branch range is the one triage already sized, so the budget is not raised',
+    reviewed.captured.logs.some(l => l.startsWith('run budget raised')), false)
+  check('the head it reports is the one that review read up to', reviewed.result.reviewed_through, REVIEWED_THROUGH)
+
+  const tiny = await run(resumed(prior, { existingBranchResult: merged, diffstatFiles: [['a.js', 5, 0]],
+    verify: (id) => id === 'f3', fixHead: () => FIX_HEAD, staleness: () => [] }))
+  check('a branch too small for any lens still reviews the carried finding\'s fix', callCount(tiny.captured, 'review:fix:1:correctness'), 1)
+  const tail = tiny.captured.calls.find(c => c.label === 'review:fix:1:correctness')?.prompt ?? ''
+  check('that review starts where the whole branch does, so the commits no lens read are read too',
+    tail.includes(`Commit range: ${BASE}..${FIX_HEAD}\n`), true)
+  check('and the head it reports is the one that review read up to', tiny.result.reviewed_through, FIX_HEAD)
+
+  const halted = await run(resumed(prior, { existingBranchResult: merged, args: { runBudget: 1_000_000 },
+    spendAllAfter: 'draft-pr' }))
+  check('a halt before any review keeps the record whole',
+    [halted.result.halted_at, halted.result.reviewed_through, idsOf(halted.result.unresolved_findings),
+     idsOf(halted.result.notes)], ['Review', P, ['f3'], ['f5']])
+}
+
+async function scenarioR12() {
+  console.log('\n== scenario R12: a demonstrated finding whose latest row went missing is carried open; only one nobody ever ran is measured again')
+  const small = { diffstatFiles: [['a.js', 5, 0]], staleness: () => [] }
+  const openDropped = await run({ args: { maxReviewRounds: 1 },
+    initialReview: { correctness: [{ title: 'Open then dropped', file: 'src/p.js', claim: 'c', evidence: 'e' }], advocate: [] },
+    verify: (id, round) => round >= 1 ? 'norow' : 1, fixHead: () => FIX_HEAD, staleness: () => [] })
+  check('an open finding the executor drops in a fix round halts the setup run at Fix',
+    [openDropped.result.halted_at, idsOf(openDropped.result.unresolved_findings)], ['Fix', ['f1']])
+  const settledDropped = await run(convergedWithSuspect({ tailReview: [],
+    initialReview: { correctness: [{ title: 'Settled then dropped', file: 'src/q.js', claim: 'c', evidence: 'e' }], advocate: [] },
+    verify: (id) => id === 'f1' ? true : undefined, mutationResult: mutationAt(MUT_HEAD),
+    settledExit: (id, round) => round === 'mutation' ? undefined : 0 }))
+  check('a settled finding whose recheck row is dropped halts the setup run at Review',
+    [settledDropped.result.halted_at, idsOf(settledDropped.result.unresolved_findings)], ['Review', ['f1']])
+
+  for (const [name, setup] of [['an open one', openDropped], ['a settled one', settledDropped]]) {
+    const rec = setup.result
+    const { result, captured } = await run(resumed({ unresolved_findings: rec.unresolved_findings, notes: rec.notes },
+      { ...small, verify: () => 2, outputFor: () => 'crashed, no marker' }))
+    check(`${name}: its reproducer is not run first as a candidate`, callCount(captured, 'reproduce:carried'), 0)
+    check(`${name}: it reaches the fixer`,
+      (captured.calls.find(c => c.label === 'fix:1')?.prompt ?? '').includes(rec.unresolved_findings[0].title), true)
+    check(`${name}: it stays open, and is not demoted to a note`,
+      [idsOf(result.unresolved_findings), idsOf(result.notes)], [['f1'], []])
+  }
+
+  const never = await run({ initialReview: { correctness: [{ title: 'Never measured', file: 'src/r.js', claim: 'c', evidence: 'e' }], advocate: [] },
+    initialExit: () => undefined })
+  check('a candidate no row ever came back for halts the setup run on measurement',
+    [never.result.halted_at, never.result.unresolved_findings?.[0]?.reproducer_run?.outcome], ['Review', 'not-executed'])
+  const remeasured = await run(resumed({ unresolved_findings: never.result.unresolved_findings, notes: never.result.notes },
+    { ...small, verify: () => true }))
+  check('and is the only kind a resumed run measures first', callCount(remeasured.captured, 'reproduce:carried'), 1)
+}
+
 const SCENARIOS = [scenarioR1, scenarioR2, scenarioR3, scenarioR4, scenarioR5, scenarioR6, scenarioR7,
-  scenarioR8, scenarioR9, scenarioR10]
+  scenarioR8, scenarioR9, scenarioR10, scenarioR11, scenarioR12]
 JS_EOF
 
 finish

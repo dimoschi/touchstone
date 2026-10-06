@@ -197,8 +197,8 @@ sChecksPost.close()
 stageSpend.checks = checksPreSpend + (stageSpend.checks ?? 0)
 
 // Taken here, after the pre-review fix may have moved impl.commit_range's head.
-const firstReviewRange = reviewedHead
-  ? `${reviewedHead}..${headOf(impl.commit_range)}` : impl.commit_range
+const firstReviewRange = resumeFrom
+  ? `${resumeFrom}..${headOf(impl.commit_range)}` : impl.commit_range
 
 // Nothing under .touchstone/ may reach a commit. The range runs from the
 // implementer's own base, not from the previous head, so a commit that adds the
@@ -461,7 +461,7 @@ size = sizeOf(sizeParsed)
 // Triage sized the ticket, but a resumed run's first review range is whatever
 // the last run left unreviewed, and a large ticket's leftover can be bigger than
 // that estimate. Raised, never lowered, and never over an explicit args.runBudget.
-if (reviewedHead && typeof args?.runBudget !== 'number') {
+if (resumeFrom && typeof args?.runBudget !== 'number') {
   const needed = budgetForLoc(size.totalChurn)
   if (needed > runBudget) {
     runBudget = needed
