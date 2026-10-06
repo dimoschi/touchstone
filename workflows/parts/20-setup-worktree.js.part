@@ -194,6 +194,39 @@ const checksDiscoveryStep = (n, whichPath) =>
   `it; a later step decides what it means. Set checks_source.detail to one ` +
   `line saying what you found.`
 
+// The head an earlier run's review finished at, from the run record the invoking
+// session passes in as args.priorRun (the script has no fs). An explicit
+// args.reviewedThrough wins over the record's. Only a full SHA is a candidate,
+// and only the branch:existing step below can say whether it is still on the
+// branch, so nothing is carried until then.
+const PRIOR_HEAD_MARKER = 'TOUCHSTONE_PRIOR_HEAD_LINEAR'
+const PRIOR_HEAD_LINEAR = `${PRIOR_HEAD_MARKER} 0`
+const PRIOR_HEAD_MERGED = `${PRIOR_HEAD_MARKER} 2`
+const priorHeadGiven = !args?.existingBranch ? null
+  : typeof args.reviewedThrough === 'string' ? args.reviewedThrough
+  : args.priorRun?.reviewed_through
+const priorHead = asSha(priorHeadGiven)
+if (priorHeadGiven != null && !priorHead) {
+  log(`ignoring reviewed head ${JSON.stringify(priorHeadGiven)}: not a 40-character SHA; ` +
+      `reviewing the whole branch`)
+}
+// Prints 0 for an ancestor with no merge after it, 2 for an ancestor with one,
+// and 1 for anything else. Two facts, not one: an ancestor keeps its findings'
+// recorded_at and reproducers valid, but git diff A..B is a tree diff, so a range
+// from a head that predates merging the base in holds all the base gained too, and
+// the lenses would review that as this branch's work. A merge costs the narrowed
+// range, never the carried record.
+const priorHeadCommand = (path, head) =>
+  `git -C ${path} merge-base --is-ancestor ${priorHead} ${head}; a=$?; ` +
+  `m=$(git -C ${path} rev-list --merges --count ${priorHead}..${head}); ` +
+  `echo ${PRIOR_HEAD_MARKER} $((a ? 1 : (m ? 2 : 0)))`
+const priorHeadStep = (n) =>
+  `${n}. Also before you return, only if step 8 returned created=true: run ` +
+  `exactly the command below, with <path> the absolute path from step 8, and ` +
+  `put the one line it prints in prior_head_check, verbatim and alone. Do not ` +
+  `interpret it; the script reads it.\n` +
+  priorHeadCommand('<path>', 'HEAD')
+
 // existingBranch is for follow-up work on an open PR: review feedback, or scope
 // added to a ticket already in flight. Cutting a fresh branch there strands the
 // delta away from the PR it belongs to. The ticket stays mandatory either way.
@@ -306,7 +339,8 @@ const wt = args?.existingBranch
       `(step 4), the worktree-less branch (step 5), or the fallback (step 6), ` +
       `whether that path is the main checkout or a linked worktree, and ` +
       `whether the branch name carries a jira- or gh- marker.\n` +
-      checksDiscoveryStep(9, 'that path'),
+      checksDiscoveryStep(9, 'that path') +
+      (priorHead ? `\n${priorHeadStep(10)}` : ''),
       { label: 'branch:existing', schema: EXISTING_BRANCH, model: 'haiku', effort: 'low' })
   // A worktree is a separate checkout, so the main tree's state is irrelevant
   // to it; cutting from origin/<base> is what removes the need to touch the
@@ -470,6 +504,30 @@ wt.base = (baseOverride || wt.base).replace(/^origin\//, '')
 log(args?.existingBranch
   ? `worktree ${wt.path} reused for branch ${wt.branch} (base ${wt.base})`
   : `worktree ${wt.path} created for branch ${wt.branch} (base ${wt.base})`)
+
+const priorHeadAnswer = wt.prior_head_check
+if (!priorHead || (priorHeadAnswer !== PRIOR_HEAD_LINEAR && priorHeadAnswer !== PRIOR_HEAD_MERGED)) {
+  recordedHead = null
+  carriedOpen = []
+  carriedNotes = []
+  if (priorHead) {
+    log(`reviewed head ${priorHead} is not confirmed as an ancestor of branch ` +
+        `${wt.branch} (check printed ${JSON.stringify(wt.prior_head_check ?? null)}); ` +
+        `reviewing the whole branch, carrying nothing`)
+  }
+} else {
+  recordedHead = priorHead
+  carriedOpen = carry(args.priorRun?.unresolved_findings)
+  carriedNotes = carry(args.priorRun?.notes)
+  const carried = `${carriedOpen.length} open, ${carriedNotes.length} notes carried`
+  if (priorHeadAnswer === PRIOR_HEAD_LINEAR) {
+    resumeFrom = priorHead
+    log(`resuming from reviewed head ${priorHead}: ${carried}`)
+  } else {
+    log(`reviewed head ${priorHead} is still an ancestor of branch ${wt.branch}, but a ` +
+        `merge commit came after it; reviewing the whole branch, ${carried}`)
+  }
+}
 
 
 // Every agent dispatch below inherits the session's working directory, which

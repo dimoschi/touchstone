@@ -279,7 +279,15 @@ direct `agent()`-style call (`setup`, `branch`, `branch:existing`, `collapseDupl
 and `dispatch()` never refuses; right after Triage, it is set to `100_000 + 1_500 *
 estimated_loc` output tokens, clamped `300_000..1_000_000`, or a flat `300_000`/`600_000`
 default by scope when triage gave no estimate, and `args.runBudget` overrides either.
-From there, `dispatch()` refuses any call once `budget.spent()` has reached it.
+A resumed `--existing` run raises the budget to the same formula applied to its first
+review range's measured changed lines, and logs it, when that figure is above the budget
+set after Triage, whether that budget came from triage's estimate or from the flat default.
+The range is the whole branch, not the part after the record's head, when a merge came
+after that head. The branch step checks that once; the implementer may merge the base
+too, so a `resume:range-check` probe asks the same question at the head Implement left,
+and a probe that is missing or not the marker line is read as a merge.
+`args.runBudget` is never raised. A halt note after a raise says what the budget was raised
+to fit and what it was raised from, including why that figure was set. From there, `dispatch()` refuses any call once `budget.spent()` has reached it.
 
 Everything after that point runs inside one `try`/`catch`, so a refusal anywhere in the
 run unwinds to a single halt rather than needing its own latch at every call site. Two
@@ -401,7 +409,11 @@ model reading the code and declaring the criterion met, is the judgement blockin
 not rest on.
 
 An open finding carries its latest `reproducer_run` into every fix brief, replaced each
-round rather than accumulated. Exit 0 settles it regardless of the marker; nonzero with
+round rather than accumulated. A round whose row the executor dropped is no run, so the
+finding (open, or a settled one reopened by its recheck) keeps the last run that
+happened: `not-executed` in a record therefore only ever names a candidate no row came
+back for, which is what a resumed `--existing` run measures again before anything else.
+Exit 0 settles it regardless of the marker; nonzero with
 the marker keeps it open as `reproduced`; nonzero without it keeps it open as `errored`,
 and the brief says the reproducer itself failed to run, with its exit code and output, so
 the fixer is not sent chasing a defect nobody demonstrated.

@@ -187,11 +187,12 @@ sTriage.close()
 // changed lines, and an inline-sized gate fix that spent 141k in Implement
 // alone): a budget halt strands work mid-run, so it is for a run that has
 // gone wrong, not a tight fit.
+const budgetForLoc = (loc) => Math.min(1_000_000, Math.max(300_000, 100_000 + 1_500 * loc))
 if (typeof args?.runBudget === 'number') {
   runBudget = args.runBudget
   runBudgetNote = `set explicitly via args.runBudget`
 } else if (triage.estimated_loc != null) {
-  runBudget = Math.min(1_000_000, Math.max(300_000, 100_000 + 1_500 * triage.estimated_loc))
+  runBudget = budgetForLoc(triage.estimated_loc)
   runBudgetNote = `derived from triage's ~${triage.estimated_loc} estimated LOC`
 } else {
   runBudget = inlineMode ? 300_000 : 600_000

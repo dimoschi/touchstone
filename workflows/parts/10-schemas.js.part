@@ -60,6 +60,8 @@ const EXISTING_BRANCH = {
   properties: {
     ...BRANCH.properties,
     halt_reason: { type: 'string', enum: ['none', 'ambiguous', 'wrong-ticket', 'merged', 'occupied'] },
+    // Optional: asked for only when a prior reviewed head was passed in.
+    prior_head_check: { type: 'string' },
   },
 }
 
@@ -255,6 +257,10 @@ const PLAN_WRITE = {
   },
 }
 const PLAN_LEAK_PROBE = {
+  type: 'object', additionalProperties: false, required: ['output'],
+  properties: { output: { type: 'string' } },
+}
+const HEAD_CHECK_PROBE = {
   type: 'object', additionalProperties: false, required: ['output'],
   properties: { output: { type: 'string' } },
 }
