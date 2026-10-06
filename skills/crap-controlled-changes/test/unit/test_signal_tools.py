@@ -399,6 +399,108 @@ def test_api_broken_in_php_ignores_test_files(repo, stubs):
     assert got["value"] is False and "only test files" in got["evidence"]["output"]
 
 
+def exempt(*patterns):
+    return tuple(f":(glob,exclude,top){pattern}" for pattern in patterns)
+
+
+def test_api_broken_in_python_is_false_beside_an_exempt_test_file(repo, stubs):
+    griffe(stubs)
+    ctx = change(repo, {"pkg/__init__.py": "", "pkg/a.py": "def f():\n    pass\n", "tests/fixtures/s.py": "x = 1\n"},
+                 {"pkg/a.py": "def f():\n    return 1\n", "tests/fixtures/s.py": "x = 2\n"},
+                 exempt=exempt("tests/fixtures/**"))
+    assert ctx.exempted == ("tests/fixtures/s.py",)
+    assert st.api_broken(ctx)["value"] is False
+
+
+def test_api_broken_in_go_is_false_beside_an_exempt_test_file_in_a_module_it_did_not_read(repo, stubs):
+    apidiff(stubs)
+    ctx = change(repo, {"go.mod": GO_MOD, "a.go": "package m\n\nfunc A() {}\n",
+                        "other/go.mod": "module example.com/other\n", "other/x_test.go": "package other\n"},
+                 {"a.go": "package m\n", "other/x_test.go": "package other\n\nfunc T() {}\n"},
+                 exempt=exempt("other/**"))
+    assert ctx.exempted == ("other/x_test.go",)
+    assert st.api_broken(ctx)["value"] is False
+    assert len(stubs.calls("apidiff")) == 2
+
+
+def test_api_broken_in_go_is_unmeasured_beside_an_exempt_source_in_a_module_it_did_not_read(repo, stubs):
+    apidiff(stubs)
+    ctx = change(repo, {"go.mod": GO_MOD, "a.go": "package m\n\nfunc A() {}\n",
+                        "other/go.mod": "module example.com/other\n", "other/x.go": "package other\n"},
+                 {"a.go": "package m\n", "other/x.go": "package other\n\nfunc T() {}\n"},
+                 exempt=exempt("other/**"))
+    got = st.api_broken(ctx)
+    assert got["value"] == UNMEASURED
+    assert "other/x.go" in got["reason"] and "exempts" in got["reason"]
+
+
+def test_api_broken_in_go_is_false_beside_an_exempt_source_in_a_module_it_read_whole(repo, stubs):
+    apidiff(stubs)
+    ctx = change(repo, {"go.mod": GO_MOD, "a.go": "package m\n\nfunc A() {}\n", "gen/x.go": "package gen\n"},
+                 {"a.go": "package m\n", "gen/x.go": "package gen\n\nfunc T() {}\n"}, exempt=exempt("gen/**"))
+    assert ctx.exempted == ("gen/x.go",)
+    assert st.api_broken(ctx)["value"] is False
+
+
+def test_api_broken_in_go_reads_the_module_of_a_changed_test_file_whole(repo, stubs):
+    apidiff(stubs)
+    ctx = change(repo, {"go.mod": GO_MOD, "a_test.go": "package m\n", "gen/x.go": "package gen\n"},
+                 {"a_test.go": "package m\n\nfunc T() {}\n", "gen/x.go": "package gen\n\nfunc T() {}\n"},
+                 exempt=exempt("gen/**"))
+    assert st.api_broken(ctx)["value"] is False
+    assert len(stubs.calls("apidiff")) == 2
+
+
+def test_api_broken_in_python_is_false_beside_an_exempt_source_in_a_package_it_read_whole(repo, stubs):
+    griffe(stubs)
+    ctx = change(repo, {"pkg/__init__.py": "", "pkg/a.py": "x = 1\n", "pkg/gen/__init__.py": "", "pkg/gen/g.py": "x = 1\n"},
+                 {"pkg/a.py": "x = 2\n", "pkg/gen/g.py": "x = 2\n"}, exempt=exempt("pkg/gen/**"))
+    assert ctx.exempted == ("pkg/gen/g.py",)
+    assert st.api_broken(ctx)["value"] is False
+    assert [c["args"][1] for c in stubs.calls("griffe")] == ["pkg"]
+
+
+def test_api_broken_in_python_is_unmeasured_beside_an_exempt_source_in_a_package_it_did_not_read(repo, stubs):
+    griffe(stubs)
+    ctx = change(repo, {"pkg/__init__.py": "", "pkg/a.py": "x = 1\n", "other/__init__.py": "", "other/g.py": "x = 1\n"},
+                 {"pkg/a.py": "x = 2\n", "other/g.py": "x = 2\n"}, exempt=exempt("other/**"))
+    got = st.api_broken(ctx)
+    assert got["value"] == UNMEASURED
+    assert "other/g.py" in got["reason"] and "exempts" in got["reason"]
+
+
+def test_api_broken_in_python_is_unmeasured_beside_an_exempt_source_outside_any_package(repo, stubs):
+    griffe(stubs)
+    ctx = change(repo, {"pkg/__init__.py": "", "pkg/a.py": "x = 1\n", "scripts/t.py": "x = 1\n"},
+                 {"pkg/a.py": "x = 2\n", "scripts/t.py": "x = 2\n"}, exempt=exempt("scripts/**"))
+    got = st.api_broken(ctx)
+    assert got["value"] == UNMEASURED and "scripts/t.py" in got["reason"]
+
+
+def test_api_broken_in_php_is_false_beside_an_exempt_source_the_project_run_read(repo, stubs):
+    stubs.add("roave-backward-compatibility-check", err="No backwards-incompatible changes detected\n")
+    ctx = change(repo, {"composer.json": "{}\n", "src/A.php": "<?php\nclass A {}\n", "gen/G.php": "<?php\nclass G {}\n"},
+                 {"src/A.php": "<?php\nclass B {}\n", "gen/G.php": "<?php\nclass H {}\n"}, exempt=exempt("gen/**"))
+    assert ctx.exempted == ("gen/G.php",)
+    assert st.api_broken(ctx)["value"] is False
+
+
+def test_api_broken_is_unmeasured_beside_an_exempt_php_source_when_no_php_tool_ran(repo, stubs):
+    griffe(stubs)
+    ctx = change(repo, {"pkg/__init__.py": "", "pkg/a.py": "x = 1\n", "gen/G.php": "<?php\nclass G {}\n"},
+                 {"pkg/a.py": "x = 2\n", "gen/G.php": "<?php\nclass H {}\n"}, exempt=exempt("gen/**"))
+    got = st.api_broken(ctx)
+    assert got["value"] == UNMEASURED and "gen/G.php" in got["reason"]
+
+
+def test_security_pattern_is_unmeasured_beside_an_exempt_test_file_bandit_was_not_given(repo, stubs):
+    stubs.add("bandit", out=bandit_json())
+    ctx = change(repo, {"a.py": "x = 1\n", "tests/fixtures/s.py": "y = 1\n"},
+                 {"a.py": "x = 2\n", "tests/fixtures/s.py": "y = 2\n"}, exempt=exempt("tests/fixtures/**"))
+    got = st.security_pattern(ctx)
+    assert got["value"] == UNMEASURED and "tests/fixtures/s.py" in got["reason"]
+
+
 def gosec_json(repo, line, rule="G204", errors=None, name="a.go"):
     return json.dumps({
         "Golang errors": errors or {},

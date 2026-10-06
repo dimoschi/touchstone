@@ -589,7 +589,11 @@ Go, PHP or Python file at all each make it unmeasured. The languages no tool cov
 leaves out on purpose), and a path the repo's marker exempts is still one of them: the
 exemption is about the CRAP gate, and no tool here read the file. A changed Go, PHP or
 Python file the marker exempts is not handed to any tool either, so it makes `api_broken`
-and `security_pattern` unmeasured as well. A non-zero exit counts as a finding only when
+and `security_pattern` unmeasured as well, with one carve-out for `api_broken`: its tools
+read a whole module (`apidiff`), top-level package (`griffe`) or project (`roave`), so an
+exempt file inside one they ran over for a gated file was read, and an exempt test file
+(`_test.go` for Go, any test file for Python and PHP) is one no `api_broken` tool counts
+whether it is exempt or not. A non-zero exit counts as a finding only when
 the output holds that tool's own finding record, because the same exit code also means
 the tool broke. A proof stands over what could not be checked: one
 language showing a break is true even if another's tool was missing. Tools that read the

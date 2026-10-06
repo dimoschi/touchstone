@@ -64,23 +64,28 @@ def language_parts(ctx, handlers):
     return parts
 
 
-def unread_parts(ctx):
+def unread_parts(ctx, exempted):
     """An unmeasured part for each set of changed files that no tool here was given."""
     parts = []
     if ctx.unsupported:
         parts.append(unmeasured('changed file(s) in a language no tool here covers: '
                                 + ', '.join(ctx.unsupported)))
-    if ctx.exempted:
+    if exempted:
         parts.append(unmeasured("changed file(s) the repo's .crap-gated exempts, so no tool here read them: "
-                                + ', '.join(ctx.exempted)))
+                                + ', '.join(exempted)))
     return parts
 
 
-def semantic(ctx, handlers):
-    """Run each language's handler over its changed files and combine what they say."""
+def all_exempted(ctx):
+    return ctx.exempted
+
+
+def semantic(ctx, handlers, exempted=all_exempted):
+    """Run each language's handler over its changed files and combine what they say.
+    `exempted` picks, from the changed files the marker exempts, those no tool of the signal read."""
     if not ctx.at_head:
         return unmeasured(HEAD_MOVED)
-    parts = [*language_parts(ctx, handlers), *unread_parts(ctx)]
+    parts = [*language_parts(ctx, handlers), *unread_parts(ctx, exempted(ctx))]
     return combine(parts) if parts else unmeasured('no Go, PHP or Python file changed')
 
 
@@ -206,8 +211,43 @@ def php_api(ctx, files):
                          if line.lstrip().startswith('[BC]')])]
 
 
+def api_counts(path):
+    """Whether `path` can change what an api_broken tool reports: apidiff skips _test.go files,
+    and the Python and PHP tools are handed no test file."""
+    if lang_of(path) == 'go':
+        return not path.endswith('_test.go')
+    return not is_test_file(path)
+
+
+def api_unit(ctx, moddirs, path):
+    """What the api_broken tool reads whole for `path`: its Go module, its top-level Python
+    package, the PHP project. None for a Python file in no package, and for any other file."""
+    lang = lang_of(path)
+    if lang == 'go':
+        return ('go', go_modules.owning_module(path, moddirs, ctx.repo))
+    if lang == 'python':
+        top = top_package(ctx.repo, path)
+        return ('python', top[0]) if top else None
+    return ('php',) if lang == 'php' else None
+
+
+def api_run_units(ctx, moddirs):
+    """The units the api_broken tools run over for the gated files. apidiff runs for a changed
+    _test.go file too, since go_api hands it every gated Go file."""
+    return {api_unit(ctx, moddirs, path) for path in ctx.gated
+            if lang_of(path) == 'go' or api_counts(path)} - {None}
+
+
+def api_exempted(ctx):
+    """The exempt files no api_broken tool read: those that can change its report and sit in no
+    module, package or project it ran over for the gated files."""
+    moddirs = go_modules.module_dirs(ctx.repo)
+    ran = api_run_units(ctx, moddirs)
+    return [path for path in ctx.exempted if api_counts(path) and api_unit(ctx, moddirs, path) not in ran]
+
+
 def api_broken(ctx):
-    return semantic(ctx, {'go': go_api, 'python': python_api, 'php': php_api})
+    return semantic(ctx, {'go': go_api, 'python': python_api, 'php': php_api}, exempted=api_exempted)
 
 
 def parse_json(text):
