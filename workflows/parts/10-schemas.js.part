@@ -247,9 +247,9 @@ const IMPL = {
 }
 const PLAN_WRITE = {
   type: 'object', additionalProperties: false,
-  required: ['bytes', 'last_line', 'ignored_exit'],
+  required: ['digest', 'last_line', 'ignored_exit'],
   properties: {
-    bytes: { type: 'integer' },
+    digest: { type: 'string' },
     last_line: { type: 'string' },
     ignored_exit: { type: 'integer' },
   },

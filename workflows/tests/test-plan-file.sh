@@ -141,8 +141,10 @@ async function scenarioPF6() {
   check('it never names a tracked ignore file', p.includes('.gitignore'), false)
   check('it no longer claims an edit hook only lets an ignored path through',
     /edit hook/.test(p), false)
-  check('it asks for wc -c, tail -n 1 and check-ignore',
-    p.includes('wc -c') && p.includes('tail -n 1') && p.includes('check-ignore -q .touchstone/plan.md'), true)
+  check('it asks for the digest command, tail -n 1 and check-ignore',
+    /^digest: what python3 -c .* \/tmp\/stub-worktree\/\.touchstone\/plan\.md prints\.$/m.test(p) &&
+      p.includes('tail -n 1') && p.includes('check-ignore -q .touchstone/plan.md'), true)
+  check('it no longer asks for a byte count', p.includes('wc -c'), false)
   check('it is dispatched on a cheap model', captured.calls.find(c => c.label === 'plan:write') !== undefined, true)
   const again = await planIdFor({ args: { planMaxChars: 8000 }, plannerResult: plannerWith(plan) })
   check('the id is deterministic', again, written?.id)
@@ -153,9 +155,9 @@ async function scenarioPF6() {
 // Scenario PF7 -- plan:write has to prove the file is whole, or the run stops.
 // A failed answer is retried once; only a second failure halts.
 async function scenarioPF7() {
-  console.log('\n== scenario PF7: a wrong byte count, last line or ignore status is retried once, then halts at Implement')
+  console.log('\n== scenario PF7: a wrong digest, last line or ignore status is retried once, then halts at Implement')
   const cases = [
-    ['wrong byte count', { bytes: 1 }],
+    ['wrong digest', { digest: '00000000' }],
     ['wrong last line', { last_line: 'END OF PLAN 00000000' }],
     ['not ignored', { ignored_exit: 1 }],
     ['no answer', null],
@@ -181,19 +183,40 @@ async function scenarioPF7() {
   }
 }
 
-// Scenario PF8 -- the byte count is UTF-8 bytes, not characters.
+// Scenario PF8 -- the file is checked by a digest of its whitespace-collapsed
+// content, computed in the worktree by a command the script built. The command
+// is run here for real, against files written the way a model might copy.
 async function scenarioPF8() {
-  console.log('\n== scenario PF8: the expected byte count is the UTF-8 length of the content')
-  const plan = 'café → 😀 done'
-  const ok = await run({ triage: TEAM, plannerResult: plannerWith(plan), ...CLEAN })
-  check('the true UTF-8 count is accepted', ok.result.halted_at, undefined)
-  const written = planFileIn(promptOf(ok.captured, 'plan:write'))
-  const chars = [...(written?.content ?? '')].length
-  check('the content is longer in bytes than in characters',
-    Buffer.byteLength(written?.content ?? '', 'utf8') > chars, true)
-  const wrong = await run({ triage: TEAM, plannerResult: plannerWith(plan), ...CLEAN,
-    planWrite: { bytes: chars } })
-  check('a character count is refused', wrong.result.halted_at, 'Implement')
+  console.log('\n== scenario PF8: the digest ignores whitespace slips, catches a dropped word, and agrees on non-ASCII text')
+  const plan = 'café → 😀 done\n- step one\n- step two\n\tindented'
+  const first = await run({ triage: TEAM, plannerResult: plannerWith(plan), ...CLEAN })
+  const p = promptOf(first.captured, 'plan:write')
+  const written = planFileIn(p)
+  const cmd = /^digest: what (python3 .*) prints\.$/m.exec(p)?.[1]
+  check('the prompt gives a digest command', typeof cmd, 'string')
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'plan-digest-'))
+  try {
+    const end = `\nEND OF PLAN ${written?.id}\n`
+    const digestOf = (text) => {
+      const file = path.join(dir, 'plan.md')
+      fs.writeFileSync(file, text)
+      return execFileSync('bash', ['-c', cmd.replace(`${STUB_WT_PATH}/.touchstone/plan.md`, file)],
+        { encoding: 'utf8' }).trim()
+    }
+    const exact = digestOf(written.content + end)
+    const slipped = digestOf(written.content.replace('- step two', '  - step two').replace('\n', '\n\n') + end)
+    const dropped = digestOf(written.content.replace('step one', 'step') + end)
+    check('a whitespace slip has the same digest', slipped, exact)
+    check('a dropped word has a different digest', dropped !== exact, true)
+    const ok = await run({ triage: TEAM, plannerResult: plannerWith(plan), ...CLEAN,
+      planWrite: { digest: slipped } })
+    check('the script computes the same digest as the command, non-ASCII included', ok.result.halted_at, undefined)
+    const bad = await run({ triage: TEAM, plannerResult: plannerWith(plan), ...CLEAN,
+      planWrite: { digest: dropped } })
+    check('a copy missing a word halts at Implement', bad.result.halted_at, 'Implement')
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true })
+  }
 }
 
 // Scenario PF9 -- the implementer is pointed at the file, never handed the plan.

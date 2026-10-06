@@ -87,6 +87,14 @@ function planFileIn(prompt) {
   return m ? { id: m[1], content: m[2] } : null
 }
 
+// What the plan:write prompt's digest command prints for a file's text.
+function planDigest(text) {
+  const bytes = Buffer.from(text.replace(/[ \t\n\r]+/g, ' ').replace(/^ | $/g, ''), 'utf8')
+  let h = 0x811c9dc5
+  for (const b of bytes) { h ^= b; h = Math.imul(h, 0x01000193) >>> 0 }
+  return h.toString(16).padStart(8, '0')
+}
+
 // The command the plan:write prompt gives for appending the end line.
 function planEndCommand(id) {
   return `printf '\\nEND OF PLAN %s\\n' ${id} >> ${STUB_WT_PATH}/.touchstone/plan.md`
@@ -261,7 +269,7 @@ function makeAgent(scenario, captured) {
         .test(prompt)
       const appended = appends ? `\nEND OF PLAN ${copied.id}\n` : ''
       const file = copied ? copied.content + appended : ''
-      return { bytes: Buffer.byteLength(file, 'utf8'),
+      return { digest: planDigest(file),
         last_line: file.replace(/\n$/, '').split('\n').pop(),
         ignored_exit: 0, ...(override ?? {}) }
     }
