@@ -1,8 +1,10 @@
 import io
 import json
 import os
+import subprocess
 import threading
 import time
+import types
 
 import pytest
 
@@ -324,4 +326,63 @@ def test_main_refuses_anything_but_record(capsys):
     with pytest.raises(SystemExit) as stop:
         crap_rows.main(["forget", "rows.json", "feat", "."])
     assert stop.value.code == 2
-    assert "invalid choice" in capsys.readouterr().err
+    assert "argument command: invalid choice" in capsys.readouterr().err
+
+
+@pytest.fixture
+def git_calls(monkeypatch):
+    """Every command crap_rows hands to subprocess.run, still run for real."""
+    calls = []
+    real = subprocess.run
+
+    def spy(cmd, *args, **kwargs):
+        calls.append(cmd)
+        return real(cmd, *args, **kwargs)
+
+    monkeypatch.setattr(crap_rows.subprocess, "run", spy)
+    return calls
+
+
+def test_git_runs_git_and_raises_when_it_fails(repo, git_calls):
+    repo.commit("base")
+    git_calls.clear()
+    crap_rows.git(str(repo.root), "rev-parse", "HEAD")
+    assert git_calls[0][0] == "git"
+    with pytest.raises(subprocess.CalledProcessError):
+        crap_rows.git(str(repo.root), "rev-parse", "no-such-ref")
+
+
+def test_trees_after_runs_git_and_returns_the_trees_of_the_newer_commits(repo, git_calls):
+    base = repo.commit("base")
+    head = repo.commit("second")
+    git_calls.clear()
+    trees = crap_rows.trees_after(str(repo.root), head, base)
+    assert git_calls[0][0] == "git"
+    assert trees == {repo.git("rev-parse", "HEAD^{tree}")}
+
+
+def test_trees_after_ignores_the_output_of_a_failed_git_log(monkeypatch):
+    failed = types.SimpleNamespace(returncode=1, stdout="deadbeef\n")
+    monkeypatch.setattr(crap_rows.subprocess, "run", lambda *args, **kwargs: failed)
+    assert crap_rows.trees_after(".", "HEAD", "base") == set()
+
+
+def test_record_measures_against_the_head_commit(repo, git_calls):
+    repo.commit("base")
+    crap_rows.record(repo.rows_path, "feat", GREEN, str(repo.root))
+    assert ["git", "-C", str(repo.root), "rev-parse", "HEAD"] in git_calls
+
+
+def test_a_claim_without_a_head_does_not_land(repo):
+    repo.commit("base")
+    head = repo.commit("second")
+    tree = repo.git("rev-parse", "HEAD^{tree}")
+    assert not crap_rows.lands(str(repo.root), head, {}, {"tree": tree})
+
+
+def test_a_claim_without_a_head_is_looked_up_under_an_empty_head(repo):
+    repo.commit("base")
+    head = repo.commit("second")
+    trees = {}
+    crap_rows.lands(str(repo.root), head, trees, {"tree": "x"})
+    assert list(trees) == [""]
