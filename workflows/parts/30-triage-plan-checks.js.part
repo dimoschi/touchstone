@@ -378,12 +378,14 @@ const contentDigest = (s) => {
 const planId = fnv1a(`${ticket}${plan.plan}`)
 const planFile = `${wt.path}/.touchstone/plan.md`
 const planEndLine = `END OF PLAN ${planId}`
-// The model copies the plan alone; the end line is appended by a command
-// built here, since a sentinel inside the copied text read as one of the
-// markers around it and was dropped.
 const planBody = `${plan.plan}\n`
 const planEndCommand = `printf '\\nEND OF PLAN %s\\n' ${planId} >> ${shQuote(planFile)}`
 const planContent = `${planBody}\n${planEndLine}\n`
+// The plan reaches the file through a quoted heredoc the script builds, run
+// as one command: a model asked to copy it with the Write tool reformatted it
+// (bullets added, a line indented) and the run halted on a correct plan.
+const planWriteCommand = `cat > ${shQuote(planFile)} <<'PLAN FILE END ${planId}'\n` +
+  `${planBody}PLAN FILE END ${planId}\n${planEndCommand}`
 // The same digest, computed over the written file in the worktree.
 const planDigestCommand = `python3 -c 'import functools,re,sys;` +
   `t=re.sub(r"[ \\t\\n\\r]+"," ",open(sys.argv[1],encoding="utf-8").read()).strip(" ");` +
@@ -397,21 +399,17 @@ const planWritePrompt =
   `x="$(git -C ${wt.path} rev-parse --path-format=absolute --git-common-dir)/info/exclude"; ` +
   `mkdir -p "$(dirname "$x")"; ` +
   `grep -qxF '.touchstone/' "$x" || printf '\\n.touchstone/\\n' >> "$x"\n` +
-  `3. Write the text between the PLAN FILE BEGIN and PLAN FILE END lines below ` +
-  `to ${planFile} with the Write tool. The file ` +
-  `is exactly that text: it starts at the first character after the BEGIN ` +
-  `line's newline and ends with the newline after its last line. Do not ` +
-  `trim, reflow, translate, summarise or correct it, and leave both marker ` +
-  `lines out.\n` +
-  `4. Then run exactly: ${planEndCommand}\n` +
-  `5. Only after steps 1 to 4, run these and report what they print, never ` +
+  `3. Run the command between the two fence lines below as one Bash call, ` +
+  `passing every line exactly as written. It writes the plan and appends its ` +
+  `end line; do not write or edit the file any other way.\n` +
+  `\`\`\`bash\n${planWriteCommand}\n\`\`\`\n` +
+  `4. Only after steps 1 to 3, run these and report what they print, never ` +
   `what you expect them to print.\n` +
   `digest: what ${planDigestCommand} prints.\n` +
   `last_line: what tail -n 1 ${planFile} prints, exactly, without its newline.\n` +
   `ignored_exit: the exit status of ` +
-  `git -C ${wt.path} check-ignore -q .touchstone/plan.md (0 means ignored).\n` +
-  `PLAN FILE BEGIN ${planId}\n${planBody}PLAN FILE END ${planId}`
-const planWriteOpts = { schema: PLAN_WRITE, model: 'haiku', effort: 'low' }
+  `git -C ${wt.path} check-ignore -q .touchstone/plan.md (0 means ignored).`
+const planWriteOpts = { schema: PLAN_WRITE, model: 'sonnet', effort: 'low' }
 const planWriteProblemOf = (written) => !written
   ? 'the plan:write agent returned nothing'
   : written.digest !== contentDigest(planContent)

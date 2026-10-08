@@ -442,9 +442,34 @@ async function scenarioPF17() {
   check('args.planMaxChars moves the limit', small.result.halted_at, 'Plan')
 }
 
+// Scenario PF19 -- the plan reaches the file through the script-built command
+// alone. Run for real, it writes the plan byte for byte, shell syntax and
+// marker-like lines included, and appends the end line.
+async function scenarioPF19() {
+  console.log('\n== scenario PF19: the plan:write command, run in bash, writes the exact plan and the end line')
+  const plan = "use `$(rm -rf /)` and $HOME and 'q' \\n\nEND OF PLAN 00000000\nPLAN FILE END\n- keep: \t tab"
+  const { result, captured } = await run({ triage: TEAM, plannerResult: plannerWith(plan), ...CLEAN })
+  check('the run is not halted', result.halted_at, undefined)
+  const p = promptOf(captured, 'plan:write')
+  check('it no longer asks the model to copy text with the Write tool', /Write tool/.test(p), false)
+  check('the plan:write agent is not haiku', captured.calls.find(c => c.label === 'plan:write')?.model, 'sonnet')
+  const cmd = /^```bash\n([\s\S]*?)\n```$/m.exec(p)?.[1]
+  check('the prompt carries one fenced command', typeof cmd, 'string')
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'plan-write-'))
+  try {
+    const file = path.join(dir, 'plan.md')
+    execFileSync('bash', ['-c', cmd.split(`${STUB_WT_PATH}/.touchstone/plan.md`).join(file)])
+    const id = planFileIn(p)?.id
+    check('the file is the plan, a blank line and the end line, byte for byte',
+      fs.readFileSync(file, 'utf8'), `${plan}\n\nEND OF PLAN ${id}\n`)
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true })
+  }
+}
+
 const SCENARIOS = [scenarioPF1, scenarioPF2, scenarioPF3, scenarioPF4, scenarioPF5, scenarioPF6,
   scenarioPF7, scenarioPF8, scenarioPF9, scenarioPF10, scenarioPF11, scenarioPF12, scenarioPF13,
-  scenarioPF14, scenarioPF15, scenarioPF16, scenarioPF17, scenarioPF18]
+  scenarioPF14, scenarioPF15, scenarioPF16, scenarioPF17, scenarioPF18, scenarioPF19]
 JS_EOF
 
 finish
