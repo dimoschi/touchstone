@@ -193,6 +193,144 @@ def test_render_of_no_records():
     assert render({}) == 'no run records found\n'
 
 
+def signals(**values):
+    return {'range': 'a..b', 'values': {name: {'value': value, 'evidence': {}} if value != 'unmeasured'
+                                         else {'value': value, 'reason': 'no tool', 'evidence': {}}
+                                         for name, value in values.items()}}
+
+
+def groups_of(recs, name):
+    return summarise(recs)['0.26.1']['signals'][name]['groups']
+
+
+def test_signals_group_runs_by_the_value_a_signal_took():
+    recs = [
+        record(signals=signals(api_broken=True), fix_rounds=3, halted_at='Fix',
+               unresolved_findings=[{'id': 'f1'}, {'id': 'f2'}]),
+        record(signals=signals(api_broken=True), fix_rounds=1),
+        record(signals=signals(api_broken=False), fix_rounds=0),
+        record(signals=signals(api_broken='unmeasured'), fix_rounds=2, halted_at='Review'),
+        record(),
+    ]
+    got = groups_of(recs, 'api_broken')
+    assert list(got) == ['true', 'false', 'unmeasured', 'missing']
+    assert got['true']['runs'] == 2
+    assert got['true']['fix_rounds'] == {'median': 2.0, 'measured': 2, 'missing': 0}
+    assert got['true']['halts'] == {'Fix': 1}
+    assert got['true']['blocking'] == {'total': 2, 'missing': 0}
+    assert got['false']['runs'] == 1 and got['false']['halts'] == {}
+    assert got['unmeasured']['halts'] == {'Review': 1}
+    assert got['missing']['runs'] == 1
+
+
+def test_a_number_signal_is_split_at_the_median_of_the_measured_values():
+    recs = [record(signals=signals(la=v), fix_rounds=r) for v, r in [(1, 0), (2, 1), (3, 2), (10, 3)]]
+    summary = summarise(recs)['0.26.1']['signals']['la']
+    assert summary['split'] == 2.5
+    assert list(summary['groups']) == ['<= 2.5', '> 2.5']
+    assert summary['groups']['<= 2.5']['runs'] == 2
+    assert summary['groups']['> 2.5']['fix_rounds']['median'] == 2.5
+
+
+def test_a_value_equal_to_the_median_sits_in_the_lower_group():
+    recs = [record(signals=signals(la=v)) for v in (1, 5, 9)]
+    got = groups_of(recs, 'la')
+    assert (got['<= 5']['runs'], got['> 5']['runs']) == (2, 1)
+
+
+def test_a_number_signal_whose_values_all_agree_has_only_the_lower_group():
+    got = groups_of([record(signals=signals(la=4)), record(signals=signals(la=4))], 'la')
+    assert list(got) == ['<= 4']
+
+
+def test_zero_is_a_measured_number_not_a_missing_one():
+    got = groups_of([record(signals=signals(la=0)), record(signals=signals(la=2))], 'la')
+    assert got['<= 1']['runs'] == 1
+
+
+def test_numbers_and_booleans_and_unmeasured_can_share_a_signal():
+    recs = [record(signals=signals(x=1)), record(signals=signals(x=3)), record(signals=signals(x='unmeasured')),
+            record(signals=signals(x=True))]
+    assert list(groups_of(recs, 'x')) == ['true', '<= 2', '> 2', 'unmeasured']
+
+
+@pytest.mark.parametrize('bad', [
+    {'values': {'la': {'evidence': {}}}},
+    {'values': {'la': {'value': None}}},
+    {'values': {'la': {'value': 'maybe'}}},
+    {'values': {'la': 7}},
+    {'values': {'other': {'value': 1}}},
+    {'values': [1]},
+    {'range': 'a..b'},
+    'none',
+    None,
+])
+def test_a_record_with_no_usable_entry_for_a_signal_is_counted_as_missing(bad):
+    recs = [record(signals=signals(la=1)), record(signals=bad)]
+    got = groups_of(recs, 'la')
+    assert got['missing']['runs'] == 1
+
+
+def test_signal_names_come_from_the_records_in_the_order_first_seen():
+    recs = [record(signals=signals(b=True, a=True)), record(signals=signals(c=1, a=False))]
+    assert list(summarise(recs)['0.26.1']['signals']) == ['b', 'a', 'c']
+
+
+def test_a_version_with_no_recorded_signals_has_none():
+    assert summarise([record(), record()])['0.26.1']['signals'] == {}
+
+
+def test_signals_are_summarised_per_pipeline_version():
+    recs = [record(signals=signals(a=True)), record(pipeline_version='0.27.0', signals=signals(b=True))]
+    got = summarise(recs)
+    assert list(got['0.26.1']['signals']) == ['a']
+    assert list(got['0.27.0']['signals']) == ['b']
+
+
+def test_render_prints_each_signal_after_the_version_block():
+    recs = [
+        record(signals=signals(api_broken=True, la=10), fix_rounds=3, halted_at='Fix',
+               unresolved_findings=[{'id': 'f1'}]),
+        record(signals=signals(api_broken=False, la=2), fix_rounds=0),
+        record(),
+    ]
+    assert render(summarise(recs)) == (
+        'pipeline 0.26.1: 3 run(s)\n'
+        '  outcome: merged 3, closed 0, open 0, none 0, missing 0\n'
+        '  halted: Fix 1\n'
+        '  output tokens per changed line: median 200 (3 measured, 0 missing)\n'
+        '  fix rounds: median 1 (3 measured, 0 missing)\n'
+        '  blocking findings 1 (0 missing), notes 0 (0 missing)\n'
+        '  signals:\n'
+        '    api_broken\n'
+        '      true: 1 run(s), fix rounds median 3, halted 1, blocking findings 1 (0 missing)\n'
+        '      false: 1 run(s), fix rounds median 0, halted 0, blocking findings 0 (0 missing)\n'
+        '      missing: 1 run(s), fix rounds median 1, halted 0, blocking findings 0 (0 missing)\n'
+        '    la (numbers split at the median 6)\n'
+        '      <= 6: 1 run(s), fix rounds median 0, halted 0, blocking findings 0 (0 missing)\n'
+        '      > 6: 1 run(s), fix rounds median 3, halted 1, blocking findings 1 (0 missing)\n'
+        '      missing: 1 run(s), fix rounds median 1, halted 0, blocking findings 0 (0 missing)\n'
+    )
+
+
+def test_render_says_n_a_for_a_group_with_no_fix_rounds_and_counts_missing_findings():
+    recs = [record(signals=signals(a=True), unresolved_findings=None, fix_rounds=None)]
+    assert '      true: 1 run(s), fix rounds median n/a, halted 0, blocking findings 0 (1 missing)\n' in render(summarise(recs))
+
+
+def test_render_orders_a_signals_groups_true_false_numbers_unmeasured_missing():
+    recs = [record(), record(signals=signals(x='unmeasured')), record(signals=signals(x=5)),
+            record(signals=signals(x=1)), record(signals=signals(x=False)), record(signals=signals(x=True))]
+    out = render(summarise(recs))
+    order = [line.split(':')[0].strip() for line in out.splitlines() if line.startswith('      ')]
+    assert order == ['true', 'false', '<= 3', '> 3', 'unmeasured', 'missing']
+
+
+def test_render_formats_a_large_median_without_an_exponent():
+    recs = [record(signals=signals(x=1234567)), record(signals=signals(x=1234569))]
+    assert '(numbers split at the median 1234568)' in render(summarise(recs))
+
+
 def write(dirpath, name, rec):
     path = dirpath / name
     path.write_text(json.dumps(rec))

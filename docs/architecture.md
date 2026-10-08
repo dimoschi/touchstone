@@ -543,6 +543,113 @@ Below the code floor the ratio never applies, which is what lets an ordinary TDD
 `args.supportRatio` raises the limit for a run that knows its own
 ratio is intentional.
 
+### Change-risk signals
+
+Every run records fourteen deterministic facts about its change, so that later work
+can ask which of them predicted trouble. They are recorded and nothing more: the lens
+count, the ratio halt, the round limit and every ceiling are decided without them, and
+`workflows/tests/test-change-signals.sh` pins that by running the same scenarios with
+every signal raised, every one clear and the probe failing.
+
+`skills/crap-controlled-changes/change-signals.sh <absolute-repo-path> <base>..<head>`
+prints exactly `TOUCHSTONE_SIGNALS <range>`, one compact JSON line
+`{"range", "values": {<name>: {"value", "evidence", "reason"?}}}`, and
+`TOUCHSTONE_SIGNALS_END`; nothing else reaches stdout or stderr on success. Exit 0 once
+printed, 2 for bad arguments or a range that does not resolve. The wrapper only
+resolves the repo and hands three settings that live in shell to
+`lib/change_signals.py`: `UNSUPPORTED_SPEC`, the marker's exemptions from
+`crap_exempt_pathspecs`, and the pinned deadcode version. `lib/signal_base.py` holds
+what the signals share (the signal shape, the tool runner, the range's diff) and
+`lib/signal_tools.py` the four that run a tool.
+
+A value is `true`, `false`, a finite number or `"unmeasured"`, and an unmeasured one
+always carries a `reason`. `evidence` is the command, its exit code and its output cut
+to 400 characters. Every name is always present: a signal that throws is recorded as
+unmeasured with the exception, never dropped.
+
+| Signal | Meaning |
+|---|---|
+| `la`, `ld` | added and removed lines (`git diff --numstat`, binary files left out) |
+| `lt` | lines at the base of every touched text file; a new file counts 0 |
+| `la_lt` | `la / lt` to 3 places; unmeasured when `lt` is 0 |
+| `files`, `directories` | changed paths, binaries included, and the distinct directories holding them |
+| `dependency_surface` | a changed `go.mod`, `go.sum`, `composer.json`, `composer.lock`, `pyproject.toml`, `uv.lock` or `requirements*.txt` |
+| `api_broken` | Go: `apidiff -m` of the module at the base against HEAD. Python: `griffe check` per top-level package. PHP: `roave-backward-compatibility-check --from=<base>` |
+| `security_pattern` | a finding of `gosec`, `bandit` or `opengrep` (rules in `lib/opengrep-php.yml`) on a line the range added. Every changed Python and PHP file is scanned, test files included, with `bandit`'s B101 (`assert_used`) skipped because every test asserts; Go test files are scanned too (`gosec -tests`). A changed Go file that `go list ./...` does not build on this host (a build constraint, a directory it skips), or that sits in a directory whose path holds `vendor` (`gosec`'s default `-exclude-dir`, which is a substring match, so `vendorclient/` goes too), makes it unmeasured, since `gosec` drops such a file without saying so. `go list` runs with `-tags=` because `gosec` ignores the tags a `GOFLAGS` sets and `go list` would not. Each scanner is told to ignore suppression comments (`gosec -nosec`, `bandit --ignore-nosec`, `opengrep --disable-nosem`), because the change under measurement writes them |
+| `semantic_noop` | `difft --check-only --exit-code` over the base and head blob of each changed file: true only when no file changed syntactically |
+| `crap_max`, `coverage_min` | the worst CRAP and lowest coverage among the functions the branch added or made worse, from the rows below |
+| `reachable` | Go: a function the range changed that `deadcode` does not list as unreachable from some main package. A changed Python, PHP or unsupported-language source file makes it unmeasured unless a Go function proves it true |
+| `defect_files` | range files an earlier run's record names in an unresolved finding whose reproducer was `reproduced`. A finding's `file` counts as its repo-relative path: an absolute path under the checkout or one of its worktrees, and a trailing `:line` or `:start-end`, are stripped first |
+
+Rules that apply to the tool-run signals. A signal is false only when every tool that
+applies ran to the end over every changed file of its language. A tool that is missing,
+errors or runs past 90 seconds, a changed file in a language no tool here covers, and no
+Go, PHP or Python file at all each make it unmeasured. The languages no tool covers are
+`UNSUPPORTED_SPEC` plus shell (`*.sh`, `*.bash`, `*.zsh`, `*.ksh`, which the CRAP gate
+leaves out on purpose), and a path the repo's marker exempts is still one of them: the
+exemption is about the CRAP gate, and no tool here read the file. A changed Go, PHP or
+Python file the marker exempts is not handed to any tool either, so it makes `api_broken`
+and `security_pattern` unmeasured as well, with one carve-out for `api_broken`: its tools
+read a whole module (`apidiff`), top-level package (`griffe`) or project (`roave`), so an
+exempt file inside one they ran over for a gated file was read, and an exempt test file
+(`_test.go` for Go, any test file for Python and PHP) is one no `api_broken` tool counts
+whether it is exempt or not. A non-zero exit counts as a finding only when
+the output holds that tool's own finding record, because the same exit code also means
+the tool broke. A proof stands over what could not be checked: one
+language showing a break is true even if another's tool was missing. Tools that read the
+working tree are unmeasured unless it is the range's head: `HEAD` is that commit and no
+tracked file has an edit that is not in it, since the tools report lines of the files as
+they are on disk and those are matched against the lines the range added. The
+security tools scan HEAD and keep the findings on added lines instead of running a
+baseline, which asks the same question in one run. `semantic_noop` reads blobs, not the
+working tree, and reports a changed, added, deleted or binary file as not a no-op.
+
+`crap-check.sh` keeps the rows of each green run in `crap-check-rows.json` under
+`git rev-parse --git-common-dir`, so a ticket's worktree that is removed and made again on
+the same branch keeps the branch's earlier rows. It is kept per branch by
+`lib/crap_rows.py`: the latest row of every function, and the stronger tag when a later
+commit touches a function again (each run tags against the commit before it, so a function
+the branch added reads `unchanged` on its second commit). Writing it never changes the
+gate's exit.
+
+The file outlives a branch, and a redone ticket cuts its branch again under the same name,
+so a row counts only while the commit that carried it is in history. The gate scores the
+index before that commit exists, so each row names the `HEAD` the run was against and the
+tree it scored; the commit is the one after that `HEAD` with that tree. A write drops the
+rows that no longer qualify before it merges, and `change-signals.sh` reads only the ones
+that do, so a gate run whose commit never landed and an abandoned attempt both count for
+nothing. A row also keeps the rows it was merged over, newest first, as a chain of `prior`s,
+and counts as the first of them whose commit is in history, so a second run at the same
+`HEAD` that never lands, or a reset back to an earlier commit, cannot cost a landed commit
+its tag. Parallel worktrees share the file, so a write takes its own lock file,
+`crap-check-rows.json.lock`, which is not the scored ledger's.
+
+In the pipeline, a `signals` agent (haiku, low effort) runs the script right after the
+implementer returns its range, before anything can halt on that work, and relays its
+output. A pre-review checks fix that moves the head runs it again over the folded range,
+so the record ends up over the same `impl.commit_range` the diffstat measures; a second
+probe that fails leaves the first record in place, and its `range` says which it is.
+`parseSignals` accepts only an exact record: the begin line naming that range, one JSON
+line with every name and a well-formed value, the end line. Anything else is `null`, as
+is an agent that fails or throws: a probe failure is logged and never halts, and is not
+retried. A spent run budget skips the probe instead of letting its refusal end the run
+as a budget halt, which would stand in for the halt the run was making for its own
+reason (an unsupported language, an implementer over its ceiling). Whether the
+implementer overran is read before the probe, so its spend is not charged to that stage.
+`signals` sits beside `size` in the result and in every halt, `null` on every halt
+before the implementer has returned a range, and on a run whose budget was spent by then.
+
+Limits worth knowing. The CRAP record keeps a row for a function that was later removed.
+A commit rewritten into a different tree (amend, rebase) no longer vouches for its rows, so
+`crap_max` and `coverage_min` then read over the rows that remain.
+`reachable` reads functions by gofmt's layout (`func` in column zero to `}` in column
+zero) and treats a root that never built a replaced module's package as not listing it.
+Python `api_broken` needs `__init__.py` packages; a file in none is unmeasured.
+`defect_files` reads only records of earlier runs, since a run's own record is written
+when it ends. `scripts/run-report.py` prints, under each version, every signal's runs
+grouped by value (numbers split at the median of the measured ones) with each group's
+median fix rounds, halts and blocking findings.
+
 ### Pipeline version transparency
 
 A host can persist a snapshot of this script and keep executing it after `main`

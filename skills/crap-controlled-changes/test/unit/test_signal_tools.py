@@ -1,0 +1,1575 @@
+import json
+import os
+import signal
+import subprocess
+
+import pytest
+
+import signal_base as sb
+import signal_tools as st
+
+UNMEASURED = "unmeasured"
+
+
+def settings(**fields):
+    return sb.Settings(**{"unsupported": (), "exempt": (), "deadcode_version": "v1", **fields})
+
+
+def fake(**fields):
+    ctx = sb.Ctx(repo="/r", rng="b..h", base="b", head="h", at_head=True, rows=[], status={},
+                 gated=(), unsupported=(), added={}, settings=settings())
+    return ctx._replace(**fields)
+
+
+def change(repo, base_files, head_files, delete=(), **config):
+    for rel, text in base_files.items():
+        repo.write(rel, text)
+    base = repo.commit("base")
+    for rel, text in head_files.items():
+        repo.write(rel, text)
+    for rel in delete:
+        (repo.root / rel).unlink()
+    head = repo.commit("head")
+    return sb.load_ctx(str(repo.root), f"{base}..{head}", settings(**config))
+
+
+def part(value, **fields):
+    return sb.signal(value, **fields)
+
+
+def test_combine_lets_a_proof_stand_over_what_could_not_be_checked():
+    parts = [part(False), sb.unmeasured("no tool"), part(True, output="found")]
+    assert st.combine(parts)["evidence"]["output"] == "found"
+
+
+def test_combine_reports_unmeasured_rather_than_false_when_any_part_is():
+    got = st.combine([part(False), sb.unmeasured("no tool")])
+    assert got["value"] == UNMEASURED and got["reason"] == "no tool"
+
+
+def test_combine_gives_every_reason_a_part_could_not_tell_once():
+    got = st.combine([sb.unmeasured("no apidiff", command="apidiff"), part(False),
+                      sb.unmeasured("no griffe"), sb.unmeasured("no apidiff")])
+    assert got["reason"] == "no apidiff; no griffe"
+    assert got["evidence"]["command"] == "apidiff"
+
+
+def test_combine_can_take_false_as_the_proof():
+    parts = [part(True, output="same"), sb.unmeasured("no tool"), part(False, output="differs")]
+    assert st.combine(parts, proof=False)["evidence"]["output"] == "differs"
+    assert st.combine(parts[:2], proof=False)["reason"] == "no tool"
+    assert st.combine(parts[:1], proof=False)["evidence"]["output"] == "same"
+
+
+def test_combine_of_clean_parts_is_the_first_clean_one():
+    assert st.combine([part(False, output="a"), part(False, output="b")])["evidence"]["output"] == "a"
+
+
+def test_semantic_refuses_to_run_tools_when_head_is_not_the_range_head():
+    called = []
+    got = st.semantic(fake(at_head=False, gated=("a.py",)), {"python": lambda c, f: called.append(f)})
+    assert got["value"] == UNMEASURED
+    assert "HEAD" in got["reason"]
+    assert called == []
+
+
+def test_semantic_hands_each_language_only_its_own_gated_files():
+    seen = {}
+    ctx = fake(gated=("a.go", "b.py", "c.py", "d.php", "e.md"))
+    st.semantic(ctx, {"go": lambda c, f: seen.setdefault("go", f) and [part(False)],
+                      "python": lambda c, f: seen.setdefault("python", f) and [part(False)],
+                      "php": lambda c, f: seen.setdefault("php", f) and [part(False)]})
+    assert seen == {"go": ["a.go"], "python": ["b.py", "c.py"], "php": ["d.php"]}
+
+
+def test_semantic_skips_a_language_that_did_not_change():
+    got = st.semantic(fake(gated=("a.py",)), {"go": lambda c, f: pytest.fail("no Go changed"),
+                                              "python": lambda c, f: [part(False)]})
+    assert got["value"] is False
+
+
+def test_semantic_with_no_go_php_or_python_file_is_unmeasured():
+    got = st.semantic(fake(gated=("README.md",)), {"python": lambda c, f: [part(False)]})
+    assert got["value"] == UNMEASURED
+    assert got["reason"] == "no Go, PHP or Python file changed"
+
+
+def test_semantic_cannot_say_false_with_a_file_in_an_unsupported_language():
+    ctx = fake(gated=("a.py", "web/app.ts"), unsupported=("web/app.ts",))
+    got = st.semantic(ctx, {"python": lambda c, f: [part(False)]})
+    assert got["value"] == UNMEASURED
+    assert "web/app.ts" in got["reason"]
+
+
+def test_semantic_still_reports_a_proof_beside_an_unsupported_file():
+    ctx = fake(gated=("a.py", "web/app.ts"), unsupported=("web/app.ts",))
+    assert st.semantic(ctx, {"python": lambda c, f: [part(True)]})["value"] is True
+
+
+def test_semantic_with_only_an_unsupported_file_is_unmeasured_for_that_reason():
+    got = st.semantic(fake(gated=("web/app.ts",), unsupported=("web/app.ts",)), {})
+    assert got["value"] == UNMEASURED and "web/app.ts" in got["reason"]
+
+
+def test_semantic_cannot_say_false_with_an_exempt_file_no_tool_was_given():
+    ctx = fake(gated=("a.py",), exempted=("fixtures/b.py",))
+    got = st.semantic(ctx, {"python": lambda c, f: [part(False)]})
+    assert got["value"] == UNMEASURED
+    assert "exempts" in got["reason"] and "fixtures/b.py" in got["reason"]
+
+
+def test_semantic_still_reports_a_proof_beside_an_exempt_file():
+    ctx = fake(gated=("a.py",), exempted=("fixtures/b.py",))
+    assert st.semantic(ctx, {"python": lambda c, f: [part(True)]})["value"] is True
+
+
+def test_semantic_with_only_an_exempt_file_is_unmeasured_for_that_reason():
+    got = st.semantic(fake(exempted=("fixtures/b.py",)), {})
+    assert got["value"] == UNMEASURED and "fixtures/b.py" in got["reason"]
+
+
+APIDIFF = """
+args = sys.argv[1:]
+if '-w' in args:
+    sys.exit({write_code})
+sys.stdout.write({out!r})
+sys.stderr.write({err!r})
+sys.exit({code})
+"""
+
+
+def apidiff(stubs, out="", err="", code=0, write_code=0):
+    stubs.add("apidiff", APIDIFF.format(out=out, err=err, code=code, write_code=write_code))
+
+
+GO_MOD = "module example.com/m\n\ngo 1.22\n"
+
+
+def go_change(repo, **config):
+    return change(repo, {"go.mod": GO_MOD, "a.go": "package m\n\nfunc A() {}\n"},
+                  {"a.go": "package m\n"}, **config)
+
+
+def test_api_broken_in_go_reads_the_incompatible_changes_apidiff_prints(repo, stubs):
+    apidiff(stubs, out="- A: removed\n")
+    got = st.api_broken(go_change(repo))
+    assert got["value"] is True
+    assert got["evidence"]["output"] == "- A: removed"
+    assert "-incompatible" in got["evidence"]["command"]
+    assert got["evidence"]["exit"] == 0
+
+
+def test_api_broken_in_go_is_false_when_apidiff_prints_nothing(repo, stubs):
+    apidiff(stubs)
+    assert st.api_broken(go_change(repo))["value"] is False
+
+
+def test_api_broken_in_go_ignores_what_apidiff_says_on_stderr(repo, stubs):
+    apidiff(stubs, err="Ignoring internal package example.com/m/internal/x\n")
+    assert st.api_broken(go_change(repo))["value"] is False
+
+
+def test_api_broken_in_go_exports_the_base_api_then_compares_it_with_head(repo, stubs):
+    apidiff(stubs)
+    ctx = go_change(repo)
+    st.api_broken(ctx)
+    write, compare = stubs.calls("apidiff")
+    assert write["args"][:2] == ["-m", "-w"] and write["args"][3] == "example.com/m"
+    assert write["cwd"].endswith("/base") or write["cwd"].endswith("/base/.")
+    export = write["args"][2]
+    assert compare["args"] == ["-m", "-incompatible", export, "example.com/m"]
+    assert os.path.realpath(compare["cwd"]) == os.path.realpath(str(repo.root))
+
+
+def test_api_broken_in_go_runs_apidiff_from_the_module_directory(repo, stubs):
+    apidiff(stubs)
+    ctx = change(repo, {"svc/go.mod": "module example.com/svc\n", "svc/a.go": "package svc\n"},
+                 {"svc/a.go": "package svc\n\nfunc B() {}\n"})
+    st.api_broken(ctx)
+    write, compare = stubs.calls("apidiff")
+    assert write["cwd"].endswith("/base/svc")
+    assert write["args"][3] == compare["args"][3] == "example.com/svc"
+    assert os.path.realpath(compare["cwd"]) == os.path.realpath(str(repo.root / "svc"))
+
+
+def test_api_broken_in_go_checks_every_module_that_changed(repo, stubs):
+    apidiff(stubs, out="- X: removed\n")
+    ctx = change(repo,
+                 {"one/go.mod": "module example.com/one\n", "one/a.go": "package one\n",
+                  "two/go.mod": "module example.com/two\n", "two/a.go": "package two\n"},
+                 {"one/a.go": "package one\n\nfunc B() {}\n", "two/a.go": "package two\n\nfunc B() {}\n"})
+    assert st.api_broken(ctx)["value"] is True
+    assert len(stubs.calls("apidiff")) == 4
+
+
+def test_api_broken_in_go_is_unmeasured_when_apidiff_is_missing(repo, stubs):
+    got = st.api_broken(go_change(repo))
+    assert got["value"] == UNMEASURED
+    assert "could not run apidiff" in got["reason"]
+
+
+def test_api_broken_in_go_is_unmeasured_when_the_base_api_cannot_be_read(repo, stubs):
+    apidiff(stubs, write_code=1)
+    got = st.api_broken(go_change(repo))
+    assert got["value"] == UNMEASURED
+    assert got["reason"].startswith("apidiff could not read the base API")
+
+
+def test_api_broken_in_go_is_unmeasured_when_the_comparison_fails(repo, stubs):
+    apidiff(stubs, err="loading example.com/m: no packages\n", code=1)
+    got = st.api_broken(go_change(repo))
+    assert got["value"] == UNMEASURED
+    assert got["reason"] == "exit 1: loading example.com/m: no packages"
+    assert got["evidence"]["exit"] == 1
+
+
+def test_api_broken_in_go_gives_up_on_a_slow_apidiff(repo, stubs, monkeypatch):
+    stubs.add("apidiff", "import time; time.sleep(30)")
+    monkeypatch.setattr(st, "run_tool", lambda argv, cwd: sb.run_tool(argv, cwd, timeout=0.2))
+    got = st.api_broken(go_change(repo))
+    assert got["value"] == UNMEASURED and "timed out" in got["reason"]
+
+
+def test_api_broken_in_go_has_nothing_to_break_in_a_module_new_in_the_range(repo, stubs):
+    ctx = change(repo, {"README.md": "x\n"}, {"go.mod": GO_MOD, "a.go": "package m\n"})
+    got = st.api_broken(ctx)
+    assert got["value"] is False
+    assert "new module" in got["evidence"]["output"]
+    assert stubs.calls("apidiff") == []
+
+
+def test_api_broken_in_go_cannot_measure_a_file_no_module_owns(repo, stubs):
+    apidiff(stubs)
+    ctx = change(repo, {"a.go": "package m\n"}, {"a.go": "package m\n\nfunc B() {}\n"})
+    got = st.api_broken(ctx)
+    assert got["value"] == UNMEASURED
+    assert "go.mod" in got["reason"]
+
+
+GRIFFE_RECORD = "src/pkg/mod.py:3: f(b): Parameter was removed\n"
+
+
+def griffe(stubs, out="", err="", code=0):
+    stubs.add("griffe", out=out, err=err, code=code)
+
+
+def py_change(repo, **config):
+    return change(repo, {"src/pkg/__init__.py": "", "src/pkg/mod.py": "def f(a, b):\n    pass\n"},
+                  {"src/pkg/mod.py": "def f(a):\n    pass\n"}, **config)
+
+
+def test_api_broken_in_python_reads_the_breakages_griffe_prints(repo, stubs):
+    griffe(stubs, err=GRIFFE_RECORD, code=1)
+    got = st.api_broken(py_change(repo))
+    assert got["value"] is True
+    assert got["evidence"]["output"] == GRIFFE_RECORD.strip()
+    assert got["evidence"]["exit"] == 1
+
+
+def test_api_broken_in_python_is_false_when_griffe_finds_nothing(repo, stubs):
+    griffe(stubs)
+    assert st.api_broken(py_change(repo))["value"] is False
+
+
+def test_api_broken_in_python_asks_griffe_about_the_top_level_package(repo, stubs):
+    griffe(stubs)
+    ctx = change(repo, {"src/pkg/__init__.py": "", "src/pkg/sub/__init__.py": "", "src/pkg/sub/m.py": "x = 1\n"},
+                 {"src/pkg/sub/m.py": "x = 2\n"})
+    st.api_broken(ctx)
+    [call] = stubs.calls("griffe")
+    assert call["args"] == ["check", "pkg", "-s", "src", "-a", ctx.base, "--no-color"]
+    assert os.path.realpath(call["cwd"]) == os.path.realpath(str(repo.root))
+
+
+def test_api_broken_in_python_searches_the_repo_root_for_a_package_there(repo, stubs):
+    griffe(stubs)
+    ctx = change(repo, {"pkg/__init__.py": "", "pkg/m.py": "x = 1\n"}, {"pkg/m.py": "x = 2\n"})
+    st.api_broken(ctx)
+    assert stubs.calls("griffe")[0]["args"][:4] == ["check", "pkg", "-s", "."]
+
+
+def test_api_broken_in_python_asks_once_per_package(repo, stubs):
+    griffe(stubs)
+    ctx = change(repo,
+                 {"a/__init__.py": "", "a/m.py": "x = 1\n", "a/n.py": "x = 1\n", "b/__init__.py": "", "b/m.py": "x = 1\n"},
+                 {"a/m.py": "x = 2\n", "a/n.py": "x = 2\n", "b/m.py": "x = 2\n"})
+    st.api_broken(ctx)
+    assert [c["args"][1] for c in stubs.calls("griffe")] == ["a", "b"]
+
+
+def test_api_broken_in_python_is_unmeasured_when_griffe_fails_without_a_breakage(repo, stubs):
+    griffe(stubs, err='Traceback (most recent call last):\n  File "x.py", line 3, in <module>\nImportError: boom\n',
+           code=1)
+    got = st.api_broken(py_change(repo))
+    assert got["value"] == UNMEASURED
+    assert got["reason"] == "exit 1: Traceback (most recent call last):"
+
+
+def test_api_broken_in_python_does_not_take_a_docstring_warning_for_a_breakage(repo, stubs):
+    griffe(stubs, err="griffe: src/pkg/mod.py:2: No type or annotation for parameter 'x'\n", code=1)
+    assert st.api_broken(py_change(repo))["value"] == UNMEASURED
+
+
+def test_api_broken_in_python_is_unmeasured_when_griffe_is_missing(repo, stubs):
+    got = st.api_broken(py_change(repo))
+    assert got["value"] == UNMEASURED and "could not run griffe" in got["reason"]
+
+
+def test_api_broken_in_python_has_nothing_to_break_in_a_package_new_in_the_range(repo, stubs):
+    ctx = change(repo, {"README.md": "x\n"}, {"newpkg/__init__.py": "", "newpkg/m.py": "x = 1\n"})
+    got = st.api_broken(ctx)
+    assert got["value"] is False
+    assert "new package" in got["evidence"]["output"]
+    assert stubs.calls("griffe") == []
+
+
+def test_api_broken_in_python_cannot_measure_a_file_outside_any_package(repo, stubs):
+    griffe(stubs)
+    ctx = change(repo, {"scripts/tool.py": "x = 1\n"}, {"scripts/tool.py": "x = 2\n"})
+    got = st.api_broken(ctx)
+    assert got["value"] == UNMEASURED
+    assert "scripts/tool.py" in got["reason"]
+
+
+def test_api_broken_in_python_still_proves_a_break_beside_a_loose_file(repo, stubs):
+    griffe(stubs, err=GRIFFE_RECORD, code=1)
+    ctx = change(repo, {"src/pkg/__init__.py": "", "src/pkg/mod.py": "x = 1\n", "tool.py": "x = 1\n"},
+                 {"src/pkg/mod.py": "x = 2\n", "tool.py": "x = 2\n"})
+    assert st.api_broken(ctx)["value"] is True
+
+
+def test_api_broken_in_python_ignores_test_files(repo, stubs):
+    ctx = change(repo, {"tests/test_a.py": "x = 1\n", "pkg/__init__.py": ""}, {"tests/test_a.py": "x = 2\n"})
+    got = st.api_broken(ctx)
+    assert got["value"] is False
+    assert "only test files" in got["evidence"]["output"]
+    assert stubs.calls("griffe") == []
+
+
+def php_change(repo, **config):
+    return change(repo, {"composer.json": "{}\n", "src/A.php": "<?php\nclass A {}\n"},
+                  {"src/A.php": "<?php\nclass B {}\n"}, **config)
+
+
+def test_api_broken_in_php_reads_the_bc_lines_the_tool_prints(repo, stubs):
+    stubs.add("roave-backward-compatibility-check",
+              out="", err="[BC] REMOVED: Class A was removed\n1 backwards-incompatible changes detected\n", code=3)
+    got = st.api_broken(php_change(repo))
+    assert got["value"] is True
+    assert got["evidence"]["output"] == "[BC] REMOVED: Class A was removed"
+    assert got["evidence"]["exit"] == 3
+
+
+def test_api_broken_in_php_compares_against_the_base_commit(repo, stubs):
+    stubs.add("roave-backward-compatibility-check")
+    ctx = php_change(repo)
+    st.api_broken(ctx)
+    [call] = stubs.calls("roave-backward-compatibility-check")
+    assert call["args"] == [f"--from={ctx.base}"]
+    assert os.path.realpath(call["cwd"]) == os.path.realpath(str(repo.root))
+
+
+def test_api_broken_in_php_is_false_when_the_tool_finds_nothing(repo, stubs):
+    stubs.add("roave-backward-compatibility-check", err="No backwards-incompatible changes detected\n")
+    assert st.api_broken(php_change(repo))["value"] is False
+
+
+def test_api_broken_in_php_is_unmeasured_when_the_tool_fails_without_a_bc_line(repo, stubs):
+    stubs.add("roave-backward-compatibility-check", err="composer install failed\n", code=1)
+    got = st.api_broken(php_change(repo))
+    assert got["value"] == UNMEASURED
+    assert got["reason"] == "exit 1: composer install failed"
+
+
+def test_api_broken_in_php_is_unmeasured_when_the_tool_is_missing(repo, stubs):
+    got = st.api_broken(php_change(repo))
+    assert got["value"] == UNMEASURED
+    assert "could not run roave-backward-compatibility-check" in got["reason"]
+
+
+def test_api_broken_in_php_finds_the_tool_under_vendor_bin(repo, stubs):
+    stubs.add("roave-backward-compatibility-check", err="[BC] CHANGED: x\n", code=3,
+              into=repo.root / "vendor" / "bin")
+    got = st.api_broken(php_change(repo))
+    assert got["value"] is True
+    assert got["evidence"]["command"].startswith(str(repo.root / "vendor" / "bin"))
+
+
+def test_api_broken_in_php_ignores_test_files(repo, stubs):
+    ctx = change(repo, {"tests/FooTest.php": "<?php\n"}, {"tests/FooTest.php": "<?php\n// x\n"})
+    got = st.api_broken(ctx)
+    assert got["value"] is False and "only test files" in got["evidence"]["output"]
+
+
+def exempt(*patterns):
+    return tuple(f":(glob,exclude,top){pattern}" for pattern in patterns)
+
+
+def test_api_broken_in_python_is_false_beside_an_exempt_test_file(repo, stubs):
+    griffe(stubs)
+    ctx = change(repo, {"pkg/__init__.py": "", "pkg/a.py": "def f():\n    pass\n", "tests/fixtures/s.py": "x = 1\n"},
+                 {"pkg/a.py": "def f():\n    return 1\n", "tests/fixtures/s.py": "x = 2\n"},
+                 exempt=exempt("tests/fixtures/**"))
+    assert ctx.exempted == ("tests/fixtures/s.py",)
+    assert st.api_broken(ctx)["value"] is False
+
+
+def test_api_broken_in_go_is_false_beside_an_exempt_test_file_in_a_module_it_did_not_read(repo, stubs):
+    apidiff(stubs)
+    ctx = change(repo, {"go.mod": GO_MOD, "a.go": "package m\n\nfunc A() {}\n",
+                        "other/go.mod": "module example.com/other\n", "other/x_test.go": "package other\n"},
+                 {"a.go": "package m\n", "other/x_test.go": "package other\n\nfunc T() {}\n"},
+                 exempt=exempt("other/**"))
+    assert ctx.exempted == ("other/x_test.go",)
+    assert st.api_broken(ctx)["value"] is False
+    assert len(stubs.calls("apidiff")) == 2
+
+
+def test_api_broken_in_go_is_unmeasured_beside_an_exempt_source_in_a_module_it_did_not_read(repo, stubs):
+    apidiff(stubs)
+    ctx = change(repo, {"go.mod": GO_MOD, "a.go": "package m\n\nfunc A() {}\n",
+                        "other/go.mod": "module example.com/other\n", "other/x.go": "package other\n"},
+                 {"a.go": "package m\n", "other/x.go": "package other\n\nfunc T() {}\n"},
+                 exempt=exempt("other/**"))
+    got = st.api_broken(ctx)
+    assert got["value"] == UNMEASURED
+    assert "other/x.go" in got["reason"] and "exempts" in got["reason"]
+
+
+def test_api_broken_in_go_is_false_beside_an_exempt_source_in_a_module_it_read_whole(repo, stubs):
+    apidiff(stubs)
+    ctx = change(repo, {"go.mod": GO_MOD, "a.go": "package m\n\nfunc A() {}\n", "gen/x.go": "package gen\n"},
+                 {"a.go": "package m\n", "gen/x.go": "package gen\n\nfunc T() {}\n"}, exempt=exempt("gen/**"))
+    assert ctx.exempted == ("gen/x.go",)
+    assert st.api_broken(ctx)["value"] is False
+
+
+def test_api_broken_in_go_reads_the_module_of_a_changed_test_file_whole(repo, stubs):
+    apidiff(stubs)
+    ctx = change(repo, {"go.mod": GO_MOD, "a_test.go": "package m\n", "gen/x.go": "package gen\n"},
+                 {"a_test.go": "package m\n\nfunc T() {}\n", "gen/x.go": "package gen\n\nfunc T() {}\n"},
+                 exempt=exempt("gen/**"))
+    assert st.api_broken(ctx)["value"] is False
+    assert len(stubs.calls("apidiff")) == 2
+
+
+def test_api_broken_in_python_is_false_beside_an_exempt_source_in_a_package_it_read_whole(repo, stubs):
+    griffe(stubs)
+    ctx = change(repo, {"pkg/__init__.py": "", "pkg/a.py": "x = 1\n", "pkg/gen/__init__.py": "", "pkg/gen/g.py": "x = 1\n"},
+                 {"pkg/a.py": "x = 2\n", "pkg/gen/g.py": "x = 2\n"}, exempt=exempt("pkg/gen/**"))
+    assert ctx.exempted == ("pkg/gen/g.py",)
+    assert st.api_broken(ctx)["value"] is False
+    assert [c["args"][1] for c in stubs.calls("griffe")] == ["pkg"]
+
+
+def test_api_broken_in_python_is_unmeasured_beside_an_exempt_source_in_a_package_it_did_not_read(repo, stubs):
+    griffe(stubs)
+    ctx = change(repo, {"pkg/__init__.py": "", "pkg/a.py": "x = 1\n", "other/__init__.py": "", "other/g.py": "x = 1\n"},
+                 {"pkg/a.py": "x = 2\n", "other/g.py": "x = 2\n"}, exempt=exempt("other/**"))
+    got = st.api_broken(ctx)
+    assert got["value"] == UNMEASURED
+    assert "other/g.py" in got["reason"] and "exempts" in got["reason"]
+
+
+def test_api_broken_in_python_is_unmeasured_beside_an_exempt_source_outside_any_package(repo, stubs):
+    griffe(stubs)
+    ctx = change(repo, {"pkg/__init__.py": "", "pkg/a.py": "x = 1\n", "scripts/t.py": "x = 1\n"},
+                 {"pkg/a.py": "x = 2\n", "scripts/t.py": "x = 2\n"}, exempt=exempt("scripts/**"))
+    got = st.api_broken(ctx)
+    assert got["value"] == UNMEASURED and "scripts/t.py" in got["reason"]
+
+
+def test_api_broken_in_php_is_false_beside_an_exempt_source_the_project_run_read(repo, stubs):
+    stubs.add("roave-backward-compatibility-check", err="No backwards-incompatible changes detected\n")
+    ctx = change(repo, {"composer.json": "{}\n", "src/A.php": "<?php\nclass A {}\n", "gen/G.php": "<?php\nclass G {}\n"},
+                 {"src/A.php": "<?php\nclass B {}\n", "gen/G.php": "<?php\nclass H {}\n"}, exempt=exempt("gen/**"))
+    assert ctx.exempted == ("gen/G.php",)
+    assert st.api_broken(ctx)["value"] is False
+
+
+def test_api_broken_is_unmeasured_beside_an_exempt_php_source_when_no_php_tool_ran(repo, stubs):
+    griffe(stubs)
+    ctx = change(repo, {"pkg/__init__.py": "", "pkg/a.py": "x = 1\n", "gen/G.php": "<?php\nclass G {}\n"},
+                 {"pkg/a.py": "x = 2\n", "gen/G.php": "<?php\nclass H {}\n"}, exempt=exempt("gen/**"))
+    got = st.api_broken(ctx)
+    assert got["value"] == UNMEASURED and "gen/G.php" in got["reason"]
+
+
+def test_security_pattern_is_unmeasured_beside_an_exempt_test_file_bandit_was_not_given(repo, stubs):
+    stubs.add("bandit", out=bandit_json())
+    ctx = change(repo, {"a.py": "x = 1\n", "tests/fixtures/s.py": "y = 1\n"},
+                 {"a.py": "x = 2\n", "tests/fixtures/s.py": "y = 2\n"}, exempt=exempt("tests/fixtures/**"))
+    got = st.security_pattern(ctx)
+    assert got["value"] == UNMEASURED and "tests/fixtures/s.py" in got["reason"]
+
+
+def gosec_json(repo, line, rule="G204", errors=None, name="a.go"):
+    return json.dumps({
+        "Golang errors": errors or {},
+        "Issues": [{"severity": "HIGH", "rule_id": rule, "details": "x",
+                    "file": str(repo.root.resolve() / name), "line": line}],
+        "Stats": {}})
+
+
+def go_security_change(repo):
+    return change(repo, {"go.mod": GO_MOD, "a.go": "package m\n\nfunc A() {}\n\nfunc B() {}\n"},
+                  {"a.go": "package m\n\nfunc A() {}\n\nfunc B() {}\n\nfunc C() {}\n"})
+
+
+def go_builds(stubs, repo, *built):
+    """A `go list` that says the build holds `built` (paths in the repo), whatever directory it is asked in."""
+    paths = [str(repo.root.resolve() / rel) for rel in built]
+    stubs.add("go", f"sys.stdout.write(''.join(path + '\\n' for path in {paths!r}))")
+
+
+def test_security_pattern_in_go_flags_a_finding_on_an_added_line(repo, stubs):
+    stubs.add("gosec", out=gosec_json(repo, "6"))
+    got = st.security_pattern(go_security_change(repo))
+    assert got["value"] is True
+    assert got["evidence"]["output"] == "a.go:6 G204"
+
+
+def test_security_pattern_in_go_ignores_a_finding_on_a_line_the_range_did_not_add(repo, stubs):
+    stubs.add("gosec", out=gosec_json(repo, "3"))
+    go_builds(stubs, repo, "a.go")
+    got = st.security_pattern(go_security_change(repo))
+    assert got["value"] is False
+    assert got["evidence"]["output"] == "1 finding(s) in scanned files, none on added lines"
+
+
+def test_security_pattern_in_go_reads_a_line_span(repo, stubs):
+    stubs.add("gosec", out=gosec_json(repo, "5-6"))
+    assert st.security_pattern(go_security_change(repo))["value"] is True
+
+
+def test_security_pattern_in_go_runs_gosec_over_each_changed_module(repo, stubs):
+    stubs.add("gosec", out=json.dumps({"Golang errors": {}, "Issues": []}))
+    st.security_pattern(go_security_change(repo))
+    [call] = stubs.calls("gosec")
+    assert call["args"] == ["-fmt=json", "-no-fail", "-tests", "-nosec", "./..."]
+    assert os.path.realpath(call["cwd"]) == os.path.realpath(str(repo.root))
+
+
+def test_security_pattern_in_go_does_not_let_the_change_suppress_its_own_finding(repo, stubs):
+    stubs.add("gosec", out=NOTHING_FOUND)
+    st.security_pattern(go_security_change(repo))
+    assert "-nosec" in stubs.calls("gosec")[0]["args"]
+
+
+def test_security_pattern_in_go_is_unmeasured_when_gosec_could_not_load_a_package(repo, stubs):
+    stubs.add("gosec", out=json.dumps({"Golang errors": {"a.go": [{"line": 1, "error": "undefined: x"}]},
+                                      "Issues": []}))
+    got = st.security_pattern(go_security_change(repo))
+    assert got["value"] == UNMEASURED
+    assert "undefined: x" in got["reason"]
+
+
+def test_security_pattern_in_go_still_reports_a_finding_beside_a_load_error(repo, stubs):
+    stubs.add("gosec", out=gosec_json(repo, "6", errors={"b.go": [{"error": "x"}]}))
+    assert st.security_pattern(go_security_change(repo))["value"] is True
+
+
+def test_security_pattern_in_go_is_unmeasured_when_gosec_prints_no_json(repo, stubs):
+    stubs.add("gosec", err="gosec: fatal\n", code=1)
+    go_builds(stubs, repo, "a.go")
+    got = st.security_pattern(go_security_change(repo))
+    assert got["value"] == UNMEASURED
+    assert got["reason"] == "exit 1: gosec: fatal"
+
+
+def test_security_pattern_in_go_is_unmeasured_when_gosec_is_missing(repo, stubs):
+    got = st.security_pattern(go_security_change(repo))
+    assert got["value"] == UNMEASURED and "could not run gosec" in got["reason"]
+
+
+NOTHING_FOUND = json.dumps({"Golang errors": {}, "Issues": []})
+TAGGED = "//go:build never\n\npackage m\n\nfunc T() {}\n"
+LEFT_OUT = ("changed Go file(s) gosec did not scan, because the build here leaves them out "
+            "(a build constraint, or a directory ./... skips) or gosec skips their directory "
+            "(its default -exclude-dir matches any path holding \"vendor\"): ")
+
+
+def tagged_change(repo):
+    return change(repo, {"go.mod": GO_MOD, "a.go": "package m\n"},
+                  {"a.go": "package m\n\nfunc A() {}\n", "tagged.go": TAGGED})
+
+
+def test_security_pattern_in_go_is_unmeasured_for_a_changed_file_the_host_build_leaves_out(repo, stubs):
+    stubs.add("gosec", out=NOTHING_FOUND)
+    go_builds(stubs, repo, "a.go")
+    got = st.security_pattern(tagged_change(repo))
+    assert got["value"] == UNMEASURED
+    assert got["reason"] == LEFT_OUT + "tagged.go"
+    assert got["evidence"]["command"].startswith("go list")
+
+
+def test_security_pattern_in_go_is_false_once_the_build_holds_every_changed_file(repo, stubs):
+    stubs.add("gosec", out=NOTHING_FOUND)
+    go_builds(stubs, repo, "a.go", "tagged.go")
+    assert st.security_pattern(tagged_change(repo))["value"] is False
+
+
+def test_security_pattern_in_go_still_reports_a_finding_beside_a_file_the_build_leaves_out(repo, stubs):
+    stubs.add("gosec", out=gosec_json(repo, "3"))
+    go_builds(stubs, repo, "a.go")
+    got = st.security_pattern(tagged_change(repo))
+    assert got["value"] is True
+    assert got["evidence"]["output"] == "a.go:3 G204"
+
+
+def test_security_pattern_in_go_asks_go_list_which_files_each_module_builds(repo, stubs):
+    stubs.add("gosec", out=NOTHING_FOUND)
+    go_builds(stubs, repo, "a.go")
+    st.security_pattern(go_security_change(repo))
+    [call] = stubs.calls("go")
+    assert call["args"] == ["list", "-e", "-tags=", "-f", st.GO_LIST_BUILT, "./..."]
+    assert os.path.realpath(call["cwd"]) == os.path.realpath(str(repo.root))
+
+
+@pytest.mark.parametrize("field", ["GoFiles", "CgoFiles", "TestGoFiles", "XTestGoFiles"])
+def test_go_list_names_every_kind_of_file_gosec_loads(field):
+    assert "{{range ." + field + "}}{{$.Dir}}/{{.}}{{\"\\n\"}}{{end}}" in st.GO_LIST_BUILT
+
+
+def two_module_change(repo):
+    return change(repo,
+                  {"one/go.mod": "module example.com/one\n", "one/a.go": "package one\n",
+                   "two/go.mod": "module example.com/two\n", "two/a.go": "package two\n"},
+                  {"one/a.go": "package one\n\nfunc B() {}\n", "two/a.go": "package two\n\nfunc B() {}\n"})
+
+
+def test_security_pattern_in_go_judges_each_module_against_its_own_build(repo, stubs):
+    stubs.add("gosec", out=NOTHING_FOUND)
+    built = {"one": [str(repo.root.resolve() / "one" / "a.go")], "two": []}
+    stubs.add("go", f"table = {built!r}\n"
+                    "sys.stdout.write(''.join(p + '\\n' for p in table[os.path.basename(os.getcwd())]))")
+    got = st.security_pattern(two_module_change(repo))
+    assert got["value"] == UNMEASURED
+    assert got["reason"] == LEFT_OUT + "two/a.go"
+
+
+def test_security_pattern_in_go_runs_gosec_inside_each_module(repo, stubs):
+    stubs.add("gosec", out=NOTHING_FOUND)
+    go_builds(stubs, repo, "one/a.go", "two/a.go")
+    st.security_pattern(two_module_change(repo))
+    assert [os.path.basename(call["cwd"]) for call in stubs.calls("gosec")] == ["one", "two"]
+
+
+def test_security_pattern_in_go_names_every_changed_file_of_a_module_the_build_leaves_out(repo, stubs):
+    stubs.add("gosec", out=NOTHING_FOUND)
+    go_builds(stubs, repo)
+    got = st.security_pattern(tagged_change(repo))
+    assert got["reason"] == LEFT_OUT + "a.go, tagged.go"
+
+
+def test_security_pattern_in_go_is_unmeasured_when_go_list_fails(repo, stubs):
+    stubs.add("gosec", out=NOTHING_FOUND)
+    stubs.add("go", err="go: boom\n", code=1)
+    got = st.security_pattern(go_security_change(repo))
+    assert got["value"] == UNMEASURED
+    assert got["reason"] == "could not list the Go files the build holds: exit 1: go: boom"
+    assert got["evidence"]["exit"] == 1
+
+
+def vendor_named_change(repo, directory, module=""):
+    prefix = f"{module}/" if module else ""
+    path = f"{prefix}{directory}/a.go"
+    return change(repo, {f"{prefix}go.mod": GO_MOD, path: "package x\n"}, {path: "package x\n\nfunc A() {}\n"}), path
+
+
+@pytest.mark.parametrize("directory", ["vendorclient", "internal/vendors", "vendor", "a/b/my-vendor-pkg"])
+def test_security_pattern_in_go_is_unmeasured_for_a_changed_file_in_a_directory_gosec_skips_by_name(
+        repo, stubs, directory):
+    ctx, path = vendor_named_change(repo, directory)
+    stubs.add("gosec", out=NOTHING_FOUND)
+    go_builds(stubs, repo, path)
+    got = st.security_pattern(ctx)
+    assert got["value"] == UNMEASURED
+    assert got["reason"] == LEFT_OUT + path
+
+
+@pytest.mark.parametrize("directory", ["internal/client", "pkg"])
+def test_security_pattern_in_go_scans_a_directory_whose_name_does_not_hold_vendor(repo, stubs, directory):
+    ctx, path = vendor_named_change(repo, directory)
+    stubs.add("gosec", out=NOTHING_FOUND)
+    go_builds(stubs, repo, path)
+    assert st.security_pattern(ctx)["value"] is False
+
+
+def test_security_pattern_in_go_reads_a_directory_name_from_the_module_gosec_runs_in(repo, stubs):
+    ctx, path = vendor_named_change(repo, "pkg", module="vendored-tools")
+    stubs.add("gosec", out=NOTHING_FOUND)
+    go_builds(stubs, repo, path)
+    assert st.security_pattern(ctx)["value"] is False
+
+
+def test_security_pattern_in_go_still_reports_a_finding_in_a_directory_gosec_skips_by_name(repo, stubs):
+    ctx, path = vendor_named_change(repo, "vendorclient")
+    stubs.add("gosec", out=gosec_json(repo, "3", name=path))
+    go_builds(stubs, repo, path)
+    assert st.security_pattern(ctx)["value"] is True
+
+
+def go_test_change(repo, deleted=()):
+    base = {"go.mod": GO_MOD, "a_test.go": "package m\n", **{name: "package m\n" for name in deleted}}
+    return change(repo, base, {"a_test.go": "package m\n\nfunc TestA() {}\n"}, delete=deleted)
+
+
+def test_security_pattern_in_go_flags_a_finding_on_an_added_line_of_a_test_file(repo, stubs):
+    stubs.add("gosec", out=gosec_json(repo, "3", name="a_test.go"))
+    go_builds(stubs, repo, "a_test.go")
+    got = st.security_pattern(go_test_change(repo))
+    assert got["value"] is True
+    assert got["evidence"]["output"] == "a_test.go:3 G204"
+
+
+def test_security_pattern_in_go_is_unmeasured_for_a_changed_test_file_the_build_leaves_out(repo, stubs):
+    stubs.add("gosec", out=NOTHING_FOUND)
+    go_builds(stubs, repo)
+    got = st.security_pattern(go_test_change(repo))
+    assert got["value"] == UNMEASURED
+    assert got["reason"] == LEFT_OUT + "a_test.go"
+
+
+def test_security_pattern_in_go_does_not_ask_go_list_about_a_deleted_file(repo, stubs):
+    stubs.add("gosec", out=NOTHING_FOUND)
+    go_builds(stubs, repo, "a_test.go")
+    assert st.security_pattern(go_test_change(repo, deleted=("gone.go",)))["value"] is False
+
+
+def bandit_json(results=(), errors=()):
+    return json.dumps({"errors": list(errors), "results": list(results), "metrics": {}})
+
+
+def bandit_result(filename="./a.py", lines=(3,), test_id="B602"):
+    return {"filename": filename, "line_number": lines[0], "line_range": list(lines), "test_id": test_id}
+
+
+PY_BASE = {"a.py": "x = 1\ny = 2\nz = 3\n", "tests/test_a.py": "x = 1\n", "gone.py": "x = 1\n"}
+PY_HEAD = {"a.py": "x = 1\ny = 2\nz = 3\nsubprocess.call(x, shell=True)\n", "tests/test_a.py": "x = 2\n"}
+
+
+def py_security_change(repo):
+    return change(repo, PY_BASE, {**PY_HEAD, "b.py": "x = 1\n"}, delete=("gone.py",))
+
+
+def test_security_pattern_in_python_flags_a_finding_on_an_added_line(repo, stubs):
+    stubs.add("bandit", out=bandit_json([bandit_result(lines=(4,))]), code=1)
+    got = st.security_pattern(py_security_change(repo))
+    assert got["value"] is True
+    assert got["evidence"]["output"] == "a.py:4 B602"
+
+
+def test_security_pattern_in_python_ignores_a_finding_on_an_older_line(repo, stubs):
+    stubs.add("bandit", out=bandit_json([bandit_result(lines=(2,))]), code=1)
+    assert st.security_pattern(py_security_change(repo))["value"] is False
+
+
+def test_security_pattern_in_python_reads_every_line_of_a_multi_line_finding(repo, stubs):
+    stubs.add("bandit", out=bandit_json([bandit_result(lines=(2, 3, 4))]), code=1)
+    assert st.security_pattern(py_security_change(repo))["value"] is True
+
+
+def test_security_pattern_in_python_scans_every_changed_file_that_still_exists(repo, stubs):
+    stubs.add("bandit", out=bandit_json())
+    st.security_pattern(py_security_change(repo))
+    [call] = stubs.calls("bandit")
+    assert call["args"] == ["-f", "json", "-s", "B101", "--ignore-nosec", "a.py", "b.py", "tests/test_a.py"]
+    assert os.path.realpath(call["cwd"]) == os.path.realpath(str(repo.root))
+
+
+def test_security_pattern_in_python_does_not_let_the_change_suppress_its_own_finding(repo, stubs):
+    stubs.add("bandit", out=bandit_json())
+    st.security_pattern(py_security_change(repo))
+    assert "--ignore-nosec" in stubs.calls("bandit")[0]["args"]
+
+
+def test_security_pattern_in_python_is_unmeasured_when_the_change_also_touches_an_exempt_file(repo, stubs):
+    stubs.add("bandit", out=bandit_json())
+    ctx = change(repo, {"a.py": "x = 1\n", "fixtures/b.py": "y = 1\n"},
+                 {"a.py": "x = 2\n", "fixtures/b.py": "y = 1\neval(input())\n"},
+                 exempt=(":(glob,exclude,top)fixtures/**",))
+    got = st.security_pattern(ctx)
+    assert got["value"] == UNMEASURED
+    assert "fixtures/b.py" in got["reason"]
+    assert stubs.calls("bandit")[0]["args"][-1] == "a.py"
+
+
+def test_security_pattern_in_python_is_unmeasured_when_bandit_skipped_a_file(repo, stubs):
+    stubs.add("bandit", out=bandit_json(errors=[{"filename": "./a.py", "reason": "syntax error"}]))
+    got = st.security_pattern(py_security_change(repo))
+    assert got["value"] == UNMEASURED
+    assert "syntax error" in got["reason"]
+
+
+def test_security_pattern_in_python_is_unmeasured_when_bandit_prints_no_json(repo, stubs):
+    stubs.add("bandit", err="boom\n", code=2)
+    got = st.security_pattern(py_security_change(repo))
+    assert got["value"] == UNMEASURED and got["reason"] == "exit 2: boom"
+
+
+def test_security_pattern_in_python_is_unmeasured_when_bandit_prints_something_else(repo, stubs):
+    stubs.add("bandit", out="[1, 2]")
+    assert st.security_pattern(py_security_change(repo))["value"] == UNMEASURED
+
+
+def test_security_pattern_in_python_is_unmeasured_when_bandit_is_missing(repo, stubs):
+    got = st.security_pattern(py_security_change(repo))
+    assert got["value"] == UNMEASURED and "could not run bandit" in got["reason"]
+
+
+def test_security_pattern_in_python_is_unmeasured_when_only_tests_changed_and_bandit_is_missing(repo, stubs):
+    ctx = change(repo, {"tests/test_a.py": "x = 1\n"}, {"tests/test_a.py": "x = 2\n"})
+    got = st.security_pattern(ctx)
+    assert got["value"] == UNMEASURED and "could not run bandit" in got["reason"]
+
+
+def test_security_pattern_in_python_reads_a_finding_in_a_file_under_a_tests_directory(repo, stubs):
+    stubs.add("bandit", out=bandit_json([bandit_result("./tests/helpers.py", lines=(5,))]), code=1)
+    ctx = change(repo, {"tests/helpers.py": "import subprocess\n"},
+                 {"tests/helpers.py": "import subprocess\n\n\ndef run(c):\n    subprocess.call(c, shell=True)\n"})
+    got = st.security_pattern(ctx)
+    assert got["value"] is True
+    assert got["evidence"]["output"] == "tests/helpers.py:5 B602"
+
+
+@pytest.mark.parametrize("language,name,path", [("Python", "bandit", "a.py"), ("PHP", "opengrep", "src/A.php")])
+def test_security_pattern_has_nothing_to_scan_when_every_changed_file_was_deleted(repo, stubs, language, name, path):
+    ctx = change(repo, {path: "x\n", "keep.txt": "k\n"}, {}, delete=(path,))
+    got = st.security_pattern(ctx)
+    assert got["value"] is False
+    assert got["evidence"]["output"] == f"every changed {language} file was deleted"
+    assert stubs.calls(name) == []
+
+
+def opengrep_json(results=(), errors=()):
+    return json.dumps({"version": "1", "results": list(results), "errors": list(errors)})
+
+
+def opengrep_result(path="src/A.php", start=3, end=3, rule="touchstone-php-eval"):
+    return {"check_id": rule, "path": path, "start": {"line": start}, "end": {"line": end}}
+
+
+def php_security_change(repo):
+    return change(repo, {"src/A.php": "<?php\nclass A {}\n"},
+                  {"src/A.php": "<?php\nclass A {}\neval($x);\n", "src/Old.php": "<?php\n"})
+
+
+def test_security_pattern_in_php_flags_a_finding_on_an_added_line(repo, stubs):
+    stubs.add("opengrep", out=opengrep_json([opengrep_result()]))
+    got = st.security_pattern(php_security_change(repo))
+    assert got["value"] is True
+    assert got["evidence"]["output"] == "src/A.php:3 touchstone-php-eval"
+
+
+def test_security_pattern_in_php_names_the_rule_without_the_path_opengrep_prefixes_it_with(repo, stubs):
+    qualified = "Users.me.plugin.skills.crap-controlled-changes.lib.touchstone-php-eval"
+    stubs.add("opengrep", out=opengrep_json([opengrep_result(rule=qualified)]))
+    got = st.security_pattern(php_security_change(repo))
+    assert got["evidence"]["output"] == "src/A.php:3 touchstone-php-eval"
+
+
+def test_security_pattern_in_php_ignores_a_finding_on_an_older_line(repo, stubs):
+    stubs.add("opengrep", out=opengrep_json([opengrep_result(start=2, end=2)]))
+    assert st.security_pattern(php_security_change(repo))["value"] is False
+
+
+def test_security_pattern_in_php_scans_with_the_rules_this_plugin_ships(repo, stubs):
+    stubs.add("opengrep", out=opengrep_json())
+    st.security_pattern(php_security_change(repo))
+    [call] = stubs.calls("opengrep")
+    assert call["args"] == ["scan", "-f", st.PHP_RULES, "--json", "--disable-nosem", "src/A.php", "src/Old.php"]
+    assert os.path.isfile(st.PHP_RULES)
+
+
+def test_security_pattern_in_php_does_not_let_the_change_suppress_its_own_finding(repo, stubs):
+    stubs.add("opengrep", out=opengrep_json())
+    st.security_pattern(php_security_change(repo))
+    assert "--disable-nosem" in stubs.calls("opengrep")[0]["args"]
+
+
+def test_the_php_rules_name_each_pattern_they_exist_for():
+    text = open(st.PHP_RULES).read()
+    for rule in ("touchstone-php-eval", "touchstone-php-exec-family", "touchstone-php-unserialize",
+                 "touchstone-php-include-variable"):
+        assert f"id: {rule}" in text
+
+
+def test_security_pattern_in_php_is_unmeasured_when_opengrep_reports_errors(repo, stubs):
+    stubs.add("opengrep", out=opengrep_json(errors=[{"message": "parse error in src/A.php"}]))
+    got = st.security_pattern(php_security_change(repo))
+    assert got["value"] == UNMEASURED and "parse error" in got["reason"]
+
+
+def test_security_pattern_in_php_is_unmeasured_when_only_tests_changed_and_opengrep_is_missing(repo, stubs):
+    ctx = change(repo, {"tests/FooTest.php": "<?php\n"}, {"tests/FooTest.php": "<?php\n// x\n"})
+    got = st.security_pattern(ctx)
+    assert got["value"] == UNMEASURED and "could not run opengrep" in got["reason"]
+
+
+def test_security_pattern_in_php_scans_a_test_file_and_reads_its_findings(repo, stubs):
+    stubs.add("opengrep", out=opengrep_json([opengrep_result(path="tests/FooTest.php", start=2, end=2)]))
+    ctx = change(repo, {"tests/FooTest.php": "<?php\n"}, {"tests/FooTest.php": "<?php\neval($x);\n"})
+    got = st.security_pattern(ctx)
+    assert got["value"] is True
+    assert got["evidence"]["output"] == "tests/FooTest.php:2 touchstone-php-eval"
+    assert stubs.calls("opengrep")[0]["args"][-1] == "tests/FooTest.php"
+
+
+def test_security_pattern_in_php_is_unmeasured_when_opengrep_is_missing(repo, stubs):
+    got = st.security_pattern(php_security_change(repo))
+    assert got["value"] == UNMEASURED and "could not run opengrep" in got["reason"]
+
+
+def test_security_pattern_across_languages_is_true_if_any_language_is(repo, stubs):
+    stubs.add("opengrep", out=opengrep_json([opengrep_result()]))
+    ctx = change(repo, {"src/A.php": "<?php\nclass A {}\n", "a.py": "x = 1\n"},
+                 {"src/A.php": "<?php\nclass A {}\neval($x);\n", "a.py": "x = 2\n"})
+    assert st.security_pattern(ctx)["value"] is True
+
+
+def test_security_pattern_with_a_missing_tool_for_one_language_is_unmeasured_not_false(repo, stubs):
+    stubs.add("opengrep", out=opengrep_json())
+    ctx = change(repo, {"src/A.php": "<?php\n", "a.py": "x = 1\n"}, {"src/A.php": "<?php\n// x\n", "a.py": "x = 2\n"})
+    got = st.security_pattern(ctx)
+    assert got["value"] == UNMEASURED and "could not run bandit" in got["reason"]
+
+
+DIFFT = """
+import sys
+old, new = sys.argv[-2:]
+if sys.argv[1:3] != ['--check-only', '--exit-code']:
+    sys.exit(2)
+sys.exit(0 if open(old).read().split() == open(new).read().split() else 1)
+"""
+
+
+def test_semantic_noop_is_true_when_difft_sees_no_syntactic_change(repo, stubs):
+    stubs.add("difft", DIFFT)
+    ctx = change(repo, {"a.py": "x = 1\n", "b.go": "package m\n"}, {"a.py": "x   =   1\n\n", "b.go": "package   m\n"})
+    got = st.semantic_noop(ctx)
+    assert got["value"] is True
+    assert got["evidence"]["output"] == "a.py: no syntactic change"
+    assert got["evidence"]["exit"] == 0
+
+
+def test_semantic_noop_is_false_when_difft_sees_a_change(repo, stubs):
+    stubs.add("difft", DIFFT)
+    ctx = change(repo, {"a.py": "x = 1\n", "b.py": "y = 1\n"}, {"a.py": "x   =   1\n", "b.py": "y = 2\n"})
+    got = st.semantic_noop(ctx)
+    assert got["value"] is False
+    assert got["evidence"]["exit"] == 1
+
+
+def test_semantic_noop_compares_the_base_and_head_blobs_under_the_original_name(repo, stubs):
+    stubs.add("difft", "sys.exit(0)")
+    st.semantic_noop(change(repo, {"dir/a.py": "old\n"}, {"dir/a.py": "new\n"}))
+    [call] = stubs.calls("difft")
+    old, new = call["args"][2:]
+    assert os.path.basename(old) == os.path.basename(new) == "a.py"
+    assert old != new
+
+
+def test_semantic_noop_hands_difft_the_two_flags_the_check_needs(repo, stubs):
+    stubs.add("difft", DIFFT)
+    st.semantic_noop(change(repo, {"a.py": "x = 1\n"}, {"a.py": "x = 1 \n"}))
+    [call] = stubs.calls("difft")
+    assert call["args"][:2] == ["--check-only", "--exit-code"]
+
+
+@pytest.mark.parametrize("base,head,delete,word", [
+    ({}, {"new.py": "x = 1\n"}, (), "status A"),
+    ({"old.py": "x = 1\n"}, {}, ("old.py",), "status D"),
+])
+def test_semantic_noop_is_false_for_a_file_that_was_added_or_deleted(repo, stubs, base, head, delete, word):
+    stubs.add("difft", DIFFT)
+    ctx = change(repo, {**base, "keep.py": "k = 1\n"}, head, delete=delete)
+    got = st.semantic_noop(ctx)
+    assert got["value"] is False
+    assert word in got["evidence"]["output"]
+
+
+def test_semantic_noop_is_false_for_a_binary_file_that_changed(repo, stubs):
+    stubs.add("difft", DIFFT)
+    ctx = change(repo, {"a.bin": b"\x00\x01"}, {"a.bin": b"\x00\x02"})
+    got = st.semantic_noop(ctx)
+    assert got["value"] is False and "binary" in got["evidence"]["output"]
+
+
+def test_semantic_noop_is_unmeasured_when_difft_fails(repo, stubs):
+    stubs.add("difft", err="bad input\n", code=2)
+    got = st.semantic_noop(change(repo, {"a.py": "x = 1\n"}, {"a.py": "x = 2\n"}))
+    assert got["value"] == UNMEASURED
+    assert got["reason"] == "exit 2: bad input"
+
+
+def test_semantic_noop_is_unmeasured_when_difft_is_missing(repo, stubs):
+    got = st.semantic_noop(change(repo, {"a.py": "x = 1\n"}, {"a.py": "x = 2\n"}))
+    assert got["value"] == UNMEASURED and "could not run difft" in got["reason"]
+
+
+def test_semantic_noop_would_rather_report_a_change_than_a_failure(repo, stubs):
+    ctx = change(repo, {"a.py": "x = 1\n"}, {"a.py": "x = 2\n", "new.py": "y = 1\n"})
+    assert st.semantic_noop(ctx)["value"] is False
+
+
+def test_semantic_noop_is_unmeasured_when_one_file_cannot_be_compared_and_the_rest_are_unchanged(repo, stubs):
+    stubs.add("difft", "sys.exit(0 if sys.argv[-1].endswith('ok.py') else 2)")
+    ctx = change(repo, {"ok.py": "x = 1\n", "bad.py": "x = 1\n"}, {"ok.py": "x = 1 \n", "bad.py": "x = 1 \n"})
+    got = st.semantic_noop(ctx)
+    assert got["value"] == UNMEASURED
+
+
+def test_semantic_noop_of_an_empty_range_is_unmeasured(repo, stubs):
+    repo.write("a.py", "x = 1\n")
+    repo.commit("base")
+    repo.commit("empty")
+    ctx = sb.load_ctx(str(repo.root), "HEAD~1..HEAD", settings())
+    got = st.semantic_noop(ctx)
+    assert got["value"] == UNMEASURED and got["reason"] == "no changed file"
+
+
+def test_semantic_noop_does_not_need_head_to_be_the_range_head(repo, stubs):
+    stubs.add("difft", DIFFT)
+    ctx = change(repo, {"a.py": "x = 1\n"}, {"a.py": "x  = 1\n"})
+    assert st.semantic_noop(ctx._replace(at_head=False))["value"] is True
+
+
+GO_SRC = """package m
+
+func Live() int {
+	return 1
+}
+
+func Dead() int {
+	return 2
+}
+
+func Third() int { return 3 }
+"""
+
+
+def deadcode(stubs, by_dir, code=0, err=""):
+    """A `go` that answers `go run ...deadcode...` per directory it is run in."""
+    stubs.add("go", f"""
+table = {by_dir!r}
+here = os.path.basename(os.getcwd())
+if here not in table:
+    sys.stderr.write('deadcode: no main packages\\n'); sys.exit(1)
+if {code}:
+    sys.stderr.write({err!r}); sys.exit({code})
+sys.stdout.write(table[here])
+""")
+
+
+def dead_json(*funcs, file="a.go"):
+    return json.dumps([{"Name": "m", "Path": "example.com/m", "Funcs": [
+        {"Name": n, "Position": {"File": file, "Line": line, "Col": 6}, "Generated": False} for n, line in funcs]}])
+
+
+def go_reach_change(repo, head_src=GO_SRC, **config):
+    return change(repo, {"go.mod": GO_MOD, "a.go": "package m\n"}, {"a.go": head_src}, **config)
+
+
+def test_reachable_is_true_when_a_changed_function_is_not_listed_as_dead(repo, stubs):
+    deadcode(stubs, {"repo": dead_json(("Dead", 7), ("Third", 11))})
+    got = st.reachable(go_reach_change(repo))
+    assert got["value"] is True
+    assert got["evidence"]["output"] == "a.go:3 reachable"
+
+
+def test_reachable_is_false_when_every_changed_function_is_listed_as_dead(repo, stubs):
+    deadcode(stubs, {"repo": dead_json(("Live", 3), ("Dead", 7), ("Third", 11))})
+    got = st.reachable(go_reach_change(repo))
+    assert got["value"] is False
+    assert got["evidence"]["output"] == "a.go:3 unreachable\na.go:7 unreachable\na.go:11 unreachable"
+
+
+def test_reachable_counts_only_functions_that_hold_an_added_line(repo, stubs):
+    deadcode(stubs, {"repo": dead_json(("Live", 3))})
+    ctx = change(repo, {"go.mod": GO_MOD, "a.go": GO_SRC}, {"a.go": GO_SRC.replace("return 2", "return 22")})
+    got = st.reachable(ctx)
+    assert got["value"] is True
+    assert got["evidence"]["output"] == "a.go:7 reachable"
+
+
+def test_reachable_reads_a_single_line_function(repo, stubs):
+    deadcode(stubs, {"repo": dead_json(("Live", 3), ("Dead", 7))})
+    ctx = change(repo, {"go.mod": GO_MOD, "a.go": GO_SRC}, {"a.go": GO_SRC.replace("return 3", "return 33")})
+    got = st.reachable(ctx)
+    assert got["value"] is True and got["evidence"]["output"] == "a.go:11 reachable"
+
+
+def test_reachable_reads_a_null_report_as_every_function_reachable(repo, stubs):
+    deadcode(stubs, {"repo": "null\n"})
+    assert st.reachable(go_reach_change(repo))["value"] is True
+
+
+def test_reachable_runs_deadcode_from_the_module_root_with_a_filter_for_its_module(repo, stubs):
+    deadcode(stubs, {"repo": "null"})
+    st.reachable(go_reach_change(repo, deadcode_version="v9.9.9"))
+    [call] = stubs.calls("go")
+    assert call["args"] == ["run", "golang.org/x/tools/cmd/deadcode@v9.9.9", "-json",
+                            "-filter=^example\\.com/m", "./..."]
+    assert os.path.realpath(call["cwd"]) == os.path.realpath(str(repo.root))
+
+
+def test_reachable_judges_a_library_from_the_module_that_replaces_it(repo, stubs):
+    deadcode(stubs, {"app": dead_json(("Dead", 7), ("Third", 11), file="../lib/a.go")})
+    ctx = change(
+        repo,
+        {"lib/go.mod": "module example.com/lib\n", "lib/a.go": "package lib\n",
+         "app/go.mod": "module example.com/app\n\nreplace example.com/lib => ../lib\n", "app/main.go": "package main\n"},
+        {"lib/a.go": GO_SRC.replace("package m", "package lib")})
+    got = st.reachable(ctx)
+    assert got["value"] is True
+    assert got["evidence"]["output"] == "lib/a.go:3 reachable"
+    dirs = [os.path.basename(c["cwd"]) for c in stubs.calls("go")]
+    assert dirs == ["app", "lib"]
+
+
+def test_reachable_is_false_only_when_every_root_that_has_a_main_lists_the_function(repo, stubs):
+    listed = dead_json(("Live", 3), ("Dead", 7), ("Third", 11), file="../lib/a.go")
+    deadcode(stubs, {"app": listed, "lib": dead_json(("Live", 3), ("Dead", 7), ("Third", 11), file="a.go")})
+    ctx = change(
+        repo,
+        {"lib/go.mod": "module example.com/lib\n", "lib/a.go": "package lib\n",
+         "app/go.mod": "module example.com/app\n\nreplace example.com/lib => ../lib\n", "app/main.go": "package main\n"},
+        {"lib/a.go": GO_SRC.replace("package m", "package lib")})
+    assert st.reachable(ctx)["value"] is False
+
+
+def test_reachable_is_unmeasured_when_no_root_has_a_main_package(repo, stubs):
+    deadcode(stubs, {})
+    got = st.reachable(go_reach_change(repo))
+    assert got["value"] == UNMEASURED
+    assert got["reason"] == "no main package reaches module ."
+
+
+def test_reachable_is_unmeasured_when_deadcode_cannot_build_the_module(repo, stubs):
+    deadcode(stubs, {"repo": "[]"}, code=1, err="deadcode: a.go:1: syntax error\n")
+    got = st.reachable(go_reach_change(repo))
+    assert got["value"] == UNMEASURED
+    assert got["reason"] == "exit 1: deadcode: a.go:1: syntax error"
+
+
+def test_reachable_is_unmeasured_when_go_is_missing(repo, stubs):
+    got = st.reachable(go_reach_change(repo))
+    assert got["value"] == UNMEASURED and "could not run go" in got["reason"]
+
+
+def test_reachable_is_unmeasured_without_a_changed_function(repo, stubs):
+    ctx = change(repo, {"go.mod": GO_MOD, "a.go": GO_SRC}, {"a.go": GO_SRC + "\n// trailing note\n"})
+    got = st.reachable(ctx)
+    assert got["value"] == UNMEASURED and "no changed Go function" in got["reason"]
+    assert stubs.calls("go") == []
+
+
+def test_reachable_ignores_test_files_and_deleted_files(repo, stubs):
+    ctx = change(repo, {"go.mod": GO_MOD, "a_test.go": "package m\n", "gone.go": GO_SRC},
+                 {"a_test.go": GO_SRC}, delete=("gone.go",))
+    assert st.reachable(ctx)["value"] == UNMEASURED
+    assert stubs.calls("go") == []
+
+
+def test_reachable_is_unmeasured_when_head_is_not_the_range_head(repo, stubs):
+    got = st.reachable(go_reach_change(repo)._replace(at_head=False))
+    assert got["value"] == UNMEASURED and "HEAD" in got["reason"]
+
+
+@pytest.mark.parametrize("path,config", [
+    ("svc/h.py", {}), ("src/A.php", {}), ("web/app.ts", {"unsupported": ("*.ts",)}),
+])
+def test_reachable_cannot_say_false_beside_a_changed_file_deadcode_cannot_read(repo, stubs, path, config):
+    deadcode(stubs, {"repo": dead_json(("Live", 3), ("Dead", 7), ("Third", 11))})
+    ctx = change(repo, {"go.mod": GO_MOD, "a.go": "package m\n", path: "x\n"},
+                 {"a.go": GO_SRC, path: "y\n"}, **config)
+    got = st.reachable(ctx)
+    assert got["value"] == UNMEASURED
+    assert got["reason"] == f"deadcode reads Go only, so these changed file(s) were not measured: {path}"
+
+
+def test_reachable_still_reports_a_live_go_function_beside_a_file_deadcode_cannot_read(repo, stubs):
+    deadcode(stubs, {"repo": dead_json(("Dead", 7), ("Third", 11))})
+    ctx = change(repo, {"go.mod": GO_MOD, "a.go": "package m\n", "svc/h.py": "x = 1\n"},
+                 {"a.go": GO_SRC, "svc/h.py": "x = 2\n"})
+    assert st.reachable(ctx)["value"] is True
+
+
+def test_reachable_does_not_count_python_test_files_or_deleted_files_as_unread_code(repo, stubs):
+    deadcode(stubs, {"repo": dead_json(("Live", 3), ("Dead", 7), ("Third", 11))})
+    ctx = change(repo, {"go.mod": GO_MOD, "a.go": "package m\n", "tests/test_a.py": "x = 1\n", "gone.py": "x = 1\n"},
+                 {"a.go": GO_SRC, "tests/test_a.py": "x = 2\n"}, delete=("gone.py",))
+    assert st.reachable(ctx)["value"] is False
+
+
+def test_reachable_says_why_a_range_of_only_other_languages_has_nothing_to_measure(repo, stubs):
+    ctx = change(repo, {"a.py": "x = 1\n"}, {"a.py": "x = 2\n"})
+    got = st.reachable(ctx)
+    assert got["reason"] == ("no changed Go function in a non-test file; "
+                             "deadcode reads Go only, so these changed file(s) were not measured: a.py")
+
+
+def test_reachable_answers_for_go_only(repo, stubs):
+    ctx = change(repo, {"a.py": "x = 1\n"}, {"a.py": "x = 2\n"})
+    got = st.reachable(ctx)
+    assert got["value"] == UNMEASURED and "no changed Go function" in got["reason"]
+
+
+def test_func_spans_runs_from_the_func_line_to_the_closing_brace_at_column_zero():
+    text = "package m\n\nfunc A() {\n\tif x {\n\t}\n}\n\nfunc (t T) B() {\n}\n"
+    assert st.func_spans(text) == [(3, 6), (8, 9)]
+
+
+def test_func_spans_treats_a_one_line_function_as_one_line():
+    assert st.func_spans("func A() int { return 1 }\n\nfunc B() {}\n") == [(1, 1), (3, 3)]
+
+
+def test_func_spans_ignores_closing_braces_outside_a_function():
+    text = "type T struct {\n\tx int\n}\n\nfunc A() {\n}\n"
+    assert st.func_spans(text) == [(5, 6)]
+
+
+def test_func_spans_ends_a_function_that_never_closes_on_the_last_line():
+    assert st.func_spans("func A() {\n\tx := 1\n") == [(1, 2)]
+
+
+def test_func_spans_of_text_without_functions_is_empty():
+    assert st.func_spans("package m\n") == []
+
+
+def test_the_four_tool_signals_are_registered_under_their_names():
+    assert sorted(st.SIGNALS) == ["api_broken", "reachable", "security_pattern", "semantic_noop"]
+
+
+def test_unread_parts_name_every_file_no_tool_was_given():
+    got = st.unread_parts(fake(unsupported=("a.ts", "b.rs")), ("x.py", "y.py"))
+    assert got == [
+        sb.unmeasured("changed file(s) in a language no tool here covers: a.ts, b.rs"),
+        sb.unmeasured("changed file(s) the repo's .crap-gated exempts, so no tool here read them: x.py, y.py")]
+
+
+def test_unread_parts_of_nothing_unread_is_empty():
+    assert st.unread_parts(fake(), ()) == []
+
+
+@pytest.mark.parametrize("code,problem,is_failed", [
+    (0, "", False), (1, "", True), (None, "apidiff timed out after 90 s", True),
+    (None, "could not run apidiff: x", True)])
+def test_a_run_failed_when_it_exited_non_zero_or_never_finished(code, problem, is_failed):
+    assert st.failed(sb.Run("c", code, "", "", problem)) is is_failed
+
+
+def test_judged_gives_every_record_it_found_one_per_line():
+    run = sb.Run("tool -x", 1, "", "", "")
+    assert st.judged(run, ["a", "b"]) == sb.signal(True, command="tool -x", code=1, output="a\nb")
+
+
+def test_only_tests_says_which_language_had_nothing_but_tests():
+    assert st.only_tests("Go") == [sb.signal(False, output="only test files changed in Go")]
+
+
+def test_python_api_with_only_test_files_says_so():
+    got = st.python_api(fake(), ["tests/test_a.py", "pkg/test_b.py"])
+    assert got == [sb.signal(False, output="only test files changed in Python")]
+
+
+def test_php_api_with_only_test_files_says_so():
+    got = st.php_api(fake(), ["tests/FooTest.php"])
+    assert got == [sb.signal(False, output="only test files changed in PHP")]
+
+
+def test_python_api_names_every_file_outside_a_package_in_order(tmp_path):
+    got = st.python_api(fake(repo=str(tmp_path)), ["b.py", "a.py"])
+    assert got == [sb.unmeasured("Python file(s) outside any package: a.py, b.py")]
+
+
+def test_api_broken_in_php_reads_a_bc_line_that_is_indented(repo, stubs):
+    stubs.add("roave-backward-compatibility-check", err="  [BC] REMOVED: Class A was removed\n", code=3)
+    got = st.api_broken(php_change(repo))
+    assert got["value"] is True
+    assert got["evidence"]["output"] == "  [BC] REMOVED: Class A was removed"
+
+
+@pytest.mark.parametrize("path,counts", [
+    ("a.go", True), ("pkg/a.go", True), ("a_test.go", False), ("pkg/a_test.go", False), ("tests/a.go", True),
+    ("pkg/a.py", True), ("tests/a.py", False), ("pkg/test_a.py", False),
+    ("src/A.php", True), ("src/FooTest.php", False), ("tests/A.php", False)])
+def test_api_counts_a_go_file_unless_it_is_a_test_file_and_other_files_unless_they_are_tests(path, counts):
+    assert st.api_counts(path) is counts
+
+
+def test_api_unit_names_the_module_package_or_project_a_tool_reads_whole(tmp_path):
+    for rel in ("svc/go.mod", "pkg/__init__.py", "pkg/sub/__init__.py"):
+        (tmp_path / rel).parent.mkdir(parents=True, exist_ok=True)
+        (tmp_path / rel).write_text("")
+    ctx = fake(repo=str(tmp_path))
+    assert st.api_unit(ctx, set(), "svc/a.go") == ("go", "svc")
+    assert st.api_unit(ctx, set(), "a.go") == ("go", ".")
+    assert st.api_unit(ctx, set(), "pkg/sub/m.py") == ("python", "pkg")
+    assert st.api_unit(ctx, set(), "loose.py") is None
+    assert st.api_unit(ctx, set(), "src/A.php") == ("php",)
+    assert st.api_unit(ctx, set(), "README.md") is None
+
+
+def test_top_package_needs_each_init_file_spelled_exactly(tmp_path, exact_case_fs):
+    for rel in ("pkg/__init__.py", "pkg/sub/__init__.py", "bare/m.py"):
+        (tmp_path / rel).parent.mkdir(parents=True, exist_ok=True)
+        (tmp_path / rel).write_text("")
+    assert st.top_package(str(tmp_path), "pkg/sub/m.py") == ("pkg", ".")
+    assert st.top_package(str(tmp_path), "pkg/m.py") == ("pkg", ".")
+    assert st.top_package(str(tmp_path), "bare/m.py") is None
+
+
+def test_top_package_stops_at_the_repo_root_even_when_the_root_holds_an_init_file(tmp_path):
+    (tmp_path / "__init__.py").write_text("")
+
+    def too_long(signum, frame):
+        raise TimeoutError("top_package did not stop at the repo root")
+
+    previous = signal.signal(signal.SIGALRM, too_long)
+    signal.alarm(5)
+    try:
+        got = st.top_package(str(tmp_path), "m.py")
+    finally:
+        signal.alarm(0)
+        signal.signal(signal.SIGALRM, previous)
+    assert got is None
+
+
+def test_go_module_api_needs_go_mod_and_the_base_tree_spelled_exactly(tmp_path, stubs, exact_case_fs):
+    work, tmp = tmp_path / "work", tmp_path / "tmp"
+    for rel in ("work/go.mod", "tmp/base/go.mod"):
+        (tmp_path / rel).parent.mkdir(parents=True, exist_ok=True)
+        (tmp_path / rel).write_text(GO_MOD)
+    apidiff(stubs, out="- A: removed\n")
+    got = st.go_module_api(fake(repo=str(work)), str(tmp), ".")
+    assert got["value"] is True
+    assert got["evidence"]["output"] == "- A: removed"
+
+
+def test_api_broken_in_go_names_apidiff_and_the_export_it_reads_back(repo, stubs):
+    apidiff(stubs, out="- A: removed\n")
+    got = st.api_broken(go_change(repo))
+    assert got["evidence"]["command"].startswith("apidiff -m -incompatible ")
+    write, compare = stubs.calls("apidiff")
+    export = write["args"][2]
+    assert compare["args"][2] == export
+    assert os.path.isabs(export) and os.path.basename(export) == "api.export"
+    assert os.path.realpath(write["cwd"]) == os.path.realpath(os.path.join(os.path.dirname(export), "base"))
+
+
+def test_api_broken_in_go_names_the_export_write_when_it_fails(repo, stubs):
+    apidiff(stubs, write_code=1)
+    got = st.api_broken(go_change(repo))
+    assert got["evidence"]["command"].startswith("apidiff -m -w ")
+
+
+def test_at_base_asks_git_whether_the_path_exists_at_the_base(repo, argv_log):
+    ctx = change(repo, {"a.py": "x\n"}, {"b.py": "y\n"})
+    argv_log.clear()
+    assert st.at_base(ctx, "a.py") is True
+    assert [call["argv"] for call in argv_log] == [
+        ["git", "-C", str(repo.root), "cat-file", "-e", f"{ctx.base}:a.py"]]
+    assert st.at_base(ctx, "b.py") is False
+
+
+def test_at_base_says_nothing_of_a_path_that_is_missing(repo, capfd):
+    ctx = change(repo, {"a.py": "x\n"}, {"b.py": "y\n"})
+    capfd.readouterr()
+    assert st.at_base(ctx, "missing.py") is False
+    assert capfd.readouterr().err == ""
+
+
+def test_unpack_base_extracts_the_base_tree_with_git_archive_and_tar(repo, argv_log, tmp_path):
+    ctx = change(repo, {"a.py": "x\n"}, {"a.py": "y\n"})
+    argv_log.clear()
+    dest = tmp_path / "out" / "base"
+    st.unpack_base(ctx, str(dest))
+    assert (dest / "a.py").read_text() == "x\n"
+    git_call, tar_call = argv_log
+    assert git_call["argv"] == ["git", "-C", str(repo.root), "archive", "--format=tar", ctx.base]
+    assert tar_call["argv"] == ["tar", "-x", "-C", str(dest)]
+
+
+@pytest.mark.parametrize("tool,failing", [("git", {"archive"}), ("tar", {"-x"})])
+def test_unpack_base_fails_when_git_archive_or_tar_fails_and_says_nothing(repo, stubs, capfd, tmp_path, tool, failing):
+    ctx = change(repo, {"a.py": "x\n"}, {"a.py": "y\n"})
+    stubs.wrap(tool, failing)
+    capfd.readouterr()
+    with pytest.raises(subprocess.CalledProcessError) as raised:
+        st.unpack_base(ctx, str(tmp_path / "dest"))
+    assert raised.value.cmd[0] == tool
+    assert capfd.readouterr().err == ""
+
+
+def test_blob_to_writes_the_blob_under_its_own_name_in_a_new_directory(repo, argv_log, tmp_path):
+    ctx = change(repo, {"dir/a.py": "old\n"}, {"dir/a.py": "new\n"})
+    argv_log.clear()
+    dest = st.blob_to(ctx, ctx.base, "dir/a.py", str(tmp_path), "0/a")
+    assert dest == str(tmp_path / "0" / "a" / "a.py")
+    assert open(dest).read() == "old\n"
+    assert [call["argv"] for call in argv_log] == [
+        ["git", "-C", str(repo.root), "cat-file", "blob", f"{ctx.base}:dir/a.py"]]
+
+
+def test_blob_to_fails_when_git_cannot_read_the_blob_and_says_nothing(repo, stubs, capfd, tmp_path):
+    ctx = change(repo, {"a.py": "old\n"}, {"a.py": "new\n"})
+    stubs.wrap("git", {"cat-file", "blob"})
+    capfd.readouterr()
+    with pytest.raises(subprocess.CalledProcessError):
+        st.blob_to(ctx, ctx.head, "a.py", str(tmp_path), "0/b")
+    assert capfd.readouterr().err == ""
+    assert not (tmp_path / "0").exists()
+
+
+def test_span_covers_the_lines_of_a_range_or_the_one_line_of_a_single_number():
+    assert list(st.span("5-6")) == [5, 6]
+    assert list(st.span("4")) == [4]
+    assert list(st.span(7)) == [7]
+
+
+def test_skipped_sorts_the_keys_and_cuts_the_text_at_200_characters():
+    assert st.skipped({"b": 1, "a": 2}) == '{"a": 2, "b": 1}'
+    assert st.skipped({"k": "x" * 300}) == ('{"k": "' + "x" * 193)
+    assert st.skipped({}) == "" and st.skipped(None) == ""
+
+
+def scanned(out="{}"):
+    return sb.Run("scan -x", 0, out, "", "")
+
+
+def test_scan_part_lists_every_finding_on_an_added_line_one_per_line():
+    ctx = fake(added={"a.py": {3, 4}, "b.py": {9}})
+    found = [("a.py", range(3, 5), "R1"), ("b.py", range(9, 10), "R2"), ("a.py", range(1, 2), "R3")]
+    got = st.scan_part(ctx, scanned(), lambda c, data: (found, ""))
+    assert got["value"] is True
+    assert got["evidence"]["output"] == "a.py:3 R1\nb.py:9 R2"
+
+
+def test_scan_part_counts_a_finding_in_a_file_the_range_did_not_touch_as_none_on_added_lines():
+    got = st.scan_part(fake(added={}), scanned(), lambda c, data: ([("other.py", range(1, 2), "R1")], ""))
+    assert got["value"] is False
+    assert got["evidence"]["output"] == "1 finding(s) in scanned files, none on added lines"
+
+
+def test_bandit_findings_read_a_filename_bandit_wrote_in_full(tmp_path):
+    data = {"results": [{"filename": str(tmp_path / "a.py"), "line_range": [3, 4], "test_id": "B602"}],
+            "errors": []}
+    assert st.bandit_findings(fake(repo=str(tmp_path)), data) == ([("a.py", [3, 4], "B602")], "")
+
+
+def test_opengrep_findings_read_a_path_written_in_full_and_the_last_part_of_a_rule_id(tmp_path):
+    data = {"results": [{"check_id": "a.b.c.rule", "path": str(tmp_path / "x.php"),
+                         "start": {"line": 2}, "end": {"line": 4}}], "errors": []}
+    assert st.opengrep_findings(fake(repo=str(tmp_path)), data) == ([("x.php", range(2, 5), "rule")], "")
+
+
+def test_security_pattern_in_php_runs_opengrep_from_the_repo(repo, stubs):
+    stubs.add("opengrep", out=opengrep_json())
+    st.security_pattern(php_security_change(repo))
+    assert os.path.realpath(stubs.calls("opengrep")[0]["cwd"]) == os.path.realpath(str(repo.root))
+
+
+def noop_row(ctx, path):
+    return next(row for row in ctx.rows if row[2] == path)
+
+
+def test_noop_file_says_the_status_of_a_file_that_was_not_modified(repo, tmp_path):
+    ctx = change(repo, {"old.py": "x\n", "keep.py": "k\n"}, {"new.py": "x\n"}, delete=("old.py",))
+    assert st.noop_file(ctx, str(tmp_path), 0, noop_row(ctx, "new.py")) == sb.signal(False, output="new.py: status A")
+    assert st.noop_file(ctx, str(tmp_path), 1, noop_row(ctx, "old.py")) == sb.signal(False, output="old.py: status D")
+
+
+def test_noop_file_says_when_a_modified_file_is_binary(repo, tmp_path):
+    ctx = change(repo, {"a.bin": b"\x00\x01"}, {"a.bin": b"\x00\x02"})
+    got = st.noop_file(ctx, str(tmp_path), 0, noop_row(ctx, "a.bin"))
+    assert got == sb.signal(False, output="a.bin: status M (binary)")
+
+
+def test_noop_file_gives_a_verdict_of_true_no_reason_and_says_so(repo, stubs, tmp_path):
+    stubs.add("difft", "sys.exit(0)")
+    ctx = change(repo, {"a.py": "x\n"}, {"a.py": "x \n"})
+    got = st.noop_file(ctx, str(tmp_path), 0, noop_row(ctx, "a.py"))
+    assert "reason" not in got
+    assert got["value"] is True and got["evidence"]["exit"] == 0
+    assert got["evidence"]["output"] == "a.py: no syntactic change"
+
+
+def test_noop_file_gives_a_verdict_of_false_no_reason_and_what_difft_printed(repo, stubs, tmp_path):
+    stubs.add("difft", out="differs\n", code=1)
+    ctx = change(repo, {"a.py": "x\n"}, {"a.py": "y\n"})
+    got = st.noop_file(ctx, str(tmp_path), 0, noop_row(ctx, "a.py"))
+    assert "reason" not in got
+    assert got["value"] is False and got["evidence"]["exit"] == 1
+    assert got["evidence"]["output"] == "differs\n"
+
+
+def test_noop_file_that_difft_could_not_compare_gives_the_reason_and_what_difft_printed(repo, stubs, tmp_path):
+    stubs.add("difft", err="bad input\n", code=2)
+    ctx = change(repo, {"a.py": "x\n"}, {"a.py": "y\n"})
+    got = st.noop_file(ctx, str(tmp_path), 0, noop_row(ctx, "a.py"))
+    assert got["value"] == UNMEASURED and got["reason"] == "exit 2: bad input"
+    assert got["evidence"]["output"] == "bad input\n"
+
+
+def test_semantic_noop_runs_difft_from_the_directory_that_holds_both_blobs(repo, stubs):
+    stubs.add("difft", "sys.exit(0)")
+    st.semantic_noop(change(repo, {"a.py": "x\n"}, {"a.py": "y\n"}))
+    [call] = stubs.calls("difft")
+    old = call["args"][2]
+    assert os.path.realpath(call["cwd"]) == os.path.realpath(os.path.dirname(os.path.dirname(os.path.dirname(old))))
+
+
+def test_func_spans_ends_a_one_line_function_with_trailing_spaces_on_that_line():
+    assert st.func_spans("func A() { return 1 }   \n\nfunc B() {\n}\n") == [(1, 1), (3, 4)]
+
+
+def test_func_spans_of_functions_with_no_blank_line_between_them():
+    assert st.func_spans("func A() {\n}\nfunc B() {\n\tx()\n}\n") == [(1, 2), (3, 5)]
+
+
+def test_func_spans_ends_a_function_at_a_brace_directly_after_its_opener():
+    assert st.func_spans("func A() {\n}\nvar x = 1\n") == [(1, 2)]
+
+
+def test_changed_functions_lists_those_of_every_file_that_holds_an_added_line(repo):
+    src = "package m\n\nfunc A() {\n}\n"
+    ctx = change(repo, {"go.mod": GO_MOD, "a.go": src, "b.go": src, "c.go": src},
+                 {"a.go": src.replace("{\n}", "{\n\tx()\n}"), "c.go": src.replace("{\n}", "{\n\ty()\n}")})
+    assert st.changed_functions(ctx, ["a.go", "b.go", "c.go"]) == [("a.go", 3), ("c.go", 3)]
+
+
+def test_reachable_reads_a_path_deadcode_prints_in_full(repo, stubs):
+    deadcode(stubs, {"repo": dead_json(("Dead", 7), ("Third", 11), file=str(repo.root.resolve() / "a.go"))})
+    got = st.reachable(go_reach_change(repo))
+    assert got["value"] is True
+    assert got["evidence"]["output"] == "a.go:3 reachable"
+
+
+def test_reachable_goes_on_to_the_next_root_when_the_first_has_no_main_package(repo, stubs):
+    deadcode(stubs, {"lib": dead_json(("Dead", 7), ("Third", 11), file="a.go")})
+    ctx = change(
+        repo,
+        {"lib/go.mod": "module example.com/lib\n", "lib/a.go": "package lib\n",
+         "app/go.mod": "module example.com/app\n\nreplace example.com/lib => ../lib\n", "app/main.go": "package main\n"},
+        {"lib/a.go": GO_SRC.replace("package m", "package lib")})
+    got = st.reachable(ctx)
+    assert got["value"] is True
+    assert got["evidence"]["output"] == "lib/a.go:3 reachable"
+    assert [os.path.basename(c["cwd"]) for c in stubs.calls("go")] == ["app", "lib"]
+
+
+def test_by_module_groups_functions_by_the_module_even_when_its_go_mod_is_not_tracked(tmp_path):
+    (tmp_path / "svc").mkdir()
+    (tmp_path / "svc" / "go.mod").write_text(GO_MOD)
+    got = st.by_module(fake(repo=str(tmp_path)), [("svc/a.go", 3), ("b.go", 5), ("svc/c.go", 7)])
+    assert got == {"svc": [("svc/a.go", 3), ("svc/c.go", 7)], ".": [("b.go", 5)]}
+
+
+def test_reachable_names_every_changed_file_deadcode_cannot_read(repo, stubs):
+    deadcode(stubs, {"repo": dead_json(("Live", 3), ("Dead", 7), ("Third", 11))})
+    ctx = change(repo, {"go.mod": GO_MOD, "a.go": "package m\n", "svc/h.py": "x\n", "svc/i.py": "x\n"},
+                 {"a.go": GO_SRC, "svc/h.py": "y\n", "svc/i.py": "y\n"})
+    assert st.reachable(ctx)["reason"] == (
+        "deadcode reads Go only, so these changed file(s) were not measured: svc/h.py, svc/i.py")

@@ -1,0 +1,388 @@
+import io
+import json
+import os
+import subprocess
+import threading
+import time
+import types
+
+import pytest
+
+import crap_rows
+import scored_ledger
+
+GREEN = (
+    "== python ==\n"
+    "lib/a.py::f  complexity=2   coverage=100.0%  CRAP=2.0  OK           (new)\n"
+    "lib/a.py::g  complexity=5   coverage=80.0%   CRAP=5.2  OK           (worsened)\n"
+    "lib/a.py::h  complexity=1   coverage=n/a     CRAP=n/a  OK_MAIN      (unchanged)\n"
+    "\n"
+    "== NEXT_ACTION ==\n"
+    "COMMIT_OK\n"
+)
+
+
+def row(**fields):
+    base = {"complexity": "2", "coverage": "100.0", "crap": "2.0", "status": "OK", "tag": "new"}
+    return {**base, **fields}
+
+
+def test_parse_reads_every_gate_row_and_nothing_else():
+    assert crap_rows.parse(GREEN) == {
+        "lib/a.py::f": row(),
+        "lib/a.py::g": row(complexity="5", coverage="80.0", crap="5.2", tag="worsened"),
+        "lib/a.py::h": row(complexity="1", coverage="n/a", crap="n/a", status="OK_MAIN", tag="unchanged"),
+    }
+
+
+def test_parse_of_text_without_rows_is_empty():
+    assert crap_rows.parse("no staged source files\n") == {}
+
+
+def test_merge_keeps_the_latest_row_per_function_and_the_ones_not_rerun():
+    stored = {"a::f": row(crap="9.0"), "a::old": row(crap="1.0")}
+    merged = crap_rows.merge(stored, {"a::f": row(crap="3.0"), "a::g": row(crap="4.0")})
+    assert merged == {"a::f": row(crap="3.0"), "a::old": row(crap="1.0"), "a::g": row(crap="4.0")}
+
+
+@pytest.mark.parametrize("was,now,kept", [
+    ("new", "unchanged", "new"),
+    ("new", "worsened", "new"),
+    ("worsened", "unchanged", "worsened"),
+    ("worsened", "new", "new"),
+    ("unchanged", "worsened", "worsened"),
+    ("unchanged", "new", "new"),
+    ("unchanged", "unchanged", "unchanged"),
+    ("new", "new", "new"),
+])
+def test_merge_keeps_the_stronger_tag_with_the_latest_numbers(was, now, kept):
+    merged = crap_rows.merge({"a::f": row(tag=was, crap="9.0")}, {"a::f": row(tag=now, crap="3.0")})
+    assert merged == {"a::f": row(tag=kept, crap="3.0")}
+
+
+def test_merge_does_not_change_what_it_was_given():
+    stored = {"a::f": row()}
+    crap_rows.merge(stored, {"a::f": row(tag="unchanged")})
+    assert stored == {"a::f": row()}
+
+
+def staged_tree(repo):
+    repo.git("add", "-A")
+    return repo.git("write-tree")
+
+
+def stored(repo, branch="feat"):
+    return json.loads(open(repo.rows_path).read())[branch]
+
+
+def test_record_writes_rows_under_the_branch_and_keeps_other_branches(repo):
+    repo.commit("base")
+    with open(repo.rows_path, "w") as f:
+        json.dump({"other": {"x::y": row()}}, f)
+    crap_rows.record(repo.rows_path, "feat", GREEN, str(repo.root))
+    saved = json.load(open(repo.rows_path))
+    assert saved["other"] == {"x::y": row()}
+    assert sorted(saved["feat"]) == ["lib/a.py::f", "lib/a.py::g", "lib/a.py::h"]
+
+
+def test_record_takes_its_own_lock_file_beside_the_rows_file(repo):
+    repo.commit("base")
+    crap_rows.record(repo.rows_path, "feat", GREEN, str(repo.root))
+    assert os.path.exists(repo.rows_path + ".lock")
+
+
+def test_record_stamps_each_row_with_the_head_and_the_staged_tree_it_was_measured_against(repo):
+    base = repo.commit("base")
+    repo.write("a.py", "y\n")
+    tree = staged_tree(repo)
+    crap_rows.record(repo.rows_path, "feat", GREEN, str(repo.root))
+    for fid in ("lib/a.py::f", "lib/a.py::g", "lib/a.py::h"):
+        assert (stored(repo)[fid]["head"], stored(repo)[fid]["tree"]) == (base, tree)
+
+
+def test_record_folds_a_second_run_into_the_first(repo):
+    repo.commit("base")
+    repo.land(GREEN)
+    repo.land("lib/a.py::f  complexity=3   coverage=90.0%  CRAP=3.1  OK  (unchanged)\n")
+    got = stored(repo)["lib/a.py::f"]
+    assert (got["complexity"], got["coverage"], got["crap"], got["tag"]) == ("3", "90.0", "3.1", "new")
+    assert "lib/a.py::g" in stored(repo)
+
+
+def test_record_replaces_a_run_whose_commit_never_landed(repo):
+    repo.commit("base")
+    repo.write("a.py", "y\n")
+    staged_tree(repo)
+    crap_rows.record(repo.rows_path, "feat", "lib/a.py::f  complexity=9  coverage=10.0%  CRAP=9.0  OK  (new)\n",
+                     str(repo.root))
+    crap_rows.record(repo.rows_path, "feat", "lib/a.py::g  complexity=1  coverage=100.0%  CRAP=1.0  OK  (new)\n",
+                     str(repo.root))
+    assert sorted(stored(repo)) == ["lib/a.py::g"]
+
+
+def test_record_drops_the_rows_of_an_earlier_attempt_at_a_branch_cut_again(repo):
+    base = repo.commit("base")
+    repo.land("lib/a.py::f  complexity=5  coverage=100.0%  CRAP=5.0  OK  (new)\n")
+    repo.git("reset", "-q", "--hard", base)
+    repo.land("lib/a.py::f  complexity=2  coverage=100.0%  CRAP=2.0  OK  (unchanged)\n"
+              "lib/b.py::g  complexity=1  coverage=100.0%  CRAP=1.0  OK  (new)\n")
+    assert {fid: r["tag"] for fid, r in stored(repo).items()} == {"lib/a.py::f": "unchanged", "lib/b.py::g": "new"}
+
+
+def test_record_keeps_the_rows_of_the_branchs_earlier_commits(repo):
+    repo.commit("base")
+    repo.land("lib/a.py::f  complexity=2  coverage=100.0%  CRAP=2.0  OK  (new)\n")
+    repo.land("lib/b.py::g  complexity=1  coverage=100.0%  CRAP=1.0  OK  (new)\n")
+    assert sorted(stored(repo)) == ["lib/a.py::f", "lib/b.py::g"]
+
+
+def test_record_keeps_every_worktrees_rows_when_runs_overlap(repo, tmp_path, monkeypatch):
+    repo.commit("base")
+    load = scored_ledger.load
+
+    def slow_load(path):
+        store = load(path)
+        time.sleep(0.05)
+        return store
+
+    monkeypatch.setattr(scored_ledger, "load", slow_load)
+    branches = [f"b{n}" for n in range(8)]
+    for name in branches:
+        repo.git("worktree", "add", "-q", "-b", name, str(tmp_path / name))
+    threads = [threading.Thread(target=crap_rows.record, args=(repo.rows_path, name, GREEN, str(tmp_path / name)))
+               for name in branches]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+    assert sorted(json.load(open(repo.rows_path))) == branches
+
+
+def test_latest_reads_the_rows_of_commits_in_the_history_of_the_head(repo):
+    repo.commit("base")
+    head = repo.land(GREEN)
+    assert sorted(crap_rows.latest(repo.rows_path, "feat", str(repo.root), head)) == [
+        "lib/a.py::f", "lib/a.py::g", "lib/a.py::h"]
+
+
+def test_latest_leaves_out_rows_whose_commit_never_landed(repo):
+    head = repo.commit("base")
+    repo.write("a.py", "y\n")
+    staged_tree(repo)
+    crap_rows.record(repo.rows_path, "feat", GREEN, str(repo.root))
+    assert crap_rows.latest(repo.rows_path, "feat", str(repo.root), head) == {}
+
+
+def test_latest_leaves_out_rows_of_an_earlier_attempt_cut_again_from_the_same_base(repo):
+    base = repo.commit("base")
+    repo.land(GREEN)
+    repo.git("reset", "-q", "--hard", base)
+    head = repo.commit("work without a gate")
+    assert crap_rows.latest(repo.rows_path, "feat", str(repo.root), head) == {}
+
+
+def test_latest_leaves_out_rows_of_an_earlier_attempt_cut_again_from_a_newer_base(repo):
+    base = repo.commit("base")
+    repo.land(GREEN)
+    repo.git("reset", "-q", "--hard", base)
+    repo.commit("main moved on")
+    head = repo.commit("work without a gate")
+    assert crap_rows.latest(repo.rows_path, "feat", str(repo.root), head) == {}
+
+
+def test_latest_leaves_out_rows_of_commits_after_the_head(repo):
+    repo.commit("base")
+    first = repo.land("lib/a.py::f  complexity=2  coverage=100.0%  CRAP=2.0  OK  (new)\n")
+    repo.land("lib/b.py::g  complexity=1  coverage=100.0%  CRAP=1.0  OK  (new)\n")
+    assert sorted(crap_rows.latest(repo.rows_path, "feat", str(repo.root), first)) == ["lib/a.py::f"]
+
+
+def test_latest_is_empty_without_a_file_or_a_branch(repo):
+    head = repo.commit("base")
+    assert crap_rows.latest(repo.rows_path, "feat", str(repo.root), head) == {}
+    with open(repo.rows_path, "w") as f:
+        json.dump({"other": {"x::y": row()}}, f)
+    assert crap_rows.latest(repo.rows_path, "feat", str(repo.root), head) == {}
+
+
+def test_latest_is_empty_when_the_file_is_not_json(repo):
+    head = repo.commit("base")
+    with open(repo.rows_path, "w") as f:
+        f.write("{broken")
+    assert crap_rows.latest(repo.rows_path, "feat", str(repo.root), head) == {}
+
+
+def test_latest_is_empty_for_rows_kept_without_a_head_and_tree(repo):
+    head = repo.commit("base")
+    with open(repo.rows_path, "w") as f:
+        json.dump({"feat": {"x::y": row()}}, f)
+    assert crap_rows.latest(repo.rows_path, "feat", str(repo.root), head) == {}
+
+
+LANDED_F = "lib/a.py::f  complexity=5  coverage=100.0%  CRAP=5.0  OK  (new)\n"
+RERUN_F = "lib/a.py::f  complexity=2  coverage=90.0%  CRAP=2.1  OK  (unchanged)\n"
+
+
+def run_without_landing(repo, name):
+    """A green gate run against a staged change that no commit follows."""
+    repo.write(name, "x\n")
+    staged_tree(repo)
+    crap_rows.record(repo.rows_path, "feat", RERUN_F, str(repo.root))
+
+
+def test_two_runs_at_the_same_head_do_not_lose_the_tag_a_landed_commit_earned(repo):
+    repo.commit("base")
+    repo.land(LANDED_F)
+    run_without_landing(repo, "one.txt")
+    run_without_landing(repo, "two.txt")
+    head = repo.commit("lands the second run")
+    got = crap_rows.latest(repo.rows_path, "feat", str(repo.root), head)["lib/a.py::f"]
+    assert (got["tag"], got["crap"]) == ("new", "2.1")
+
+
+def test_latest_returns_the_landed_row_while_the_runs_after_it_are_pending(repo):
+    repo.commit("base")
+    head = repo.land(LANDED_F)
+    landed = crap_rows.latest(repo.rows_path, "feat", str(repo.root), head)
+    run_without_landing(repo, "one.txt")
+    run_without_landing(repo, "two.txt")
+    got = crap_rows.latest(repo.rows_path, "feat", str(repo.root), head)
+    assert got == landed
+    assert (got["lib/a.py::f"]["tag"], got["lib/a.py::f"]["crap"]) == ("new", "5.0")
+
+
+def test_latest_never_returns_the_prior_a_pending_row_keeps(repo):
+    repo.commit("base")
+    repo.land(LANDED_F)
+    run_without_landing(repo, "one.txt")
+    head = repo.commit("lands the run")
+    assert "prior" not in crap_rows.latest(repo.rows_path, "feat", str(repo.root), head)["lib/a.py::f"]
+
+
+def test_rows_stored_without_a_prior_are_read_as_before(repo):
+    base = repo.commit("base")
+    landed_tree = repo.git("write-tree")
+    head = repo.commit("lands the row")
+    old_shape = {"feat": {"x::landed": row(head=base, tree=landed_tree), "x::pending": row(head=base, tree="0" * 40)}}
+    with open(repo.rows_path, "w") as f:
+        json.dump(old_shape, f)
+    assert crap_rows.latest(repo.rows_path, "feat", str(repo.root), head) == {
+        "x::landed": row(head=base, tree=landed_tree)}
+
+
+def test_a_pending_row_whose_prior_was_rewritten_away_is_dropped(repo):
+    base = repo.commit("base")
+    repo.land(LANDED_F)
+    run_without_landing(repo, "one.txt")
+    repo.git("reset", "-q", "--hard", base)
+    head = repo.commit("work without a gate")
+    assert crap_rows.latest(repo.rows_path, "feat", str(repo.root), head) == {}
+    crap_rows.record(repo.rows_path, "feat", "lib/b.py::g  complexity=1  coverage=100.0%  CRAP=1.0  OK  (new)\n",
+                     str(repo.root))
+    assert sorted(stored(repo)) == ["lib/b.py::g"]
+
+
+def test_a_run_that_never_lands_does_not_cost_a_reset_the_tag_of_an_earlier_commit(repo):
+    repo.commit("base")
+    first = repo.land(LANDED_F)
+    repo.land(RERUN_F)
+    run_without_landing(repo, "pending.txt")
+    repo.git("reset", "-q", "--hard", first)
+    got = crap_rows.latest(repo.rows_path, "feat", str(repo.root), first)["lib/a.py::f"]
+    assert (got["tag"], got["crap"]) == ("new", "5.0")
+
+
+def test_a_row_not_rerun_keeps_the_commits_it_was_earned_in_for_a_reset(repo):
+    repo.commit("base")
+    first = repo.land(LANDED_F)
+    repo.land(RERUN_F)
+    repo.land("lib/b.py::g  complexity=1  coverage=100.0%  CRAP=1.0  OK  (new)\n")
+    repo.git("reset", "-q", "--hard", first)
+    got = crap_rows.latest(repo.rows_path, "feat", str(repo.root), first)
+    assert {fid: (r["tag"], r["crap"]) for fid, r in got.items()} == {"lib/a.py::f": ("new", "5.0")}
+
+
+def test_a_reset_to_each_commit_that_touched_a_function_reads_the_row_it_had_there(repo):
+    repo.commit("base")
+    first = repo.land("lib/a.py::f  complexity=2  coverage=100.0%  CRAP=2.0  OK  (new)\n")
+    second = repo.land("lib/a.py::f  complexity=3  coverage=100.0%  CRAP=3.0  OK  (worsened)\n")
+    third = repo.land("lib/a.py::f  complexity=4  coverage=100.0%  CRAP=4.0  OK  (worsened)\n")
+    seen = {}
+    for name, commit in (("third", third), ("second", second), ("first", first)):
+        repo.git("reset", "-q", "--hard", commit)
+        got = crap_rows.latest(repo.rows_path, "feat", str(repo.root), commit)["lib/a.py::f"]
+        seen[name] = (got["tag"], got["crap"])
+    assert seen == {"third": ("new", "4.0"), "second": ("new", "3.0"), "first": ("new", "2.0")}
+
+
+def test_main_records_the_rows_on_stdin(repo, monkeypatch):
+    repo.commit("base")
+    monkeypatch.setattr("sys.stdin", io.StringIO(GREEN))
+    assert crap_rows.main(["record", repo.rows_path, "feat", str(repo.root)]) == 0
+    assert sorted(stored(repo)) == ["lib/a.py::f", "lib/a.py::g", "lib/a.py::h"]
+
+
+def test_main_refuses_anything_but_record(capsys):
+    with pytest.raises(SystemExit) as stop:
+        crap_rows.main(["forget", "rows.json", "feat", "."])
+    assert stop.value.code == 2
+    assert "argument command: invalid choice" in capsys.readouterr().err
+
+
+@pytest.fixture
+def git_calls(monkeypatch):
+    """Every command crap_rows hands to subprocess.run, still run for real."""
+    calls = []
+    real = subprocess.run
+
+    def spy(cmd, *args, **kwargs):
+        calls.append(cmd)
+        return real(cmd, *args, **kwargs)
+
+    monkeypatch.setattr(crap_rows.subprocess, "run", spy)
+    return calls
+
+
+def test_git_runs_git_and_raises_when_it_fails(repo, git_calls):
+    repo.commit("base")
+    git_calls.clear()
+    crap_rows.git(str(repo.root), "rev-parse", "HEAD")
+    assert git_calls[0][0] == "git"
+    with pytest.raises(subprocess.CalledProcessError):
+        crap_rows.git(str(repo.root), "rev-parse", "no-such-ref")
+
+
+def test_trees_after_runs_git_and_returns_the_trees_of_the_newer_commits(repo, git_calls):
+    base = repo.commit("base")
+    head = repo.commit("second")
+    git_calls.clear()
+    trees = crap_rows.trees_after(str(repo.root), head, base)
+    assert git_calls[0][0] == "git"
+    assert trees == {repo.git("rev-parse", "HEAD^{tree}")}
+
+
+def test_trees_after_ignores_the_output_of_a_failed_git_log(monkeypatch):
+    failed = types.SimpleNamespace(returncode=1, stdout="deadbeef\n")
+    monkeypatch.setattr(crap_rows.subprocess, "run", lambda *args, **kwargs: failed)
+    assert crap_rows.trees_after(".", "HEAD", "base") == set()
+
+
+def test_record_measures_against_the_head_commit(repo, git_calls):
+    repo.commit("base")
+    crap_rows.record(repo.rows_path, "feat", GREEN, str(repo.root))
+    assert ["git", "-C", str(repo.root), "rev-parse", "HEAD"] in git_calls
+
+
+def test_a_claim_without_a_head_does_not_land(repo):
+    repo.commit("base")
+    head = repo.commit("second")
+    tree = repo.git("rev-parse", "HEAD^{tree}")
+    assert not crap_rows.lands(str(repo.root), head, {}, {"tree": tree})
+
+
+def test_a_claim_without_a_head_is_looked_up_under_an_empty_head(repo):
+    repo.commit("base")
+    head = repo.commit("second")
+    trees = {}
+    crap_rows.lands(str(repo.root), head, trees, {"tree": "x"})
+    assert list(trees) == [""]

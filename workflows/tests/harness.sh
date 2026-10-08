@@ -77,6 +77,24 @@ function idsIn(prompt) {
   return [...prompt.matchAll(/\[(f\d+)\]/g)].map(m => m[1])
 }
 
+// The names change-signals.sh prints, and a reply to the signals probe that
+// carries all of them for `range`. values overrides individual entries.
+const SIGNAL_NAMES = [
+  'la', 'ld', 'lt', 'la_lt', 'files', 'directories', 'dependency_surface',
+  'api_broken', 'security_pattern', 'semantic_noop', 'crap_max', 'coverage_min',
+  'reachable', 'defect_files']
+function signalEntry(value, reason) {
+  return { value, ...(reason ? { reason } : {}),
+    evidence: { command: 'stub', exit: 0, output: '' } }
+}
+function signalValues(overrides = {}) {
+  return { ...Object.fromEntries(SIGNAL_NAMES.map(n => [n, signalEntry(false)])), ...overrides }
+}
+function signalsOutput(range, overrides = {}) {
+  return `TOUCHSTONE_SIGNALS ${range}\n${JSON.stringify({ range, values: signalValues(overrides) })}\n` +
+    `TOUCHSTONE_SIGNALS_END`
+}
+
 // baseArgs()'s branch/branch:existing defaults both put the worktree here.
 const STUB_WT_PATH = '/tmp/stub-worktree'
 
@@ -206,7 +224,8 @@ function reproduceResponse(prompt, scenario, exitFn, hunkLines) {
 function makeAgent(scenario, captured) {
   return async (prompt, opts) => {
     const label = opts.label
-    captured.calls.push({ label, prompt, schema: opts.schema })
+    captured.calls.push({ label, prompt, schema: opts.schema, model: opts.model, effort: opts.effort,
+      phase: opts.phase })
 
     // Replaces the old separate ticket/plugin:version/gate:opt-in dispatches
     // (gh-118): one call, before any worktree exists, answers all three.
@@ -317,6 +336,19 @@ function makeAgent(scenario, captured) {
       const diffstat = scenario.diffstat ??
         (scenario.sizeUnmeasured ? 'not a real diffstat' : goodDiffstat)
       return { diffstat, ...(scenario.draftPr ?? { opened: false, detail: 'no draft in this test' }) }
+    }
+    // The change-signals probe. The reply names the range the script
+    // asked about, read from the command line of its own prompt, so it always
+    // matches whatever range a pre-review fix folded in. signalValues overrides
+    // entries; signalsReply(range) -> string | object | null replaces the reply
+    // (a string is the output field, an object the whole response, null no answer); signalsThrows makes the dispatch itself fail.
+    if (label === 'signals') {
+      if (scenario.signalsThrows) throw new Error('signals probe failed')
+      const range = (/^change-signals\.sh \S+ (\S+)$/m.exec(prompt) ?? [])[1] ?? COMMIT_RANGE
+      const custom = scenario.signalsReply ? scenario.signalsReply(range) : undefined
+      if (custom === null) return null
+      if (custom !== undefined && typeof custom === 'object') return custom
+      return { output: custom ?? signalsOutput(range, scenario.signalValues) }
     }
     // The command is run for real when its worktree exists on disk, as an agent
     // would; otherwise (the stub path) the head is clean. scenario.rangeCheck(command)

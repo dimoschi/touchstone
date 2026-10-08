@@ -29,7 +29,7 @@ export const meta = {
 // against the manifest in scripts/check-version-bump.sh, so drift is a
 // gate's job rather than something this script verifies about itself.
 const PLUGIN_NAME = 'touchstone'
-const PIPELINE_VERSION = '0.30.0'
+const PIPELINE_VERSION = '0.31.0'
 
 // Boundaries. Wall-clock deadlines are not expressible here (no Date.now, by
 // design); the bounds are rounds, counts, and token budget instead.
@@ -266,6 +266,11 @@ let draftPr = null
 // call site having to pass it through `extra` by hand.
 let size = null
 
+// The change-risk signals measured over the implementer's range (part 40), null
+// on every halt before the implementer has returned one and whenever the probe
+// failed. Recorded only: nothing in the run reads it to decide anything.
+let signals = null
+
 // reportedHead() is reported as reviewed_through by every halt and the result: the
 // last head a review finished at. Not reviewedThrough (part 50), which also
 // moves past commits no review read, so the next run would skip them.
@@ -330,7 +335,7 @@ const halted = async (at, extra) => {
   const split = scopeSplit()
   const payload = {
     task, halted_at: at, pipeline_version: pipelineVersion, stage_spend: stageSpend,
-    needs_user: true, record_file: runRecordFile, size,
+    needs_user: true, record_file: runRecordFile, size, signals,
     reviewed_through: reportedHead(),
     ...(carriedOpen.length ? { unresolved_findings: carriedOpen } : {}),
     ...(carriedNotes.length ? { notes: carriedNotes } : {}),
@@ -2248,6 +2253,73 @@ function checksPayload() {
 const blockingChecksOpen = () => checksBlocking && redChecks.length > 0
 widenBudgetHaltState(() => ({ plan: plan.plan, checks: checksPayload() }))
 
+// Every name change-signals.sh prints. Recorded and read by nothing here: not
+// the lens count, the ratio halt, the round limit or a ceiling.
+const SIGNAL_NAMES = [
+  'la', 'ld', 'lt', 'la_lt', 'files', 'directories', 'dependency_surface',
+  'api_broken', 'security_pattern', 'semantic_noop', 'crap_max', 'coverage_min',
+  'reachable', 'defect_files']
+const SIGNALS_PROBE = {
+  type: 'object', additionalProperties: false, required: ['output'],
+  properties: { output: { type: 'string' } },
+}
+const signalsCommandFor = (range) => `change-signals.sh ${wt.path} ${range}`
+
+// As strict as parseDiffstat: the begin line names this exact range, one JSON
+// line follows, then the end line, and every name carries a well-formed value.
+// Anything else is null.
+const validSignal = (e) => !!e && typeof e === 'object' && (
+  e.value === true || e.value === false ||
+  (typeof e.value === 'number' && Number.isFinite(e.value)) ||
+  (e.value === 'unmeasured' && typeof e.reason === 'string' && e.reason.trim() !== ''))
+const parseSignals = (output, range) => {
+  const lines = String(output ?? '').split(/\r?\n/).map(l => l.trimEnd())
+  while (lines.length && lines[0].trim() === '') lines.shift()
+  while (lines.length && lines[lines.length - 1].trim() === '') lines.pop()
+  if (lines.length !== 3) return null
+  if (lines[0] !== `TOUCHSTONE_SIGNALS ${range}`) return null
+  if (lines[2] !== 'TOUCHSTONE_SIGNALS_END') return null
+  let parsed
+  try { parsed = JSON.parse(lines[1]) } catch { return null }
+  if (!parsed || parsed.range !== range || !parsed.values || typeof parsed.values !== 'object') return null
+  if (!SIGNAL_NAMES.every(name => validSignal(parsed.values[name]))) return null
+  return { range, values: Object.fromEntries(SIGNAL_NAMES.map(name => [name, parsed.values[name]])) }
+}
+
+// One try, no retry: a missing record is not worth a second dispatch, and a
+// failure here must not stop the run. Not dispatched once the run budget is
+// spent: the refusal would end the run as a budget halt before the halt it was
+// about to make for its own reason, an unsupported language or an overrun
+// implementer, could say so.
+const measureSignals = async (range) => {
+  if (runBudget != null && runSpent() >= runBudget) {
+    log(`signals: run budget spent; not measured for ${range}`)
+    return null
+  }
+  try {
+    const probe = await treeAgent(
+      `Run exactly this and put all of its output verbatim in output, ` +
+      `unsummarised, then STOP. change-signals.sh sits in the ` +
+      `crap-controlled-changes skill's directory, beside crap-check.sh: invoke ` +
+      `that skill to learn where that is. Run it in the foreground with a Bash ` +
+      `timeout of 600000, never in the background, never twice, and change ` +
+      `nothing.\n${signalsCommandFor(range)}`,
+      { label: 'signals', phase: 'Implement', schema: SIGNALS_PROBE, model: 'haiku', effort: 'low' })
+    const parsed = parseSignals(probe?.output, range)
+    if (!parsed) {
+      log(`signals: no usable output for ${range}; continuing without them`)
+      return null
+    }
+    const unmeasured = SIGNAL_NAMES.filter(n => parsed.values[n].value === 'unmeasured')
+    log(`signals: ${SIGNAL_NAMES.length - unmeasured.length} of ${SIGNAL_NAMES.length} measured` +
+      (unmeasured.length ? `; unmeasured: ${unmeasured.join(', ')}` : ''))
+    return parsed
+  } catch (e) {
+    log(`signals: probe failed (${e?.message ?? e}); continuing without them`)
+    return null
+  }
+}
+
 const sImpl = stage('implement')
 const impl = await treeAgent(
   `Implement this task in the current repo.\n` +
@@ -2332,6 +2404,13 @@ let scoredNote = scored ? (impl.gate_note ?? '') : ''
 let unscoredNote = scored ? '' : (impl.gate_note ?? '')
 widenBudgetHaltState(() => ({ implemented: impl.summary, gates: gatesPayload() }))
 
+// Measured here, the first moment a range exists, so that every halt from this
+// point on carries the signals, a refused plan_id and a budget refusal during
+// checks included. The probe's own spend counts against the stage's window, so
+// whether the implementer overran is read before it.
+const implementerOver = sImpl.over()
+signals = await measureSignals(impl.commit_range)
+
 // Before anything else is read from impl: an implementer that never reached
 // the end of the plan cannot be trusted to have followed it.
 const returnedPlanId = String(impl.plan_id ?? '').trim()
@@ -2355,7 +2434,7 @@ if (impl.unsupported_language) {
     note: impl.summary,
   })
 }
-if (sImpl.over()) {
+if (implementerOver) {
   return await halted('Implement', {
     plan: plan.plan, implemented: impl.summary, gates: gatesPayload(),
     // The note says nothing about the gates: an implementer that committed
@@ -2432,6 +2511,7 @@ if (blockingChecksOpen() && !sChecksPost.over()) {
   if (preReviewHead && preReviewHead !== lastCheckedHead) {
     impl.commit_range = `${implBase}..${preReviewHead}`
     lastCheckedHead = preReviewHead
+    signals = (await measureSignals(impl.commit_range)) ?? signals
     ;({ red: redChecks, unmeasured: unmeasuredChecks } = await runChecks())
     log(redChecks.length
       ? `checks: ${redChecks.length} still red after the pre-review fix round`
@@ -4068,6 +4148,7 @@ const result = {
   checks: checksPayload(),
   mutation,
   size,
+  signals,
   reviewers: reviewerCount,
   // Raised but never blocking: wrong category, no reproducer, an unmet
   // criterion whose quote was not found, out of range, or a residual of a

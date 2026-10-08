@@ -256,4 +256,7 @@ otherwise `closed` or `open` from `state`. When gh finds no PR for the branch, s
 `.claude/touchstone-runs/`, re-reads the outcome of any still `open` from gh and
 rewrites it, and prints per pipeline version: runs, outcomes, halts by stage, median
 output tokens per changed line, median fix rounds, and blocking findings against
-notes. A record missing a field is counted as missing, never estimated.
+notes, then each recorded change-risk signal with its runs grouped by the value it took
+(true, false, unmeasured, or a number below or above the median) and each group's median
+fix rounds, halts and blocking findings. A record missing a field is counted as missing,
+never estimated.

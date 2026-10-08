@@ -170,6 +170,17 @@ function makeAgent(scenario, captured) {
       return { diffstat: goodDiffstat,
         ...(scenario.draftPr ?? { opened: false, detail: 'should not be reached' }) }
     }
+    // The change-signals probe: nothing in this suite is about the signals, so
+    // it gets a well-formed record for the range it asked about.
+    if (label === 'signals') {
+      const range = (/^change-signals\.sh \S+ (\S+)$/m.exec(prompt) ?? [])[1] ?? ''
+      const names = ['la', 'ld', 'lt', 'la_lt', 'files', 'directories', 'dependency_surface',
+        'api_broken', 'security_pattern', 'semantic_noop', 'crap_max', 'coverage_min',
+        'reachable', 'defect_files']
+      const values = Object.fromEntries(names.map(n =>
+        [n, { value: false, evidence: { command: 'stub', exit: 0, output: '' } }]))
+      return { output: `TOUCHSTONE_SIGNALS ${range}\n${JSON.stringify({ range, values })}\nTOUCHSTONE_SIGNALS_END` }
+    }
     if (label.startsWith('halt-notice:')) {
       captured.haltAt = label.slice('halt-notice:'.length)
       return true
@@ -235,6 +246,8 @@ async function scenarioUnsupportedLanguage() {
     },
   })
   check('halted at Implement', result.halted_at, 'Implement')
+  check('the halt carries the signals of the range the implementer left',
+    result.signals?.range, 'base00000000000000000000000000000000000000..base00000000000000000000000000000000000000')
   // The implementer may have committed and scored before hitting the refusal,
   // and commands/deliver.md tells the caller to report the gate result, so a
   // halt that omits it leaves the caller with nothing to report.

@@ -208,6 +208,17 @@ function makeAgent(scenario, captured) {
       return scenario.draftPr ?? { opened: true, url: 'https://example.test/pr/1', number: 1, detail: 'stub',
         diffstat: `TOUCHSTONE_DIFFSTAT ${range}\n${DEFAULT_DIFFSTAT_BODY}` }
     }
+    // The change-signals probe: nothing in this suite is about the signals, so
+    // it gets a well-formed record for the range it asked about.
+    if (label === 'signals') {
+      const range = (/^change-signals\.sh \S+ (\S+)$/m.exec(prompt) ?? [])[1] ?? ''
+      const names = ['la', 'ld', 'lt', 'la_lt', 'files', 'directories', 'dependency_surface',
+        'api_broken', 'security_pattern', 'semantic_noop', 'crap_max', 'coverage_min',
+        'reachable', 'defect_files']
+      const values = Object.fromEntries(names.map(n =>
+        [n, { value: false, evidence: { command: 'stub', exit: 0, output: '' } }]))
+      return { output: `TOUCHSTONE_SIGNALS ${range}\n${JSON.stringify({ range, values })}\nTOUCHSTONE_SIGNALS_END` }
+    }
     if (label.startsWith('mutation:')) {
       return scenario.mutationResult ??
         { green: true, head_sha: 'impl0000000000000000000000000000000000000',

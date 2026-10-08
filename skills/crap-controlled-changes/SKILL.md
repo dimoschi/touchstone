@@ -164,6 +164,14 @@ caps the wait (default 900s). Do not add your own locking around gate runs.
 
 Env knobs: `MUTATION_GO_TEST_FLAGS`, `MUTATION_PHP_INFECTION`, `MUTATION_PHP_CONFIG`, `MUTATION_PHP_THREADS`, `MUTATION_PY_RUN`. The Go run is CPU-bounded to `cores/4` parallel mutants at `GOMAXPROCS=2` each, since mutago's own default is one worker per core and each worker runs a full `go test`; raise with `MUTATION_GO_WORKERS` / `MUTATION_GO_MAXPROCS` on a machine that can take it. Go mutation runs also queue one at a time per machine (`MUTATION_GO_CONCURRENCY` raises that), refuse with exit 2 below `MUTATION_MIN_FREE_MB` free (default 4096) on the cache or temp volume, and reset the mutant build cache when it is over `MUTATION_GOCACHE_MAX_MB` (default 8192) at the start or the end of a run. A run that prints `waiting...` is queued behind another, not hung.
 
+## Change signals (recording, not a gate)
+
+`change-signals.sh <absolute-repo-path> <base>..<head>` prints the deterministic
+change-risk signals of a range as one marked JSON record. The delivery pipeline runs it
+once the implementer has returned (again if a pre-review fix moves the head); it is not
+part of the commit loop and has no verdict. A signal it could not
+measure says why. See docs/architecture.md in the plugin repository for what each one means.
+
 ## Out of Scope
 
 - CI enforcement: not in v1.
