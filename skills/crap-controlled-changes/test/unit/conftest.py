@@ -87,9 +87,18 @@ class Stubs:
         body = body or (f"sys.stdout.write({out!r}); sys.stderr.write({err!r}); sys.exit({code})")
         path = (into or self.directory) / name
         path.parent.mkdir(parents=True, exist_ok=True)
+        path.unlink(missing_ok=True)
         path.write_text(STUB.format(python=sys.executable, log=str(self.log), name=name, body=body))
         path.chmod(0o755)
         return path
+
+    def wrap(self, name, failing, err="boom"):
+        """Replace the real `name` with one that fails, with `err` on stderr, whenever
+        every word of `failing` is among its arguments, and otherwise runs the real tool."""
+        real = os.path.realpath(self.directory / name)
+        return self.add(name, f"if {set(failing)!r} <= set(sys.argv[1:]):\n"
+                              f"    sys.stderr.write({err!r}); sys.exit(1)\n"
+                              f"os.execv({real!r}, [{real!r}, *sys.argv[1:]])")
 
     def calls(self, name=None):
         if not self.log.exists():
@@ -106,3 +115,41 @@ def stubs(tmp_path, monkeypatch):
         (directory / real).symlink_to(shutil.which(real))
     monkeypatch.setenv("PATH", str(directory))
     return Stubs(directory)
+
+
+@pytest.fixture
+def argv_log(monkeypatch):
+    """Every subprocess.run made while the test runs, as {"argv", "cwd", "kwargs"}.
+
+    A tool name written in another case still runs on a case-insensitive filesystem,
+    so the argv is the only place a test can see that the name was spelled exactly.
+    """
+    real = subprocess.run
+    calls = []
+
+    def recording(argv, *args, **kwargs):
+        calls.append({"argv": list(argv), "cwd": kwargs.get("cwd"), "kwargs": kwargs})
+        return real(argv, *args, **kwargs)
+
+    monkeypatch.setattr(subprocess, "run", recording)
+    return calls
+
+
+@pytest.fixture
+def exact_case_fs(monkeypatch):
+    """os.path.isfile that is true only when every component of the path exists spelled as
+    given, so a file named in the wrong case is not found as it would be on macOS."""
+    real = os.path.isfile
+
+    def exact(path):
+        path = os.path.abspath(path)
+        if not real(path):
+            return False
+        while path != os.path.dirname(path):
+            parent, name = os.path.split(path)
+            if name not in os.listdir(parent):
+                return False
+            path = parent
+        return True
+
+    monkeypatch.setattr(os.path, "isfile", exact)

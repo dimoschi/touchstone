@@ -460,3 +460,126 @@ def test_main_reads_the_process_environment_by_default(sized, stubs, capsys, mon
     monkeypatch.setattr("sys.argv", ["change_signals.py", sized.repo, sized.rng])
     assert cs.main() == 0
     assert capsys.readouterr().out.startswith("TOUCHSTONE_SIGNALS ")
+
+
+NUMSTAT = "3\t1\ta.py\n0\t5\tb.go\n-\t-\tbin.dat\n6\t0\tsrc/d.py"
+
+
+def test_numstat_text_is_one_git_numstat_line_per_row_with_binaries_as_dashes(sized):
+    assert cs.numstat_text(sized) == NUMSTAT
+
+
+def test_the_size_signals_each_carry_their_whole_evidence(sized):
+    got = cs.size_lines(sized)
+    command = f"git diff --numstat --no-renames {sized.base} {sized.head}"
+    assert got["la"] == {"value": 9, "evidence": {"command": command, "exit": 0, "output": NUMSTAT}}
+    assert got["ld"] == {"value": 6, "evidence": {"command": command, "exit": 0, "output": NUMSTAT}}
+    assert got["lt"] == {"value": 15, "evidence": {
+        "command": f"git cat-file blob {sized.base}:<path> (each touched text file)", "exit": 0,
+        "output": "3 touched text file(s)"}}
+    assert got["la_lt"] == {"value": 0.6, "evidence": {"command": "la / lt", "exit": 0, "output": "9 / 15"}}
+
+
+def test_ratio_signal_rounds_to_three_places_and_carries_its_whole_evidence():
+    assert cs.ratio_signal(1, 3) == {"value": 0.333, "evidence": {"command": "la / lt", "exit": 0, "output": "1 / 3"}}
+
+
+def test_base_lines_reads_the_blob_at_the_base(repo, argv_log):
+    repo.write("f.txt", "one\ntwo\n")
+    base = repo.commit("base")
+    repo.write("f.txt", "one\ntwo\nthree\n")
+    ctx = ctx_of(repo, base, repo.commit("head"))
+    argv_log.clear()
+    assert cs.base_lines(ctx, "f.txt") == 2
+    assert [call["argv"] for call in argv_log] == [
+        ["git", "-C", str(repo.root), "cat-file", "blob", f"{base}:f.txt"]]
+
+
+def test_the_spread_signals_each_carry_their_whole_evidence(sized):
+    got = cs.spread(sized)
+    command = f"git diff --numstat --no-renames {sized.base} {sized.head}"
+    assert got["files"] == {"value": 4, "evidence": {
+        "command": command, "exit": 0, "output": "a.py\nb.go\nbin.dat\nsrc/d.py"}}
+    assert got["directories"] == {"value": 2, "evidence": {"command": command, "exit": 0, "output": ".\nsrc"}}
+
+
+def test_dependency_surface_carries_its_whole_evidence(repo):
+    repo.write("a.py", "x\n")
+    base = repo.commit("base")
+    repo.write("go.mod", "m\n")
+    repo.write("a.py", "y\n")
+    head = repo.commit("head")
+    got = cs.dependency_surface(ctx_of(repo, base, head))
+    assert got == {"value": True, "evidence": {
+        "command": f"git diff --numstat --no-renames {base} {head}", "exit": 0, "output": "go.mod"}}
+
+
+def test_branch_of_asks_git_quietly_for_the_short_name_of_the_branch(repo, argv_log):
+    repo.write("f.txt", "x\n")
+    repo.commit("base")
+    argv_log.clear()
+    assert cs.branch_of(str(repo.root)) == "feat"
+    assert [call["argv"] for call in argv_log] == [
+        ["git", "-C", str(repo.root), "-c", "core.quotepath=false", "symbolic-ref", "--quiet", "--short", "HEAD"]]
+
+
+def test_worst_passes_over_a_row_with_no_number_to_the_rows_after_it():
+    rows = {"a": {"crap": "n/a"}, "b": {"crap": "3.5"}, "c": {"crap": "9.0"}}
+    assert cs.worst(rows, cs.CRAP, "the command", "feat") == sb.signal(
+        9.0, command="the command", code=0, output="c CRAP=9.0 (2 row(s))")
+
+
+def test_worst_with_no_number_is_unmeasured_and_keeps_where_it_looked():
+    assert cs.worst({}, cs.COVERAGE, "the command", "feat") == sb.unmeasured(
+        "no CRAP row tagged new or worsened with a coverage on branch feat", command="the command", code=0)
+
+
+def test_the_coverage_signal_carries_its_whole_evidence(rows_repo):
+    got = cs.crap_signals(landed(rows_repo, ROWS))
+    assert got["coverage_min"] == {"value": 62.5, "evidence": {
+        "command": f"read {rows_repo.rows_path} [feat]", "exit": 0, "output": "lib/a.py::g coverage=62.5 (2 row(s))"}}
+
+
+def test_the_unmeasured_coverage_signal_names_the_record_it_looked_in(rows_repo):
+    got = cs.crap_signals(ctx_of(rows_repo, rows_repo.base, rows_repo.commit("head")))
+    assert got["coverage_min"]["evidence"] == {
+        "command": f"read {rows_repo.rows_path} [feat]", "exit": 0, "output": ""}
+
+
+def test_load_record_reads_utf8_json(tmp_path):
+    path = tmp_path / "r.json"
+    path.write_bytes('{"k": "café"}'.encode("utf-8"))
+    assert cs.load_record(str(path)) == {"k": "café"}
+
+
+@pytest.mark.parametrize("content", [b"{not json", b'{"k": "\xff"}'])
+def test_load_record_of_a_file_that_is_not_json_is_none(tmp_path, content):
+    path = tmp_path / "r.json"
+    path.write_bytes(content)
+    assert cs.load_record(str(path)) is None
+
+
+def test_load_record_of_a_missing_file_is_none(tmp_path):
+    assert cs.load_record(str(tmp_path / "none.json")) is None
+
+
+@pytest.mark.parametrize("number", [float("nan"), float("inf")])
+def test_render_refuses_a_value_json_cannot_hold(number):
+    with pytest.raises(ValueError):
+        cs.render("a..b", {"la": number})
+
+
+def test_guarded_names_what_a_single_signal_producer_gives():
+    assert cs.guarded(("one",), lambda ctx: sb.signal(1), None) == {"one": sb.signal(1)}
+
+
+def test_guarded_passes_on_what_a_producer_of_several_signals_gives():
+    assert cs.guarded(("one", "two"), lambda ctx: {"one": 1, "two": 2}, None) == {"one": 1, "two": 2}
+
+
+def test_guarded_makes_every_name_unmeasured_when_the_producer_breaks():
+    def boom(ctx):
+        raise RuntimeError("kaboom")
+
+    got = cs.guarded(("one", "two"), boom, None)
+    assert got == {name: sb.unmeasured(f"{name} failed: RuntimeError: kaboom") for name in ("one", "two")}

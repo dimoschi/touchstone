@@ -41,6 +41,7 @@ COVERAGE = {'key': 'coverage', 'label': 'coverage', 'pick': min, 'what': 'covera
 LINE_SUFFIX = re.compile(r':\d+(?:-\d+)?$')
 WORKTREE_DIR = re.compile(r'^\.claude/worktrees/[^/]+/')
 USAGE = 'usage: change-signals.sh <absolute-repo-path> <base>..<head>'
+COMPACT_STRICT_JSON = {'separators': (',', ':'), 'allow_nan': False}
 
 
 def numstat_command(ctx):
@@ -67,7 +68,7 @@ def ratio_signal(added, touched):
 
 
 def size_lines(ctx):
-    text_rows = [row for row in ctx.rows if row[0] is not None]
+    text_rows = [(a, r, p) for a, r, p in ctx.rows if a is not None]
     added = sum(a for a, _, _ in text_rows)
     removed = sum(r for _, r, _ in text_rows)
     touched = sum(base_lines(ctx, path) for _, _, path in text_rows)
@@ -172,7 +173,7 @@ def findings_of(record):
 
 def load_record(path):
     try:
-        with open(path, encoding='utf-8') as fh:
+        with open(path, 'rb') as fh:
             return json.load(fh)
     except (OSError, ValueError):
         return None
@@ -200,27 +201,25 @@ def defect_files(ctx):
                   output='\n'.join(hit) or f'no reproduced defect in a range file, in {len(records)} record(s)')
 
 
-def one(name, produce):
-    return (name,), lambda ctx: {name: produce(ctx)}
-
-
 PRODUCERS = (
     (('la', 'ld', 'lt', 'la_lt'), size_lines),
     (('files', 'directories'), spread),
-    one('dependency_surface', dependency_surface),
-    one('api_broken', signal_tools.SIGNALS['api_broken']),
-    one('security_pattern', signal_tools.SIGNALS['security_pattern']),
-    one('semantic_noop', signal_tools.SIGNALS['semantic_noop']),
+    (('dependency_surface',), dependency_surface),
+    (('api_broken',), signal_tools.SIGNALS['api_broken']),
+    (('security_pattern',), signal_tools.SIGNALS['security_pattern']),
+    (('semantic_noop',), signal_tools.SIGNALS['semantic_noop']),
     (('crap_max', 'coverage_min'), crap_signals),
-    one('reachable', signal_tools.SIGNALS['reachable']),
-    one('defect_files', defect_files),
+    (('reachable',), signal_tools.SIGNALS['reachable']),
+    (('defect_files',), defect_files),
 )
 
 
 def guarded(names, produce, ctx):
-    """What `produce` gives, or every one of `names` unmeasured if it breaks."""
+    """The signals `produce` gives by name: a producer of one name gives that signal alone.
+    Every one of `names` is unmeasured if it breaks."""
     try:
-        return produce(ctx)
+        got = produce(ctx)
+        return {names[0]: got} if len(names) == 1 else got
     except Exception as error:
         return {name: unmeasured(f'{name} failed: {type(error).__name__}: {error}') for name in names}
 
@@ -233,7 +232,7 @@ def compute(ctx):
 
 
 def render(rng, values):
-    body = json.dumps({'range': rng, 'values': values}, separators=(',', ':'), allow_nan=False)
+    body = json.dumps({'range': rng, 'values': values}, **COMPACT_STRICT_JSON)
     return f'TOUCHSTONE_SIGNALS {rng}\n{body}\nTOUCHSTONE_SIGNALS_END\n'
 
 

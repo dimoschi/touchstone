@@ -415,3 +415,135 @@ def test_load_ctx_refuses_a_directory_that_is_not_a_repository(tmp_path):
 def test_git_reports_a_failing_command_with_what_git_said(tmp_path):
     with pytest.raises(sb.SignalError, match="git status failed: .*not a git repository"):
         sb.git(str(tmp_path), "status")
+
+
+def test_signal_without_evidence_has_empty_evidence():
+    assert sb.signal(1) == {"value": 1, "evidence": {"command": "", "exit": None, "output": ""}}
+
+
+def test_run_tool_gives_up_with_the_command_and_no_output(tmp_path):
+    argv = [sys.executable, "-c", "import time; time.sleep(30)"]
+    got = sb.run_tool(argv, cwd=str(tmp_path), timeout=0.2)
+    assert got == sb.Run(shlex.join(argv), None, "", "", f"{sys.executable} timed out after 0.2 s")
+
+
+def test_run_tool_reports_a_missing_tool_with_the_command_and_no_output(tmp_path):
+    got = sb.run_tool(["no-such-tool-for-signals", "-x"], cwd=str(tmp_path))
+    assert (got.command, got.code, got.out, got.err) == ("no-such-tool-for-signals -x", None, "", "")
+    assert got.problem.startswith("could not run no-such-tool-for-signals: ")
+
+
+def test_git_replaces_output_that_is_not_utf8(repo):
+    repo.write("f.bin", b"a\xffb\n")
+    repo.commit("base")
+    assert sb.git(str(repo.root), "show", "HEAD:f.bin") == "a�b\n"
+
+
+def test_git_runs_git_in_the_repo_with_unquoted_paths(repo, argv_log):
+    repo.write("f.txt", "x\n")
+    repo.commit("base")
+    argv_log.clear()
+    sb.git(str(repo.root), "status", "--short")
+    assert [call["argv"] for call in argv_log] == [
+        ["git", "-C", str(repo.root), "-c", "core.quotepath=false", "status", "--short"]]
+
+
+def test_load_ctx_names_a_path_with_non_ascii_characters_as_it_is_written(repo):
+    repo.write("café.py", "a\n")
+    base = repo.commit("base")
+    repo.write("café.py", "a\nb\n")
+    head = repo.commit("head")
+    ctx = sb.load_ctx(str(repo.root), f"{base}..{head}", no_settings())
+    assert ctx.added == {"café.py": {2}}
+
+
+def test_resolve_asks_git_for_the_commit_a_ref_names(repo, argv_log):
+    repo.write("f.txt", "x\n")
+    head = repo.commit("base")
+    argv_log.clear()
+    assert sb.resolve(str(repo.root), "HEAD") == head
+    assert [call["argv"] for call in argv_log] == [
+        ["git", "-C", str(repo.root), "rev-parse", "--verify", "--quiet", "HEAD^{commit}"]]
+
+
+def test_tree_is_head_compares_with_the_commit_HEAD_names(repo, argv_log):
+    repo.write("f.txt", "x\n")
+    head = repo.commit("base")
+    argv_log.clear()
+    assert sb.tree_is_head(str(repo.root), head) is True
+    assert argv_log[0]["argv"][-1] == "HEAD^{commit}"
+
+
+def test_target_is_none_for_a_deleted_file():
+    assert sb._target("diff --git a/x b/x\n--- a/x\n+++ /dev/null") is None
+
+
+@pytest.mark.parametrize("header,name", [
+    ("+++ b/x.py", "x.py"), ("+++ x.py", "x.py"), ("+++ b/dir/b/y.py\t", "dir/b/y.py"), ("+++ ab", "ab")])
+def test_target_drops_only_a_leading_b_prefix(header, name):
+    assert sb._target(header) == name
+
+
+def test_target_is_none_without_a_plus_header():
+    assert sb._target("diff --git a/x b/x\nindex 1..2") is None
+
+
+def test_chunk_added_reads_hunks_when_the_chunk_starts_with_one():
+    assert sb._chunk_added("\n@@ -0,0 +1 @@\n+a") == (None, {1})
+
+
+def test_chunk_added_without_a_hunk_adds_nothing():
+    assert sb._chunk_added("diff --git a/x b/x\nBinary files differ") == (None, set())
+
+
+def test_added_lines_leaves_out_a_file_the_diff_only_shortened():
+    diff = ("diff --git a/short.py b/short.py\n--- a/short.py\n+++ b/short.py\n@@ -2,2 +1,0 @@\n-a\n-b\n"
+            "diff --git a/keep.py b/keep.py\n--- a/keep.py\n+++ b/keep.py\n@@ -1 +1 @@\n-a\n+b\n")
+    assert sb.added_lines(diff) == {"keep.py": {1}}
+
+
+def test_added_lines_leaves_out_hunks_that_name_no_file():
+    assert sb.added_lines("diff --git a/x b/x\n@@ -0,0 +1 @@\n+a\n") == {}
+
+
+def test_settings_refuse_a_missing_deadcode_version_in_these_words():
+    with pytest.raises(sb.SignalError) as raised:
+        sb.settings_from({})
+    assert str(raised.value) == "TOUCHSTONE_DEADCODE_VERSION is not set"
+
+
+def test_settings_refuse_an_empty_deadcode_version():
+    with pytest.raises(sb.SignalError, match="TOUCHSTONE_DEADCODE_VERSION is not set"):
+        sb.settings_from({"TOUCHSTONE_DEADCODE_VERSION": ""})
+
+
+@pytest.mark.parametrize("text,rows", [
+    ("1\t0\ta\tb.txt\0", [(1, 0, "a\tb.txt")]),
+    ("1\t0\t lead.txt\0", [(1, 0, " lead.txt")]),
+    ("-\t-\tbin.dat\0", [(None, None, "bin.dat")]),
+    ("2\t3\tx.py\0-\t-\ty.bin\0", [(2, 3, "x.py"), (None, None, "y.bin")]),
+])
+def test_numstat_rows_split_only_the_two_counts_off_the_path(text, rows):
+    assert sb._numstat_rows(text) == rows
+
+
+def test_diff_pathspecs_follow_a_double_dash(repo, argv_log):
+    repo.write("a.py", "a\n")
+    repo.write("b.py", "a\n")
+    base = repo.commit("base")
+    repo.write("a.py", "b\n")
+    repo.write("b.py", "b\n")
+    head = repo.commit("head")
+    argv_log.clear()
+    assert sb._paths(str(repo.root), base, head, ["a.py"]) == ("a.py",)
+    assert argv_log[0]["argv"][-3:] == [head, "--", "a.py"]
+
+
+def test_diff_without_pathspecs_still_ends_in_a_double_dash(repo, argv_log):
+    repo.write("a.py", "a\n")
+    base = repo.commit("base")
+    repo.write("a.py", "b\n")
+    head = repo.commit("head")
+    argv_log.clear()
+    assert sb._paths(str(repo.root), base, head, ()) == ("a.py",)
+    assert argv_log[0]["argv"][-2:] == [head, "--"]

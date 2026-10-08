@@ -90,7 +90,7 @@ def semantic(ctx, handlers, exempted=all_exempted):
 
 
 def failed(run):
-    return bool(run.problem) or run.code != 0
+    return run.code != 0
 
 
 def judged(run, records):
@@ -305,7 +305,7 @@ def opengrep_findings(ctx, data):
     # opengrep prefixes each rule id with the dotted path of the rules file's directory.
     found = [(repo_path(ctx, result['path']),
               range(result['start']['line'], result['end']['line'] + 1),
-              result['check_id'].rsplit('.', 1)[-1])
+              result['check_id'].rpartition('.')[-1])
              for result in data.get('results') or []]
     return found, skipped(data.get('errors'))
 
@@ -317,7 +317,7 @@ def existing(ctx, files):
 def gosec_excludes(mod, path):
     """Whether gosec's default -exclude-dir drops the directory of `path`. It reads `vendor` as
     a regex over the directory under the module, so vendorclient/ and internal/vendors/ go too."""
-    return 'vendor' in os.path.relpath(os.path.dirname(path) or '.', mod)
+    return 'vendor' in os.path.dirname(os.path.relpath(path, mod))
 
 
 def unscanned(ctx, mod, changed, run):

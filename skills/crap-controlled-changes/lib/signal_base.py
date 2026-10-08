@@ -50,8 +50,7 @@ def run_tool(argv, cwd, timeout=TOOL_TIMEOUT):
     """Run a tool to the end or to its time limit; `problem` says why it did not finish."""
     command = shlex.join(argv)
     try:
-        done = subprocess.run(argv, cwd=cwd, capture_output=True, text=True,
-                              errors='replace', timeout=timeout)
+        done = subprocess.run(argv, cwd=cwd, capture_output=True, errors='replace', timeout=timeout)
     except subprocess.TimeoutExpired:
         return Run(command, None, '', '', f'{argv[0]} timed out after {timeout:g} s')
     except OSError as error:
@@ -68,8 +67,8 @@ def why(run):
     """One line on why a run does not count: its problem, else its exit and first word."""
     if run.problem:
         return run.problem
-    said = next((line for line in (run.err + run.out).splitlines() if line.strip()), '')
-    return f'exit {run.code}: {said}' if said else f'exit {run.code}'
+    said = [line for line in (run.err + run.out).splitlines() if line.strip()]
+    return f'exit {run.code}: {said[0]}' if said else f'exit {run.code}'
 
 
 def lang_of(path):
@@ -85,11 +84,13 @@ def is_test_file(path):
 
 def _target(header):
     """The path a diff's `+++` header names, None for a deleted file."""
-    plus = next((line for line in header.splitlines() if line.startswith('+++ ')), '+++ /dev/null')
-    name = plus[4:].split('\t')[0]
-    if name == '/dev/null':
-        return None
-    return name[2:] if name.startswith('b/') else name
+    for line in header.splitlines():
+        if line.startswith('+++ '):
+            name = line[4:].split('\t')[0]
+            if name == '/dev/null':
+                return None
+            return name[2:] if name.startswith('b/') else name
+    return None
 
 
 def _chunk_added(chunk):
@@ -131,7 +132,7 @@ def _lines(text):
 
 
 def settings_from(env):
-    version = env.get('TOUCHSTONE_DEADCODE_VERSION', '')
+    version = env.get('TOUCHSTONE_DEADCODE_VERSION')
     if not version:
         raise SignalError('TOUCHSTONE_DEADCODE_VERSION is not set')
     return Settings(_lines(env.get('TOUCHSTONE_UNSUPPORTED_SPEC', '')),
@@ -155,7 +156,7 @@ class Ctx(NamedTuple):
 
 def git(repo, *args):
     done = subprocess.run(['git', '-C', repo, '-c', 'core.quotepath=false', *args],
-                          capture_output=True, text=True, errors='replace')
+                          capture_output=True, errors='replace')
     if done.returncode != 0:
         raise SignalError(f'git {args[0]} failed: {done.stderr.strip()}')
     return done.stdout
@@ -195,11 +196,10 @@ def _status_of(text):
 
 
 def _diff(repo, base, head, *flags, specs=()):
-    tail = ['--', *specs] if specs else []
     # added_lines parses hunks and the b/ prefix, so pin everything a user's diff config
     # can rewrite: an external diff tool (difftastic), prefixes, hunk merging, textconv.
     return git(repo, 'diff', '--no-ext-diff', '--no-textconv', '--dst-prefix=b/', '--inter-hunk-context=0',
-               *flags, '--no-renames', base, head, *tail)
+               *flags, '--no-renames', base, head, '--', *specs)
 
 
 def _paths(repo, base, head, specs):
