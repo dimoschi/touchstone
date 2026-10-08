@@ -552,6 +552,12 @@ def test_load_record_reads_utf8_json(tmp_path):
     assert cs.load_record(str(path)) == {"k": "café"}
 
 
+def test_load_record_reads_json_with_a_byte_order_mark(tmp_path):
+    path = tmp_path / "r.json"
+    path.write_bytes(b'\xef\xbb\xbf{"k": 1}')
+    assert cs.load_record(str(path)) == {"k": 1}
+
+
 @pytest.mark.parametrize("content", [b"{not json", b'{"k": "\xff"}'])
 def test_load_record_of_a_file_that_is_not_json_is_none(tmp_path, content):
     path = tmp_path / "r.json"
