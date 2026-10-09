@@ -81,10 +81,11 @@ Workflow({ name: 'touchstone:deliver-pipeline', args: { ticket: "...", existingB
   priorRun: { reviewed_through: "<sha>", unresolved_findings: [...], notes: [...] } } })
 ```
 
-Pass `priorRun` only from a record whose `pipeline_version.executed` is 0.30.0 or later.
+Pass `priorRun` only from a record whose `pipeline_version.executed` is 0.31.2 or later.
 Compare it number by number on each dot-separated part, never as text, so 0.9.0 is older
-than 0.30.0. For an older record, or one with no `pipeline_version.executed`, pass no
-`priorRun`: in those records `reviewed_through` could sit past commits no review read.
+than 0.31.2. For an older record, or one with no `pipeline_version.executed`, pass no
+`priorRun`: in those records `reviewed_through` could sit past commits no review read,
+because a review lens that returned nothing still counted as having read its range.
 
 `reviewed_through` is the last head a review finished at; the workflow verifies it is
 still an ancestor of the branch, and otherwise ignores the record, reviewing the whole
