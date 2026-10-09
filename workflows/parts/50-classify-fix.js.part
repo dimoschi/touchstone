@@ -328,6 +328,24 @@ const notExecutedHalt = (at, notExecuted, extra) => {
   })
 }
 
+// Reports a review round in which a lens returned no result. Same shape and
+// the same TDZ reasoning as notExecutedHalt: it reads only plan, impl,
+// gatesPayload and checksPayload by closure, and every call site passes
+// unresolved_findings, notes, fix_rounds and (once it exists) fix_round_output
+// through extra. Never handed to a fixer: nothing was found, so nothing is open
+// because of it.
+const deadLensHalt = (at, dead, extra) => {
+  const note = `${dead.length} review ${dead.length === 1 ? 'lens' : 'lenses'} ` +
+    `returned no result (stalled, errored, or failed schema after retries), so ` +
+    `the review did not run over its range. reviewed_through was not moved past ` +
+    `that range, and a re-run reviews it again.\n` +
+    dead.map(label => `- ${label}`).join('\n')
+  return halted(at, {
+    plan: plan.plan, implemented: impl.summary, gates: gatesPayload(),
+    checks: checksPayload(), ...extra, note,
+  })
+}
+
 let settled = []
 // A carried finding whose reproducer nobody ran (notExecutedHalt recorded it)
 // is a candidate, not a verdict: held in open it would stay open through every
@@ -370,8 +388,13 @@ if (lenses.length) {
     ? `\nThose came from an earlier run on this branch and are still tracked. ` +
       `Reference one by its id in duplicate_of; never raise it again.`
     : ''
-  const raised = await collapseDuplicates(
-    await reviewOf(firstReviewRange, 'review', lenses, knownForRound(), carriedCharge))
+  const { raised: raisedRaw, dead } =
+    await reviewOf(firstReviewRange, 'review', lenses, knownForRound(), carriedCharge)
+  if (dead.length) {
+    sReview.close()
+    return await deadLensHalt('Review', dead, { unresolved_findings: open, notes, fix_rounds: round })
+  }
+  const raised = await collapseDuplicates(raisedRaw)
   const { candidates, freshNotes } = classifyBatch(raised, null, 0)
   notes.push(...freshNotes)
   if (candidates.length) {
@@ -588,9 +611,9 @@ while ((open.length || blockingChecksOpen()) && round < MAX_REVIEW_ROUNDS && !ou
     ? await executeAtHead(settledBefore, `reproduce:settled:${round}`)
     : null
   if (execSettled?.dirty) { sFix.close(); return await dirtyReproducerHalt('Fix', execSettled) }
-  const freshRaw = tailReviewable
+  const tail = tailReviewable
     ? await reviewOf(roundRange, `review:fix:${round}`, [LENS.correctness], knownForRound())
-    : []
+    : { raised: [], dead: [] }
 
   // For an open finding, fixed means its reproducer exits 0 at this round's
   // head; anything else stays open, carrying the latest reproducer_run
@@ -628,7 +651,13 @@ while ((open.length || blockingChecksOpen()) && round < MAX_REVIEW_ROUNDS && !ou
   }
 
   if (tailReviewable) {
-    const { candidates, freshNotes } = classifyBatch(freshRaw ?? [], execOld?.hunks ?? null, round)
+    if (tail.dead.length) {
+      sFix.close()
+      return await deadLensHalt('Fix', tail.dead, {
+        unresolved_findings: open, notes, fix_rounds: round, fix_round_output: fixRoundSpend,
+      })
+    }
+    const { candidates, freshNotes } = classifyBatch(tail.raised, execOld?.hunks ?? null, round)
     notes.push(...freshNotes)
     if (candidates.length) {
       const disposed = await executeAndDispose(candidates, `reproduce:fix:${round}:fresh`, round)

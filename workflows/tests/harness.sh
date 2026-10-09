@@ -380,6 +380,10 @@ function makeAgent(scenario, captured) {
       captured.dedupPrompt = prompt
       return { groups: scenario.dedupGroups ?? [] }
     }
+    // scenario.deadLenses names review labels (review:advocate,
+    // review:fix:1:correctness, ...) whose lens returns null: what parallel()
+    // hands back for a lens that threw or failed its schema after retries.
+    if ((scenario.deadLenses ?? []).includes(label)) return null
     if (/^review:fix:\d+:/.test(label)) {
       return { findings: (scenario.tailReview ?? []).map(defaultFinding) }
     }

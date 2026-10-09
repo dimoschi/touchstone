@@ -795,14 +795,21 @@ const reviewOf = async (range, tag, picked, known = [], knownCharge = '') => {
         model: 'opus', effort: effortFor.review })))
   // parallel() (the runtime global) catches each thunk's own error and hands
   // back null for the ones that threw, so a budget refusal inside one lens
-  // reads, past this point, exactly like a lens that legitimately found
-  // nothing -- every lens null is a plausible clean review, not evidence of a
-  // refusal. Re-checking the flag here is what tells the two apart, and
-  // re-throwing is what lets the top-level catch turn it into a halt instead
-  // of a false all-clear.
+  // reads, past this point, exactly like a lens that died for any other
+  // reason. Re-checking the flag here is what tells the two apart, and
+  // re-throwing is what lets the top-level catch turn it into a budget halt
+  // instead of a dead-lens one.
   if (runBudgetSpent) throw new Error(`touchstone: run budget spent during review (${tag})`)
+  // A lens with no result did not review the range, so a round holding one
+  // must not read as clean. Only `findings: []` is a clean lens.
+  const dead = picked.filter((_, i) => !Array.isArray(out[i]?.findings))
+    .map(l => `${tag}:${l.label}`)
+  if (dead.length) {
+    log(`${tag}: no result from ${dead.join(', ')}; the review did not run`)
+    return { raised: [], dead }
+  }
   const raised = out.flatMap((r, i) => {
-    const findings = Array.isArray(r?.findings) ? r.findings : []
+    const findings = r.findings
     // The script slices, not the schema: a maxItems failure would null the
     // whole lens's result rather than trim it.
     if (findings.length > MAX_FINDINGS_PER_LENS) {
@@ -824,6 +831,6 @@ const reviewOf = async (range, tag, picked, known = [], knownCharge = '') => {
     log(`${tag}: ${spanless.length} of ${raised.length} finding(s) carry no line span: ` +
         spanless.map(f => `${f.id} (${f.file})`).join(', '))
   }
-  return raised
+  return { raised, dead: [] }
 }
 
