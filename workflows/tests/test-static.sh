@@ -156,8 +156,8 @@ ARCH_MD="$REPO_ROOT/docs/architecture.md"
 
 echo ""
 echo "== static: gh-154 -- the docs say what the resume record does"
-check "deliver.md passes priorRun only from a record at 0.30.0 or later" \
-  "$(docHas "$DELIVER_MD" 'Pass `priorRun` only from a record whose `pipeline_version.executed` is 0.30.0 or later')" 1
+check "deliver.md passes priorRun only from a record at 0.31.2 or later" \
+  "$(docHas "$DELIVER_MD" 'Pass `priorRun` only from a record whose `pipeline_version.executed` is 0.31.2 or later')" 1
 check "and compares that version number by number, never as text" \
   "$(docHas "$DELIVER_MD" 'Compare it number by number on each dot-separated part, never as text')" 1
 check "and passes no priorRun for an older record or one without the field" \
