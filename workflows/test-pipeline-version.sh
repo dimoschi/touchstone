@@ -183,7 +183,7 @@ function makeAgent(scenario, captured) {
           premise_ok: true, estimated_loc: 5, evidence: [], premise_note: 'stub' }
     }
     if (label === 'plan:write') {
-      const m = /^PLAN FILE BEGIN ([0-9a-f]{8})\n([\s\S]*)^PLAN FILE END \1$/m.exec(prompt)
+      const m = /<<'PLAN FILE END ([0-9a-f]{8})'\n([\s\S]*?)^PLAN FILE END \1$/m.exec(prompt)
       captured.planId = m?.[1]
       // The copied body, plus the end line the prompt's printf appends.
       const appends = m && prompt.includes(`printf '\\nEND OF PLAN %s\\n' ${m[1]} >> `)

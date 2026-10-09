@@ -335,17 +335,16 @@ The implementer never gets the plan as prompt text. `brief()` clamps to `briefCh
   same limit but never tightened: over it, the run halts at Plan before any agent is
   dispatched (no setup, branch or triage), so nothing has been created. The inline stub
   plan is not gated.
-- **Plan file.** On every plan path, a haiku `plan:write` agent copies the plan to
-  `<worktree>/.touchstone/plan.md`, then runs a `printf` the script built that appends a
-  blank line and `END OF PLAN <id>`. The model never copies the end line: when it sat
-  inside the copied text it read as one of the markers around it and was dropped. It adds `.touchstone/`
+- **Plan file.** On every plan path, a `plan:write` agent runs one shell command the
+  script built: a quoted heredoc that writes the plan to `<worktree>/.touchstone/plan.md`,
+  then a `printf` that appends a blank line and `END OF PLAN <id>`. No model reproduces
+  the plan: asked to copy it with the Write tool, models dropped the end line, indented a
+  line and turned lines into list items, and each halted a run on a correct plan. It adds `.touchstone/`
   to `info/exclude` under `git rev-parse --git-common-dir` (never a tracked
   `.gitignore`), and reports a content digest, `tail -n 1` and the `git check-ignore`
   exit. The digest is FNV-1a over the file's UTF-8 bytes with every run of spaces, tabs
   and newlines collapsed to one space, printed by a `python3` command the script built;
-  the script computes the same over the plan. A byte count failed runs on harmless
-  whitespace slips in the model's copy, while a changed or dropped word still changes the
-  digest. The script halts at Implement unless the digests match, the last line is the
+  the script computes the same over the plan, so a changed or dropped word fails. The script halts at Implement unless the digests match, the last line is the
   end line, and the file is ignored. The id is an FNV-1a
   hash of ticket and plan, computed by the script, so it is deterministic. A failed
   verification is retried once as `plan:write:retry` with the identical prompt; a second

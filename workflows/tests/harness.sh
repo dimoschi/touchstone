@@ -98,10 +98,10 @@ function signalsOutput(range, overrides = {}) {
 // baseArgs()'s branch/branch:existing defaults both put the worktree here.
 const STUB_WT_PATH = '/tmp/stub-worktree'
 
-// The text strictly between the plan:write prompt's PLAN FILE BEGIN and END
-// lines, which is what the script asked to have written.
+// The heredoc body of the plan:write command, which is what the script asked
+// to have written.
 function planFileIn(prompt) {
-  const m = /^PLAN FILE BEGIN ([0-9a-f]{8})\n([\s\S]*)^PLAN FILE END \1$/m.exec(prompt)
+  const m = /<<'PLAN FILE END ([0-9a-f]{8})'\n([\s\S]*?)^PLAN FILE END \1$/m.exec(prompt)
   return m ? { id: m[1], content: m[2] } : null
 }
 
@@ -284,7 +284,7 @@ function makeAgent(scenario, captured) {
       // The copied text, plus the end line only when the prompt carries the
       // command that appends it, as the shell would run it.
       const appends = copied && new RegExp(
-        `^4\\. Then run exactly: printf '\\\\nEND OF PLAN %s\\\\n' ${copied.id} >> .*/\\.touchstone/plan\\.md'?$`, 'm')
+        `^printf '\\\\nEND OF PLAN %s\\\\n' ${copied.id} >> .*/\\.touchstone/plan\\.md'?$`, 'm')
         .test(prompt)
       const appended = appends ? `\nEND OF PLAN ${copied.id}\n` : ''
       const file = copied ? copied.content + appended : ''
