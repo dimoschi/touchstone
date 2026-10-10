@@ -326,7 +326,22 @@ const oneLineOf = (output) => {
   if (lines.length > 1) return { reason: `${lines.length} lines where one was expected` }
   return { line: lines[0] }
 }
-const MUTATION_VERIFY_LINE = /^TOUCHSTONE_MUTATION_VERIFY (\S+) (\S+) (\S+) (\S+) (.+)$/
+// The log and the gate path can both contain spaces: the log is found by its
+// fixed ending and the gate takes the rest of the line.
+const MUTATION_VERIFY_LINE =
+  /^TOUCHSTONE_MUTATION_VERIFY (\S+) (\S+) (\S+) (\S+) (.+?\/mutation-verify\.log) (\S+) (\S+) (.+)$/
+const PLUGIN_GATE_TAIL = '/skills/crap-controlled-changes/mutation-check.sh'
+// The plugin's own gate has this pipeline's plugin.json at its plugin root. A
+// same-named user or project skill's copy has none, and a stale or other
+// install has another version.
+const otherGateCopy = (gate, name, version) => {
+  const what = !gate.startsWith('/') || !gate.endsWith(PLUGIN_GATE_TAIL) ? 'not the plugin\'s gate script'
+    : name === '-' ? 'no plugin manifest beside it'
+    : name !== PLUGIN_NAME || version !== PIPELINE_VERSION
+      ? `plugin ${name} version ${version}, this pipeline is ${PLUGIN_NAME} ${PIPELINE_VERSION}`
+      : null
+  return what && `the relay ran a different copy of mutation-check.sh: ${gate} (${what})`
+}
 // The real mutation-check.sh ends every run past its own setup with
 // `mutation-check: EXIT=<n> ...`, so a 0 or a 5 without that trailer, or with
 // a different number, came from something else: a substituted `true`, another
@@ -342,7 +357,7 @@ const parseMutationVerify = (output, run) => {
   if (reason) return { reason }
   const m = MUTATION_VERIFY_LINE.exec(line)
   if (!m) return { reason: 'malformed verdict line' }
-  const [, r, exit, trailer, head, log] = m
+  const [, r, exit, trailer, head, log, name, version, gate] = m
   if (r !== run) return { reason: `verdict line names run ${r}, not ${run}` }
   if (!/^\d+$/.test(exit)) return { reason: 'exit is not an integer' }
   const mismatch = trailerProblem(Number(exit), trailer)
@@ -351,6 +366,9 @@ const parseMutationVerify = (output, run) => {
   if (!log.startsWith('/') || !log.endsWith(`/touchstone-gates/${run}/mutation-verify.log`)) {
     return { reason: 'log path is not under this run' }
   }
+  // 127 ran nothing, whatever the path, and keeps its own retry and halt.
+  const other = Number(exit) === 127 ? null : otherGateCopy(gate, name, version)
+  if (other) return { reason: other }
   return { exit: Number(exit), head, log }
 }
 const UNREVIEWED_LINE = /^TOUCHSTONE_UNREVIEWED (\S+) (\S+) (\S+)$/

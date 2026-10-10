@@ -551,20 +551,35 @@ runners (`60-mutation-pr.js.part`, parsers in `10-schemas.js.part`).
 nothing, a `mutation-verify:N` agent (haiku, low effort, `runnerPrompt`) runs one line:
 
 ```
-d="$(git -C <worktree> rev-parse --path-format=absolute --git-path touchstone-gates/<run> 2>/dev/null)" && mkdir -p "$d" && h="$(git -C <worktree> rev-parse HEAD 2>/dev/null)" && { mutation-check.sh <worktree> --verify >|"$d/mutation-verify.log" 2>&1; e=$?; t="$(sed -n '$s/^mutation-check: EXIT=\([0-9][0-9]*\) .*$/\1/p' "$d/mutation-verify.log")"; printf 'TOUCHSTONE_MUTATION_VERIFY %s %s %s %s %s\n' <run> "$e" "${t:--}" "$h" "$d/mutation-verify.log"; }
+g=mutation-check.sh && d="$(git -C <worktree> rev-parse --path-format=absolute --git-path touchstone-gates/<run> 2>/dev/null)" && mkdir -p "$d" && h="$(git -C <worktree> rev-parse HEAD 2>/dev/null)" && { "$g" <worktree> --verify >|"$d/mutation-verify.log" 2>&1; e=$?; t="$(sed -n '$s/^mutation-check: EXIT=\([0-9][0-9]*\) .*$/\1/p' "$d/mutation-verify.log")"; m="$(python3 -c 'import json,sys; j=json.load(open(sys.argv[1])); print(j["name"], j["version"])' "${g%/skills/crap-controlled-changes/mutation-check.sh}/.claude-plugin/plugin.json" 2>/dev/null)" || m='- -'; printf 'TOUCHSTONE_MUTATION_VERIFY %s %s %s %s %s %s %s\n' <run> "$e" "${t:--}" "$h" "$d/mutation-verify.log" "$m" "$g"; }
 ```
 
 `<run>` is the plan id plus `mutation-verify-<n>`. The line names `mutation-check.sh`
-without its directory, so the agent is told to find it in the crap-controlled-changes
-skill's directory and replace that one word with its absolute path, the same way the
-signals probe resolves `change-signals.sh`. That substitution is the one step a model
-still does here, and the trailer is what checks it: the real `mutation-check.sh` ends
-every run past its own setup with `mutation-check: EXIT=<n> <verdict>`, and the line
-prints that `<n>` from the log's last line, or `-` when there is none.
+without its directory, so the agent is told to find it in the
+`touchstone:crap-controlled-changes` skill's directory and replace the word after `g=`
+with its absolute path (single-quoted if it contains a space), the same way the signals
+probe resolves `change-signals.sh`.
+Every prompt names the skill by that namespaced form (`GATES_SKILL`, built from
+`PLUGIN_NAME`) and says not to use a skill of the same bare name: a user or project
+skill called `crap-controlled-changes` can resolve first and run an older copy of the
+gates. That substitution is the one step a model still does here, and two things check
+it. The line prints `$g`, the path it actually ran, with the `name` and `version` of the
+`.claude-plugin/plugin.json` at that copy's plugin root (`-` for each when it is missing
+or unreadable). And the real `mutation-check.sh` ends
+every run past its own setup with `mutation-check: EXIT=<n> <verdict>`, which the line
+prints from the log's last line, or `-` when there is none.
 `parseMutationVerify` accepts exactly one line naming this run, an integer exit, a
-trailer that equals the exit (or `-` with an exit other than 0 and 5), a 40-hex head and
-an absolute log path ending in `/touchstone-gates/<run>/mutation-verify.log`. A
-substituted `true` prints exit 0 with no trailer and is read as unmeasured.
+trailer that equals the exit (or `-` with an exit other than 0 and 5), a 40-hex head, an
+absolute log path ending in `/touchstone-gates/<run>/mutation-verify.log`, the manifest's
+name and version, and the gate path, which is last and takes the rest of the line since
+it can contain spaces. The gate path must be absolute and end in
+`/skills/crap-controlled-changes/mutation-check.sh`, and the manifest must name
+`PLUGIN_NAME` at `PIPELINE_VERSION`. That accepts the plugin cache and a clone under any
+name at this version, and rejects a user or project skill (`<config>/skills/...` has no
+manifest) and a stale or other install. A rejection is unmeasured with a reason saying the
+relay ran a different copy, naming its path and what was read beside it. Exit 127 is
+exempt from these checks, since nothing ran, and keeps its retry. A substituted
+`true` prints exit 0 with no trailer and is read as unmeasured.
 
 The script keeps the agent's `detail`, `needs_user_run` and `unsupported_language` for
 the halt note and ignores its `green` and `head_sha`, so the post-mutation review range,

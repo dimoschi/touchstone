@@ -45,8 +45,8 @@ const measureSignals = async (range) => {
     const probe = await treeAgent(
       `Run exactly this and put all of its output verbatim in output, ` +
       `unsummarised, then STOP. change-signals.sh sits in the ` +
-      `crap-controlled-changes skill's directory, beside crap-check.sh: invoke ` +
-      `that skill to learn where that is. Run it in the foreground with a Bash ` +
+      `${GATES_SKILL} skill's directory, beside crap-check.sh: invoke ` +
+      `that skill to learn where that is. ${GATES_SKILL_ONLY} Run it in the foreground with a Bash ` +
       `timeout of 600000, never in the background, never twice, and change ` +
       `nothing.\n${signalsCommandFor(range)}`,
       { label: 'signals', phase: 'Implement', schema: SIGNALS_PROBE, model: 'haiku', effort: 'low' })
@@ -86,7 +86,7 @@ const impl = await treeAgent(
       `ticket made: build each only as far as its stated reason needs, and ` +
       `name each in your summary.\n${additionsLines()}\n`
     : '') +
-  `Follow the crap-controlled-changes skill: TDD first, iterating with the ` +
+  `Follow the ${GATES_SKILL} skill: TDD first, iterating with the ` +
   `repo's own test command. Commit with crap-commit.sh ${wt.path} -m "...", ` +
   `which runs the gate itself and refuses if it is red; do not run ` +
   `crap-check.sh first, since that doubles a check that already runs the ` +

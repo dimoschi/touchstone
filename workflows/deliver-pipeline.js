@@ -29,7 +29,14 @@ export const meta = {
 // against the manifest in scripts/check-version-bump.sh, so drift is a
 // gate's job rather than something this script verifies about itself.
 const PLUGIN_NAME = 'touchstone'
-const PIPELINE_VERSION = '0.37.0'
+const PIPELINE_VERSION = '0.37.1'
+// The plugin's gates are this skill's scripts. A user or project skill with the
+// bare name can resolve first and run an older copy of the gates, whose result
+// would then be read as this version's, so prompts name the namespaced skill.
+const GATES_SKILL = `${PLUGIN_NAME}:crap-controlled-changes`
+const GATES_SKILL_ONLY =
+  `Invoke it as ${GATES_SKILL}, never a skill named plain ` +
+  `crap-controlled-changes, which can be a different, older copy of the gates.`
 
 // Boundaries. Wall-clock deadlines are not expressible here (no Date.now, by
 // design); the bounds are rounds, counts, and token budget instead.
@@ -725,7 +732,22 @@ const oneLineOf = (output) => {
   if (lines.length > 1) return { reason: `${lines.length} lines where one was expected` }
   return { line: lines[0] }
 }
-const MUTATION_VERIFY_LINE = /^TOUCHSTONE_MUTATION_VERIFY (\S+) (\S+) (\S+) (\S+) (.+)$/
+// The log and the gate path can both contain spaces: the log is found by its
+// fixed ending and the gate takes the rest of the line.
+const MUTATION_VERIFY_LINE =
+  /^TOUCHSTONE_MUTATION_VERIFY (\S+) (\S+) (\S+) (\S+) (.+?\/mutation-verify\.log) (\S+) (\S+) (.+)$/
+const PLUGIN_GATE_TAIL = '/skills/crap-controlled-changes/mutation-check.sh'
+// The plugin's own gate has this pipeline's plugin.json at its plugin root. A
+// same-named user or project skill's copy has none, and a stale or other
+// install has another version.
+const otherGateCopy = (gate, name, version) => {
+  const what = !gate.startsWith('/') || !gate.endsWith(PLUGIN_GATE_TAIL) ? 'not the plugin\'s gate script'
+    : name === '-' ? 'no plugin manifest beside it'
+    : name !== PLUGIN_NAME || version !== PIPELINE_VERSION
+      ? `plugin ${name} version ${version}, this pipeline is ${PLUGIN_NAME} ${PIPELINE_VERSION}`
+      : null
+  return what && `the relay ran a different copy of mutation-check.sh: ${gate} (${what})`
+}
 // The real mutation-check.sh ends every run past its own setup with
 // `mutation-check: EXIT=<n> ...`, so a 0 or a 5 without that trailer, or with
 // a different number, came from something else: a substituted `true`, another
@@ -741,7 +763,7 @@ const parseMutationVerify = (output, run) => {
   if (reason) return { reason }
   const m = MUTATION_VERIFY_LINE.exec(line)
   if (!m) return { reason: 'malformed verdict line' }
-  const [, r, exit, trailer, head, log] = m
+  const [, r, exit, trailer, head, log, name, version, gate] = m
   if (r !== run) return { reason: `verdict line names run ${r}, not ${run}` }
   if (!/^\d+$/.test(exit)) return { reason: 'exit is not an integer' }
   const mismatch = trailerProblem(Number(exit), trailer)
@@ -750,6 +772,9 @@ const parseMutationVerify = (output, run) => {
   if (!log.startsWith('/') || !log.endsWith(`/touchstone-gates/${run}/mutation-verify.log`)) {
     return { reason: 'log path is not under this run' }
   }
+  // 127 ran nothing, whatever the path, and keeps its own retry and halt.
+  const other = Number(exit) === 127 ? null : otherGateCopy(gate, name, version)
+  if (other) return { reason: other }
   return { exit: Number(exit), head, log }
 }
 const UNREVIEWED_LINE = /^TOUCHSTONE_UNREVIEWED (\S+) (\S+) (\S+)$/
@@ -1973,7 +1998,9 @@ const treeAgent = (prompt, { omitBase = false, ...opts }) =>
     `argument (crap-commit.sh already required it; the other three now accept ` +
     `it too) and print the repo and branch they resolved as their first line ` +
     `of output -- read that line and pass ${wt.path} there, every time, rather ` +
-    `than relying on cwd. GIT_DIR/GIT_WORK_TREE env vars and cd are not the way ` +
+    `than relying on cwd. All four are the scripts of the ${GATES_SKILL} ` +
+    `skill. ${GATES_SKILL_ONLY} ` +
+    `GIT_DIR/GIT_WORK_TREE env vars and cd are not the way ` +
     `to target it. Any reproduction or experiment -- a scratch clone, a throwaway ` +
     `git repo to test a git behaviour, anything you would otherwise drop in /tmp ` +
     `-- goes under the path printed by ` +
@@ -2722,8 +2749,8 @@ const measureSignals = async (range) => {
     const probe = await treeAgent(
       `Run exactly this and put all of its output verbatim in output, ` +
       `unsummarised, then STOP. change-signals.sh sits in the ` +
-      `crap-controlled-changes skill's directory, beside crap-check.sh: invoke ` +
-      `that skill to learn where that is. Run it in the foreground with a Bash ` +
+      `${GATES_SKILL} skill's directory, beside crap-check.sh: invoke ` +
+      `that skill to learn where that is. ${GATES_SKILL_ONLY} Run it in the foreground with a Bash ` +
       `timeout of 600000, never in the background, never twice, and change ` +
       `nothing.\n${signalsCommandFor(range)}`,
       { label: 'signals', phase: 'Implement', schema: SIGNALS_PROBE, model: 'haiku', effort: 'low' })
@@ -2763,7 +2790,7 @@ const impl = await treeAgent(
       `ticket made: build each only as far as its stated reason needs, and ` +
       `name each in your summary.\n${additionsLines()}\n`
     : '') +
-  `Follow the crap-controlled-changes skill: TDD first, iterating with the ` +
+  `Follow the ${GATES_SKILL} skill: TDD first, iterating with the ` +
   `repo's own test command. Commit with crap-commit.sh ${wt.path} -m "...", ` +
   `which runs the gate itself and refuses if it is red; do not run ` +
   `crap-check.sh first, since that doubles a check that already runs the ` +
@@ -4448,21 +4475,30 @@ if (!mutationGated) {
 // script builds and the shell prints, never from the mutation agent's own
 // account: green is mutation-check.sh --verify exiting 0, and the head is git's.
 // The line names mutation-check.sh without its directory, so the agent
-// running the line supplies the path, as the signals probe does.
+// running the line supplies the path, as the signals probe does. It prints the
+// path it ran and the name and version in the plugin.json beside it, so a
+// relay that resolved another copy of the gates is caught by
+// parseMutationVerify rather than read as this plugin's verdict. The path goes
+// last because it can contain spaces.
 let verdictAttempt = 0
 // What --verify exits when the ledger is missing or stale for this head.
 const VERIFY_UNRECORDED = 5
 const mutationVerifyLineFor = (run) =>
+  `g=mutation-check.sh && ` +
   `${logDirFor(run, 'touchstone-gates')} && mkdir -p "$d" && ` +
   `h="$(git -C ${shQuote(wt.path)} rev-parse HEAD 2>/dev/null)" && ` +
-  `{ mutation-check.sh ${shQuote(wt.path)} --verify >|"$d/mutation-verify.log" 2>&1; e=$?; ` +
+  `{ "$g" ${shQuote(wt.path)} --verify >|"$d/mutation-verify.log" 2>&1; e=$?; ` +
   `t="$(sed -n '$s/^mutation-check: EXIT=\\([0-9][0-9]*\\) .*$/\\1/p' "$d/mutation-verify.log")"; ` +
-  `printf 'TOUCHSTONE_MUTATION_VERIFY %s %s %s %s %s\\n' ${run} "$e" "\${t:--}" "$h" "$d/mutation-verify.log"; }`
+  `m="$(python3 -c 'import json,sys; j=json.load(open(sys.argv[1])); print(j["name"], j["version"])' ` +
+  `"\${g%${PLUGIN_GATE_TAIL}}/.claude-plugin/plugin.json" 2>/dev/null)" || m='- -'; ` +
+  `printf 'TOUCHSTONE_MUTATION_VERIFY %s %s %s %s %s %s %s\\n' ${run} "$e" "\${t:--}" "$h" "$d/mutation-verify.log" "$m" "$g"; }`
 const MUTATION_CHECK_PATH_NOTE =
   `mutation-check.sh is named without its directory. It sits in the ` +
-  `crap-controlled-changes skill's directory, beside crap-check.sh: invoke ` +
-  `that skill to learn where that is, and replace that one word with its ` +
-  `absolute path. That is the only change you may make to the line.\n`
+  `${GATES_SKILL} skill's directory, beside crap-check.sh: invoke ` +
+  `that skill to learn where that is. ${GATES_SKILL_ONLY} Then replace ` +
+  `that one word with its absolute path: the mutation-check.sh after g=, ` +
+  `nowhere else; single-quote it if it contains a space. That is the only ` +
+  `change you may make to the line.\n`
 const measureVerdict = async (label) => {
   verdictAttempt++
   const run = `${planId}-mutation-verify-${verdictAttempt}`
@@ -4496,8 +4532,8 @@ for (let attempt = 1; attempt <= MAX_GATE_ATTEMPTS && !mutation.green
      && !mutation.verdict_unmeasured && !mutation.verify_setup
      && !outOfBudget() && !sMut.over(); attempt++) {
   const reported = await treeAgent(
-    `Run mutation-check.sh ${wt.path} from the crap-controlled-changes skill in ` +
-    `this repo. It mutates files in place and needs a clean working tree, so ` +
+    `Run mutation-check.sh ${wt.path} from the ${GATES_SKILL} skill in ` +
+    `this repo. ${GATES_SKILL_ONLY} It mutates files in place and needs a clean working tree, so ` +
     `commit anything outstanding first. Never create, edit or delete .crap-gated, ` +
     `.mutation-gated or .comment-gated on your own initiative: that is the ` +
     `repo owner's decision, not yours, and a repo without any of them is ` +

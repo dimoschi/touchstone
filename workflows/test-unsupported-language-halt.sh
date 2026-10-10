@@ -107,12 +107,15 @@ function baseArgs(overrides) {
 // which is what makes each scenario only state the one call it cares about.
 // What the mutation verdict line prints: exit 0 when the last mutation answer
 // said green, else 5 (no green run recorded), with the gate's matching
-// trailer, at a fixed 40-hex head.
+// trailer, at a fixed 40-hex head, run from the plugin's own gate.
 function mutationVerifyReply(prompt, last) {
-  const run = (/printf 'TOUCHSTONE_MUTATION_VERIFY %s %s %s %s %s\\n' (\S+) /.exec(prompt) ?? [])[1] ?? ''
+  const run = (/printf 'TOUCHSTONE_MUTATION_VERIFY %s %s %s %s %s %s %s\\n' (\S+) /.exec(prompt) ?? [])[1] ?? ''
   const exit = last?.green ? 0 : 5
+  const name = /^const PLUGIN_NAME = '([^']*)'/m.exec(src)?.[1]
+  const version = /^const PIPELINE_VERSION = '([^']*)'/m.exec(src)?.[1]
   return { output: `TOUCHSTONE_MUTATION_VERIFY ${run} ${exit} ${exit} ` +
-    `c0ffee0000000000000000000000000000000001 /stub-worktree/.git/touchstone-gates/${run}/mutation-verify.log` }
+    `c0ffee0000000000000000000000000000000001 /stub-worktree/.git/touchstone-gates/${run}/mutation-verify.log ` +
+    `${name} ${version} /stub-plugin/skills/crap-controlled-changes/mutation-check.sh` }
 }
 
 function makeAgent(scenario, captured) {
