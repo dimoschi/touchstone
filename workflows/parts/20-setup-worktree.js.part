@@ -619,8 +619,8 @@ const decisionsSpec = () => settledDecisions
     `taken" section, verbatim; decided, not under review):\n${settledDecisions}\n` +
     `Behaviour a settled decision specifies is not a defect: do not report it ` +
     `as wrong-result, crash, gate-bypass or unmet-criterion. Disagreeing with ` +
-    `a decision is at most a design or scope note, which never blocks. Do not ` +
-    `critique the rest of the ticket's reasoning.\n`
+    `a decision is at most a design or scope note, with no reproducer, which ` +
+    `never blocks. Do not critique the rest of the ticket's reasoning.\n`
   : ''
 
 const treeAgent = (prompt, { omitBase = false, ...opts }) =>

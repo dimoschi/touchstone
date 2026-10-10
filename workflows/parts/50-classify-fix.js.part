@@ -73,8 +73,7 @@ const criterionQuoteFound = (f) => {
 // finding: used only to rank collapseDuplicates()'s survivor, never to
 // decide anything classify() itself decides.
 const looksBlocking = (f) =>
-  BLOCKING_CATEGORIES.has(f?.category) &&
-  (f.category === 'unmet-criterion' ? criterionQuoteFound(f) : hasCompleteReproducer(f))
+  !!f && hasCompleteReproducer(f) && (f.category !== 'unmet-criterion' || criterionQuoteFound(f))
 // A lens is told to use absolute paths (treeAgent's own rule) but hands
 // classify() its own file field, which hunks (keyed on the repo-relative
 // "+++ b/<path>" git prints) never matches unless normalized the same way: an
@@ -135,11 +134,9 @@ const classify = (f, ctx) => {
     // under (a bad reproducer, an earlier out-of-range round, the wrong
     // category) does not mean the defect itself is gone.
   }
-  if (!BLOCKING_CATEGORIES.has(f.category)) {
-    return { note: { ...f, reason: 'category', round: ctx.round } }
-  }
   if (!hasCompleteReproducer(f)) {
-    return { note: { ...f, reason: 'no-reproducer', round: ctx.round } }
+    const reason = BLOCKING_CATEGORIES.has(f.category) ? 'no-reproducer' : 'category'
+    return { note: { ...f, reason, round: ctx.round } }
   }
   // The quote proves the criterion exists; the reproducer is what shows the
   // change misses it. Without the second, the only way to decide "unmet" is a
@@ -265,7 +262,7 @@ const dirtyReproducerHalt = async (phaseName, exec, extraOpen = []) => halted(ph
 })
 
 // Every note is a finding the run does not block on: raised, but not
-// demonstrated, not blocking-category, not in range, or a residual of a fix
+// demonstrated, without a reproducer, not in range, or a residual of a fix
 // already verified. Separate from unresolved_findings, which stays reserved
 // for what actually holds the run.
 let notes = [...carriedNotes]
