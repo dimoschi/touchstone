@@ -32,8 +32,10 @@ if (!mutationGated) {
 // account: green is mutation-check.sh --verify exiting 0, and the head is git's.
 // The line names mutation-check.sh without its directory, so the agent
 // running the line supplies the path, as the signals probe does. It prints the
-// path it ran, so a relay that resolved another copy of the gates is caught
-// by parseMutationVerify rather than read as this plugin's verdict.
+// path it ran and the name and version in the plugin.json beside it, so a
+// relay that resolved another copy of the gates is caught by
+// parseMutationVerify rather than read as this plugin's verdict. The path goes
+// last because it can contain spaces.
 let verdictAttempt = 0
 // What --verify exits when the ledger is missing or stale for this head.
 const VERIFY_UNRECORDED = 5
@@ -43,13 +45,16 @@ const mutationVerifyLineFor = (run) =>
   `h="$(git -C ${shQuote(wt.path)} rev-parse HEAD 2>/dev/null)" && ` +
   `{ "$g" ${shQuote(wt.path)} --verify >|"$d/mutation-verify.log" 2>&1; e=$?; ` +
   `t="$(sed -n '$s/^mutation-check: EXIT=\\([0-9][0-9]*\\) .*$/\\1/p' "$d/mutation-verify.log")"; ` +
-  `printf 'TOUCHSTONE_MUTATION_VERIFY %s %s %s %s %s %s\\n' ${run} "$e" "\${t:--}" "$h" "$g" "$d/mutation-verify.log"; }`
+  `m="$(python3 -c 'import json,sys; j=json.load(open(sys.argv[1])); print(j["name"], j["version"])' ` +
+  `"\${g%${PLUGIN_GATE_TAIL}}/.claude-plugin/plugin.json" 2>/dev/null)" || m='- -'; ` +
+  `printf 'TOUCHSTONE_MUTATION_VERIFY %s %s %s %s %s %s %s\\n' ${run} "$e" "\${t:--}" "$h" "$d/mutation-verify.log" "$m" "$g"; }`
 const MUTATION_CHECK_PATH_NOTE =
   `mutation-check.sh is named without its directory. It sits in the ` +
   `${GATES_SKILL} skill's directory, beside crap-check.sh: invoke ` +
   `that skill to learn where that is. ${GATES_SKILL_ONLY} Then replace ` +
   `that one word with its absolute path: the mutation-check.sh after g=, ` +
-  `nowhere else. That is the only change you may make to the line.\n`
+  `nowhere else; single-quote it if it contains a space. That is the only ` +
+  `change you may make to the line.\n`
 const measureVerdict = async (label) => {
   verdictAttempt++
   const run = `${planId}-mutation-verify-${verdictAttempt}`

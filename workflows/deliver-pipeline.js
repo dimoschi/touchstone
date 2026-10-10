@@ -732,13 +732,22 @@ const oneLineOf = (output) => {
   if (lines.length > 1) return { reason: `${lines.length} lines where one was expected` }
   return { line: lines[0] }
 }
-const MUTATION_VERIFY_LINE = /^TOUCHSTONE_MUTATION_VERIFY (\S+) (\S+) (\S+) (\S+) (\S+) (.+)$/
-// The plugin's own gate sits under a directory named for the plugin: the
-// version-keyed cache (<plugin>/<version>/skills/...) or a checkout of it. A
-// same-named user or project skill's copy does not.
+// The log and the gate path can both contain spaces: the log is found by its
+// fixed ending and the gate takes the rest of the line.
+const MUTATION_VERIFY_LINE =
+  /^TOUCHSTONE_MUTATION_VERIFY (\S+) (\S+) (\S+) (\S+) (.+?\/mutation-verify\.log) (\S+) (\S+) (.+)$/
 const PLUGIN_GATE_TAIL = '/skills/crap-controlled-changes/mutation-check.sh'
-const isPluginGate = (gate) => gate.startsWith('/') && gate.endsWith(PLUGIN_GATE_TAIL) &&
-  gate.slice(0, -PLUGIN_GATE_TAIL.length).split('/').includes(PLUGIN_NAME)
+// The plugin's own gate has this pipeline's plugin.json at its plugin root. A
+// same-named user or project skill's copy has none, and a stale or other
+// install has another version.
+const otherGateCopy = (gate, name, version) => {
+  const what = !gate.startsWith('/') || !gate.endsWith(PLUGIN_GATE_TAIL) ? 'not the plugin\'s gate script'
+    : name === '-' ? 'no plugin manifest beside it'
+    : name !== PLUGIN_NAME || version !== PIPELINE_VERSION
+      ? `plugin ${name} version ${version}, this pipeline is ${PLUGIN_NAME} ${PIPELINE_VERSION}`
+      : null
+  return what && `the relay ran a different copy of mutation-check.sh: ${gate} (${what})`
+}
 // The real mutation-check.sh ends every run past its own setup with
 // `mutation-check: EXIT=<n> ...`, so a 0 or a 5 without that trailer, or with
 // a different number, came from something else: a substituted `true`, another
@@ -754,19 +763,18 @@ const parseMutationVerify = (output, run) => {
   if (reason) return { reason }
   const m = MUTATION_VERIFY_LINE.exec(line)
   if (!m) return { reason: 'malformed verdict line' }
-  const [, r, exit, trailer, head, gate, log] = m
+  const [, r, exit, trailer, head, log, name, version, gate] = m
   if (r !== run) return { reason: `verdict line names run ${r}, not ${run}` }
   if (!/^\d+$/.test(exit)) return { reason: 'exit is not an integer' }
   const mismatch = trailerProblem(Number(exit), trailer)
   if (mismatch) return { reason: mismatch }
   if (!COMMIT_TOKEN.test(head)) return { reason: 'head is not a commit id' }
-  // 127 ran nothing, whatever the path, and keeps its own retry and halt.
-  if (Number(exit) !== 127 && !isPluginGate(gate)) {
-    return { reason: `the relay ran a different copy of mutation-check.sh: ${gate}, not the ${PLUGIN_NAME} plugin's` }
-  }
   if (!log.startsWith('/') || !log.endsWith(`/touchstone-gates/${run}/mutation-verify.log`)) {
     return { reason: 'log path is not under this run' }
   }
+  // 127 ran nothing, whatever the path, and keeps its own retry and halt.
+  const other = Number(exit) === 127 ? null : otherGateCopy(gate, name, version)
+  if (other) return { reason: other }
   return { exit: Number(exit), head, log }
 }
 const UNREVIEWED_LINE = /^TOUCHSTONE_UNREVIEWED (\S+) (\S+) (\S+)$/
@@ -4468,8 +4476,10 @@ if (!mutationGated) {
 // account: green is mutation-check.sh --verify exiting 0, and the head is git's.
 // The line names mutation-check.sh without its directory, so the agent
 // running the line supplies the path, as the signals probe does. It prints the
-// path it ran, so a relay that resolved another copy of the gates is caught
-// by parseMutationVerify rather than read as this plugin's verdict.
+// path it ran and the name and version in the plugin.json beside it, so a
+// relay that resolved another copy of the gates is caught by
+// parseMutationVerify rather than read as this plugin's verdict. The path goes
+// last because it can contain spaces.
 let verdictAttempt = 0
 // What --verify exits when the ledger is missing or stale for this head.
 const VERIFY_UNRECORDED = 5
@@ -4479,13 +4489,16 @@ const mutationVerifyLineFor = (run) =>
   `h="$(git -C ${shQuote(wt.path)} rev-parse HEAD 2>/dev/null)" && ` +
   `{ "$g" ${shQuote(wt.path)} --verify >|"$d/mutation-verify.log" 2>&1; e=$?; ` +
   `t="$(sed -n '$s/^mutation-check: EXIT=\\([0-9][0-9]*\\) .*$/\\1/p' "$d/mutation-verify.log")"; ` +
-  `printf 'TOUCHSTONE_MUTATION_VERIFY %s %s %s %s %s %s\\n' ${run} "$e" "\${t:--}" "$h" "$g" "$d/mutation-verify.log"; }`
+  `m="$(python3 -c 'import json,sys; j=json.load(open(sys.argv[1])); print(j["name"], j["version"])' ` +
+  `"\${g%${PLUGIN_GATE_TAIL}}/.claude-plugin/plugin.json" 2>/dev/null)" || m='- -'; ` +
+  `printf 'TOUCHSTONE_MUTATION_VERIFY %s %s %s %s %s %s %s\\n' ${run} "$e" "\${t:--}" "$h" "$d/mutation-verify.log" "$m" "$g"; }`
 const MUTATION_CHECK_PATH_NOTE =
   `mutation-check.sh is named without its directory. It sits in the ` +
   `${GATES_SKILL} skill's directory, beside crap-check.sh: invoke ` +
   `that skill to learn where that is. ${GATES_SKILL_ONLY} Then replace ` +
   `that one word with its absolute path: the mutation-check.sh after g=, ` +
-  `nowhere else. That is the only change you may make to the line.\n`
+  `nowhere else; single-quote it if it contains a space. That is the only ` +
+  `change you may make to the line.\n`
 const measureVerdict = async (label) => {
   verdictAttempt++
   const run = `${planId}-mutation-verify-${verdictAttempt}`

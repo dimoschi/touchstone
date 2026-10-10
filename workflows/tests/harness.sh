@@ -158,15 +158,18 @@ function runRunnerLines(prompt) {
 }
 // What the mutation verdict line prints, for the run its prompt names.
 function mutationVerifyRunOf(prompt) {
-  return (/printf 'TOUCHSTONE_MUTATION_VERIFY %s %s %s %s %s %s\\n' (\S+) /.exec(prompt) ?? [])[1] ?? ''
+  return (/printf 'TOUCHSTONE_MUTATION_VERIFY %s %s %s %s %s %s %s\\n' (\S+) /.exec(prompt) ?? [])[1] ?? ''
 }
 // Where the plugin cache installs the gate the line is meant to run.
 const PLUGIN_GATE = '/opt/agent-config/plugins/cache/m/touchstone/0.36.2/skills/crap-controlled-changes/mutation-check.sh'
+const STUB_PLUGIN_VERSION = /const PIPELINE_VERSION = '([^']+)'/.exec(src)[1]
 // trailer is the EXIT=<n> the gate's last log line states, '-' when absent;
-// gate is the path the line says it ran.
-function mutationVerifyOutput(prompt, exit, head, trailer = exit, wtPath = STUB_WT_PATH, gate = PLUGIN_GATE) {
+// name and version are read from the plugin.json beside the gate, the path
+// the line says it ran.
+function mutationVerifyOutput(prompt, exit, head, trailer = exit, wtPath = STUB_WT_PATH, gate = PLUGIN_GATE,
+  name = 'touchstone', version = STUB_PLUGIN_VERSION) {
   const run = mutationVerifyRunOf(prompt)
-  return `TOUCHSTONE_MUTATION_VERIFY ${run} ${exit} ${trailer} ${head} ${gate} ${wtPath}/.git/touchstone-gates/${run}/mutation-verify.log`
+  return `TOUCHSTONE_MUTATION_VERIFY ${run} ${exit} ${trailer} ${head} ${wtPath}/.git/touchstone-gates/${run}/mutation-verify.log ${name} ${version} ${gate}`
 }
 // The reviewed head the unreviewed-commit line counts from.
 function unreviewedFromOf(prompt) {
@@ -616,7 +619,7 @@ function makeAgent(scenario, captured) {
     // The verdict line run after each mutation attempt. By default it agrees
     // with the agent: exit 0 when its last answer said green, else 5 (no green
     // run recorded), at the head it reported. scenario.mutationVerify(attempt,
-    // prompt, retry) returns { exit, head, trailer, gate } to override any of them,
+    // prompt, retry) returns { exit, head, trailer, gate, name, version } to override any of them,
     // { output } for a raw reply, or null for no answer.
     const verifyAt = /^mutation-verify:(\d+)(:retry)?$/.exec(label)
     if (verifyAt) {
@@ -626,7 +629,7 @@ function makeAgent(scenario, captured) {
       const last = captured.lastMutation
       const exit = custom?.exit ?? (last?.green ? 0 : 5)
       return { output: mutationVerifyOutput(prompt, exit,
-        custom?.head ?? (last?.head_sha || REVIEWED_THROUGH), custom?.trailer ?? exit, STUB_WT_PATH, custom?.gate) }
+        custom?.head ?? (last?.head_sha || REVIEWED_THROUGH), custom?.trailer ?? exit, STUB_WT_PATH, custom?.gate, custom?.name, custom?.version) }
     }
     // The unreviewed-commit count before the PR. Count 0 at the reviewed head
     // (or a 40-hex stand-in when a fixture's head is not hex) unless scenario.unreviewed(retry, prompt) returns { count, head },
