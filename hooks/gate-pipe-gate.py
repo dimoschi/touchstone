@@ -14,14 +14,21 @@ shell setting this hook cannot see), and each form guessed wrong is a silent fal
 green. Redirect to a file and read it instead; nothing is lost, since the file
 holds the whole output and the exit code survives.
 
-The command is read with a small tokenizer, not a shell parser. Quoted strings
-and heredoc bodies are data, except a quoted word ending in a gate's name, a
-heredoc fed to bash/sh/zsh, and `$(...)` in an unquoted heredoc body. Groups
+The command is read with a small tokenizer, not a shell parser. A word runs a
+gate when it ends in a gate's file name and sits in command position: the
+command word after any assignments and prefix words (`time`, `env`, `bash`,
+`source`, ...), or the word after `--`. A gate's name as a search argument
+(`grep crap-check.sh f | wc`) is therefore not a run. Heredoc bodies are data,
+except a heredoc fed to bash/sh/zsh and `$(...)` in an unquoted body. Groups
 (`{}`, `()`, do/done, if/fi, case/esac) are tracked, so a pipe after a group
-that ran a gate is refused at any depth. Known limits: code run from inside a
-quoted string (`bash -c "..."`), shell functions, ANSI-C `$'...'` quoting and
-obfuscated gate names get past it, and a gate's name used as a search argument
-(`grep crap-check.sh f | wc`) is refused although harmless.
+that ran a gate is refused at any depth.
+
+Known limits, each a way past it: code inside a quoted string (`bash -c "...
+| tail"`), shell functions, a gate path held in a variable, ANSI-C `$'...'`
+quoting, obfuscated names (`crap-check.sh""`), a heredoc piped into a shell
+(`cat <<EOF | bash`), backticks in an unquoted heredoc body, a gate in a
+`while`/`until` condition, and a gate behind a wrapper not listed below. A
+`--` before a gate's name in an argument list is refused although harmless.
 
 Exit 2 blocks, with the replacement form on stderr. Tests: test-gate-pipe.sh.
 """
@@ -41,6 +48,8 @@ DATA = re.compile(r"""
   | .
 """, re.VERBOSE | re.DOTALL)
 
+CONTINUATION = '\\\n'
+
 # Redirections come first so `>|` and `&>` are never read as a pipe or a list.
 # A quoted string stays inside its word, so its `|` and `;` are not operators.
 TOKEN = re.compile(r"""
@@ -49,12 +58,16 @@ TOKEN = re.compile(r"""
   | (?:'[^']*'|"(?:\\.|[^"\\])*"|\\.|[^\s|;&<>()\\'"])+
 """, re.VERBOSE | re.DOTALL)
 
-# A word names a gate when it ends in the gate's file name, quoted or not, so a
-# quoted path runs the gate but a sentence that mentions one does not.
 GATE_WORD = re.compile(r'(?:^["\']?|/)(?:' + '|'.join(map(re.escape, GATES)) + r')["\']?$')
 SHELL = re.compile(r'(?:^|[\s/])(?:ba|z)?sh(?=\s|$)')
 SUBSTITUTION = re.compile(r'\$\((?:[^()]|\([^()]*\))*\)')
 QUOTE_CHARS = re.compile(r'[\'"\\]')
+# Words that leave the next word in command position: flags, numbers,
+# assignments, and the wrappers and interpreters that run the word after them.
+PREFIX = re.compile(r"""
+    -\S* | \d+[smhd]? | [A-Za-z_]\w*=\S* | ! | \.
+  | (?:\S*/)?(?:time|command|exec|nohup|env|eval|sudo|timeout|nice|bash|sh|zsh|source)
+""", re.VERBOSE)
 
 PIPES = ('|', '|&')
 BREAKS = PIPES + ('||', '&&', ';', '&', '\n')
@@ -112,7 +125,7 @@ def command_text(cmd):
         if m['delim']:
             heredocs.append((m['delim'], feeds_shell(''.join(kept))))
         else:
-            kept.append(m.group())
+            kept.append(m.group().replace(CONTINUATION, ''))
         if m.group() == '\n':
             pos = read_heredocs(cmd, pos, heredocs, kept)
             heredocs = []
@@ -145,6 +158,10 @@ class Walk:
     def opens(self, token):
         return token == '(' or (self.at_start and token in CLOSERS)
 
+    def command_follows(self, token):
+        """True if the word after `token` is in command position."""
+        return token in STARTERS or token == '--' or (self.at_start and bool(PREFIX.fullmatch(token)))
+
     def step(self, token):
         if self.closes(token):
             inner = self.stack.pop()
@@ -154,8 +171,8 @@ class Walk:
         elif token in BREAKS:
             self.stack[-1].element_runs_gate = False
         else:
-            self.stack[-1].ran(bool(GATE_WORD.search(token)))
-        self.at_start = token in STARTERS
+            self.stack[-1].ran(self.at_start and bool(GATE_WORD.search(token)))
+        self.at_start = self.command_follows(token)
 
 
 def pipes_a_gate(cmd):

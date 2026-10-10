@@ -255,3 +255,39 @@ def test_pipes_a_gate_false_for_gate_name_inside_a_longer_word():
 def test_pipes_a_gate_false_for_gate_mentioned_inside_quoted_text():
     assert gate_pipe.pipes_a_gate('echo "see crap-check.sh" | cat') is False
     assert gate_pipe.pipes_a_gate('echo "crap-check.sh is a gate" | cat') is False
+
+
+def test_pipes_a_gate_false_for_gate_name_as_a_search_argument():
+    assert gate_pipe.pipes_a_gate('grep -rn "crap-check.sh" hooks | head') is False
+    assert gate_pipe.pipes_a_gate("rg 'mutation-check.sh' -l | wc -l") is False
+    assert gate_pipe.pipes_a_gate('git grep -n "crap-check.sh" -- hooks | head -20') is False
+    assert gate_pipe.pipes_a_gate('echo "crap-check.sh" | wc') is False
+    assert gate_pipe.pipes_a_gate("grep -rn crap-check.sh hooks | head") is False
+
+
+def test_pipes_a_gate_true_for_gate_after_prefix_words():
+    assert gate_pipe.pipes_a_gate("A=1 time nohup crap-check.sh /r | tail") is True
+    assert gate_pipe.pipes_a_gate("env -i B=2 command crap-check.sh /r | tail") is True
+    assert gate_pipe.pipes_a_gate("! exec crap-check.sh /r | tail") is True
+    assert gate_pipe.pipes_a_gate("timeout 600 crap-check.sh /r | tail") is True
+
+
+def test_pipes_a_gate_true_for_gate_run_by_an_interpreter():
+    assert gate_pipe.pipes_a_gate('bash "$SKILL_DIR/crap-check.sh" /r | tail') is True
+    assert gate_pipe.pipes_a_gate("/bin/bash -e /x/crap-check.sh /r | tail") is True
+    assert gate_pipe.pipes_a_gate("source /x/mutation-check.sh | tail") is True
+    assert gate_pipe.pipes_a_gate(". /x/mutation-check.sh | tail") is True
+    assert gate_pipe.pipes_a_gate('bash -c "crap-check.sh" | tail') is True
+    assert gate_pipe.pipes_a_gate('eval "crap-check.sh" | tail') is True
+
+
+def test_pipes_a_gate_true_for_gate_after_double_dash():
+    assert gate_pipe.pipes_a_gate("uv run -- crap-check.sh /r | tail") is True
+
+
+def test_pipes_a_gate_true_for_glued_quoted_prefix_path():
+    assert gate_pipe.pipes_a_gate('"$D"/crap-check.sh /r | tail') is True
+
+
+def test_pipes_a_gate_true_for_gate_continued_with_backslash_newline():
+    assert gate_pipe.pipes_a_gate("bash /x/crap-check.sh\\\n  --base main 2>&1 | tail") is True
