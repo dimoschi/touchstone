@@ -9,8 +9,11 @@ skips the token ceilings, the halt latches, and the gates, which are the reason 
 workflow exists.
 
 ```
-Workflow({ name: 'touchstone:deliver-pipeline', args: { task: "...", ticket: "...", branchType: "..." } })
+Workflow({ name: 'touchstone:deliver-pipeline', args: { task: "...", ticket: "...", branchType: "...", prepared: <prepare-delivery.sh's JSON> } })
 ```
+
+Run `prepare-delivery.sh` first (see Prepare the worktree, below) and pass what it printed
+as `prepared`.
 
 ## Arguments
 
@@ -24,9 +27,9 @@ the fabricated link.
   `perf`, `build`, or `ci`. Pass as `branchType`. Defaults to `feat`.
 - `--existing` — optional. Pass `existingBranch: true`. Use it when the work
   continues a branch this ticket already has: review feedback, or scope added
-  to a ticket whose PR is already open. The workflow looks up that branch by
-  ticket marker, whatever the invoking checkout happens to be on and skipping
-  fetch and pull entirely: first among every worktree
+  to a ticket whose PR is already open. `prepare-delivery.sh` looks up that
+  branch by ticket marker, whatever the invoking checkout happens to be on,
+  never pulling (it fetches only the base, to read the base's manifest): first among every worktree
   (`git worktree list --porcelain`), then, only if none matches, a branch with
   no worktree of its own (its directory was removed by hand -- sometimes
   because its PR merged and the tree was cleaned up, sometimes because it was
@@ -46,6 +49,37 @@ the fabricated link.
   with.
 
 **If `--ticket` is absent, stop and tell the user. Do not invoke the workflow.**
+
+## Prepare the worktree
+
+Before invoking the workflow, cut or find the ticket's worktree with the script this
+plugin ships:
+
+1. Read the ticket's title: `gh issue view <number> --json title -q .title` for a GitHub
+   issue, the Atlassian tools for a Jira key. Derive the slug from it: lowercase,
+   hyphen-separated, at most 6 words, letters and digits only. With `--existing` the slug
+   is not used to find anything, but the script still requires one.
+2. Run it with the main checkout's absolute path, redirecting its output to a file and
+   reading that file:
+
+   ```
+   ${CLAUDE_PLUGIN_ROOT}/skills/crap-controlled-changes/prepare-delivery.sh <absolute repo path> --ticket <ref> --type <type> --slug <slug> [--existing] [--base <ref>] [--prior-head <sha>]
+   ```
+
+   Pass `--type` as `branchType` would be (`feat` by default), `--existing` when the
+   user passed it, `--base` when you pass `base`, and `--prior-head` with the same
+   `reviewed_through` you pass in `priorRun` (or `reviewedThrough`), so the resume check
+   runs against the head you hand the workflow.
+3. On exit 0, pass the printed JSON unchanged as `prepared`. On any other exit it printed
+   `{"error", "reason"}`: **report both verbatim and stop.** Do not invoke the workflow,
+   do not retry with another slug, and do not create or delete a branch or worktree to
+   get past it. A name already on origin (`remote-branch-exists`) is another run's
+   branch, and reusing it attaches this run to that branch's pull request.
+
+The workflow validates every field of `prepared` and halts at Worktree naming the first
+that fails, so never edit it. Without `prepared` the workflow falls back to agents that
+do the same steps less reliably; that path exists for callers who invoke the workflow
+directly, not for this command.
 
 ## Re-running with a plan you already have
 
@@ -132,7 +166,8 @@ downstream metric would inherit it.
 
 ## If the workflow refuses
 
-It halts on purpose: a detached HEAD, a base ref that will not resolve, a dirty
+`prepare-delivery.sh` refuses the same cases before the run starts, and the workflow
+halts on a `prepared` argument that fails validation. It halts on purpose: a detached HEAD, a base ref that will not resolve, a dirty
 checkout in the worktree `--existing` resolves to, `--existing` finding no
 worktree or branch for the ticket and the current checkout not on a feature
 branch either, `--existing` matching more than one worktree or branch for the
@@ -151,7 +186,7 @@ around once.
 
 ## Before invoking
 
-Nothing to confirm. Invoke the workflow.
+Nothing to confirm beyond running `prepare-delivery.sh`. Invoke the workflow.
 
 **A missing marker is not a reason to stop.** The markers control enforcement, not
 measurement, so the run is worth making either way:

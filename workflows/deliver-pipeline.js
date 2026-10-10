@@ -29,7 +29,7 @@ export const meta = {
 // against the manifest in scripts/check-version-bump.sh, so drift is a
 // gate's job rather than something this script verifies about itself.
 const PLUGIN_NAME = 'touchstone'
-const PIPELINE_VERSION = '0.36.1'
+const PIPELINE_VERSION = '0.37.0'
 
 // Boundaries. Wall-clock deadlines are not expressible here (no Date.now, by
 // design); the bounds are rounds, counts, and token budget instead.
@@ -446,13 +446,15 @@ const BRANCH = {
     // this instead of a separate checks:discover call, since the branch
     // agent already has the worktree open by the time it can answer.
     checks_source: CHECKS,
+    // Optional here and narrower than EXISTING_BRANCH's: the fresh prompt has
+    // one halt of its own, a name already on origin.
+    halt_reason: { type: 'string', enum: ['none', 'remote-exists'] },
   },
 }
 
-// halt_reason lives here, not on BRANCH, so the default branch agent never
-// sees a field its own prompt says nothing about. Required, because an
-// omitted one reads as the plain not-found note, which is the note these
-// halts exist to replace; 'none' keeps an absent key from being the signal.
+// Required here, because an omitted halt_reason reads as the plain not-found
+// note, which is the note these halts exist to replace; 'none' keeps an
+// absent key from being the signal.
 const EXISTING_BRANCH = {
   ...BRANCH,
   required: [...BRANCH.required, 'halt_reason'],
@@ -1156,6 +1158,80 @@ const SETUP = {
   },
 }
 
+// What setup still answers when args.prepared carries the markers and the
+// base manifest: only the ticket needs an agent, for Jira's MCP tools.
+const SETUP_TICKET = {
+  type: 'object', additionalProperties: false, required: ['ticket'],
+  properties: { ticket: TICKET },
+}
+
+
+// args.prepared is the JSON skills/crap-controlled-changes/prepare-delivery.sh
+// printed, which the invoking session ran before launching this run (see
+// commands/deliver.md). It replaces the branch agents and the marker and
+// version halves of setup. The session relays it, so nothing in it is taken on
+// trust: every field is checked before anything reads it, and the first one
+// that fails is named in the halt.
+const isStr = (v) => typeof v === 'string'
+const isBool = (v) => typeof v === 'boolean'
+const isObj = (v) => v !== null && typeof v === 'object' && !Array.isArray(v)
+const markerTail = (name) => isStr(name) && name.startsWith(`${ticketMarker}-`) &&
+  name.length > ticketMarker.length + 1
+const carriesMarker = (branch) => isStr(branch) && /^[^/\s]+\/\S+$/.test(branch) &&
+  markerTail(branch.slice(branch.indexOf('/') + 1))
+const isAbsPath = (p) => isStr(p) && /^(\/[^/\0]+)+$/.test(p) &&
+  !p.split('/').some(seg => seg === '.' || seg === '..')
+const REF_NAME = /^(?!-)(?!.*\.\.)[A-Za-z0-9._/-]+$/
+const PRIOR_HEAD_LINE = /^TOUCHSTONE_PRIOR_HEAD_LINEAR [012]$/
+
+const preparedWorktreeName = (p) => {
+  const prefix = `${p.repo_root}/.claude/worktrees/`
+  if (!isStr(p.worktree) || !p.worktree.startsWith(prefix)) return null
+  const name = p.worktree.slice(prefix.length)
+  return /^[A-Za-z0-9._-]+$/.test(name) && !name.includes('..') ? name : null
+}
+const preparedChecksOk = (c, worktree) => isObj(c) && isStr(c.detail) && Array.isArray(c.sections) &&
+  c.sections.every(s => isObj(s) && isStr(s.heading) && s.heading.startsWith('##') && isStr(s.fence)) &&
+  [ '', `${worktree}/AGENTS.md`, `${worktree}/CLAUDE.md` ].includes(c.file)
+const preparedManifestOk = (m) => isObj(m) && isBool(m.found) && isBool(m.refreshed) &&
+  ['name', 'version', 'detail'].every(k => isStr(m[k]))
+
+const PREPARED_FIELDS = [
+  ['repo_root', (p) => isAbsPath(p.repo_root), 'an absolute path with no trailing slash'],
+  ['worktree', (p) => markerTail(preparedWorktreeName(p)),
+    `<repo_root>/.claude/worktrees/${ticketMarker}-<slug>`],
+  ['branch', (p) => carriesMarker(p.branch), `<type>/${ticketMarker}-<slug>`],
+  ['base', (p) => isStr(p.base) && (/^[0-9a-f]{40}$/.test(p.base) || REF_NAME.test(p.base)) &&
+    (!baseOverride || p.base === baseOverride),
+    `a 40-hex SHA or a ref name${baseOverride ? `, equal to args.base (${baseOverride})` : ''}`],
+  ['ticket_marker', (p) => p.ticket_marker === ticketMarker, ticketMarker],
+  ['mode', (p) => p.mode === (args?.existingBranch ? 'existing' : 'fresh'),
+    args?.existingBranch ? "'existing', since existingBranch is set" : "'fresh', since existingBranch is not set"],
+  ['worktree_action', (p) => (args?.existingBranch ? ['reused', 'reattached'] : ['created']).includes(p.worktree_action),
+    args?.existingBranch ? "'reused' or 'reattached'" : "'created'"],
+  ['detail', (p) => isStr(p.detail), 'a string'],
+  ['markers', (p) => isObj(p.markers) && isBool(p.markers.crap_gated) && isBool(p.markers.mutation_gated),
+    'booleans crap_gated and mutation_gated'],
+  ['plugin', (p) => isObj(p.plugin) && p.plugin.name === PLUGIN_NAME && p.plugin.version === PIPELINE_VERSION,
+    `${PLUGIN_NAME} ${PIPELINE_VERSION}, the version this run executes`],
+  ['base_manifest', (p) => preparedManifestOk(p.base_manifest),
+    'booleans found and refreshed, strings name, version and detail'],
+  ['checks_source', (p) => preparedChecksOk(p.checks_source, p.worktree),
+    "file '' or the worktree's AGENTS.md or CLAUDE.md, sections of {heading starting ##, fence}, detail"],
+  ['prior_head', (p) => p.prior_head == null || asSha(p.prior_head) === p.prior_head, 'null or a 40-hex SHA'],
+  ['prior_head_check', (p) => p.prior_head_check == null ||
+    (p.prior_head != null && isStr(p.prior_head_check) && PRIOR_HEAD_LINE.test(p.prior_head_check)),
+    'null, or the TOUCHSTONE_PRIOR_HEAD_LINEAR line for prior_head'],
+]
+
+const preparedProblem = (p) => {
+  const rerun = ' Nothing was dispatched. Re-run prepare-delivery.sh and pass its output unchanged.'
+  if (!isObj(p)) return `args.prepared is not an object.${rerun}`
+  const bad = PREPARED_FIELDS.find(([, ok]) => !ok(p))
+  return bad
+    ? `args.prepared.${bad[0]} is ${JSON.stringify(p[bad[0]] ?? null).slice(0, 200)}; expected ${bad[2]}.${rerun}`
+    : null
+}
 // Worktree before triage, not just before planning. Triage often routes small
 // work back to be done inline, and that work still needs to land somewhere
 // named: without the jira-/gh- marker the session is reported untracked
@@ -1179,6 +1255,13 @@ if (givenPlan && givenPlan.length > PLAN_MAX_CHARS) {
   })
 }
 
+const prepared = args?.prepared ?? null
+const preparedNote = prepared === null ? null : preparedProblem(prepared)
+if (preparedNote) {
+  enterPhase('Worktree')
+  return await halted('Worktree', { note: preparedNote })
+}
+
 // One dispatch, before anything reads the envelope, answering three questions
 // that share nothing but their timing: none needs a worktree, and each used
 // to cost its own haiku round trip (ticket, plugin:version, gate:opt-in). Not
@@ -1186,13 +1269,10 @@ if (givenPlan && givenPlan.length > PLAN_MAX_CHARS) {
 // resolves the repo root itself (dirname of --git-common-dir) rather than
 // being pointed at one, and the prompt never names wt.base or baseOverride,
 // both unset at this point regardless. Its only write is the one
-// `git fetch origin <base>` the version check needs.
-const sSetup = stage('setup')
-const setupResult = await dispatch(
-  `[touchstone: setup]\n` +
-  `Gather three unrelated facts, then STOP. Do not plan, implement, branch, ` +
-  `commit, or comment on anything.\n\n` +
-  `1. TICKET. A key like PROJ-4821 or ABC-36 is a Jira issue: read it with ` +
+// `git fetch origin <base>` the version check needs. With args.prepared it asks
+// for the ticket alone, since prepare-delivery.sh read the other two.
+const setupTicketStep =
+  `TICKET. A key like PROJ-4821 or ABC-36 is a Jira issue: read it with ` +
   `the Atlassian tools, which you can find via ToolSearch. A bare number ` +
   `like 216 is a GitHub issue in the repo you are currently in: read it ` +
   `with gh issue view <number> --json title,body,comments. Fetch ticket ` +
@@ -1200,7 +1280,16 @@ const setupResult = await dispatch(
   `ticket.description, and ticket.comments (concatenated, newest last, ` +
   `each prefixed with its author; empty string if none). Return ` +
   `ticket.found=false with empty strings if the ticket cannot be read at ` +
-  `all: say why in ticket.summary. Do not invent or infer any field.\n\n` +
+  `all: say why in ticket.summary. Do not invent or infer any field.`
+const sSetup = stage('setup')
+const setupResult = await dispatch(prepared
+  ? `[touchstone: setup]\n` +
+    `Gather one fact, then STOP. Do not plan, implement, branch, commit, or ` +
+    `comment on anything.\n\n` + setupTicketStep
+  : `[touchstone: setup]\n` +
+  `Gather three unrelated facts, then STOP. Do not plan, implement, branch, ` +
+  `commit, or comment on anything.\n\n` +
+  `1. ` + setupTicketStep + `\n\n` +
   `2. VERSION. Find the repo root: dirname "$(git rev-parse ` +
   `--path-format=absolute --git-common-dir)". Resolve the repo's actual ` +
   `base branch: git -C <repo root> symbolic-ref --short refs/remotes/` +
@@ -1233,7 +1322,7 @@ const setupResult = await dispatch(
   `false only if you confirmed it is absent -- an unconfirmed mutation ` +
   `marker should still run the gate, which only costs a run rather than ` +
   `dropping a real one. Report the paths you checked in markers.detail.`,
-  { label: 'setup', schema: SETUP, model: 'haiku', effort: 'low' })
+  { label: 'setup', schema: prepared ? SETUP_TICKET : SETUP, model: 'haiku', effort: 'low' })
 sSetup.close()
 
 const fetched = setupResult?.ticket
@@ -1268,7 +1357,7 @@ if (!task) {
 // mismatch. A probe that returns nothing at all leaves the same null/null
 // pair, but is logged separately again, since that case means the comparison
 // did not run, not that there was nothing to compare.
-const versionProbe = setupResult?.version
+const versionProbe = prepared ? prepared.base_manifest : setupResult?.version
 if (versionProbe == null) {
   log(`the plugin:version probe returned nothing, so pipeline_version could ` +
       `not be compared against the repository's base branch`)
@@ -1309,7 +1398,7 @@ if (versionProbe == null) {
 // marker is there -- the false assertion this ticket exists to remove. So
 // crap_gated counts only a confirmed `true`; everything else, including a
 // probe that returned nothing, is reported as unconfirmed.
-const gateProbe = setupResult?.markers
+const gateProbe = prepared ? prepared.markers : setupResult?.markers
 const crapGated = gateProbe?.crap_gated === true
 const mutationGated = gateProbe?.mutation_gated !== false
 if (!gateProbe) {
@@ -1388,7 +1477,16 @@ const priorHeadStep = (n) =>
 // existingBranch is for follow-up work on an open PR: review feedback, or scope
 // added to a ticket already in flight. Cutting a fresh branch there strands the
 // delta away from the PR it belongs to. The ticket stays mandatory either way.
-const wt = args?.existingBranch
+const wtFromPrepared = (p) => ({
+  created: true, branch: p.branch, base: p.base, path: p.worktree, ticket: p.ticket,
+  detail: `prepare-delivery.sh ${p.worktree_action} ${p.worktree}: ${p.detail}`,
+  dirty: false, halt_reason: 'none', checks_source: p.checks_source,
+  // A check of any other head says nothing about this run's.
+  ...(priorHead && p.prior_head === priorHead ? { prior_head_check: p.prior_head_check } : {}),
+})
+const wt = prepared
+  ? wtFromPrepared(prepared)
+  : args?.existingBranch
   ? await dispatch(
       `[touchstone: branch:existing]\n` +
       `Find the worktree that already holds this ticket's branch, then STOP. Do ` +
@@ -1510,8 +1608,10 @@ const wt = args?.existingBranch
   `Task: ${brief(task)}\n` +
   `Ticket: ${ticket}\n` +
   `Branch type prefix: ${args?.branchType ?? 'feat'}\n` +
-  `One field matters on every response below, halts included: dirty is true ` +
-  `only for step 6's dirty-checkout halt, false in every other response.\n` +
+  `Two fields matter on every response below, halts included: dirty is true ` +
+  `only for step 6's dirty-checkout halt, false in every other response; ` +
+  `halt_reason is "remote-exists" for step 4's halt and "none" in every ` +
+  `other response.\n` +
   `1. Run git worktree prune. It only removes registrations for worktree ` +
   `directories that no longer exist on disk, never a directory that does ` +
   `exist, so it is safe to run unconditionally; it clears the way for ` +
@@ -1535,7 +1635,13 @@ const wt = args?.existingBranch
   `in full, already resolved against the ticket: use it character for ` +
   `character and do not re-derive it, abbreviate it, or swap jira- for gh- or ` +
   `back. Supply only <slug>, from the task: lowercase, hyphen-separated, at ` +
-  `most 6 words, no trailing hyphen.\n` +
+  `most 6 words, no trailing hyphen. Then run ` +
+  `git ls-remote --heads origin <name> with that exact name. If it prints ` +
+  `any line, the name already exists on origin and belongs to another run, ` +
+  `whose pull request this run would otherwise adopt: return created=false, ` +
+  `halt_reason=remote-exists, naming the branch in detail, and run no later ` +
+  `step. Do not pick another slug to get around it. If ls-remote itself ` +
+  `fails, return created=false naming the failure.\n` +
   `5. The worktree path is ` +
   `<repo-root>/.claude/worktrees/${ticketMarker}-<slug>, the branch name with ` +
   `its ${args?.branchType ?? 'feat'}/ prefix stripped.\n` +
@@ -1587,7 +1693,15 @@ sBranch.close()
 
 // A failed worktree step halts rather than falling through: implementing onto
 // whatever tree happened to be checked out is how unrelated work lands in a PR.
-if (!wt?.created) {
+// Decided from what the reply says it found, not from created alone: one agent
+// read created as "newly created", returned false for a worktree it had found
+// clean, and halted a run whose lookup succeeded. created=true still passes by
+// itself, which keeps step 6's fallback onto an unmarked branch working.
+const worktreeFound = (w) => Boolean(w) && w.dirty !== true &&
+  (w.halt_reason ?? 'none') === 'none' && isStr(w.branch) && w.branch !== '' &&
+  isStr(w.path) && w.path !== '' &&
+  (w.created === true || (carriesMarker(w.branch) && markerTail(w.path.split('/').pop())))
+if (!worktreeFound(wt)) {
   return await halted('Worktree', {
     branch: wt?.branch,
     base: wt?.base,
@@ -1611,6 +1725,12 @@ if (!wt?.created) {
       ? 'The checkout that holds this branch has uncommitted changes, so ' +
         'nothing was planned or implemented. Commit or stash them, then ' +
         're-run.'
+      : wt?.halt_reason === 'remote-exists'
+      ? `The branch name ${wt?.branch} already exists on origin, so nothing was ` +
+        `planned or implemented: ${wt?.detail}. A same-named remote branch ` +
+        `belongs to another run, and this run would adopt its pull request. ` +
+        `Re-run with existingBranch: true if this work continues that branch, ` +
+        `or give a task whose slug names a different one.`
       : wt?.halt_reason === 'ambiguous'
       ? `Found more than one branch carrying the ${ticketMarker} marker, so ` +
         `nothing was planned or implemented: ${wt?.detail}. This lookup ` +

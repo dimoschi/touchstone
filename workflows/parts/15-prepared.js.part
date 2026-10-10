@@ -1,0 +1,67 @@
+
+// args.prepared is the JSON skills/crap-controlled-changes/prepare-delivery.sh
+// printed, which the invoking session ran before launching this run (see
+// commands/deliver.md). It replaces the branch agents and the marker and
+// version halves of setup. The session relays it, so nothing in it is taken on
+// trust: every field is checked before anything reads it, and the first one
+// that fails is named in the halt.
+const isStr = (v) => typeof v === 'string'
+const isBool = (v) => typeof v === 'boolean'
+const isObj = (v) => v !== null && typeof v === 'object' && !Array.isArray(v)
+const markerTail = (name) => isStr(name) && name.startsWith(`${ticketMarker}-`) &&
+  name.length > ticketMarker.length + 1
+const carriesMarker = (branch) => isStr(branch) && /^[^/\s]+\/\S+$/.test(branch) &&
+  markerTail(branch.slice(branch.indexOf('/') + 1))
+const isAbsPath = (p) => isStr(p) && /^(\/[^/\0]+)+$/.test(p) &&
+  !p.split('/').some(seg => seg === '.' || seg === '..')
+const REF_NAME = /^(?!-)(?!.*\.\.)[A-Za-z0-9._/-]+$/
+const PRIOR_HEAD_LINE = /^TOUCHSTONE_PRIOR_HEAD_LINEAR [012]$/
+
+const preparedWorktreeName = (p) => {
+  const prefix = `${p.repo_root}/.claude/worktrees/`
+  if (!isStr(p.worktree) || !p.worktree.startsWith(prefix)) return null
+  const name = p.worktree.slice(prefix.length)
+  return /^[A-Za-z0-9._-]+$/.test(name) && !name.includes('..') ? name : null
+}
+const preparedChecksOk = (c, worktree) => isObj(c) && isStr(c.detail) && Array.isArray(c.sections) &&
+  c.sections.every(s => isObj(s) && isStr(s.heading) && s.heading.startsWith('##') && isStr(s.fence)) &&
+  [ '', `${worktree}/AGENTS.md`, `${worktree}/CLAUDE.md` ].includes(c.file)
+const preparedManifestOk = (m) => isObj(m) && isBool(m.found) && isBool(m.refreshed) &&
+  ['name', 'version', 'detail'].every(k => isStr(m[k]))
+
+const PREPARED_FIELDS = [
+  ['repo_root', (p) => isAbsPath(p.repo_root), 'an absolute path with no trailing slash'],
+  ['worktree', (p) => markerTail(preparedWorktreeName(p)),
+    `<repo_root>/.claude/worktrees/${ticketMarker}-<slug>`],
+  ['branch', (p) => carriesMarker(p.branch), `<type>/${ticketMarker}-<slug>`],
+  ['base', (p) => isStr(p.base) && (/^[0-9a-f]{40}$/.test(p.base) || REF_NAME.test(p.base)) &&
+    (!baseOverride || p.base === baseOverride),
+    `a 40-hex SHA or a ref name${baseOverride ? `, equal to args.base (${baseOverride})` : ''}`],
+  ['ticket_marker', (p) => p.ticket_marker === ticketMarker, ticketMarker],
+  ['mode', (p) => p.mode === (args?.existingBranch ? 'existing' : 'fresh'),
+    args?.existingBranch ? "'existing', since existingBranch is set" : "'fresh', since existingBranch is not set"],
+  ['worktree_action', (p) => (args?.existingBranch ? ['reused', 'reattached'] : ['created']).includes(p.worktree_action),
+    args?.existingBranch ? "'reused' or 'reattached'" : "'created'"],
+  ['detail', (p) => isStr(p.detail), 'a string'],
+  ['markers', (p) => isObj(p.markers) && isBool(p.markers.crap_gated) && isBool(p.markers.mutation_gated),
+    'booleans crap_gated and mutation_gated'],
+  ['plugin', (p) => isObj(p.plugin) && p.plugin.name === PLUGIN_NAME && p.plugin.version === PIPELINE_VERSION,
+    `${PLUGIN_NAME} ${PIPELINE_VERSION}, the version this run executes`],
+  ['base_manifest', (p) => preparedManifestOk(p.base_manifest),
+    'booleans found and refreshed, strings name, version and detail'],
+  ['checks_source', (p) => preparedChecksOk(p.checks_source, p.worktree),
+    "file '' or the worktree's AGENTS.md or CLAUDE.md, sections of {heading starting ##, fence}, detail"],
+  ['prior_head', (p) => p.prior_head == null || asSha(p.prior_head) === p.prior_head, 'null or a 40-hex SHA'],
+  ['prior_head_check', (p) => p.prior_head_check == null ||
+    (p.prior_head != null && isStr(p.prior_head_check) && PRIOR_HEAD_LINE.test(p.prior_head_check)),
+    'null, or the TOUCHSTONE_PRIOR_HEAD_LINEAR line for prior_head'],
+]
+
+const preparedProblem = (p) => {
+  const rerun = ' Nothing was dispatched. Re-run prepare-delivery.sh and pass its output unchanged.'
+  if (!isObj(p)) return `args.prepared is not an object.${rerun}`
+  const bad = PREPARED_FIELDS.find(([, ok]) => !ok(p))
+  return bad
+    ? `args.prepared.${bad[0]} is ${JSON.stringify(p[bad[0]] ?? null).slice(0, 200)}; expected ${bad[2]}.${rerun}`
+    : null
+}

@@ -47,13 +47,15 @@ const BRANCH = {
     // this instead of a separate checks:discover call, since the branch
     // agent already has the worktree open by the time it can answer.
     checks_source: CHECKS,
+    // Optional here and narrower than EXISTING_BRANCH's: the fresh prompt has
+    // one halt of its own, a name already on origin.
+    halt_reason: { type: 'string', enum: ['none', 'remote-exists'] },
   },
 }
 
-// halt_reason lives here, not on BRANCH, so the default branch agent never
-// sees a field its own prompt says nothing about. Required, because an
-// omitted one reads as the plain not-found note, which is the note these
-// halts exist to replace; 'none' keeps an absent key from being the signal.
+// Required here, because an omitted halt_reason reads as the plain not-found
+// note, which is the note these halts exist to replace; 'none' keeps an
+// absent key from being the signal.
 const EXISTING_BRANCH = {
   ...BRANCH,
   required: [...BRANCH.required, 'halt_reason'],
@@ -755,5 +757,12 @@ const SETUP = {
     version: MANIFEST_PROBE,
     markers: MARKERS,
   },
+}
+
+// What setup still answers when args.prepared carries the markers and the
+// base manifest: only the ticket needs an agent, for Jira's MCP tools.
+const SETUP_TICKET = {
+  type: 'object', additionalProperties: false, required: ['ticket'],
+  properties: { ticket: TICKET },
 }
 

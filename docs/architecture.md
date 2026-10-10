@@ -220,7 +220,39 @@ build.
 Structure, top to bottom: `meta` (phase titles must match the `phase()` calls exactly),
 argument validation that throws early, `CEILINGS` per stage, then the phases in order.
 
-### Setup: one dispatch for three unrelated facts
+### Setup: prepared by the invoking session
+
+`/touchstone:deliver` runs `skills/crap-controlled-changes/prepare-delivery.sh` before it
+launches the workflow (logic in `lib/prepare_delivery.py`) and passes the JSON it prints
+as `args.prepared`. The script does with fixed commands what the `branch`/
+`branch:existing` agents and two thirds of `setup` used to relay: `git worktree prune`;
+in fresh mode, fetch the base and refuse (exit 3) a branch name that exists locally or on
+origin (`git ls-remote --heads origin`), or an occupied path, then cut
+`<repo>/.claude/worktrees/<marker>-<slug>`; in existing mode, find the ticket's worktree,
+then a branch with no worktree, by marker, refusing a merged PR
+(`gh pr list --head <branch> --state merged`), a dirty tree, more than one match, or a
+worktree outside `.claude/worktrees/`. It then reads the gate markers at the repo root,
+its own `plugin.json`, the base branch's manifest, `AGENTS.md`/`CLAUDE.md`'s `##`
+sections with their first fence (the `checks_source` shape below), and, given
+`--prior-head`, the ancestry line the resume check reads. Ticket text is not fetched
+there, since a Jira ticket needs the session's MCP tools.
+
+Every field of `args.prepared` is validated (`workflows/parts/15-prepared.js.part`)
+before anything is dispatched, and the first that fails halts at Worktree naming it: the
+worktree must sit directly under `<repo_root>/.claude/worktrees/` and carry the ticket
+marker, the branch must carry it too, the base must be a ref name or 40-hex SHA (and
+equal `args.base` when one is given), the mode and action must match `existingBranch`,
+and the plugin must be this run's own name and `PIPELINE_VERSION`. A valid one skips
+the branch dispatch, and `setup` asks for the ticket alone (`SETUP_TICKET`).
+
+Without `args.prepared` the agent path below still runs. Its success is decided from
+the reply's facts, not from `created` alone: no halt reason, not dirty, and a non-empty
+branch and path that carry the ticket marker proceed whatever `created` says, since one
+agent read `created` as "newly created" and halted a run whose lookup had succeeded.
+`created: true` still passes by itself, which keeps the existing-mode fallback onto an
+unmarked branch. The fresh prompt also runs `git ls-remote --heads origin <name>` and
+halts (`halt_reason: remote-exists`) on a name already on origin, whose pull request the
+run would otherwise adopt.
 
 Before the worktree is cut, a single `agent()` call labelled `setup` (not a
 `treeAgent`, since there is nothing to point it at yet) answers the ticket fetch, the
@@ -624,7 +656,9 @@ it, so a halt at any phase after the push says so.
 
 ### Check discovery
 
-Folded into the `branch`/`branch:existing` call's own last step (`checks_source` on
+With `args.prepared`, `checks_source` comes from `prepare-delivery.sh`, which applies
+the same transcription rule in code. Otherwise it is folded into the
+`branch`/`branch:existing` call's own last step (`checks_source` on
 the `BRANCH`/`EXISTING_BRANCH` schema), rather than a separate `checks:discover`
 dispatch: that call already has the worktree path open by the time it can answer,
 since it derives that path itself in an earlier step. It reads only
@@ -892,7 +926,9 @@ literals for that reason: they travel with the executed bytes, and
 `scripts/check-version-bump.sh` checks them against the manifest at HEAD
 (`scripts/test-version-bump.sh` covers that half).
 
-One third of the merged `setup` call (below), placed before the worktree is even cut
+With `args.prepared`, the manifest comes from `prepare-delivery.sh`'s `base_manifest`,
+read the same way (fetch the default base, then read `origin/<base>`'s manifest even when
+the fetch failed). Otherwise one third of the merged `setup` call (below), placed before the worktree is even cut
 and before Triage, resolves the repository's actual base branch itself and reads its
 manifest exactly once, neither the branch's own working tree nor `wt.base` (neither
 exists yet at this point in the run): a resumed branch already carries this run's own
