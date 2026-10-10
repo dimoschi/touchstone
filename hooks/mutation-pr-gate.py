@@ -177,7 +177,7 @@ def undoes(rest):
     a real ready.
     """
     undo = False
-    for token in READY_COMMAND_END.split(rest, maxsplit=1)[0].split():
+    for token in READY_COMMAND_END.split(rest)[0].split():
         if token == '--undo':
             undo = True
         elif token.startswith('--undo='):

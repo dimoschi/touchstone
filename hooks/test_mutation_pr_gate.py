@@ -97,6 +97,12 @@ def test_trigger_gh_pr_ready_undo_still_allowed_after_a_push(tmp_path):
     assert gate.trigger(f"git -C {repo} push && gh pr ready 5 --undo", repo) is None
 
 
+def test_undoes_returns_a_bool():
+    assert gate.undoes(" 5") is False
+    assert gate.undoes(" 5 --undo") is True
+    assert gate.undoes(" 5 --undo=false") is False
+
+
 def test_trigger_gh_pr_create_non_draft(tmp_path):
     repo = _repo(tmp_path)
     hit_repo, branch = gate.trigger("gh pr create --title x", repo)
