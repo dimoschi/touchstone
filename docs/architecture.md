@@ -293,11 +293,18 @@ Everything after that point runs inside one `try`/`catch`, so a refusal anywhere
 run unwinds to a single halt rather than needing its own latch at every call site. Two
 places have to re-check the flag explicitly rather than let it propagate on its own:
 `parallel()` (used to run review lenses concurrently) catches each thunk's own throw and
-hands back `null`, which would otherwise read as a lens that legitimately found nothing,
-and `markStale`'s own `try`/`catch` would otherwise log the refusal as a merely failed
+hands back `null`, which would otherwise be reported as a dead lens (below) rather than
+as the budget halt it is, and `markStale`'s own `try`/`catch` would otherwise log the refusal as a merely failed
 staleness probe. Both re-throw when `runBudgetSpent` is set. A stage still open when the
 throw unwinds past its own `close()` -- the one actually running at the halt -- has its
 spend folded into `stage_spend` by the catch, rather than silently dropped from it.
+
+A lens that returns `null` for any other reason (stalled, errored, or failed its schema
+after retries) did not review anything, so it is never read as zero findings. The round's
+findings are dropped and the run halts at that phase (Review, Fix for a fix-round review,
+Review for the post-mutation review) with a note naming each dead lens and saying the
+review did not run. `reviewed_through` does not move past the range, so a resume reviews
+it again. A lens that returns an empty findings list is still a clean review.
 
 The catch also reports whatever work and review state the run had reached: plan, checks,
 implementation and gates, open findings, notes, fix rounds and their output, and the

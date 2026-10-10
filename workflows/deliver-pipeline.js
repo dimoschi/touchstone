@@ -29,7 +29,7 @@ export const meta = {
 // against the manifest in scripts/check-version-bump.sh, so drift is a
 // gate's job rather than something this script verifies about itself.
 const PLUGIN_NAME = 'touchstone'
-const PIPELINE_VERSION = '0.31.1'
+const PIPELINE_VERSION = '0.31.2'
 
 // Boundaries. Wall-clock deadlines are not expressible here (no Date.now, by
 // design); the bounds are rounds, counts, and token budget instead.
@@ -3048,14 +3048,21 @@ const reviewOf = async (range, tag, picked, known = [], knownCharge = '') => {
         model: 'opus', effort: effortFor.review })))
   // parallel() (the runtime global) catches each thunk's own error and hands
   // back null for the ones that threw, so a budget refusal inside one lens
-  // reads, past this point, exactly like a lens that legitimately found
-  // nothing -- every lens null is a plausible clean review, not evidence of a
-  // refusal. Re-checking the flag here is what tells the two apart, and
-  // re-throwing is what lets the top-level catch turn it into a halt instead
-  // of a false all-clear.
+  // reads, past this point, exactly like a lens that died for any other
+  // reason. Re-checking the flag here is what tells the two apart, and
+  // re-throwing is what lets the top-level catch turn it into a budget halt
+  // instead of a dead-lens one.
   if (runBudgetSpent) throw new Error(`touchstone: run budget spent during review (${tag})`)
+  // A lens with no result did not review the range, so a round holding one
+  // must not read as clean. Only `findings: []` is a clean lens.
+  const dead = picked.filter((_, i) => !Array.isArray(out[i]?.findings))
+    .map(l => `${tag}:${l.label}`)
+  if (dead.length) {
+    log(`${tag}: no result from ${dead.join(', ')}; the review did not run`)
+    return { raised: [], dead }
+  }
   const raised = out.flatMap((r, i) => {
-    const findings = Array.isArray(r?.findings) ? r.findings : []
+    const findings = r.findings
     // The script slices, not the schema: a maxItems failure would null the
     // whole lens's result rather than trim it.
     if (findings.length > MAX_FINDINGS_PER_LENS) {
@@ -3077,7 +3084,7 @@ const reviewOf = async (range, tag, picked, known = [], knownCharge = '') => {
     log(`${tag}: ${spanless.length} of ${raised.length} finding(s) carry no line span: ` +
         spanless.map(f => `${f.id} (${f.file})`).join(', '))
   }
-  return raised
+  return { raised, dead: [] }
 }
 
 // Everything from here to the PR is measured against reviewedThrough: the SHA
@@ -3410,6 +3417,24 @@ const notExecutedHalt = (at, notExecuted, extra) => {
   })
 }
 
+// Reports a review round in which a lens returned no result. Same shape and
+// the same TDZ reasoning as notExecutedHalt: it reads only plan, impl,
+// gatesPayload and checksPayload by closure, and every call site passes
+// unresolved_findings, notes, fix_rounds and (once it exists) fix_round_output
+// through extra. Never handed to a fixer: nothing was found, so nothing is open
+// because of it.
+const deadLensHalt = (at, dead, extra) => {
+  const note = `${dead.length} review ${dead.length === 1 ? 'lens' : 'lenses'} ` +
+    `returned no result (stalled, errored, or failed schema after retries), so ` +
+    `the review did not run over its range. reviewed_through was not moved past ` +
+    `that range, and a re-run reviews it again.\n` +
+    dead.map(label => `- ${label}`).join('\n')
+  return halted(at, {
+    plan: plan.plan, implemented: impl.summary, gates: gatesPayload(),
+    checks: checksPayload(), ...extra, note,
+  })
+}
+
 let settled = []
 // A carried finding whose reproducer nobody ran (notExecutedHalt recorded it)
 // is a candidate, not a verdict: held in open it would stay open through every
@@ -3452,8 +3477,13 @@ if (lenses.length) {
     ? `\nThose came from an earlier run on this branch and are still tracked. ` +
       `Reference one by its id in duplicate_of; never raise it again.`
     : ''
-  const raised = await collapseDuplicates(
-    await reviewOf(firstReviewRange, 'review', lenses, knownForRound(), carriedCharge))
+  const { raised: raisedRaw, dead } =
+    await reviewOf(firstReviewRange, 'review', lenses, knownForRound(), carriedCharge)
+  if (dead.length) {
+    sReview.close()
+    return await deadLensHalt('Review', dead, { unresolved_findings: open, notes, fix_rounds: round })
+  }
+  const raised = await collapseDuplicates(raisedRaw)
   const { candidates, freshNotes } = classifyBatch(raised, null, 0)
   notes.push(...freshNotes)
   if (candidates.length) {
@@ -3670,9 +3700,9 @@ while ((open.length || blockingChecksOpen()) && round < MAX_REVIEW_ROUNDS && !ou
     ? await executeAtHead(settledBefore, `reproduce:settled:${round}`)
     : null
   if (execSettled?.dirty) { sFix.close(); return await dirtyReproducerHalt('Fix', execSettled) }
-  const freshRaw = tailReviewable
+  const tail = tailReviewable
     ? await reviewOf(roundRange, `review:fix:${round}`, [LENS.correctness], knownForRound())
-    : []
+    : { raised: [], dead: [] }
 
   // For an open finding, fixed means its reproducer exits 0 at this round's
   // head; anything else stays open, carrying the latest reproducer_run
@@ -3710,7 +3740,13 @@ while ((open.length || blockingChecksOpen()) && round < MAX_REVIEW_ROUNDS && !ou
   }
 
   if (tailReviewable) {
-    const { candidates, freshNotes } = classifyBatch(freshRaw ?? [], execOld?.hunks ?? null, round)
+    if (tail.dead.length) {
+      sFix.close()
+      return await deadLensHalt('Fix', tail.dead, {
+        unresolved_findings: open, notes, fix_rounds: round, fix_round_output: fixRoundSpend,
+      })
+    }
+    const { candidates, freshNotes } = classifyBatch(tail.raised, execOld?.hunks ?? null, round)
     notes.push(...freshNotes)
     if (candidates.length) {
       const disposed = await executeAndDispose(candidates, `reproduce:fix:${round}:fresh`, round)
@@ -3995,11 +4031,16 @@ if (reviewerCount && mutHead && mutHead !== reviewedThrough && !outOfBudget()) {
   if (execHunks.dirty) return await dirtyReproducerHalt('Review', execHunks)
   // An undone fix is already caught above by executing its reproducer, so the
   // lens is not asked to report one.
-  const raisedMut = await reviewOf(mutRange, 'review:mutation', [LENS.correctness], knownForRound(),
+  const { raised: raisedMut, dead } = await reviewOf(mutRange, 'review:mutation', [LENS.correctness], knownForRound(),
     `\nEach of those is already tracked, and an undone fix is caught by ` +
     `re-running its reproducer, so do not report one of them again. A defect ` +
     `you still perceive in code these commits do not touch is not a finding ` +
     `against this range: leave it out.`)
+  if (dead.length) {
+    return await deadLensHalt('Review', dead, {
+      mutation, unresolved_findings: open, fix_rounds: round, fix_round_output: fixRoundSpend, notes,
+    })
+  }
   const { candidates, freshNotes } = classifyBatch(raisedMut, execHunks.hunks ?? null, 'mutation')
   notes.push(...freshNotes)
   let freshOpen = []
