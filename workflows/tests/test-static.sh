@@ -61,6 +61,12 @@ check "and its last two" \
   "$(grep -Fc "'not-found', 'dirty'] }," "$SCRIPT" || true)" 1
 
 echo ""
+echo "== static: the gates' skill is named only by its namespaced name"
+check "GATES_SKILL is built from PLUGIN_NAME" \
+  "$(grep -Fc 'const GATES_SKILL = `${PLUGIN_NAME}:crap-controlled-changes`' "$SCRIPT" || true)" 1
+check "no prompt names the bare skill" \
+  "$(grep -c 'crap-controlled-changes skill' "$SCRIPT" || true)" 0
+
 echo "== static: treeAgent tells every phase where scratch work goes (gh-40)"
 # treeAgent() builds the prompt every phase (triage, plan, implement, fix,
 # review, mutation) shares, so one addition here reaches all of them. Without

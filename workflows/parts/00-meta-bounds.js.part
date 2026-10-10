@@ -29,7 +29,14 @@ export const meta = {
 // against the manifest in scripts/check-version-bump.sh, so drift is a
 // gate's job rather than something this script verifies about itself.
 const PLUGIN_NAME = 'touchstone'
-const PIPELINE_VERSION = '0.37.0'
+const PIPELINE_VERSION = '0.37.1'
+// The plugin's gates are this skill's scripts. A user or project skill with the
+// bare name can resolve first and run an older copy of the gates, whose result
+// would then be read as this version's, so prompts name the namespaced skill.
+const GATES_SKILL = `${PLUGIN_NAME}:crap-controlled-changes`
+const GATES_SKILL_ONLY =
+  `Invoke it as ${GATES_SKILL}, never a skill named plain ` +
+  `crap-controlled-changes, which can be a different, older copy of the gates.`
 
 // Boundaries. Wall-clock deadlines are not expressible here (no Date.now, by
 // design); the bounds are rounds, counts, and token budget instead.

@@ -68,8 +68,8 @@ async function scenarioSignalsAreOneDispatchRightAfterTheImplementer() {
   check('grouped with the Implement phase', probe[0].phase, 'Implement')
   check('the command is on a line of its own', probe[0].prompt.split('\n').includes(
     `change-signals.sh ${STUB_WT_PATH} ${STUB_RANGE}`), true)
-  check('it is the crap-controlled-changes skill\'s script, found by invoking the skill',
-    probe[0].prompt.includes('crap-controlled-changes skill') && probe[0].prompt.includes('invoke that skill'), true)
+  check('it is the plugin\'s crap-controlled-changes skill\'s script, found by invoking the skill',
+    probe[0].prompt.includes('touchstone:crap-controlled-changes skill') && probe[0].prompt.includes('invoke that skill'), true)
   check('the Bash timeout is 600000', probe[0].prompt.includes('Bash timeout of 600000'), true)
   check('the output is relayed verbatim', probe[0].prompt.includes('verbatim in output'), true)
   check('it stops after the one run', probe[0].prompt.includes('then STOP'), true)

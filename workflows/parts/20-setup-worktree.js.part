@@ -719,7 +719,9 @@ const treeAgent = (prompt, { omitBase = false, ...opts }) =>
     `argument (crap-commit.sh already required it; the other three now accept ` +
     `it too) and print the repo and branch they resolved as their first line ` +
     `of output -- read that line and pass ${wt.path} there, every time, rather ` +
-    `than relying on cwd. GIT_DIR/GIT_WORK_TREE env vars and cd are not the way ` +
+    `than relying on cwd. All four are the scripts of the ${GATES_SKILL} ` +
+    `skill. ${GATES_SKILL_ONLY} ` +
+    `GIT_DIR/GIT_WORK_TREE env vars and cd are not the way ` +
     `to target it. Any reproduction or experiment -- a scratch clone, a throwaway ` +
     `git repo to test a git behaviour, anything you would otherwise drop in /tmp ` +
     `-- goes under the path printed by ` +
