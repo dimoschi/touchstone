@@ -56,7 +56,8 @@ def world(tmp_path, monkeypatch):
     gh_out = tmp_path / "gh-out"
     gh_out.write_text("[]")
     gh = bin_dir / "gh"
-    gh.write_text(f"#!/bin/sh\necho \"$@\" >> {tmp_path}/gh.log\ncat {gh_out}\n")
+    (tmp_path / "gh-code").write_text("0")
+    gh.write_text(f"#!/bin/sh\necho \"$PWD $@\" >> {tmp_path}/gh.log\ncat {gh_out}\nexit $(cat {tmp_path}/gh-code)\n")
     gh.chmod(0o755)
     monkeypatch.setenv("PATH", f"{bin_dir}{os.pathsep}{os.environ['PATH']}")
     plugin = tmp_path / "plugin.json"
@@ -100,6 +101,7 @@ def test_fresh_creates_the_worktree_on_a_new_branch_cut_from_origin_base(world, 
     assert out["worktree_action"] == "created"
     assert out["ticket"] == "163"
     assert out["ticket_marker"] == "gh-163"
+    assert out["detail"] == "cut fix/gh-163-prepare-worktree from origin/main"
     assert git(out["worktree"], "rev-parse", "HEAD") == later
     assert git(out["worktree"], "branch", "--show-current") == "fix/gh-163-prepare-worktree"
 
@@ -279,7 +281,9 @@ def test_existing_finds_the_ticket_worktree_whatever_its_type(world, capsys):
     assert (out["worktree"], out["branch"], out["base"]) == (path, "feat/gh-163-old-slug", "main")
     assert out["mode"] == "existing"
     assert out["worktree_action"] == "reused"
-    assert "pr list --head feat/gh-163-old-slug --state merged --json number" in world.gh_log.read_text()
+    assert world.gh_log.read_text() == \
+        f"{world.repo} pr list --head feat/gh-163-old-slug --state merged --json number\n"
+    assert out["detail"] == "reused the worktree of feat/gh-163-old-slug"
 
 
 def test_existing_does_not_match_a_marker_that_only_shares_a_prefix(world, capsys):
@@ -296,6 +300,8 @@ def test_existing_reattaches_a_branch_without_a_worktree(world, capsys):
     assert out["worktree"] == wt_path(world, "gh-163-left-behind")
     assert out["branch"] == "feat/gh-163-left-behind"
     assert out["worktree_action"] == "reattached"
+    assert out["detail"] == "reattached the worktree of feat/gh-163-left-behind"
+    assert world.gh_log.read_text().startswith(f"{world.repo} pr list --head feat/gh-163-left-behind ")
     assert git(out["worktree"], "branch", "--show-current") == "feat/gh-163-left-behind"
 
 
@@ -668,3 +674,123 @@ def test_a_heading_keeps_its_trailing_text_verbatim(tmp_path):
     (tmp_path / "AGENTS.md").write_text("## Checks  \r\n```\nx\n```\n")
     got = pd.checks_source(str(tmp_path))
     assert got["sections"][0]["heading"] == "## Checks  "
+
+
+def test_git_runs_the_git_binary(world, argv_log):
+    pd.git(world.repo, "status")
+    assert argv_log[-1]["argv"][:3] == ["git", "-C", world.repo]
+
+
+@pytest.mark.parametrize("flag", ["--ticket", "--type", "--slug", "--plugin-json"])
+def test_each_required_flag_is_required(world, capsys, flag):
+    argv = [world.repo, "--ticket", "163", "--type", "fix", "--slug", "x", "--plugin-json", str(world.plugin)]
+    i = argv.index(flag)
+    del argv[i:i + 2]
+    code = pd.main(argv)
+    out = json.loads(capsys.readouterr().out)
+    assert code == 2
+    assert out == {"error": "bad-args", "reason": f"the following arguments are required: {flag}"}
+
+
+def test_a_bad_type_names_every_accepted_one(world, capsys):
+    _, out = run(world, capsys, type_="feature")
+    assert out["reason"] == "--type must be one of feat, fix, chore, refactor, docs, test, perf, build, ci, got 'feature'"
+
+
+def test_prior_head_refusals_say_why(world, capsys):
+    _, out = run(world, capsys, "--prior-head", "a" * 40)
+    assert out["reason"] == "--prior-head is only meaningful with --existing"
+    _, out = run(world, capsys, "--existing", "--prior-head", "abc")
+    assert out["reason"] == "--prior-head must be a 40-character SHA, got 'abc'"
+
+
+def test_a_manifest_without_fields_says_so(world, capsys):
+    world.plugin.write_text("[1]")
+    _, out = run(world, capsys)
+    assert out["reason"] == f"{world.plugin} has no string name and version"
+
+
+def test_a_branch_whose_name_only_ends_like_ours_is_not_ours(world, capsys):
+    git(world.repo, "branch", "a/refs/heads/fix/gh-163-prepare-worktree")
+    code, out = run(world, capsys)
+    assert code == 0
+    assert out["branch"] == "fix/gh-163-prepare-worktree"
+
+
+def test_worktree_add_refuses_a_branch_that_appeared_after_the_checks(world, capsys, monkeypatch):
+    git(world.repo, "commit", "-q", "--allow-empty", "-m", "elsewhere")
+    git(world.repo, "branch", "fix/gh-163-prepare-worktree")
+    monkeypatch.setattr(pd, "_refuse_taken_name", lambda root, branch: None)
+    code, out = run(world, capsys)
+    assert code == 3
+    assert out["error"] == "worktree-add-failed"
+
+
+def test_the_fetch_asks_for_the_base_alone(world, capsys):
+    git(world.seed, "branch", "unrelated")
+    git(world.origin, "fetch", "-q", str(world.seed), "unrelated:unrelated")
+    code, _ = run(world, capsys)
+    assert code == 0
+    assert git(world.repo, "branch", "-r", "--list", "origin/unrelated") == ""
+
+
+def test_no_base_names_why(world, capsys):
+    kill_every_base(world)
+    _, fresh_out = run(world, capsys)
+    make_branch_worktree(world, "feat/gh-163-x", "gh-163-x")
+    _, existing_out = run(world, capsys, "--existing")
+    why = "no base branch: origin/HEAD is unset and neither main nor master exists"
+    assert (fresh_out["reason"], existing_out["reason"]) == (why, why)
+
+
+def test_base_manifest_details(world):
+    assert pd.base_manifest(world.repo, "main", True)["detail"] == "read origin/main:.claude-plugin/plugin.json"
+    assert pd.base_manifest(world.repo, "main", False)["detail"] == \
+        "read origin/main:.claude-plugin/plugin.json; the fetch failed, so the ref may be stale"
+    assert pd.base_manifest(world.repo, None, False)["detail"] == "no base branch resolved"
+
+
+def test_markers_are_the_exact_file_names(tmp_path, exact_case_fs):
+    (tmp_path / ".crap-gated").write_text("")
+    (tmp_path / ".mutation-gated").write_text("")
+    assert pd.markers(str(tmp_path)) == {"crap_gated": True, "mutation_gated": True}
+
+
+@pytest.mark.parametrize("branch,want", [
+    ("feat/gh-163-x", True), ("user/feat/gh-163-x", False), ("gh-163-x", False), ("feat/gh-1630-x", False),
+])
+def test_carries_reads_the_marker_after_the_first_slash(branch, want):
+    assert pd.carries(branch, "gh-163") is want
+
+
+def test_a_marker_deeper_than_the_first_segment_is_not_another_ticket(world, capsys):
+    git(world.repo, "checkout", "-q", "-b", "x/feat/jira-AB-9-y")
+    code, out = run(world, capsys, "--existing")
+    assert out["error"] == "not-found"
+
+
+def test_a_tag_carrying_the_marker_is_not_a_branch(world, capsys):
+    git(world.repo, "tag", "feat/gh-163-tag")
+    code, out = run(world, capsys, "--existing")
+    assert out["error"] == "not-found"
+
+
+def test_ambiguous_reasons_list_every_match(world, capsys):
+    git(world.repo, "branch", "feat/gh-163-a")
+    git(world.repo, "branch", "fix/gh-163-b")
+    _, out = run(world, capsys, "--existing")
+    assert out["reason"] == "more than one branch carries the gh-163 marker: feat/gh-163-a, fix/gh-163-b"
+    a = make_branch_worktree(world, "chore/gh-163-c", "gh-163-c")
+    b = make_branch_worktree(world, "docs/gh-163-d", "gh-163-d")
+    _, out = run(world, capsys, "--existing")
+    assert out["reason"] == ("more than one worktree carries the gh-163 marker: "
+                             f"('{a}', 'chore/gh-163-c'), ('{b}', 'docs/gh-163-d')")
+
+
+def test_a_failing_gh_is_not_believed_even_when_it_prints_a_merge(world, capsys):
+    path = make_branch_worktree(world, "feat/gh-163-live", "gh-163-live")
+    world.gh_out.write_text('[{"number": 5}]')
+    (world.tmp / "gh-code").write_text("1")
+    code, out = run(world, capsys, "--existing")
+    assert code == 0
+    assert out["worktree"] == path

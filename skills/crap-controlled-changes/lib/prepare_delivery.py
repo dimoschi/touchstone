@@ -36,7 +36,6 @@ class Run(NamedTuple):
 
 class Refusal(Exception):
     def __init__(self, error, reason, code=3):
-        super().__init__(reason)
         self.error, self.reason, self.code = error, reason, code
 
 
@@ -61,7 +60,7 @@ def marker_for(ref):
 
 
 def parse(argv):
-    p = _Parser(prog="prepare-delivery.sh")
+    p = _Parser()
     p.add_argument("repo")
     p.add_argument("--ticket", required=True)
     p.add_argument("--type", required=True)
@@ -132,13 +131,13 @@ def repo_root(path):
 
 
 def _ref_exists(root, ref):
-    return git(root, "show-ref", "--verify", "--quiet", ref).code == 0
+    return ref in git(root, "for-each-ref", "--format=%(refname)", ref).out.split()
 
 
 def default_base(root):
-    r = git(root, "symbolic-ref", "--short", "refs/remotes/origin/HEAD")
-    if r.code == 0 and r.out.strip():
-        return r.out.strip().removeprefix("origin/")
+    named = git(root, "for-each-ref", "--format=%(symref:short)", "refs/remotes/origin/HEAD").out.strip()
+    if named:
+        return named.removeprefix("origin/")
     for name in ("main", "master"):
         if _ref_exists(root, f"refs/heads/{name}") or _ref_exists(root, f"refs/remotes/origin/{name}"):
             return name
@@ -151,7 +150,7 @@ def base_manifest(root, base, refreshed):
         return {**empty, "detail": "no base branch resolved"}
     source = f"origin/{base}:.claude-plugin/plugin.json"
     r = git(root, "show", source)
-    data = _json_or_none(r.out) if r.code == 0 else None
+    data = _json_or_none(r.out)
     if not _is_manifest(data):
         return {**empty, "detail": f"no usable manifest at {source}"}
     stale = "" if refreshed else "; the fetch failed, so the ref may be stale"
@@ -176,12 +175,12 @@ def canonical(root, name):
 
 
 def carries(branch, marker):
-    return "/" in branch and branch.split("/", 1)[1].startswith(f"{marker}-")
+    return branch.partition("/")[2].startswith(f"{marker}-")
 
 
 def _cut_point(root, given, default, refreshed):
     if given:
-        if git(root, "rev-parse", "--verify", "-q", f"{given}^{{commit}}").code:
+        if git(root, "cat-file", "-e", f"{given}^{{commit}}").code:
             raise Refusal("base-unresolved", f"the given base {given} does not resolve to a commit")
         return given
     if not default:
@@ -195,10 +194,10 @@ def _refuse_taken_name(root, branch):
     if _ref_exists(root, f"refs/heads/{branch}"):
         raise Refusal("local-branch-exists",
                       f"branch {branch} already exists locally; pass --existing to continue it")
-    r = git(root, "ls-remote", "--heads", "origin", f"refs/heads/{branch}")
+    r = git(root, "ls-remote", "origin", f"refs/heads/{branch}")
     if r.code:
         raise Refusal("remote-check-failed",
-                      f"git ls-remote --heads origin {branch} failed: {r.err.strip()}")
+                      f"git ls-remote origin refs/heads/{branch} failed: {r.err.strip()}")
     if r.out.strip():
         raise Refusal("remote-branch-exists",
                       f"branch {branch} already exists on origin; its pull request belongs to "
@@ -206,7 +205,7 @@ def _refuse_taken_name(root, branch):
 
 
 def _add_worktree(root, path, *args):
-    r = git(root, "worktree", "add", "-q", path, *args)
+    r = git(root, "worktree", "add", path, *args)
     if r.code:
         raise Refusal("worktree-add-failed", f"git worktree add {path} failed: {r.err.strip()}")
 
@@ -254,7 +253,7 @@ def merged_numbers(text):
 def _refuse_merged(root, branch):
     try:
         done = subprocess.run([GH, "pr", "list", "--head", branch, "--state", "merged", "--json", "number"],
-                              cwd=root, capture_output=True, text=True)
+                              cwd=root, capture_output=True)
     except OSError:
         return
     numbers = merged_numbers(done.stdout) if done.returncode == 0 else []
@@ -279,7 +278,7 @@ def _refuse_dirty(path):
 
 def _refuse_fallback(root, marker):
     current = git(root, "branch", "--show-current").out.strip()
-    other = OTHER_MARKER.match(current.split("/", 1)[1]) if "/" in current else None
+    other = OTHER_MARKER.match(current.partition("/")[2])
     if other:
         raise Refusal("wrong-ticket", f"no worktree or branch carries {marker}, and the checkout is on "
                       f"{current}, which belongs to {other.group(1)}")
@@ -292,7 +291,7 @@ def _reattach(root, marker):
     if branch is None:
         _refuse_fallback(root, marker)
     _refuse_merged(root, branch)
-    path = canonical(root, branch.split("/", 1)[1])
+    path = canonical(root, branch.partition("/")[2])
     if os.path.lexists(path):
         raise Refusal("occupied", f"branch {branch} has no worktree, but {path} is already occupied")
     _add_worktree(root, path, branch)
@@ -316,7 +315,7 @@ def existing(root, opts, marker, default):
 
 
 def _fence_closes(line, fence):
-    return re.fullmatch(f" {{0,3}}{re.escape(fence[0])}{{{len(fence)},}}[ \t]*", line) is not None
+    return re.fullmatch(f" {{0,3}}{re.escape(fence[:1])}{{{len(fence)},}}[ \t]*", line) is not None
 
 
 def sections_of(text):
@@ -364,10 +363,10 @@ def checks_source(path):
 
 
 def prior_head_check(path, sha):
-    if git(path, "merge-base", "--is-ancestor", sha, "HEAD").code:
+    if git(path, "merge-base", "--is-ancestor", sha, "@").code:
         return f"{PRIOR_HEAD} 1"
-    merges = git(path, "rev-list", "--merges", "--count", f"{sha}..HEAD").out.strip()
-    return f"{PRIOR_HEAD} {2 if merges not in ('', '0') else 0}"
+    merges = git(path, "rev-list", "--merges", f"{sha}..@").out.strip()
+    return f"{PRIOR_HEAD} {2 if merges else 0}"
 
 
 def prepare(opts):
@@ -376,7 +375,7 @@ def prepare(opts):
     root = repo_root(opts.repo)
     git(root, "worktree", "prune")
     default = default_base(root)
-    refreshed = bool(default) and git(root, "fetch", "-q", "origin", default).code == 0
+    refreshed = bool(default) and git(root, "fetch", "origin", default).code == 0
     place = existing(root, opts, marker, default) if opts.existing \
         else fresh(root, opts, marker, default, refreshed)
     head = opts.prior_head

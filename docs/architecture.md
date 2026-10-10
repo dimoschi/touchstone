@@ -227,7 +227,7 @@ launches the workflow (logic in `lib/prepare_delivery.py`) and passes the JSON i
 as `args.prepared`. The script does with fixed commands what the `branch`/
 `branch:existing` agents and two thirds of `setup` used to relay: `git worktree prune`;
 in fresh mode, fetch the base and refuse (exit 3) a branch name that exists locally or on
-origin (`git ls-remote --heads origin`), or an occupied path, then cut
+origin (`git ls-remote origin refs/heads/<name>`), or an occupied path, then cut
 `<repo>/.claude/worktrees/<marker>-<slug>`; in existing mode, find the ticket's worktree,
 then a branch with no worktree, by marker, refusing a merged PR
 (`gh pr list --head <branch> --state merged`), a dirty tree, more than one match, or a
