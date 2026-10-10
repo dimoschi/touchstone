@@ -394,11 +394,11 @@ def test_existing_with_nothing_found_refuses(world, capsys):
 
 
 def test_existing_names_another_tickets_checkout_as_wrong_ticket(world, capsys):
-    git(world.repo, "checkout", "-q", "-b", "feat/jira-AB-9-other")
+    git(world.repo, "checkout", "-q", "-b", "feat/jira-ABC-9-other")
     code, out = run(world, capsys, "--existing")
     assert code == 3
     assert out["error"] == "wrong-ticket"
-    assert "jira-AB-9" in out["reason"]
+    assert "jira-ABC-9" in out["reason"]
 
 
 def test_existing_does_not_need_the_remote(world, capsys):
@@ -764,7 +764,7 @@ def test_carries_reads_the_marker_after_the_first_slash(branch, want):
 
 
 def test_a_marker_deeper_than_the_first_segment_is_not_another_ticket(world, capsys):
-    git(world.repo, "checkout", "-q", "-b", "x/feat/jira-AB-9-y")
+    git(world.repo, "checkout", "-q", "-b", "x/feat/jira-ABC-9-y")
     code, out = run(world, capsys, "--existing")
     assert out["error"] == "not-found"
 
