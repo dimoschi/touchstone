@@ -33,10 +33,15 @@ the fabricated link.
   (`git worktree list --porcelain`), then, only if none matches, a branch with
   no worktree of its own (its directory was removed by hand -- sometimes
   because its PR merged and the tree was cleaned up, sometimes because it was
-  cut loose mid-flight). Either match is checked for a merged PR before it is
-  touched: a merged one halts instead of being reused, since that work is
-  done, not a tree to keep implementing into; otherwise the workflow
-  re-attaches a worktree to it rather than cutting a new branch.
+  cut loose mid-flight). A matched worktree is used where it is, inside
+  `.claude/worktrees/` or not. Either match is checked for a merged PR before
+  it is touched: when the branch's latest PR (its open one, else its
+  highest-numbered) merged, the run halts instead of reusing it, since that
+  work is done, not a tree to keep implementing into; otherwise a worktree is
+  re-attached to it rather than a new branch cut. When nothing carries the
+  marker and the checkout the script was pointed at is on a feature branch
+  (not detached, not the base), that branch is used as it is, unrenamed: it
+  predates the naming convention.
   **`--ticket` is still required.** Without this flag the workflow cuts a
   fresh branch and worktree off the base, which would strand follow-up work
   away from the PR it belongs to.
@@ -166,15 +171,16 @@ downstream metric would inherit it.
 
 ## If the workflow refuses
 
-`prepare-delivery.sh` refuses the same cases before the run starts, and the workflow
-halts on a `prepared` argument that fails validation. It halts on purpose: a detached HEAD, a base ref that will not resolve, a dirty
-checkout in the worktree `--existing` resolves to, `--existing` finding no
-worktree or branch for the ticket and the current checkout not on a feature
-branch either, `--existing` matching more than one worktree or branch for the
-ticket, `--existing` matching a worktree or a branch whose pull request
-already merged, `--existing` matching only a branch whose canonical worktree
-directory is already occupied by something else, `--existing` falling back
-to a checkout that carries a different ticket's marker, a missing ticket.
+`prepare-delivery.sh` refuses these before the run starts, and the workflow halts on
+a `prepared` argument that fails validation. Both stop on purpose: a base ref that
+will not resolve, a branch name already taken locally or on origin, an occupied
+worktree path, a dirty checkout in the worktree `--existing` resolves to,
+`--existing` finding no worktree or branch for the ticket while the checkout is
+detached or on the base branch, `--existing` matching more than one worktree or
+branch for the ticket, `--existing` matching a branch whose latest pull request
+merged, `--existing` matching only a branch whose canonical worktree directory is
+already occupied by something else, `--existing` finding only a checkout that
+carries a different ticket's marker, a missing ticket.
 **Report the halt and stop.** Do not copy
 `deliver-pipeline.js` elsewhere and edit out the phase that blocked you, and do not
 edit the original. A gate that gets neutered whenever it is inconvenient is not a

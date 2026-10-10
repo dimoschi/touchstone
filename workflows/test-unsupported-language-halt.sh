@@ -136,7 +136,7 @@ function makeAgent(scenario, captured) {
       }
     }
     if (label === 'branch') {
-      return { created: true, branch: 'feat/gh-9-stub', base: 'main',
+      return { created: true, halt_reason: 'none', dirty: false, branch: 'feat/gh-9-stub', base: 'main',
         path: '/tmp/stub-worktree', ticket: '9', detail: 'stub',
         checks_source: { file: '', sections: [], detail: 'stub: no repo checks' } }
     }

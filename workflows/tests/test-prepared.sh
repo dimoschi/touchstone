@@ -123,9 +123,20 @@ const MALFORMED = [
   ['base starting with -', 'base', prepared({ base: '-main' })],
   ['base not args.base', 'base', prepared({ base: 'main' }), { base: 'feat/gh-20-parent' }],
   ['wrong ticket_marker', 'ticket_marker', prepared({ ticket_marker: 'gh-22' })],
+  ['another ticket', 'ticket', prepared({ ticket: '22' })],
+  ['an existing worktree path that is relative', 'worktree',
+    prepared({ mode: 'existing', worktree_action: 'reused', worktree: 'work/gh-21-x' }), { existingBranch: true }],
+  ['an existing reuse with no marker on branch or directory', 'branch',
+    prepared({ mode: 'existing', worktree_action: 'reused', worktree: '/elsewhere/legacy', branch: 'feat/legacy',
+      checks_source: { file: '', sections: [], detail: '' } }), { existingBranch: true }],
+  ['an adopted branch that carries this ticket', 'branch',
+    prepared({ mode: 'existing', worktree_action: 'adopted' }), { existingBranch: true }],
+  ['an adopted branch that carries another ticket', 'branch',
+    prepared({ mode: 'existing', worktree_action: 'adopted', branch: 'feat/jira-ABC-9-x' }), { existingBranch: true }],
   ['existing mode on a fresh run', 'mode', prepared({ mode: 'existing', worktree_action: 'reused' })],
   ['fresh mode on an existing run', 'mode', prepared(), { existingBranch: true }],
   ['reused on a fresh run', 'worktree_action', prepared({ worktree_action: 'reused' })],
+  ['adopted on a fresh run', 'worktree_action', prepared({ worktree_action: 'adopted' })],
   ['created on an existing run', 'worktree_action',
     prepared({ mode: 'existing', worktree_action: 'created' }), { existingBranch: true }],
   ['detail not a string', 'detail', prepared({ detail: 3 })],
@@ -181,22 +192,53 @@ async function scenarioPH() {
   check('the run carries the found branch', result.branch, 'feat/gh-21-stub')
 }
 
-async function scenarioPI() {
-  console.log('\n== scenario PI (gh-156): replies whose facts do not hold still halt')
-  const cases = [
-    ['an empty path', { created: false, halt_reason: 'none', dirty: false, branch: 'feat/gh-21-stub', path: '' }],
-    ['an unmarked branch', { created: false, halt_reason: 'none', dirty: false, branch: 'feat/other', path: '/tmp/wt/gh-21-stub' }],
-    ['an unmarked path', { created: false, halt_reason: 'none', dirty: false, branch: 'feat/gh-21-stub', path: '/tmp/wt/other' }],
-    ['a prefix-only marker', { created: false, halt_reason: 'none', dirty: false, branch: 'feat/gh-210-x', path: '/tmp/wt/gh-210-x' }],
-    ['a dirty tree', { created: true, halt_reason: 'none', dirty: true, branch: 'feat/gh-21-stub', path: '/tmp/wt/gh-21-stub' }],
-    ['a halt reason', { created: true, halt_reason: 'ambiguous', dirty: false, branch: 'feat/gh-21-stub', path: '/tmp/wt/gh-21-stub' }],
-    ['created with no path', { created: true, halt_reason: 'none', dirty: false, branch: 'feat/gh-21-stub', path: '' }],
+async function scenarioPN() {
+  console.log('\n== scenario PN: an existing prepared worktree may live anywhere, marked on its branch or directory')
+  const ex = (over) => prepared({ mode: 'existing', worktree_action: 'reused',
+    checks_source: { file: '', sections: [], detail: '' }, ...over })
+  const accepted = [
+    ['outside .claude/worktrees', ex({ worktree: '/elsewhere/checkout' })],
+    ['an unmarked directory under .claude/worktrees', ex({ worktree: `${ROOT}/.claude/worktrees/foo` })],
+    ['an unmarked branch in a marked directory', ex({ branch: 'feat/legacy' })],
+    ['an adopted unmarked branch in the main checkout', ex({ worktree_action: 'adopted', worktree: ROOT, branch: 'feat/legacy' })],
+    ['an adopted branch without a type', ex({ worktree_action: 'adopted', worktree: ROOT, branch: 'legacy' })],
+    ['a reattached worktree', ex({ worktree_action: 'reattached' })],
   ]
-  for (const [what, reply] of cases) {
-    const { result } = await run({ args: { existingBranch: true },
-      existingBranchResult: { base: 'main', ticket: '21', detail: 'stub', ...reply }, ...quiet })
-    check(`${what}: halts at Worktree`, result.halted_at, 'Worktree')
+  for (const [what, p] of accepted) {
+    const { result } = await run({ args: { existingBranch: true, prepared: p }, ...quiet })
+    check(`${what}: accepted`, [result.halted_at, result.note], [undefined, undefined])
   }
+}
+
+const FRESH_REASONS = ['none', 'base-unresolved', 'fetch-failed', 'remote-exists', 'remote-check-failed',
+  'path-exists', 'dirty']
+const EXISTING_REASONS = ['none', 'ambiguous', 'wrong-ticket', 'merged', 'occupied', 'not-found', 'dirty']
+const reply = (over) => ({ created: false, halt_reason: 'none', dirty: false, branch: 'feat/gh-21-stub',
+  base: 'main', path: '/tmp/wt/gh-21-stub', ticket: '21', detail: 'stub', ...over })
+
+async function scenarioPI() {
+  console.log('\n== scenario PI (gh-156): an existing-mode reply is decided by halt_reason and its facts, never created')
+  const ok = [
+    ['an unmarked fallback branch', reply({ branch: 'feat/legacy', path: '/work/repo' })],
+    ['created=false', reply({ created: false })],
+  ]
+  for (const [what, r] of ok) {
+    const { result } = await run({ args: { existingBranch: true }, existingBranchResult: r, ...quiet })
+    check(`${what}: proceeds`, result.halted_at, undefined)
+  }
+  const halts = [
+    ['not-found with names filled', reply({ created: true, halt_reason: 'not-found' })],
+    ['dirty', reply({ halt_reason: 'dirty', dirty: true })],
+    ['occupied', reply({ created: true, halt_reason: 'occupied' })],
+  ]
+  for (const [what, r] of halts) {
+    const { result, captured } = await run({ args: { existingBranch: true }, existingBranchResult: r, ...quiet })
+    check(`${what}: halts at Worktree`, result.halted_at, 'Worktree')
+    check(`${what}: is not retried`, callCount(captured, 'branch:existing:retry'), 0)
+  }
+  const nf = await run({ args: { existingBranch: true },
+    existingBranchResult: reply({ halt_reason: 'not-found' }), ...quiet })
+  check('not-found gets the not-found note', nf.result.note.startsWith('No worktree or branch carrying the gh-21-<slug> marker'), true)
 }
 
 async function scenarioPJ() {
@@ -205,17 +247,89 @@ async function scenarioPJ() {
   const p = captured.calls.find(c => c.label === 'branch')?.prompt ?? ''
   check('the prompt runs ls-remote on the name', p.includes('git ls-remote --heads origin <name>'), true)
   check('the prompt says to return remote-exists', p.includes('halt_reason=remote-exists'), true)
-  check('the schema allows that halt reason',
-    captured.calls.find(c => c.label === 'branch').schema.properties.halt_reason.enum, ['none', 'remote-exists'])
-  const { result } = await run({ branchResult: { created: false, halt_reason: 'remote-exists', dirty: false,
-    branch: 'feat/gh-21-stub', base: 'main', path: '', ticket: '21', detail: 'origin has feat/gh-21-stub' }, ...quiet })
+  const { result } = await run({ branchResult: reply({ halt_reason: 'remote-exists', path: '',
+    detail: 'origin has feat/gh-21-stub' }), ...quiet })
   check('a remote collision halts at Worktree', result.halted_at, 'Worktree')
   check('the note names the collision', result.note.includes('already exists on origin'), true)
   check('the note carries the detail', result.note.includes('origin has feat/gh-21-stub'), true)
 }
 
+async function scenarioPK() {
+  console.log('\n== scenario PK: every failure the prompts describe has its own required halt_reason')
+  const fresh = await run({ ...quiet })
+  const fs = fresh.captured.calls.find(c => c.label === 'branch')
+  check('fresh: halt_reason is required', fs.schema.required.includes('halt_reason'), true)
+  check('fresh: its values', fs.schema.properties.halt_reason.enum, FRESH_REASONS)
+  for (const v of FRESH_REASONS.slice(1)) {
+    check(`fresh prompt names halt_reason=${v}`, fs.prompt.includes(`halt_reason=${v}`), true)
+  }
+  check('fresh prompt has no failure without a halt_reason', /created=false(?!, halt_reason=)/.test(fs.prompt), false)
+  const stacked = await run({ args: { base: 'feat/gh-20-parent' }, ...quiet })
+  const sp = stacked.captured.calls.find(c => c.label === 'branch').prompt
+  check('stacked prompt names halt_reason=base-unresolved', sp.includes('halt_reason=base-unresolved'), true)
+  check('stacked prompt has no failure without a halt_reason', /created=false(?!, halt_reason=)/.test(sp), false)
+  const ex = await run({ args: { existingBranch: true }, ...quiet })
+  const es = ex.captured.calls.find(c => c.label === 'branch:existing')
+  check('existing: halt_reason is required', es.schema.required.includes('halt_reason'), true)
+  check('existing: its values', es.schema.properties.halt_reason.enum, EXISTING_REASONS)
+  for (const v of EXISTING_REASONS.slice(1)) {
+    check(`existing prompt names halt_reason=${v}`, es.prompt.includes(`halt_reason=${v}`), true)
+  }
+  check('existing prompt has no failure without a halt_reason', /created=false(?!, halt_reason=)/.test(es.prompt), false)
+  const resumed = await run({ args: { existingBranch: true, priorRun: { reviewed_through: P } }, ...quiet })
+  const rp = resumed.captured.calls.find(c => c.label === 'branch:existing').prompt
+  check('the prior-head step keys on halt_reason, not created',
+    [rp.includes('only if step 8 returned halt_reason=none'), rp.includes('returned created=true')], [true, false])
+}
+
+async function scenarioPL() {
+  console.log('\n== scenario PL: the reviewer\'s failure replies, names filled in, halt')
+  const fetch = await run({ branchResult: reply({ halt_reason: 'fetch-failed', path: '/r/.claude/worktrees/gh-21-x',
+    branch: 'feat/gh-21-x', detail: 'git fetch origin failed' }), ...quiet })
+  check('fetch-failed halts', fetch.result.halted_at, 'Worktree')
+  check('nothing was implemented', callCount(fetch.captured, 'implementer'), 0)
+  const exists = await run({ branchResult: reply({ created: true, halt_reason: 'path-exists',
+    detail: '/r/.claude/worktrees/gh-21-x holds a file' }), ...quiet })
+  check('path-exists halts, whatever created says', exists.result.halted_at, 'Worktree')
+  check('path-exists names the path problem', exists.result.note.startsWith('The worktree path for this branch is already occupied'), true)
+  check('path-exists carries the detail', exists.result.note.includes('holds a file'), true)
+  const notFound = await run({ args: { existingBranch: true }, existingBranchResult: reply({ halt_reason: 'not-found',
+    branch: 'feat/gh-21-guess', path: '/r/.claude/worktrees/gh-21-guess' }), ...quiet })
+  check('not-found halts', notFound.result.halted_at, 'Worktree')
+  check('nothing was implemented', callCount(notFound.captured, 'implementer'), 0)
+}
+
+async function scenarioPM() {
+  console.log('\n== scenario PM (gh-156): a reply that contradicts itself is retried once, then halts')
+  const bad = [
+    ['none with no path', reply({ path: '' })],
+    ['none with no branch', reply({ branch: '' })],
+    ['none with a relative path', reply({ path: 'wt/gh-21-stub' })],
+    ['none on a dirty tree', reply({ dirty: true })],
+    ['none on an unmarked fresh branch', reply({ branch: 'feat/other' })],
+    ['dirty on a clean tree', reply({ halt_reason: 'dirty', dirty: false })],
+  ]
+  for (const [what, r] of bad) {
+    const { result, captured } = await run({ branchResult: r, ...quiet })
+    check(`${what}: retried once`, callCount(captured, 'branch:retry'), 1)
+    check(`${what}: halts at Worktree`, result.halted_at, 'Worktree')
+    check(`${what}: the note names the contradiction`, String(result.note).startsWith('The worktree step\'s reply contradicted itself twice'), true)
+  }
+  const fixed = await run({ branchResult: reply({ path: '' }), branchRetryResult: reply({}), ...quiet })
+  check('a consistent retry proceeds', fixed.result.halted_at, undefined)
+  check('the retry\'s worktree is used', fixed.result.branch, 'feat/gh-21-stub')
+  const retriedHalt = await run({ branchResult: reply({ path: '' }),
+    branchRetryResult: reply({ halt_reason: 'remote-exists' }), ...quiet })
+  check('a consistent failing retry halts with its own note', retriedHalt.result.note.includes('already exists on origin'), true)
+  const ex = await run({ args: { existingBranch: true }, existingBranchResult: reply({ path: '' }), ...quiet })
+  check('existing mode retries under its own label', callCount(ex.captured, 'branch:existing:retry'), 1)
+  check('existing mode halts after it', ex.result.halted_at, 'Worktree')
+  const okFirst = await run({ branchResult: reply({}), ...quiet })
+  check('a consistent reply is not retried', callCount(okFirst.captured, 'branch:retry'), 0)
+}
+
 const SCENARIOS = [scenarioPA, scenarioPB, scenarioPC, scenarioPD, scenarioPE, scenarioPF, scenarioPG,
-  scenarioPH, scenarioPI, scenarioPJ]
+  scenarioPH, scenarioPI, scenarioPJ, scenarioPK, scenarioPL, scenarioPM, scenarioPN]
 JS_EOF
 
 DELIVER_MD="$REPO_ROOT/commands/deliver.md"

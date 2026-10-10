@@ -44,8 +44,15 @@ class _Parser(argparse.ArgumentParser):
         raise Refusal("bad-args", message, 2)
 
 
+def _run(argv, cwd=None):
+    # The invoking session has no terminal to answer a credential prompt on, so a
+    # prompt must fail instead of hanging the session.
+    return subprocess.run(argv, cwd=cwd, capture_output=True, text=True, stdin=subprocess.DEVNULL,
+                          env={**os.environ, "GIT_TERMINAL_PROMPT": "0", "GH_PROMPT_DISABLED": "1"})
+
+
 def git(root, *args):
-    done = subprocess.run(["git", "-C", root, *args], capture_output=True, text=True)
+    done = _run(["git", "-C", root, *args])
     return Run(done.returncode, done.stdout, done.stderr)
 
 
@@ -243,30 +250,34 @@ def _one(found, marker, what):
     return found[0] if found else None
 
 
-def merged_numbers(text):
-    data = _json_or_none(text)
-    if not isinstance(data, list):
-        return []
-    return [d["number"] for d in data if isinstance(d, dict) and isinstance(d.get("number"), int)]
+def latest_pr(text):
+    """The open PR if there is one, else the highest-numbered, as the draft-PR step picks."""
+    prs = sorted(_prs(_json_or_none(text)), key=lambda d: -d["number"])
+    return next((d for d in prs if d["state"] == "OPEN"), prs[0] if prs else None)
 
 
-def _refuse_merged(root, branch):
+def _prs(data):
+    return [d for d in data if _is_pr(d)] if isinstance(data, list) else []
+
+
+def _is_pr(d):
+    return isinstance(d, dict) and isinstance(d.get("number"), int) and isinstance(d.get("state"), str)
+
+
+def _merged_check(root, branch):
+    """Refuses a branch whose latest PR merged; otherwise a note for detail, '' when gh answered."""
     try:
-        done = subprocess.run([GH, "pr", "list", "--head", branch, "--state", "merged", "--json", "number"],
-                              cwd=root, capture_output=True)
-    except OSError:
-        return
-    numbers = merged_numbers(done.stdout) if done.returncode == 0 else []
-    if numbers:
-        raise Refusal("merged", f"branch {branch} already has a merged pull request (#{numbers[0]}); "
+        done = _run([GH, "pr", "list", "--head", branch, "--state", "all", "--json", "number,state",
+                     "--limit", "20"], cwd=root)
+    except OSError as error:
+        return f"; merged check skipped: could not run {GH}: {error}"
+    if done.returncode:
+        return f"; merged check skipped: gh exited {done.returncode}"
+    pr = latest_pr(done.stdout)
+    if pr and pr["state"] == "MERGED":
+        raise Refusal("merged", f"branch {branch}'s latest pull request (#{pr['number']}) merged; "
                       f"that work shipped, so it is not a tree to keep implementing into")
-
-
-def _refuse_outside(root, path):
-    prefix = canonical(root, "")
-    if not path.startswith(prefix) or os.sep in path[len(prefix):]:
-        raise Refusal("outside-worktrees", f"the ticket's worktree is at {path}, outside {prefix}; "
-                      f"move it there (git worktree move) or run the workflow without prepared args")
+    return ""
 
 
 def _refuse_dirty(path):
@@ -276,26 +287,29 @@ def _refuse_dirty(path):
                       f"sweep into a commit: {(r.out + r.err).strip()}")
 
 
-def _refuse_fallback(root, marker):
-    current = git(root, "branch", "--show-current").out.strip()
+def _adopt(here, marker, bases):
+    """The checkout's own branch, when nothing carries the marker: a branch older than the convention."""
+    current = git(here, "branch", "--show-current").out.strip()
     other = OTHER_MARKER.match(current.partition("/")[2])
     if other:
         raise Refusal("wrong-ticket", f"no worktree or branch carries {marker}, and the checkout is on "
                       f"{current}, which belongs to {other.group(1)}")
-    raise Refusal("not-found", f"no worktree or branch carries the {marker} marker; run without "
-                  f"--existing to cut one")
+    if not current or current in bases:
+        raise Refusal("not-found", f"no worktree or branch carries the {marker} marker, and the checkout "
+                      f"is not on a feature branch; run without --existing to cut one")
+    return git(here, "rev-parse", "--show-toplevel").out.strip(), current, "adopted", ""
 
 
-def _reattach(root, marker):
+def _reattach(root, here, marker, bases):
     branch = _one([b for b in local_branches(root) if carries(b, marker)], marker, "branch")
     if branch is None:
-        _refuse_fallback(root, marker)
-    _refuse_merged(root, branch)
+        return _adopt(here, marker, bases)
+    note = _merged_check(root, branch)
     path = canonical(root, branch.partition("/")[2].replace("/", "-"))
     if os.path.lexists(path):
         raise Refusal("occupied", f"branch {branch} has no worktree, but {path} is already occupied")
     _add_worktree(root, path, branch)
-    return path, branch, "reattached"
+    return path, branch, "reattached", note
 
 
 def existing(root, opts, marker, default):
@@ -304,14 +318,13 @@ def existing(root, opts, marker, default):
         raise Refusal("base-unresolved", "no base branch: origin/HEAD is unset and neither main nor master exists")
     hit = _one([r for r in worktree_records(root) if carries(r[1], marker)], marker, "worktree")
     if hit:
-        _refuse_outside(root, hit[0])
-        _refuse_merged(root, hit[1])
-        path, branch, action = (*hit, "reused")
+        path, branch, action, note = (*hit, "reused", _merged_check(root, hit[1]))
     else:
-        path, branch, action = _reattach(root, marker)
+        bases = {base, default, "main", "master"}
+        path, branch, action, note = _reattach(root, opts.repo, marker, bases)
     _refuse_dirty(path)
     return {"worktree": path, "branch": branch, "base": base, "worktree_action": action,
-            "detail": f"{action} the worktree of {branch}"}
+            "detail": f"{action} the worktree of {branch}{note}"}
 
 
 def _fence_closes(line, fence):

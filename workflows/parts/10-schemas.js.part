@@ -33,8 +33,10 @@ const CHECKS = {
 // count for a change nobody has scoped yet forces a number out of thin air.
 const BRANCH = {
   type: 'object', additionalProperties: false,
-  required: ['created', 'branch', 'base', 'path', 'detail', 'dirty'],
+  required: ['created', 'branch', 'base', 'path', 'detail', 'dirty', 'halt_reason'],
   properties: {
+    // Asked for by the prompts but never read: one agent took it to mean "newly
+    // created" and set it false for a worktree it had found. halt_reason decides.
     created: { type: 'boolean' },
     branch: { type: 'string' },
     base: { type: 'string' },
@@ -47,21 +49,20 @@ const BRANCH = {
     // this instead of a separate checks:discover call, since the branch
     // agent already has the worktree open by the time it can answer.
     checks_source: CHECKS,
-    // Optional here and narrower than EXISTING_BRANCH's: the fresh prompt has
-    // one halt of its own, a name already on origin.
-    halt_reason: { type: 'string', enum: ['none', 'remote-exists'] },
+    // Required, with a value for every failure the fresh prompt describes: the
+    // schema also forces branch and path, so on a failure the agent fills in the
+    // names it meant to use, and only this field says the step failed.
+    halt_reason: { type: 'string', enum: ['none', 'base-unresolved', 'fetch-failed', 'remote-exists',
+      'remote-check-failed', 'path-exists', 'dirty'] },
   },
 }
 
-// Required here, because an omitted halt_reason reads as the plain not-found
-// note, which is the note these halts exist to replace; 'none' keeps an
-// absent key from being the signal.
 const EXISTING_BRANCH = {
   ...BRANCH,
-  required: [...BRANCH.required, 'halt_reason'],
   properties: {
     ...BRANCH.properties,
-    halt_reason: { type: 'string', enum: ['none', 'ambiguous', 'wrong-ticket', 'merged', 'occupied'] },
+    halt_reason: { type: 'string', enum: ['none', 'ambiguous', 'wrong-ticket', 'merged', 'occupied',
+      'not-found', 'dirty'] },
     // Optional: asked for only when a prior reviewed head was passed in.
     prior_head_check: { type: 'string' },
   },

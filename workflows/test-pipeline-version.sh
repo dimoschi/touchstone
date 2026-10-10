@@ -185,7 +185,7 @@ function makeAgent(scenario, captured) {
     }
     if (label === 'branch') {
       return scenario.branchResult ??
-        { created: true, branch: 'feat/gh-101-stub', base: 'main',
+        { created: true, halt_reason: 'none', dirty: false, branch: 'feat/gh-101-stub', base: 'main',
           path: '/stub-worktree', ticket: '101', detail: 'stub',
           checks_source: { file: '', sections: [], detail: 'stub: no repo checks' } }
     }

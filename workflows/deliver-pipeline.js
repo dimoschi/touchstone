@@ -432,8 +432,10 @@ const CHECKS = {
 // count for a change nobody has scoped yet forces a number out of thin air.
 const BRANCH = {
   type: 'object', additionalProperties: false,
-  required: ['created', 'branch', 'base', 'path', 'detail', 'dirty'],
+  required: ['created', 'branch', 'base', 'path', 'detail', 'dirty', 'halt_reason'],
   properties: {
+    // Asked for by the prompts but never read: one agent took it to mean "newly
+    // created" and set it false for a worktree it had found. halt_reason decides.
     created: { type: 'boolean' },
     branch: { type: 'string' },
     base: { type: 'string' },
@@ -446,21 +448,20 @@ const BRANCH = {
     // this instead of a separate checks:discover call, since the branch
     // agent already has the worktree open by the time it can answer.
     checks_source: CHECKS,
-    // Optional here and narrower than EXISTING_BRANCH's: the fresh prompt has
-    // one halt of its own, a name already on origin.
-    halt_reason: { type: 'string', enum: ['none', 'remote-exists'] },
+    // Required, with a value for every failure the fresh prompt describes: the
+    // schema also forces branch and path, so on a failure the agent fills in the
+    // names it meant to use, and only this field says the step failed.
+    halt_reason: { type: 'string', enum: ['none', 'base-unresolved', 'fetch-failed', 'remote-exists',
+      'remote-check-failed', 'path-exists', 'dirty'] },
   },
 }
 
-// Required here, because an omitted halt_reason reads as the plain not-found
-// note, which is the note these halts exist to replace; 'none' keeps an
-// absent key from being the signal.
 const EXISTING_BRANCH = {
   ...BRANCH,
-  required: [...BRANCH.required, 'halt_reason'],
   properties: {
     ...BRANCH.properties,
-    halt_reason: { type: 'string', enum: ['none', 'ambiguous', 'wrong-ticket', 'merged', 'occupied'] },
+    halt_reason: { type: 'string', enum: ['none', 'ambiguous', 'wrong-ticket', 'merged', 'occupied',
+      'not-found', 'dirty'] },
     // Optional: asked for only when a prior reviewed head was passed in.
     prior_head_check: { type: 'string' },
   },
@@ -1196,19 +1197,35 @@ const preparedChecksOk = (c, worktree) => isObj(c) && isStr(c.detail) && Array.i
 const preparedManifestOk = (m) => isObj(m) && isBool(m.found) && isBool(m.refreshed) &&
   ['name', 'version', 'detail'].every(k => isStr(m[k]))
 
+// An existing worktree lives wherever git says it does, and is this ticket's when
+// its branch or its directory carries the marker. An adopted one is the
+// checkout's own unmarked branch, which the script takes only when nothing
+// carries the marker; it must carry no ticket marker at all.
+const preparedExisting = Boolean(args?.existingBranch)
+const afterTypePrefix = (b) => b.includes('/') ? b.slice(b.indexOf('/') + 1) : ''
+const anyTicketMarker = (b) => /^(gh-[0-9]+|jira-[A-Za-z][A-Za-z0-9]*-[0-9]+)-/.test(afterTypePrefix(b))
+const existingBranchOk = (p) => isStr(p.branch) && /^\S+$/.test(p.branch) && (p.worktree_action === 'adopted'
+  ? !anyTicketMarker(p.branch)
+  : carriesMarker(p.branch) || markerTail(String(p.worktree).split('/').pop()))
+
 const PREPARED_FIELDS = [
   ['repo_root', (p) => isAbsPath(p.repo_root), 'an absolute path with no trailing slash'],
-  ['worktree', (p) => markerTail(preparedWorktreeName(p)),
-    `<repo_root>/.claude/worktrees/${ticketMarker}-<slug>`],
-  ['branch', (p) => carriesMarker(p.branch), `<type>/${ticketMarker}-<slug>`],
+  ['worktree', (p) => preparedExisting ? isAbsPath(p.worktree) : markerTail(preparedWorktreeName(p)),
+    preparedExisting ? 'an absolute path' : `<repo_root>/.claude/worktrees/${ticketMarker}-<slug>`],
+  ['branch', (p) => preparedExisting ? existingBranchOk(p) : carriesMarker(p.branch),
+    preparedExisting
+      ? `a branch carrying ${ticketMarker}, or one in a worktree directory that does; when adopted, ` +
+        `a branch carrying no ticket marker`
+      : `<type>/${ticketMarker}-<slug>`],
   ['base', (p) => isStr(p.base) && (/^[0-9a-f]{40}$/.test(p.base) || REF_NAME.test(p.base)) &&
     (!baseOverride || p.base === baseOverride),
     `a 40-hex SHA or a ref name${baseOverride ? `, equal to args.base (${baseOverride})` : ''}`],
   ['ticket_marker', (p) => p.ticket_marker === ticketMarker, ticketMarker],
-  ['mode', (p) => p.mode === (args?.existingBranch ? 'existing' : 'fresh'),
-    args?.existingBranch ? "'existing', since existingBranch is set" : "'fresh', since existingBranch is not set"],
-  ['worktree_action', (p) => (args?.existingBranch ? ['reused', 'reattached'] : ['created']).includes(p.worktree_action),
-    args?.existingBranch ? "'reused' or 'reattached'" : "'created'"],
+  ['ticket', (p) => isStr(p.ticket) && p.ticket === String(ticket), `${JSON.stringify(String(ticket))}, this run's ticket`],
+  ['mode', (p) => p.mode === (preparedExisting ? 'existing' : 'fresh'),
+    preparedExisting ? "'existing', since existingBranch is set" : "'fresh', since existingBranch is not set"],
+  ['worktree_action', (p) => (preparedExisting ? ['reused', 'reattached', 'adopted'] : ['created']).includes(p.worktree_action),
+    preparedExisting ? "'reused', 'reattached' or 'adopted'" : "'created'"],
   ['detail', (p) => isStr(p.detail), 'a string'],
   ['markers', (p) => isObj(p.markers) && isBool(p.markers.crap_gated) && isBool(p.markers.mutation_gated),
     'booleans crap_gated and mutation_gated'],
@@ -1468,7 +1485,7 @@ const priorHeadCommand = (path, head) =>
   `m=$(git -C ${path} rev-list --merges --count ${priorHead}..${head}); ` +
   `echo ${PRIOR_HEAD_MARKER} $((a ? 1 : (m ? 2 : 0)))`
 const priorHeadStep = (n) =>
-  `${n}. Also before you return, only if step 8 returned created=true: run ` +
+  `${n}. Also before you return, only if step 8 returned halt_reason=none: run ` +
   `exactly the command below, with <path> the absolute path from step 8, and ` +
   `put the one line it prints in prior_head_check, verbatim and alone. Do not ` +
   `interpret it; the script reads it.\n` +
@@ -1484,10 +1501,7 @@ const wtFromPrepared = (p) => ({
   // A check of any other head says nothing about this run's.
   ...(priorHead && p.prior_head === priorHead ? { prior_head_check: p.prior_head_check } : {}),
 })
-const wt = prepared
-  ? wtFromPrepared(prepared)
-  : args?.existingBranch
-  ? await dispatch(
+const askExisting = (label) => dispatch(
       `[touchstone: branch:existing]\n` +
       `Find the worktree that already holds this ticket's branch, then STOP. Do ` +
       `not create a branch, do not fetch, do not pull, do not plan or ` +
@@ -1499,8 +1513,9 @@ const wt = prepared
       `response; halt_reason is "ambiguous" for the two-or-more-matches halts ` +
       `in steps 4 and 5, "merged" for step 4 or 5's already-merged-PR halt, ` +
       `"occupied" for step 5's occupied-directory halt, "wrong-ticket" for ` +
-      `the different-ticket halt in step 6, and "none" in every other ` +
-      `response, including every success. Never omit it.\n` +
+      `the different-ticket halt in step 6, "not-found" for step 6's ` +
+      `nothing-found halt, "dirty" for step 7's halt, and "none" only for ` +
+      `step 8's success. Never omit it.\n` +
       `1. Run git worktree prune. It only removes registrations for worktree ` +
       `directories that no longer exist on disk; it never touches a directory ` +
       `that does exist. Run it before listing worktrees so a stale record left ` +
@@ -1569,7 +1584,8 @@ const wt = prepared
       `6. Only if steps 4 and 5 matched nothing: fall back to whatever is ` +
       `actually checked out here (git branch --show-current). If HEAD is ` +
       `detached, or the current branch is the repo's base branch (main, ` +
-      `master, or whatever origin/HEAD names), return created=false saying no ` +
+      `master, or whatever origin/HEAD names), return created=false, ` +
+      `halt_reason=not-found, saying no ` +
       `worktree or branch for ${ticketMarker} was found and the current ` +
       `checkout is not on a feature branch either. If that branch carries a ` +
       `jira- or gh- marker other than ${ticketMarker}, refuse it too: return ` +
@@ -1585,9 +1601,10 @@ const wt = prepared
       `would be swept into a commit. Check git -C <path> status --porcelain, ` +
       `using the matched or re-attached path from step 4, 5, or 6, whether ` +
       `that is the main checkout or a linked worktree; the risk is the same ` +
-      `either way. If it is non-empty, return created=false, dirty=true, and ` +
-      `say what is dirty. Never stash, reset, or discard the user's work.\n` +
-      `8. Otherwise return created=true, branch set to the matched record's own ` +
+      `either way. If it is non-empty, return created=false, halt_reason=dirty, ` +
+      `dirty=true, and say what is dirty. Never stash, reset, or discard the ` +
+      `user's work.\n` +
+      `8. Otherwise return halt_reason=none, created=true, branch set to the matched record's own ` +
       `branch name (never git branch --show-current, which names the invoking ` +
       `checkout and not necessarily this ticket's branch), base set to the ` +
       `repo's base branch, and path set to the absolute path from the matching ` +
@@ -1597,11 +1614,11 @@ const wt = prepared
       `whether the branch name carries a jira- or gh- marker.\n` +
       checksDiscoveryStep(9, 'that path') +
       (priorHead ? `\n${priorHeadStep(10)}` : ''),
-      { label: 'branch:existing', schema: EXISTING_BRANCH, model: 'haiku', effort: 'low' })
-  // A worktree is a separate checkout, so the main tree's state is irrelevant
-  // to it; cutting from origin/<base> is what removes the need to touch the
-  // main checkout at all.
-  : await dispatch(
+      { label, schema: EXISTING_BRANCH, model: 'haiku', effort: 'low' })
+// A worktree is a separate checkout, so the main tree's state is irrelevant
+// to it; cutting from origin/<base> is what removes the need to touch the
+// main checkout at all.
+const askFresh = (label) => dispatch(
   `[touchstone: branch]\n` +
   `Create the working branch and a git worktree for it, then STOP. Do not ` +
   `plan, implement, or commit any code.\n` +
@@ -1610,8 +1627,8 @@ const wt = prepared
   `Branch type prefix: ${args?.branchType ?? 'feat'}\n` +
   `Two fields matter on every response below, halts included: dirty is true ` +
   `only for step 6's dirty-checkout halt, false in every other response; ` +
-  `halt_reason is "remote-exists" for step 4's halt and "none" in every ` +
-  `other response.\n` +
+  `halt_reason names the halt each step below gives it, and is "none" only ` +
+  `when the worktree is ready. Never omit it.\n` +
   `1. Run git worktree prune. It only removes registrations for worktree ` +
   `directories that no longer exist on disk, never a directory that does ` +
   `exist, so it is safe to run unconditionally; it clears the way for ` +
@@ -1622,14 +1639,15 @@ const wt = prepared
     ? `3. The base for this branch is given: ${baseOverride}. Do not read the ` +
       `remote HEAD and do not substitute main or master; this work is stacked ` +
       `on that branch deliberately. Verify the ref resolves ` +
-      `(git rev-parse --verify ${baseOverride}) and return created=false naming ` +
-      `it if it does not.\n`
+      `(git rev-parse --verify ${baseOverride}) and return created=false, ` +
+      `halt_reason=base-unresolved, naming it if it does not.\n`
     : `3. Find this repo's base branch: read the remote HEAD ` +
       `(git symbolic-ref --short refs/remotes/origin/HEAD), which prints an ` +
       `origin/-prefixed name; strip that prefix so the base is the bare ` +
       `branch name (main, not origin/main), falling back to whichever of ` +
       `main or master exists when there is no remote-tracking HEAD. Do not ` +
-      `assume main.\n`) +
+      `assume main. If none of those exists, return created=false, ` +
+      `halt_reason=base-unresolved.\n`) +
   `4. Name the branch exactly ` +
   `${args?.branchType ?? 'feat'}/${ticketMarker}-<slug>. The prefix is given ` +
   `in full, already resolved against the ticket: use it character for ` +
@@ -1641,7 +1659,8 @@ const wt = prepared
   `whose pull request this run would otherwise adopt: return created=false, ` +
   `halt_reason=remote-exists, naming the branch in detail, and run no later ` +
   `step. Do not pick another slug to get around it. If ls-remote itself ` +
-  `fails, return created=false naming the failure.\n` +
+  `fails, return created=false, halt_reason=remote-check-failed, naming the ` +
+  `failure.\n` +
   `5. The worktree path is ` +
   `<repo-root>/.claude/worktrees/${ticketMarker}-<slug>, the branch name with ` +
   `its ${args?.branchType ?? 'feat'}/ prefix stripped.\n` +
@@ -1652,15 +1671,17 @@ const wt = prepared
   `path in step 5) is what this task must reuse. This mode commits into ` +
   `that tree, and a later phase runs git add -A there, so check git -C ` +
   `<that path> status --porcelain: if it is non-empty, return created=false, ` +
-  `dirty=true, and say what is dirty. Never stash, reset, or discard the ` +
-  `user's work. Otherwise return created=true using that path, note in ` +
+  `halt_reason=dirty, dirty=true, and say what is dirty. Never stash, reset, ` +
+  `or discard the user's work. Otherwise return halt_reason=none, created=true ` +
+  `using that path, note in ` +
   `detail that the branch was reused rather than created, then go straight ` +
   `to step 11: do not fetch, pull, or run any worktree add.\n` +
   `7. Otherwise check whether the branch exists at all (git show-ref --verify ` +
   `--quiet refs/heads/<name>). If it does, the fetch and cut in step 10 are ` +
   `not needed; go straight to step 8.\n` +
   `8. Check whether the path from step 5 already exists on disk. If it does, ` +
-  `return created=false naming the exact path and explaining what is there. ` +
+  `return created=false, halt_reason=path-exists, naming the exact path and ` +
+  `explaining what is there. ` +
   `Do not delete it, do not rename around it, and do not pick a different ` +
   `slug: a surprising second worktree is worse than a clear halt.\n` +
   `9. If the branch exists (step 7) and the path is clear (step 8), run ` +
@@ -1676,8 +1697,10 @@ const wt = prepared
       `checked out in another worktree, where checking it out again would fail.\n`
     : `10. If the branch does not exist, run git fetch origin, then resolve ` +
       `the cut point with git rev-parse --verify origin/<base>. If the fetch ` +
-      `fails or that ref does not resolve, return created=false naming the ` +
-      `base and the reason, rather than falling back to the local branch. ` +
+      `fails, return created=false, halt_reason=fetch-failed, naming the base ` +
+      `and the reason; if it worked but that ref does not resolve, return ` +
+      `created=false, halt_reason=base-unresolved, naming it. Never fall back ` +
+      `to the local branch. ` +
       `Otherwise run git worktree add <path> -b <branch> origin/<base>. Do ` +
       `not check out the base branch, do not run git pull, and do not modify ` +
       `the main checkout's working tree in any way: the worktree is a ` +
@@ -1688,20 +1711,45 @@ const wt = prepared
   `Return the branch you created or reused, the base you cut it from (or ` +
   (baseOverride ? `${baseOverride}` : `the repo's base branch`) +
   ` if the branch already existed), and the absolute worktree path.`,
-  { label: 'branch', schema: BRANCH, model: 'haiku', effort: 'low' })
-sBranch.close()
+  { label, schema: BRANCH, model: 'haiku', effort: 'low' })
 
 // A failed worktree step halts rather than falling through: implementing onto
 // whatever tree happened to be checked out is how unrelated work lands in a PR.
-// Decided from what the reply says it found, not from created alone: one agent
-// read created as "newly created", returned false for a worktree it had found
-// clean, and halted a run whose lookup succeeded. created=true still passes by
-// itself, which keeps step 6's fallback onto an unmarked branch working.
-const worktreeFound = (w) => Boolean(w) && w.dirty !== true &&
-  (w.halt_reason ?? 'none') === 'none' && isStr(w.branch) && w.branch !== '' &&
-  isStr(w.path) && w.path !== '' &&
-  (w.created === true || (carriesMarker(w.branch) && markerTail(w.path.split('/').pop())))
-if (!worktreeFound(wt)) {
+// halt_reason decides, never created: one agent read created as "newly
+// created" and set it false for a worktree it had found. halt_reason=none
+// still has to agree with the reply's own facts, since the schema forces
+// branch and path and a failing agent fills in the names it meant to use. A
+// reply that disagrees with itself is asked again once, then halts. An
+// existing-mode branch need not carry the marker: step 6 adopts an unmarked one.
+const replyFacts = (w) => [
+  [w?.dirty !== true, 'dirty is true'],
+  [isStr(w?.branch) && w.branch !== '', 'branch is empty'],
+  [isAbsPath(w?.path), 'path is not absolute'],
+  [Boolean(args?.existingBranch) || carriesMarker(w?.branch), `branch does not carry ${ticketMarker}`],
+].filter(([ok]) => !ok).map(([, why]) => why)
+const contradictionIn = (w) =>
+  w?.halt_reason === 'none' && replyFacts(w).length ? `halt_reason is none but ${replyFacts(w).join(', ')}`
+  : w?.halt_reason === 'dirty' && w?.dirty !== true ? 'halt_reason is dirty but dirty is false'
+  : ''
+const askBranch = args?.existingBranch ? askExisting : askFresh
+const branchLabel = args?.existingBranch ? 'branch:existing' : 'branch'
+let wt = prepared ? wtFromPrepared(prepared) : await askBranch(branchLabel)
+let contradiction = prepared ? '' : contradictionIn(wt)
+if (contradiction) {
+  log(`the ${branchLabel} reply contradicted itself (${contradiction}); asking once more`)
+  wt = await askBranch(`${branchLabel}:retry`)
+  contradiction = contradictionIn(wt)
+}
+sBranch.close()
+if (contradiction) {
+  return await halted('Worktree', {
+    branch: wt?.branch, base: wt?.base, detail: wt?.detail,
+    note: `The worktree step's reply contradicted itself twice (${contradiction}), so ` +
+      `nothing was planned or implemented and no path it named was trusted. Check the ` +
+      `worktree for ${ticketMarker} by hand, then re-run.`,
+  })
+}
+if (!(wt?.halt_reason === 'none' && !replyFacts(wt).length)) {
   return await halted('Worktree', {
     branch: wt?.branch,
     base: wt?.base,
@@ -1721,7 +1769,7 @@ if (!worktreeFound(wt)) {
     // than nothing existing to reuse, a merged match means the ticket's
     // branch already exists and shipped, and an occupied match means the
     // ticket's branch already exists and only its directory is blocked.
-    note: wt?.dirty
+    note: wt?.dirty || wt?.halt_reason === 'dirty'
       ? 'The checkout that holds this branch has uncommitted changes, so ' +
         'nothing was planned or implemented. Commit or stash them, then ' +
         're-run.'
@@ -1731,6 +1779,10 @@ if (!worktreeFound(wt)) {
         `belongs to another run, and this run would adopt its pull request. ` +
         `Re-run with existingBranch: true if this work continues that branch, ` +
         `or give a task whose slug names a different one.`
+      : wt?.halt_reason === 'path-exists'
+      ? `The worktree path for this branch is already occupied, so nothing was ` +
+        `planned or implemented: ${wt?.detail}. Clear what is there, or re-run ` +
+        `with existingBranch: true if it already holds this ticket's work.`
       : wt?.halt_reason === 'ambiguous'
       ? `Found more than one branch carrying the ${ticketMarker} marker, so ` +
         `nothing was planned or implemented: ${wt?.detail}. This lookup ` +

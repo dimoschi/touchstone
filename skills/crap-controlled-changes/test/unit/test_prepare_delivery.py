@@ -282,7 +282,7 @@ def test_existing_finds_the_ticket_worktree_whatever_its_type(world, capsys):
     assert out["mode"] == "existing"
     assert out["worktree_action"] == "reused"
     assert world.gh_log.read_text() == \
-        f"{world.repo} pr list --head feat/gh-163-old-slug --state merged --json number\n"
+        f"{world.repo} pr list --head feat/gh-163-old-slug --state all --json number,state --limit 20\n"
     assert out["detail"] == "reused the worktree of feat/gh-163-old-slug"
 
 
@@ -316,7 +316,7 @@ def test_existing_refuses_reattaching_onto_an_occupied_directory(world, capsys):
 
 def test_existing_refuses_a_worktree_whose_pr_merged(world, capsys):
     make_branch_worktree(world, "feat/gh-163-done", "gh-163-done")
-    world.gh_out.write_text('[{"number": 42}]')
+    world.gh_out.write_text('[{"number": 40, "state": "CLOSED"}, {"number": 42, "state": "MERGED"}]')
     code, out = run(world, capsys, "--existing")
     assert code == 3
     assert out["error"] == "merged"
@@ -325,14 +325,15 @@ def test_existing_refuses_a_worktree_whose_pr_merged(world, capsys):
 
 def test_existing_refuses_a_branch_whose_pr_merged_without_reattaching(world, capsys):
     git(world.repo, "branch", "feat/gh-163-done")
-    world.gh_out.write_text('[{"number": 7}]')
+    world.gh_out.write_text('[{"number": 7, "state": "MERGED"}]')
     code, out = run(world, capsys, "--existing")
     assert code == 3
     assert out["error"] == "merged"
     assert not os.path.exists(wt_path(world, "gh-163-done"))
 
 
-@pytest.mark.parametrize("reply", ["not json", '{"number": 1}', "[]", '[{"id": 1}]'])
+@pytest.mark.parametrize("reply", ["not json", '{"number": 1, "state": "MERGED"}', "[]", '[{"id": 1}]',
+                                   '[{"number": 1}]', '[{"state": "MERGED"}]', '[{"number": "1", "state": "MERGED"}]'])
 def test_existing_treats_an_unusable_or_empty_gh_reply_as_live(world, capsys, reply):
     path = make_branch_worktree(world, "feat/gh-163-live", "gh-163-live")
     world.gh_out.write_text(reply)
@@ -347,6 +348,21 @@ def test_existing_treats_a_missing_gh_as_live(world, capsys, monkeypatch):
     code, out = run(world, capsys, "--existing")
     assert code == 0
     assert out["worktree"] == path
+    assert out["detail"].startswith("reused the worktree of feat/gh-163-live; merged check skipped: could not run no-such-gh-binary")
+
+
+@pytest.mark.parametrize("reply,refused", [
+    ('[{"number": 42, "state": "MERGED"}, {"number": 50, "state": "OPEN"}]', False),
+    ('[{"number": 50, "state": "OPEN"}, {"number": 52, "state": "MERGED"}]', False),
+    ('[{"number": 42, "state": "CLOSED"}, {"number": 40, "state": "MERGED"}]', False),
+    ('[{"number": 40, "state": "MERGED"}, {"number": 42, "state": "CLOSED"}]', False),
+    ('[{"number": 42, "state": "MERGED"}, {"number": 40, "state": "CLOSED"}]', True),
+])
+def test_only_the_latest_pr_on_the_head_decides_merged(world, capsys, reply, refused):
+    make_branch_worktree(world, "feat/gh-163-again", "gh-163-again")
+    world.gh_out.write_text(reply)
+    code, out = run(world, capsys, "--existing")
+    assert (code, out.get("error")) == ((3, "merged") if refused else (0, None))
 
 
 def test_existing_refuses_a_dirty_worktree(world, capsys):
@@ -377,13 +393,60 @@ def test_existing_refuses_two_matching_branches(world, capsys):
     assert "feat/gh-163-a" in out["reason"] and "fix/gh-163-b" in out["reason"]
 
 
-def test_existing_refuses_a_worktree_outside_claude_worktrees(world, capsys):
+def test_existing_reuses_a_worktree_outside_claude_worktrees_where_it_is(world, capsys):
     elsewhere = os.path.realpath(world.tmp) + "/elsewhere"
     git(world.repo, "worktree", "add", "-q", "-b", "feat/gh-163-x", elsewhere)
     code, out = run(world, capsys, "--existing")
-    assert code == 3
-    assert out["error"] == "outside-worktrees"
-    assert elsewhere in out["reason"]
+    assert code == 0
+    assert (out["worktree"], out["worktree_action"]) == (elsewhere, "reused")
+
+
+def test_existing_adopts_an_unmarked_feature_branch_checked_out_here(world, capsys):
+    git(world.repo, "checkout", "-q", "-b", "feat/legacy-work")
+    code, out = run(world, capsys, "--existing")
+    assert code == 0
+    assert (out["worktree"], out["branch"], out["worktree_action"]) == (world.repo, "feat/legacy-work", "adopted")
+    assert out["detail"] == "adopted the worktree of feat/legacy-work"
+    assert out["checks_source"]["file"] == os.path.join(world.repo, "AGENTS.md")
+
+
+def test_existing_adopts_the_branch_of_the_worktree_it_was_given(world, capsys):
+    other = os.path.realpath(world.tmp) + "/legacy"
+    git(world.repo, "worktree", "add", "-q", "-b", "legacy", other)
+    argv = [other, "--ticket", "163", "--type", "fix", "--slug", "x", "--plugin-json", str(world.plugin), "--existing"]
+    assert pd.main(argv) == 0
+    out = json.loads(capsys.readouterr().out)
+    assert (out["worktree"], out["branch"], out["repo_root"]) == (other, "legacy", world.repo)
+
+
+def test_existing_refuses_to_adopt_a_dirty_checkout(world, capsys):
+    git(world.repo, "checkout", "-q", "-b", "feat/legacy-work")
+    (world.tmp / "repo" / "stray.txt").write_text("x")
+    code, out = run(world, capsys, "--existing")
+    assert (code, out["error"]) == (3, "dirty")
+
+
+@pytest.mark.parametrize("head,base", [("main", "main"), ("main", "master"), ("trunk", "trunk"), ("trunk", "main")])
+def test_existing_never_adopts_a_base_branch(world, capsys, head, base):
+    if head == "trunk":
+        git(world.repo, "branch", "trunk")
+        git(world.repo, "push", "-q", "origin", "trunk")
+        git(world.repo, "remote", "set-head", "origin", "trunk")
+    git(world.repo, "checkout", "-q", "-B", base)
+    code, out = run(world, capsys, "--existing")
+    assert (code, out["error"]) == (3, "not-found")
+
+
+def test_existing_never_adopts_a_given_base(world, capsys):
+    git(world.repo, "checkout", "-q", "-b", "release")
+    code, out = run(world, capsys, "--existing", "--base", "release")
+    assert (code, out["error"]) == (3, "not-found")
+
+
+def test_existing_never_adopts_a_detached_head(world, capsys):
+    git(world.repo, "checkout", "-q", "--detach")
+    code, out = run(world, capsys, "--existing")
+    assert (code, out["error"]) == (3, "not-found")
 
 
 def test_existing_with_nothing_found_refuses(world, capsys):
@@ -766,7 +829,7 @@ def test_carries_reads_the_marker_after_the_first_slash(branch, want):
 def test_a_marker_deeper_than_the_first_segment_is_not_another_ticket(world, capsys):
     git(world.repo, "checkout", "-q", "-b", "x/feat/jira-ABC-9-y")
     code, out = run(world, capsys, "--existing")
-    assert out["error"] == "not-found"
+    assert (code, out["branch"], out["worktree_action"]) == (0, "x/feat/jira-ABC-9-y", "adopted")
 
 
 def test_a_tag_carrying_the_marker_is_not_a_branch(world, capsys):
@@ -789,11 +852,24 @@ def test_ambiguous_reasons_list_every_match(world, capsys):
 
 def test_a_failing_gh_is_not_believed_even_when_it_prints_a_merge(world, capsys):
     path = make_branch_worktree(world, "feat/gh-163-live", "gh-163-live")
-    world.gh_out.write_text('[{"number": 5}]')
+    world.gh_out.write_text('[{"number": 5, "state": "MERGED"}]')
     (world.tmp / "gh-code").write_text("1")
     code, out = run(world, capsys, "--existing")
     assert code == 0
     assert out["worktree"] == path
+    assert out["detail"] == "reused the worktree of feat/gh-163-live; merged check skipped: gh exited 1"
+
+
+def test_every_command_runs_without_a_terminal_to_prompt_on(world, capsys, argv_log):
+    make_branch_worktree(world, "feat/gh-163-x", "gh-163-x")
+    argv_log.clear()
+    run(world, capsys, "--existing")
+    assert {c["argv"][0] for c in argv_log} == {"git", "gh"}
+    for call in argv_log:
+        assert call["kwargs"]["stdin"] is subprocess.DEVNULL
+        assert call["kwargs"]["env"]["GIT_TERMINAL_PROMPT"] == "0"
+        assert call["kwargs"]["env"]["GH_PROMPT_DISABLED"] == "1"
+        assert call["kwargs"]["env"]["PATH"] == os.environ["PATH"]
 
 
 def test_default_base_ignores_other_remotes_heads(world):

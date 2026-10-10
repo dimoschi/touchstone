@@ -48,15 +48,17 @@ check "classify() is a pure script function, never a prompt's own judgement" \
   "$(grep -Fc 'const classify = (f, ctx) =>' "$SCRIPT" || true)" 1
 
 echo ""
-echo "== static: BRANCH requires dirty on every response"
+echo "== static: BRANCH requires dirty and halt_reason on every response"
 # A haiku-at-low-effort branch agent that simply omits dirty must fail schema
 # validation, not have it default to false and mask a dirty checkout as clean.
-check "BRANCH's required array lists dirty" \
-  "$(grep -c "required: \['created', 'branch', 'base', 'path', 'detail', 'dirty'\]" "$SCRIPT" || true)" 1
+check "BRANCH's required array lists dirty and halt_reason" \
+  "$(grep -c "required: \['created', 'branch', 'base', 'path', 'detail', 'dirty', 'halt_reason'\]" "$SCRIPT" || true)" 1
 
-echo "== static: BRANCH's halt_reason enum covers the merged and occupied halts, not just ambiguous and wrong-ticket"
-check "halt_reason enum lists all five" \
-  "$(grep -c "enum: \['none', 'ambiguous', 'wrong-ticket', 'merged', 'occupied'\]" "$SCRIPT" || true)" 1
+echo "== static: EXISTING_BRANCH's halt_reason enum covers every halt its prompt describes"
+check "halt_reason enum lists all seven" \
+  "$(grep -Ec "enum: \['none', 'ambiguous', 'wrong-ticket', 'merged', 'occupied',$" "$SCRIPT" || true)" 1
+check "and its last two" \
+  "$(grep -Fc "'not-found', 'dirty'] }," "$SCRIPT" || true)" 1
 
 echo ""
 echo "== static: treeAgent tells every phase where scratch work goes (gh-40)"
