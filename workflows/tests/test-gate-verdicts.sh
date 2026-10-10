@@ -363,18 +363,27 @@ async function scenarioRealUnreviewed() {
 
 // The verdict line reads the real gate's last line; if mutation-check.sh ever
 // changes it, this fails rather than every verdict silently going unmeasured.
+// A scratch branch off main reaches the gate's exit trap on any machine.
 async function scenarioRealGateTrailer() {
   console.log('\n== scenario GU: the real mutation-check.sh --verify ends with the trailer the verdict line reads')
-  // This repo's own worktree: --verify only reads its ledger, and here it reaches
-  // the trap that prints the trailer (a scratch repo with no base exits 2 first).
-  const repo = path.resolve(path.dirname(SCRIPT_PATH), '..')
-  const gate = path.join(repo, 'skills', 'crap-controlled-changes', 'mutation-check.sh')
-  const run = spawnSync('bash', ['-c', 'bash "$0" "$1" --verify 2>&1', gate, repo], { encoding: 'utf8' })
-  const last = run.stdout.trim().split('\n').pop()
-  const m = /^mutation-check: EXIT=([0-9]+) /.exec(last ?? '')
-  check('--verify exits 0 or 5 here', [0, 5].includes(run.status), true)
-  check('the last line is the trailer', Boolean(m), true)
-  check('and its number is the exit code', Number(m?.[1]), run.status)
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'gate-trailer-'))
+  try {
+    const env = { ...process.env, GIT_AUTHOR_NAME: 't', GIT_AUTHOR_EMAIL: 't@t',
+      GIT_COMMITTER_NAME: 't', GIT_COMMITTER_EMAIL: 't@t' }
+    const git = (...a) => execFileSync('git', ['-C', dir, '-c', 'commit.gpgsign=false', ...a], { env })
+    git('init', '-q', '-b', 'main')
+    fs.writeFileSync(path.join(dir, 'a.txt'), 'a\n'); git('add', '-A'); git('commit', '-qm', 'a')
+    git('checkout', '-qb', 'feat')
+    fs.writeFileSync(path.join(dir, 'm.py'), 'x = 1\n'); git('add', '-A'); git('commit', '-qm', 'b')
+    const gate = path.resolve(path.dirname(SCRIPT_PATH), '..', 'skills', 'crap-controlled-changes', 'mutation-check.sh')
+    const run = spawnSync('bash', ['-c', 'bash "$0" "$1" --verify 2>&1', gate, dir], { encoding: 'utf8' })
+    const m = /^mutation-check: EXIT=([0-9]+) /.exec(run.stdout.trim().split('\n').pop() ?? '')
+    check('a branch with no recorded run exits 5', run.status, 5)
+    check('its last line is the trailer', Boolean(m), true)
+    check('and the trailer\'s number is the exit code', Number(m?.[1]), run.status)
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true })
+  }
 }
 
 const SCENARIOS = [scenarioRealGateTrailer, scenarioVerifyLine, scenarioClaimedGreenButRed, scenarioSetupExitStops, scenarioHookAllowsLines, scenarioClaimedRedButGreen,
