@@ -356,7 +356,7 @@ async function scenarioPF14() {
 // Scenario PF15 -- the mutation gate's commits are probed too.
 async function scenarioPF15() {
   console.log('\n== scenario PF15: a leak in the mutation gate\'s commits halts at Mutation')
-  const mutHead = 'mut00000000000000000000000000000000000001'
+  const mutHead = 'aaa0000000000000000000000000000000000001'
   const base = COMMIT_RANGE.split('..')[0]
   const scenario = { triage: TEAM, ...CLEAN, mutationGated: true,
     mutationResult: () => ({ green: true, head_sha: mutHead, detail: 'stub', scored: true }) }

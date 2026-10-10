@@ -451,7 +451,7 @@ async function scenarioDC() {
     postMutationReview: [{ title: 'Boundary check excludes the last element', file: 'parser.js',
       claim: 'the mutation commits reverted the guard', evidence: 'parser.js:14',
       duplicate_of: 'f1', reproducer: undefined }],
-    mutationResult: () => ({ green: true, head_sha: 'mut0000000000000000000000000000000000001', detail: 'stub green', scored: true }),
+    mutationResult: () => ({ green: true, head_sha: 'aaa0000000000000000000000000000000000001', detail: 'stub green', scored: true }),
     settledExit: (id, round) => (id === 'f1' && round === 'mutation' ? 1 : 0),
   }))
   check('halted at Review (the mutation gate undid the fix)', result.halted_at, 'Review')
@@ -580,7 +580,7 @@ async function scenarioDJ() {
       advocate: [],
     },
     mutationGated: true,
-    mutationResult: () => ({ green: true, head_sha: 'mut0000000000000000000000000000000000001',
+    mutationResult: () => ({ green: true, head_sha: 'aaa0000000000000000000000000000000000001',
       detail: 'stub green', scored: true }),
     reproducerDirty: true,
     reproducerPorcelain: '?? stray-mutation-file.txt',

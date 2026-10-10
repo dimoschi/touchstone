@@ -93,7 +93,7 @@ async function scenarioBHE() {
     spendAllAfter: 'plan:leak:Mutation',
     mutationGated: true,
     initialReview: { correctness: [], advocate: [] },
-    mutationResult: () => ({ green: true, head_sha: 'mut00000000000000000000000000000000000001',
+    mutationResult: () => ({ green: true, head_sha: 'aaa0000000000000000000000000000000000001',
       detail: 'killed every mutant', scored: false }),
   })
   check('halted at the post-mutation Review', result.halted_at, 'Review')

@@ -42,7 +42,8 @@ def pipes_a_gate(cmd):
     for segment in re.split(r'\|\||&&|;', cmd):
         if not any(gate in segment for gate in GATES):
             continue
-        if '|' in segment:
+        # `>|` is a redirect that overrides noclobber, not a pipe.
+        if re.search(r'(?<!>)\|', segment):
             return True
     return False
 

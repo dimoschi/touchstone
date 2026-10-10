@@ -9,7 +9,7 @@ run_js_scenarios <<'JS_EOF'
 const P = 'a1b2c3d4e5f60718293a4b5c6d7e8f9012345678'
 const Q = '0123456789abcdef0123456789abcdef01234567'
 const FIX_HEAD = 'fix00000000000000000000000000000000000001'
-const MUT_HEAD = 'mut00000000000000000000000000000000000001'
+const MUT_HEAD = 'aaa0000000000000000000000000000000000001'
 const PRIOR = (n) => `TOUCHSTONE_PRIOR_HEAD_LINEAR ${n}`
 const PRIOR_OK = PRIOR(0)
 const PRIOR_MERGED = PRIOR(2)
@@ -349,9 +349,9 @@ async function scenarioR7() {
     tail.includes(`Commit range: ${P}..${FIX_HEAD}\n`), true)
   check('the run reports one reviewer', result.reviewers, 1)
   check('the head it reports is the fix round\'s, which that review read up to', result.reviewed_through, FIX_HEAD)
-  const pr = captured.calls.find(c => c.label === 'pr')?.prompt ?? ''
+  const count = captured.calls.find(c => c.label === 'pr-unreviewed')?.prompt ?? ''
   check('the PR phase still guards against unreviewed commits',
-    pr.includes(`git rev-list --count ${FIX_HEAD}..HEAD`), true)
+    count.includes(`rev-list --count ${FIX_HEAD}.."$h"`), true)
 
   const optOut = await run(resumed(prior, { ...base, args: { openPr: true, reviewers: 0 } }))
   check('args.reviewers: 0 switches the floor off', callCount(optOut.captured, 'review:fix:1:correctness'), 0)

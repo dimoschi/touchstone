@@ -146,6 +146,16 @@ function baseArgs(overrides) {
 // these scenarios reach Draft PR/PR at all.
 const DEFAULT_DIFFSTAT_BODY = '5\t0\ta.js\nTOUCHSTONE_COMMENT_LINES\nTOUCHSTONE_DIFFSTAT_END'
 
+// What the mutation verdict line prints: exit 0 when the last mutation answer
+// said green, else 5 (no green run recorded), with the gate's matching
+// trailer, at a fixed 40-hex head.
+function mutationVerifyReply(prompt, last) {
+  const run = (/printf 'TOUCHSTONE_MUTATION_VERIFY %s %s %s %s %s\\n' (\S+) /.exec(prompt) ?? [])[1] ?? ''
+  const exit = last?.green ? 0 : 5
+  return { output: `TOUCHSTONE_MUTATION_VERIFY ${run} ${exit} ${exit} ` +
+    `c0ffee0000000000000000000000000000000001 /stub-worktree/.git/touchstone-gates/${run}/mutation-verify.log` }
+}
+
 function makeAgent(scenario, captured) {
   const responses = scenario.responses ?? {}
   return async (prompt, opts) => {
@@ -153,8 +163,10 @@ function makeAgent(scenario, captured) {
     captured.calls.push({ label, prompt })
 
     if (Object.prototype.hasOwnProperty.call(responses, label)) {
+      if (label.startsWith('mutation:')) captured.lastMutation = responses[label]
       return responses[label]
     }
+    if (/^mutation-verify:\d+(:retry)?$/.test(label)) return mutationVerifyReply(prompt, captured.lastMutation)
     // Replaces the old separate ticket/plugin:version/gate:opt-in dispatches
     // (gh-118): one call, before any worktree exists, answers all three.
     if (label === 'setup') {
@@ -220,9 +232,10 @@ function makeAgent(scenario, captured) {
       return { output: `TOUCHSTONE_SIGNALS ${range}\n${JSON.stringify({ range, values })}\nTOUCHSTONE_SIGNALS_END` }
     }
     if (label.startsWith('mutation:')) {
-      return scenario.mutationResult ??
+      captured.lastMutation = scenario.mutationResult ??
         { green: true, head_sha: 'impl0000000000000000000000000000000000000',
           detail: 'stub', scored: true }
+      return captured.lastMutation
     }
     if (label === 'pr') {
       captured.prCalled = true

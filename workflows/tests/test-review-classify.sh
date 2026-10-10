@@ -132,7 +132,7 @@ async function scenarioE() {
 // code_changed_since_recorded, so the comment must carry no marker.
 async function scenarioH() {
   console.log('\n== scenario H: the post-mutation Review halt is unmarked, byte for byte')
-  const mutHead = 'mut0000000000000000000000000000000000001'
+  const mutHead = 'aaa0000000000000000000000000000000000001'
   const { result, captured } = await run({
     draftPr: { opened: true, url: 'https://example.test/pr/2', number: 2, detail: 'stub' },
     initialReview: { correctness: [], advocate: [] }, // no Fix-loop findings at all
@@ -230,7 +230,7 @@ async function scenarioL() {
     verify: (id) => id === 'f1' ? true : undefined,
     staleness: () => [],
     mutationGated: true,
-    mutationResult: () => ({ green: true, head_sha: 'mut0000000000000000000000000000000000001', detail: 'stub green', scored: true }),
+    mutationResult: () => ({ green: true, head_sha: 'aaa0000000000000000000000000000000000001', detail: 'stub green', scored: true }),
     postMutationReview: [{ title: 'Repeated Title', file: 'mutfile.js',
       claim: 'a different bug', evidence: 'e2' }],
   })
@@ -318,7 +318,7 @@ async function scenarioP() {
     verify: (id) => id === 'f1' ? true : undefined,
     staleness: () => [],
     mutationGated: true,
-    mutationResult: () => ({ green: true, head_sha: 'mut0000000000000000000000000000000000001', detail: 'stub green', scored: true }),
+    mutationResult: () => ({ green: true, head_sha: 'aaa0000000000000000000000000000000000001', detail: 'stub green', scored: true }),
     postMutationReview: [{ title: 'Off-by-one in parser', file: 'src/parser.js',
       claim: 'boundary is wrong', evidence: 'parser.js:12' }],
   })
@@ -432,7 +432,7 @@ async function scenarioT() {
     verify: (id) => id === 'f1' ? true : undefined,
     staleness: () => [],
     mutationGated: true,
-    mutationResult: () => ({ green: true, head_sha: 'mut0000000000000000000000000000000000001', detail: 'stub green', scored: true }),
+    mutationResult: () => ({ green: true, head_sha: 'aaa0000000000000000000000000000000000001', detail: 'stub green', scored: true }),
     // No reproducer of its own: this scenario is about the reference alone
     // becoming a residual note, not about gh-106's separate check of a
     // residual's own claim (scenario DD), which needs one.
@@ -546,7 +546,7 @@ async function scenarioW() {
 async function scenarioX() {
   console.log('\n== scenario X: the Mutation halt carries the residual note')
   const { result, captured } = await run(convergedWithSuspect({
-    mutationResult: () => ({ green: false, head_sha: 'mut0000000000000000000000000000000000001',
+    mutationResult: () => ({ green: false, head_sha: 'aaa0000000000000000000000000000000000001',
       detail: 'stub red', survivors: 1, scored: true }),
   }))
   check('halted at Mutation', result.halted_at, 'Mutation')
@@ -568,7 +568,7 @@ async function scenarioX() {
 async function scenarioY() {
   console.log('\n== scenario Y: the post-mutation Review halt carries the residual note plus the fresh finding')
   const { result, captured } = await run(convergedWithSuspect({
-    mutationResult: () => ({ green: true, head_sha: 'mut0000000000000000000000000000000000001', detail: 'stub green', scored: true }),
+    mutationResult: () => ({ green: true, head_sha: 'aaa0000000000000000000000000000000000001', detail: 'stub green', scored: true }),
     postMutationReview: [{ title: 'New nil deref in the added test helper',
       file: 'src/helper.js', claim: 'deref before the guard', evidence: 'helper.js:8' }],
   }))

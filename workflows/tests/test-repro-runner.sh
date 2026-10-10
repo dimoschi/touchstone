@@ -578,7 +578,7 @@ async function scenarioSettledUnmeasuredMutation() {
   console.log('\n== scenario PL: a settled re-check at the mutation head unmeasured twice halts on measurement, never blaming the mutation commits')
   const { result, captured } = await run(convergedWithSuspect({
     tailReview: [],
-    mutationResult: () => ({ green: true, head_sha: 'mut0000000000000000000000000000000000001', detail: 'stub green', scored: true }),
+    mutationResult: () => ({ green: true, head_sha: 'aaa0000000000000000000000000000000000001', detail: 'stub green', scored: true }),
     reproRuns: (label) => label.startsWith('reproduce:settled:mutation') ? null : undefined,
   }))
   check('retried once', callCount(captured, 'reproduce:settled:mutation:retry'), 1)
