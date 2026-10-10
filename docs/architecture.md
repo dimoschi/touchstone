@@ -472,14 +472,16 @@ command or relaying output (`checkLineFor` and `endLineFor` in `30-triage-plan-c
 as its own foreground Bash call. A check's line is self-contained:
 
 ```
-d="$(git -C <worktree> rev-parse --path-format=absolute --git-path touchstone-checks/<run>)" && mkdir -p "$d" && { bash -c 'cd <worktree> && <command>' >"$d/<id>.log" 2>&1; printf 'TOUCHSTONE_CHECK %s %s %s\n' <id> "$?" "$d/<id>.log"; }
+d="$(git -C <worktree> rev-parse --path-format=absolute --git-path touchstone-checks/<run> 2>/dev/null)" && mkdir -p "$d" && { bash -c 'cd <worktree> && <command>' >|"$d/<id>.log" 2>&1; printf 'TOUCHSTONE_CHECK %s %s %s\n' <id> "$?" "$d/<id>.log"; }
 ```
 
 The check's whole output, stdout and stderr, goes to
 `touchstone-checks/<run>/<id>.log` under the worktree's own git dir, so a log is never
 part of the tree, cannot dirty it, and is removed with the worktree. `<run>` is the plan
 id and the attempt number (`<planId>-<n>`): the retry of a batch writes new logs and
-leaves the first attempt's as they were. The `printf` sits after `;` rather than `&&`,
+leaves the first attempt's as they were. A later run with the same plan in the same
+worktree reuses those directories and overwrites them; every redirect is `>|`, so a
+shell with `noclobber` set still writes the log instead of failing the check. The `printf` sits after `;` rather than `&&`,
 so the exit code is read from `$?` and printed even when the check failed or called
 `exit N` itself. The only thing the shell prints per check is `TOUCHSTONE_CHECK <id>
 <exit> <log path>`, which is also why a long suite (this repo's own prints minutes of
@@ -503,13 +505,15 @@ The agent returns `output` and nothing else: the lines it saw printed, verbatim 
 order. `parseCheckRun` (a pure function in `10-schemas.js.part`, in the style of
 `parseDiffstat`) accepts that only if every discovered id appears exactly once and in
 order, each exit is an integer, each log path is absolute and ends in
-`/touchstone-checks/<run>/<id>.log` for this run and id, and the end line names this run
+`/touchstone-checks/<run>/<id>.log` for this run and id, all rows share one directory,
+and the end line names this run
 and is both last and unique. Anything else makes the whole batch unmeasured, not just
 the row at fault, with the first reason found (`no output`, `no end line`, `end line is
 not last`, `end line repeated`, `malformed end line`, `end line names run X, not Y`,
 `unexpected line ...`, `malformed check line`, `<id> reported twice`, `unexpected id
 <id>`, `<id> reported where <id> was expected`, `exit of <id> is not an integer`, `log
-path of <id> is not under this run`, `no line for <id>`). A reply that is wrong
+path of <id> is not under this run`, `no line for <id>`, `log path of <id> is not in the
+run directory`). A reply that is wrong
 anywhere is not trusted anywhere, and an unmeasured batch is never read as a pass or as
 evidence about the repo's own environment. `classifyResults` then reads exit 0 as green
 and any other exit as red, 2 and 4 included, as AGENTS.md says they are not passes.

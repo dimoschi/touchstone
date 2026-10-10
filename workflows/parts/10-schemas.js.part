@@ -140,7 +140,11 @@ const parseCheckRun = (output, checks, run) => {
     rows.push(parsed.row)
   }
   if (rows.length < checks.length) return { reason: `no line for ${checks[rows.length].id}` }
+  // One runner writes every log of a run into one directory; a row elsewhere
+  // was not printed by that runner.
   const dir = rows[0].log.slice(0, rows[0].log.lastIndexOf('/'))
+  const stray = rows.find(r => r.log.slice(0, r.log.lastIndexOf('/')) !== dir)
+  if (stray) return { reason: `log path of ${stray.id} is not in the run directory` }
   return { rows, dirty: end.dirty, statusLog: `${dir}/status.log` }
 }
 // The only heading that is a check list. Only trailing whitespace is

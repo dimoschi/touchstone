@@ -27,14 +27,14 @@ async function scenarioPromptIsOneLinePerCheck() {
   check('the run is the plan id and the attempt', /^[0-9a-f]{8}-1$/.test(id), true)
   const lineFor = (n, cmd) =>
     `d="$(git -C /tmp/stub-worktree rev-parse --path-format=absolute --git-path touchstone-checks/${id} 2>/dev/null)" && ` +
-    `mkdir -p "$d" && { bash -c 'cd /tmp/stub-worktree && ${cmd}' >"$d/check:${n}.log" 2>&1; ` +
+    `mkdir -p "$d" && { bash -c 'cd /tmp/stub-worktree && ${cmd}' >|"$d/check:${n}.log" 2>&1; ` +
     `printf 'TOUCHSTONE_CHECK %s %s %s\\n' check:${n} "$?" "$d/check:${n}.log"; }`
   check('check:1 is one line that logs to the git dir and prints only its id, exit and log',
     runnerLineOf(p, 'check:1'), lineFor(1, 'make test'))
   check('a command with quotes is quoted once, in the same line',
     runnerLineOf(p, 'check:2'), lineFor(2, `bash scripts/echo.sh '\\''a # b'\\''`))
   const endLine = `d="$(git -C /tmp/stub-worktree rev-parse --path-format=absolute --git-path touchstone-checks/${id} 2>/dev/null)" && ` +
-    `mkdir -p "$d" && git -C /tmp/stub-worktree status --porcelain >"$d/status.log" 2>"$d/status.err" && ` +
+    `mkdir -p "$d" && git -C /tmp/stub-worktree status --porcelain >|"$d/status.log" 2>|"$d/status.err" && ` +
     `{ if [ -s "$d/status.log" ]; then s=dirty; else s=clean; fi; ` +
     `printf 'TOUCHSTONE_CHECKS_END %s %s\\n' ${id} "$s"; }`
   const fence = /```bash\n([\s\S]*?)\n```/.exec(p)?.[1].split('\n')
@@ -102,6 +102,8 @@ const REJECTED = [
     'log path of check:1 is not under this run'],
   ['a log path of another check', (l) => [l[0].replace('check:1.log', 'check:2.log'), l[1], l[2]].join('\n'),
     'log path of check:1 is not under this run'],
+  ['a log in another directory than the other rows', (l) => [l[0].replace(/ (\/.*)\/touchstone-checks\//, ' /elsewhere/touchstone-checks/'), l[1], l[2]].join('\n'),
+    'log path of check:2 is not in the run directory'],
   ['a relative log path', (l) => [l[0].replace(/ \/.*touchstone-checks/, ' touchstone-checks'), l[1], l[2]].join('\n'),
     'log path of check:1 is not under this run'],
 ]
@@ -156,6 +158,7 @@ async function scenarioBaselineHaltsWhenStillUnmeasured() {
   check('the note gives each attempt\'s reason',
     (result.note ?? '').includes('first run no end line; second run no output'), true)
   check('the unmeasured check is named', result.checks?.unmeasured?.map(u => u.id), ['check:1'])
+  check('the plan is kept in the halt', typeof result.plan, 'string')
   check('no fixer ran', [callCount(captured, 'checks:fix'), callCount(captured, 'fix:1')], [0, 0])
   check('nothing is red', result.checks?.red?.length, 0)
 }
@@ -359,10 +362,30 @@ async function scenarioRealRunnerLargeOutput() {
   }
 }
 
+async function scenarioRealRunnerNoclobber() {
+  console.log('\n== scenario RV: a shell with noclobber set, writing over an existing run directory, still measures')
+  const dir = scratchRepo()
+  try {
+    const { scenario } = realRun(dir, 'echo fine')
+    scenario.checkRuns = (attempt, prompt) => {
+      const fence = /```bash\n([\s\S]*?)\n```/.exec(prompt)
+      const lines = fence ? fence[1].split('\n') : []
+      const once = () => lines.map(line => spawnSync('bash', ['-c', `set -o noclobber; ${line}`], { encoding: 'utf8' }).stdout).join('')
+      once()
+      return { output: once() }
+    }
+    const { result } = await run(scenario)
+    check('nothing is unmeasured', result.checks?.unmeasured?.length, 0)
+    check('the passing check is not red', result.checks?.red?.length, 0)
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true })
+  }
+}
+
 const SCENARIOS = [scenarioPromptIsOneLinePerCheck, scenarioParserMeasures, scenarioParserTolerance,
   scenarioParserRejects, scenarioNullReplyIsUnmeasured, scenarioBaselineRetriesOnce,
   scenarioBaselineHaltsWhenStillUnmeasured, scenarioUnmeasuredAfterImplementHalts,
-  scenarioFixersGetLogPaths, scenarioRealRunner, scenarioRealRunnerDirtyTree,
+  scenarioFixersGetLogPaths, scenarioRealRunner, scenarioRealRunnerDirtyTree, scenarioRealRunnerNoclobber,
   scenarioRealRunnerStatusWarning, scenarioRealRunnerRevParseWarning, scenarioRealRunnerCwd,
   scenarioRealRunnerLargeOutput]
 JS_EOF

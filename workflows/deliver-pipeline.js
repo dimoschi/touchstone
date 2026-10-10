@@ -520,7 +520,11 @@ const parseCheckRun = (output, checks, run) => {
     rows.push(parsed.row)
   }
   if (rows.length < checks.length) return { reason: `no line for ${checks[rows.length].id}` }
+  // One runner writes every log of a run into one directory; a row elsewhere
+  // was not printed by that runner.
   const dir = rows[0].log.slice(0, rows[0].log.lastIndexOf('/'))
+  const stray = rows.find(r => r.log.slice(0, r.log.lastIndexOf('/')) !== dir)
+  if (stray) return { reason: `log path of ${stray.id} is not in the run directory` }
   return { rows, dirty: end.dirty, statusLog: `${dir}/status.log` }
 }
 // The only heading that is a check list. Only trailing whitespace is
@@ -2032,7 +2036,7 @@ const bashCommandFor = (c) => `bash -c ${shQuote(`cd ${shQuote(wt.path)} && ${c.
 const logDirFor = (run) =>
   `d="$(git -C ${shQuote(wt.path)} rev-parse --path-format=absolute --git-path touchstone-checks/${run} 2>/dev/null)"`
 const checkLineFor = (c, run) =>
-  `${logDirFor(run)} && mkdir -p "$d" && { ${bashCommandFor(c)} >"$d/${c.id}.log" 2>&1; ` +
+  `${logDirFor(run)} && mkdir -p "$d" && { ${bashCommandFor(c)} >|"$d/${c.id}.log" 2>&1; ` +
   `printf 'TOUCHSTONE_CHECK %s %s %s\\n' ${c.id} "$?" "$d/${c.id}.log"; }`
 // The tree is looked at once, after the last check: a check that writes to it
 // (a ledger, a generated file) must be visible, not silently carried into
@@ -2040,7 +2044,7 @@ const checkLineFor = (c, run) =>
 // stderr to status.err; a human reads both, so neither is ever relayed. Only
 // stdout decides dirty.
 const endLineFor = (run) =>
-  `${logDirFor(run)} && mkdir -p "$d" && git -C ${shQuote(wt.path)} status --porcelain >"$d/status.log" 2>"$d/status.err" && ` +
+  `${logDirFor(run)} && mkdir -p "$d" && git -C ${shQuote(wt.path)} status --porcelain >|"$d/status.log" 2>|"$d/status.err" && ` +
   `{ if [ -s "$d/status.log" ]; then s=dirty; else s=clean; fi; ` +
   `printf 'TOUCHSTONE_CHECKS_END %s %s\\n' ${run} "$s"; }`
 const executeChecks = async (checks = discoveredChecks) => {
@@ -2181,6 +2185,7 @@ if (discoveredChecks.length && checksBlocking) {
   if (baseline.unmeasured.length) {
     sChecksPre.close()
     return await halted('Implement', {
+      plan: plan.plan,
       checks: { discovered: discoveredChecks.length, blocking: checksBlocking, red: [],
         unmeasured: baseline.unmeasured,
         detail: 'halted before any check ran against real implementation work' },
@@ -2195,6 +2200,7 @@ if (discoveredChecks.length && checksBlocking) {
   if (baseline.dirty) {
     sChecksPre.close()
     return await halted('Implement', {
+      plan: plan.plan,
       checks: { discovered: discoveredChecks.length, blocking: checksBlocking, red: [],
         detail: 'halted before any check ran against real implementation work' },
       note: `A discovered check wrote to the working tree while establishing ` +
