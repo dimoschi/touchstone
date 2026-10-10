@@ -7,9 +7,11 @@ echo "== static: the join reads only v.id, never v.title"
 check "no v.title reference remains" \
   "$(grep -c 'v\.title' "$SCRIPT" || true)" 0
 
-echo "== static: EXECUTE_RESULT requires id, exit_code and output per row"
-check "EXECUTE_RESULT lists id, exit_code, output in its required array" \
-  "$(grep -c "required: \['id', 'exit_code', 'output'\]" "$SCRIPT" || true)" 1
+echo "== static: reproduce:* returns only the runner's printed lines"
+check "no EXECUTE_RESULT schema with model-reported exit codes remains" \
+  "$(grep -c '^const EXECUTE_RESULT' "$SCRIPT" || true)" 0
+check "executeAtHead dispatches with REPRO_RUN" \
+  "$(grep -Fc "{ label, schema: REPRO_RUN, model: 'haiku', effort: 'low' }" "$SCRIPT" || true)" 1
 check "no LLM verifier schema (VERDICTS) remains" \
   "$(grep -c '^const VERDICTS' "$SCRIPT" || true)" 0
 
@@ -25,8 +27,8 @@ check "the contract demands a self-contained command" \
   "$(grep -Fc 'The command must be self-contained: set any environment' "$SCRIPT" || true)" 1
 check "outcomeOf is the one pure function deciding a row's disposition" \
   "$(grep -Fc 'const outcomeOf = (row) =>' "$SCRIPT" || true)" 1
-check "the executor prompt asks for combined stdout+stderr verbatim and complete" \
-  "$(grep -Fc 'verbatim and complete -- do not summarise, truncate, or interpret' "$SCRIPT" || true)" 1
+check "the shell, not a model, decides the marker, whole-line" \
+  "$(grep -Fc "if grep -aqxE '[[:space:]]*\${REPRODUCED_MARKER}[[:space:]]*'" "$SCRIPT" || true)" 1
 
 echo ""
 echo "== static: gh-106 -- FINDINGS requires category from the closed enum, first among its properties"

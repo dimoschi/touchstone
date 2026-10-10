@@ -192,9 +192,15 @@ function makeAgent(scenario, captured) {
     // open-vs-note for whatever candidates it raised; this file's one scenario
     // that reaches Review needs its finding to reproduce (nonzero, with the
     // gh-113 marker) so it is still open when the fixer halts on it.
+    // The reply is what the runner's lines print: the ids, the run and the log
+    // directory are read back out of the prompt.
     if (label === 'reproduce:review') {
-      const ids = [...prompt.matchAll(/\[(f\d+)\]/g)].map(m => m[1])
-      return { results: ids.map(id => ({ id, exit_code: 1, output: 'stub: still reproduces\nTOUCHSTONE_DEFECT_REPRODUCED' })), dirty: false }
+      const ids = [...prompt.matchAll(/printf 'TOUCHSTONE_REPRO %s %s %s %s\\n' (\S+) /g)].map(m => m[1])
+      const run = (/printf 'TOUCHSTONE_REPRO_END %s %s %s\\n' (\S+) /.exec(prompt) ?? [])[1]
+      const dir = `/tmp/stub-worktree/.git/touchstone-repro/${run}`
+      return { output: [`TOUCHSTONE_REPRO_BEFORE ${run} clean`,
+        ...ids.map(id => `TOUCHSTONE_REPRO ${id} 1 1 ${dir}/${id}.log`),
+        `TOUCHSTONE_REPRO_END ${run} clean ${dir}/status.log`].join('\n') }
     }
     if (['ticket', 'plugin:version', 'gate:opt-in', 'checks:discover', 'run-record'].includes(label)) {
       throw new Error(`agent '${label}' should no longer be dispatched (folded into setup/branch, or dropped)`)

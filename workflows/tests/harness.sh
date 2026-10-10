@@ -74,7 +74,8 @@ function baseArgs(overrides) {
 // reproduce and staleness stubs learn which ids the script actually assigned,
 // without the scenario needing to predict them.
 function idsIn(prompt) {
-  return [...prompt.matchAll(/\[(f\d+)\]/g)].map(m => m[1])
+  return [...prompt.matchAll(/\[(f\d+)\]|printf 'TOUCHSTONE_REPRO %s %s %s %s\\n' (f\d+) /g)]
+    .map(m => m[1] ?? m[2])
 }
 
 // The names change-signals.sh prints, and a reply to the signals probe that
@@ -208,29 +209,66 @@ function defaultHunkLines(files) {
 // supplies its own via scenario.outputFor.
 const REPRODUCED_MARKER = 'TOUCHSTONE_DEFECT_REPRODUCED'
 
+// What a reproduce:* runner prints. The ids and the run are read back out of
+// the prompt's own lines, never predicted by a scenario. Logs are written for
+// real, under this harness's own work dir, so a scenario can read what a log
+// path a finding carries holds.
+const STUB_GIT_DIR = path.join(path.dirname(process.argv[1]), 'stub-git')
+function reproIdsOf(prompt) {
+  return [...prompt.matchAll(/printf 'TOUCHSTONE_REPRO %s %s %s %s\\n' (\S+) "\$e"/g)].map(m => m[1])
+}
+function reproRunOf(prompt) {
+  return (/printf 'TOUCHSTONE_REPRO_END %s %s %s\\n' (\S+) "\$s"/.exec(prompt) ?? [])[1] ?? ''
+}
+function reproDirOf(run) {
+  return `${STUB_GIT_DIR}/touchstone-repro/${run}`
+}
+// The stub stands in for the shell's grep, so it applies the same rule: a line
+// that is exactly the marker once surrounding whitespace is trimmed.
+function markerLineIn(output) {
+  return String(output).split(/\r?\n/).some(l => l.trim() === REPRODUCED_MARKER)
+}
+// Well-formed runner output for the prompt's own lines. rows are
+// { id, exit, output }; a range prompt gets the hunks block only when
+// hunkLines is an array, so leaving it out reads as a runner that skipped it.
+function reproOutput(prompt, rows, { before = 'clean', dirty = false, porcelain = '', hunkLines } = {}) {
+  const run = reproRunOf(prompt)
+  const dir = reproDirOf(run)
+  fs.mkdirSync(dir, { recursive: true })
+  const lines = [`TOUCHSTONE_REPRO_BEFORE ${run} ${before}`]
+  for (const r of rows) {
+    fs.writeFileSync(`${dir}/${r.id}.log`, r.output ?? '')
+    lines.push(`TOUCHSTONE_REPRO ${r.id} ${r.exit} ${markerLineIn(r.output ?? '') ? 1 : 0} ${dir}/${r.id}.log`)
+  }
+  if (prompt.includes('TOUCHSTONE_HUNKS_BEGIN') && Array.isArray(hunkLines)) {
+    lines.push(`TOUCHSTONE_HUNKS_BEGIN ${run}`, ...hunkLines, `TOUCHSTONE_HUNKS_END ${run} ${hunkLines.length}`)
+  }
+  fs.writeFileSync(`${dir}/status.log`, dirty ? `${porcelain}\n` : '')
+  lines.push(`TOUCHSTONE_REPRO_END ${run} ${dirty ? 'dirty' : 'clean'} ${dir}/status.log`)
+  return lines.join('\n')
+}
+
+// exitFn(id) undefined drops that id's row, which the parser reads as the
+// whole run unmeasured: a runner cannot leave out one row and be trusted on
+// the others.
 function reproduceResponse(prompt, scenario, exitFn, hunkLines) {
-  const ids = idsIn(prompt)
-  const results = []
-  for (const id of ids) {
+  const rows = []
+  for (const id of reproIdsOf(prompt)) {
     const code = exitFn(id)
-    if (code === undefined) continue // no executor row: not-executed / stays open
-    const returnedId = scenario.verifyBracketed ? `[${id}]` : id
+    if (code === undefined) continue
     const output = scenario.outputFor
       ? scenario.outputFor(id, code)
       : `stub reproduce output for ${id} (${code})` +
         (code !== 0 && code !== 126 && code !== 127 ? `\n${REPRODUCED_MARKER}` : '')
-    results.push({ id: returnedId, exit_code: code, output })
+    rows.push({ id, exit: code, output })
   }
-  if (scenario.injectBogusVerdict) {
-    results.push({ id: 'f999-not-a-real-finding', exit_code: 0, output: 'bogus' })
-  }
-  return {
-    results,
+  if (scenario.injectBogusVerdict) rows.push({ id: 'f999', exit: 0, output: 'bogus' })
+  return { output: reproOutput(prompt, rows, {
+    before: scenario.porcelainBefore ? 'dirty' : 'clean',
     dirty: scenario.reproducerDirty === true,
-    porcelain: scenario.reproducerDirty ? (scenario.reproducerPorcelain ?? 'M some-file.txt') : '',
-    porcelain_before: scenario.porcelainBefore ?? '',
-    ...(hunkLines !== undefined ? { diff_lines: hunkLines } : {}),
-  }
+    porcelain: scenario.reproducerPorcelain ?? 'M some-file.txt',
+    hunkLines,
+  }) }
 }
 
 function makeAgent(scenario, captured) {
@@ -429,8 +467,15 @@ function makeAgent(scenario, captured) {
     // own rerun of whatever came back with no row -- matched on the full
     // label below (dirtyAt included), then dispatched on the label with any
     // trailing ':retry' stripped, with `retry` passed on to the scenario.
+    // scenario.reproRuns(label, prompt) answers a reproduce:* call itself:
+    // { output }, or null for no answer; undefined falls through to the stubs.
+    if (label.startsWith('reproduce:') && scenario.reproRuns) {
+      const reply = scenario.reproRuns(label, prompt)
+      if (reply !== undefined) return reply
+    }
     if (scenario.dirtyAt === label) {
-      return { results: [], dirty: true, porcelain: '?? stray-file', porcelain_before: '' }
+      return reproduceResponse(prompt, { reproducerDirty: true, reproducerPorcelain: '?? stray-file' },
+        () => 1, [])
     }
     const retry = /^reproduce:.+:retry$/.test(label)
     const base = retry ? label.slice(0, -':retry'.length) : label

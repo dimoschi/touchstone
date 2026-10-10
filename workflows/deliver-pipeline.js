@@ -29,7 +29,7 @@ export const meta = {
 // against the manifest in scripts/check-version-bump.sh, so drift is a
 // gate's job rather than something this script verifies about itself.
 const PLUGIN_NAME = 'touchstone'
-const PIPELINE_VERSION = '0.32.0'
+const PIPELINE_VERSION = '0.33.0'
 
 // Boundaries. Wall-clock deadlines are not expressible here (no Date.now, by
 // design); the bounds are rounds, counts, and token budget instead.
@@ -473,15 +473,15 @@ const CHECK_END_LINE = /^TOUCHSTONE_CHECKS_END (\S+) (clean|dirty)$/
 const CHECK_ROW_LINE = /^TOUCHSTONE_CHECK (\S+) (\S+) (.+)$/
 // The end line closes the batch: it names this run and says whether the tree
 // was dirty once every check had run. It must be the last line and the only one.
-const parseCheckEnd = (lines, run) => {
-  const ends = lines.filter(l => l.startsWith(CHECK_END_PREFIX))
+const parseCheckEnd = (lines, run, prefix = CHECK_END_PREFIX, pattern = CHECK_END_LINE) => {
+  const ends = lines.filter(l => l.startsWith(prefix))
   if (!ends.length) return { reason: 'no end line' }
   if (ends.length > 1) return { reason: 'end line repeated' }
   if (lines[lines.length - 1] !== ends[0]) return { reason: 'end line is not last' }
-  const m = CHECK_END_LINE.exec(ends[0])
+  const m = pattern.exec(ends[0])
   if (!m) return { reason: 'malformed end line' }
   if (m[1] !== run) return { reason: `end line names run ${m[1]}, not ${run}` }
-  return { dirty: m[2] === 'dirty' }
+  return { dirty: m[2] === 'dirty', path: m[3] }
 }
 // One check line, read against the rows already accepted: the next row has to
 // be the next discovered check, and its log has to be where this run puts it.
@@ -508,8 +508,11 @@ const parseCheckRow = (line, checks, rows, run) => {
 // has to come last. Anything else is not a partial result: the whole batch is
 // unmeasured, with the first reason found, because a reply that is wrong
 // anywhere cannot be trusted anywhere. checks is never empty here.
+const runnerLinesOf = (output) =>
+  String(output ?? '').split(/\r?\n/).map(l => l.trimEnd()).filter(l => l !== '')
+const dirOf = (p) => p.slice(0, p.lastIndexOf('/'))
 const parseCheckRun = (output, checks, run) => {
-  const lines = String(output ?? '').split(/\r?\n/).map(l => l.trimEnd()).filter(l => l !== '')
+  const lines = runnerLinesOf(output)
   if (!lines.length) return { reason: 'no output' }
   const end = parseCheckEnd(lines, run)
   if (end.reason) return end
@@ -522,10 +525,103 @@ const parseCheckRun = (output, checks, run) => {
   if (rows.length < checks.length) return { reason: `no line for ${checks[rows.length].id}` }
   // One runner writes every log of a run into one directory; a row elsewhere
   // was not printed by that runner.
-  const dir = rows[0].log.slice(0, rows[0].log.lastIndexOf('/'))
-  const stray = rows.find(r => r.log.slice(0, r.log.lastIndexOf('/')) !== dir)
+  const dir = dirOf(rows[0].log)
+  const stray = rows.find(r => dirOf(r.log) !== dir)
   if (stray) return { reason: `log path of ${stray.id} is not in the run directory` }
   return { rows, dirty: end.dirty, statusLog: `${dir}/status.log` }
+}
+
+// What a reproduce:* agent returns, read the same way as CHECK_RUN: the lines
+// the runner printed (reproLinesFor in 50-classify-fix.js.part), copied back
+// whole. No reproducer's output, exit code or porcelain passes through a model.
+const REPRO_RUN = {
+  type: 'object', additionalProperties: false, required: ['output'],
+  properties: { output: { type: 'string' } },
+}
+const REPRO_BEFORE_PREFIX = 'TOUCHSTONE_REPRO_BEFORE'
+const REPRO_BEFORE_LINE = /^TOUCHSTONE_REPRO_BEFORE (\S+) (clean|dirty)$/
+const REPRO_ROW_PREFIX = 'TOUCHSTONE_REPRO '
+const REPRO_ROW_LINE = /^TOUCHSTONE_REPRO (\S+) (\S+) (\S+) (.+)$/
+// The end line carries the status log's path, unlike the checks end line,
+// because a call that runs no reproducer (the mutation-hunk fetch) has no row
+// to read the run directory from, and a dirty tree's halt has to name it.
+const REPRO_END_PREFIX = 'TOUCHSTONE_REPRO_END'
+const REPRO_END_LINE = /^TOUCHSTONE_REPRO_END (\S+) (clean|dirty) (.+)$/
+const HUNKS_BEGIN_PREFIX = 'TOUCHSTONE_HUNKS_BEGIN'
+const HUNKS_BEGIN_LINE = /^TOUCHSTONE_HUNKS_BEGIN (\S+)$/
+const HUNKS_END_PREFIX = 'TOUCHSTONE_HUNKS_END'
+const HUNKS_END_LINE = /^TOUCHSTONE_HUNKS_END (\S+) (\S+)$/
+const underRun = (p, run, name) => p.startsWith('/') && p.endsWith(`/touchstone-repro/${run}/${name}`)
+const parseReproRow = (line, ids, rows, run) => {
+  if (!line.startsWith(REPRO_ROW_PREFIX)) {
+    return { reason: `unexpected line ${JSON.stringify(line.slice(0, 80))}` }
+  }
+  const m = REPRO_ROW_LINE.exec(line)
+  if (!m) return { reason: 'malformed reproducer line' }
+  const [, id, exit, marker, log] = m
+  if (rows.some(r => r.id === id)) return { reason: `${id} reported twice` }
+  if (!ids.includes(id)) return { reason: `unexpected id ${id}` }
+  const want = ids[rows.length]
+  if (id !== want) return { reason: `${id} reported where ${want} was expected` }
+  if (!/^\d+$/.test(exit)) return { reason: `exit of ${id} is not an integer` }
+  if (marker !== '0' && marker !== '1') return { reason: `marker of ${id} is not 0 or 1` }
+  if (!underRun(log, run, `${id}.log`)) return { reason: `log path of ${id} is not under this run` }
+  return { row: { id, exit: Number(exit), reproduced: marker === '1', log } }
+}
+// The block between the begin and end lines is the kept diff header lines,
+// and the end line's count, computed by the shell, has to match them.
+const parseHunksBlock = (body, i, run) => {
+  if (i >= body.length || !body[i].startsWith(HUNKS_BEGIN_PREFIX)) return { reason: 'no hunks block' }
+  const begin = HUNKS_BEGIN_LINE.exec(body[i])
+  if (!begin) return { reason: 'malformed hunks begin line' }
+  if (begin[1] !== run) return { reason: `hunks block names run ${begin[1]}, not ${run}` }
+  const j = body.findIndex((l, k) => k > i && l.startsWith(HUNKS_END_PREFIX))
+  if (j < 0) return { reason: 'no hunks end line' }
+  const kept = body.slice(i + 1, j)
+  const stray = kept.find(l => !l.startsWith('+++ ') && !l.startsWith('@@ '))
+  if (stray !== undefined) return { reason: `unexpected hunk line ${JSON.stringify(stray.slice(0, 80))}` }
+  const end = HUNKS_END_LINE.exec(body[j])
+  if (!end || !/^\d+$/.test(end[2])) return { reason: 'malformed hunks end line' }
+  if (end[1] !== run) return { reason: `hunks end line names run ${end[1]}, not ${run}` }
+  if (Number(end[2]) !== kept.length) {
+    return { reason: `hunks count ${end[2]} does not match ${kept.length} line(s)` }
+  }
+  return { hunkLines: kept, next: j + 1 }
+}
+// Pure, like parseCheckRun: the before line first, one row per runnable id in
+// order, the hunks block when a range was asked for, the end line last, and
+// every log in this run's one directory. Anything else is not a partial
+// result: the whole run is unmeasured, with the first reason found.
+const parseReproRun = (output, ids, run, withHunks) => {
+  const lines = runnerLinesOf(output)
+  if (!lines.length) return { reason: 'no output' }
+  if (!lines[0].startsWith(REPRO_BEFORE_PREFIX)) return { reason: 'no before line' }
+  const before = REPRO_BEFORE_LINE.exec(lines[0])
+  if (!before) return { reason: 'malformed before line' }
+  if (before[1] !== run) return { reason: `before line names run ${before[1]}, not ${run}` }
+  const end = parseCheckEnd(lines, run, REPRO_END_PREFIX, REPRO_END_LINE)
+  if (end.reason) return end
+  const body = lines.slice(1, -1)
+  const rows = []
+  let i = 0
+  for (; i < body.length && !body[i].startsWith(HUNKS_BEGIN_PREFIX); i++) {
+    const parsed = parseReproRow(body[i], ids, rows, run)
+    if (parsed.reason) return parsed
+    rows.push(parsed.row)
+  }
+  if (rows.length < ids.length) return { reason: `no line for ${ids[rows.length]}` }
+  let hunkLines = null
+  if (withHunks) {
+    const block = parseHunksBlock(body, i, run)
+    if (block.reason) return block
+    ;({ hunkLines, next: i } = block)
+  }
+  if (i < body.length) return { reason: `unexpected line ${JSON.stringify(body[i].slice(0, 80))}` }
+  const dir = dirOf(end.path)
+  if (!underRun(end.path, run, 'status.log')) return { reason: 'status log is not in the run directory' }
+  const stray = rows.find(r => dirOf(r.log) !== dir)
+  if (stray) return { reason: `log path of ${stray.id} is not in the run directory` }
+  return { rows, before: before[2] === 'dirty', dirty: end.dirty, statusLog: end.path, hunkLines }
 }
 // The only heading that is a check list. Only trailing whitespace is
 // ignored: '## checks', '### Checks', '##Checks', '## Checks ##' and
@@ -714,12 +810,12 @@ const BLOCKING_CATEGORIES = new Set(['wrong-result', 'crash', 'gate-bypass', 'un
 // serious first, and logs what it dropped.
 const MAX_FINDINGS_PER_LENS = 5
 // One command, run from the worktree root: exits 0 when the code is correct.
-// A nonzero exit only counts as a demonstration when the executor's raw
+// A nonzero exit only counts as a demonstration when the reproducer's own
 // output also carries REPRODUCED_MARKER on a line of its own; nonzero without
 // it means the command itself failed to run, not that it showed the defect.
-// expected/actual hold what it prints. The script decides on exit_code plus
-// the marker, never on a model's account of it -- the same principle as
-// CHECK_RUN below.
+// expected/actual hold what it prints. The script decides on the exit code
+// and marker flag the shell printed, never on a model's account of them --
+// the same principle as CHECK_RUN above.
 const REPRODUCER = {
   type: 'object', additionalProperties: false,
   required: ['kind', 'command', 'expected', 'actual'],
@@ -729,23 +825,19 @@ const REPRODUCER = {
   },
 }
 // Printed by a reproducer on a line of its own when, and only when, it has
-// observed the defect. Matched whole-line (split, trim, ===) against the
-// executor's raw output, never as a substring: a `set -x` echo of this same
-// text, or a stack-trace source line that happens to mention it, must not
-// pass as a demonstration.
+// observed the defect. The runner's grep matches it whole-line (surrounding
+// whitespace, a CR included, allowed), never as a substring: a `set -x` echo
+// of this same text, or a stack-trace source line that happens to mention it,
+// must not pass as a demonstration.
 const REPRODUCED_MARKER = 'TOUCHSTONE_DEFECT_REPRODUCED'
-const hasMarkerLine = (output) =>
-  String(output ?? '').split(/\r?\n/).some((line) => line.trim() === REPRODUCED_MARKER)
-// The one place that turns an executor row into what it actually showed.
-// Read against the row's raw, untruncated output -- truncateOutput below
-// runs only on the copy that gets stored, never on the copy this reads -- so
-// a long log can never cut the marker off and turn a real demonstration into
-// an error.
+// The one place that turns a runner row into what it actually showed. The
+// marker flag was decided by the shell against the whole log, so a long
+// output can never cut the marker off.
 const outcomeOf = (row) => {
   if (!row) return 'not-executed'
   if (row.exit_code === 0) return 'passed'
   if (row.exit_code === 126 || row.exit_code === 127) return 'could-not-run'
-  return hasMarkerLine(row.output) ? 'reproduced' : 'errored'
+  return row.reproduced ? 'reproduced' : 'errored'
 }
 const FINDINGS = {
   type: 'object', additionalProperties: false, required: ['findings'],
@@ -796,32 +888,6 @@ const DUPES = {
         },
       },
     },
-  },
-}
-// Replaces the old LLM verifier (VERDICTS): whether a finding is fixed is
-// decided by executing its reproducer, never by a model's judgement of a
-// diff. One row per reproducer that actually ran; a finding whose id is
-// missing here was not executed, and executeAtHead() below leaves it open
-// rather than guessing why. diff_lines is present only when the call also
-// fetched a range's new-side hunks (the header lines of
-// `git diff --unified=0`), for classify()'s out-of-range rule.
-const EXECUTE_RESULT = {
-  type: 'object', additionalProperties: false, required: ['results', 'dirty'],
-  properties: {
-    results: {
-      type: 'array',
-      items: {
-        type: 'object', additionalProperties: false,
-        required: ['id', 'exit_code', 'output'],
-        properties: {
-          id: { type: 'string' }, exit_code: { type: 'integer' }, output: { type: 'string' },
-        },
-      },
-    },
-    dirty: { type: 'boolean' },
-    porcelain: { type: 'string' },
-    porcelain_before: { type: 'string' },
-    diff_lines: { type: 'array', items: { type: 'string' } },
   },
 }
 // A fix round is a code change like any other, so the script has to know where
@@ -2033,8 +2099,8 @@ let checkAttempt = 0
 // tree (an unreadable excludes or attributes file) would otherwise read as an
 // unexpected line, or as a dirty tree.
 const bashCommandFor = (c) => `bash -c ${shQuote(`cd ${shQuote(wt.path)} && ${c.command}`)}`
-const logDirFor = (run) =>
-  `d="$(git -C ${shQuote(wt.path)} rev-parse --path-format=absolute --git-path touchstone-checks/${run} 2>/dev/null)"`
+const logDirFor = (run, area = 'touchstone-checks') =>
+  `d="$(git -C ${shQuote(wt.path)} rev-parse --path-format=absolute --git-path ${area}/${run} 2>/dev/null)"`
 const checkLineFor = (c, run) =>
   `${logDirFor(run)} && mkdir -p "$d" && { ${bashCommandFor(c)} >|"$d/${c.id}.log" 2>&1; ` +
   `printf 'TOUCHSTONE_CHECK %s %s %s\\n' ${c.id} "$?" "$d/${c.id}.log"; }`
@@ -2042,61 +2108,54 @@ const checkLineFor = (c, run) =>
 // (a ledger, a generated file) must be visible, not silently carried into
 // whatever commits next. The porcelain goes to a log beside the others and its
 // stderr to status.err; a human reads both, so neither is ever relayed. Only
-// stdout decides dirty.
-const endLineFor = (run) =>
-  `${logDirFor(run)} && mkdir -p "$d" && git -C ${shQuote(wt.path)} status --porcelain >|"$d/status.log" 2>|"$d/status.err" && ` +
-  `{ if [ -s "$d/status.log" ]; then s=dirty; else s=clean; fi; ` +
-  `printf 'TOUCHSTONE_CHECKS_END %s %s\\n' ${run} "$s"; }`
+// stdout decides dirty. reproduce:* reuses this for its before and end lines,
+// under its own area, log name and tag.
+const statusLineFor = (run, { area = 'touchstone-checks', name = 'status',
+  tag = 'TOUCHSTONE_CHECKS_END', withPath = false } = {}) =>
+  `${logDirFor(run, area)} && mkdir -p "$d" && git -C ${shQuote(wt.path)} status --porcelain >|"$d/${name}.log" 2>|"$d/${name}.err" && ` +
+  `{ if [ -s "$d/${name}.log" ]; then s=dirty; else s=clean; fi; ` +
+  (withPath
+    ? `printf '${tag} %s %s %s\\n' ${run} "$s" "$d/${name}.log"; }`
+    : `printf '${tag} %s %s\\n' ${run} "$s"; }`)
+const endLineFor = (run) => statusLineFor(run)
+// The instructions every runner call gets around its fenced lines: checks:run
+// and reproduce:* alike.
+const runnerPrompt = (label, lines) =>
+  `[touchstone: ${label}]\n` +
+  `Run each line between the fence lines below as its own Bash call, exactly ` +
+  `as written, then STOP. Do not fix, edit, or investigate a failure; a later ` +
+  `phase does that.\n` +
+  `Every line is complete and self-contained: it runs one step, writes that ` +
+  `step's output to a log file itself, and prints only what the script reads ` +
+  `back. Never edit, merge, split, reorder or re-quote a line, and never add ` +
+  `to one.\n` +
+  `This one call is the exception to the rule above about never running ` +
+  `cd, and only in the bash -c form each line already takes: its cd ` +
+  `runs inside a child shell, which does not move this session's own ` +
+  `working directory. Never split one into a bare cd ${wt.path} && ` +
+  `<command>, which does.\n` +
+  `Run the lines one at a time, in the order given, each in the ` +
+  `foreground with a Bash timeout of 600000 ms: never with ` +
+  `run_in_background, never several at once, and wait for each to return ` +
+  `before starting the next. A call that does not return within the ` +
+  `timeout printed nothing and is simply not reported.\n` +
+  `Return output: every line the calls printed, copied verbatim and in ` +
+  `order, one per line, with no fence, comment or summary of your own. Never ` +
+  `write, change or reorder a line yourself; a line you did not see printed ` +
+  `is not reported.\n` +
+  '```bash\n' + lines.join('\n') + '\n```'
 const executeChecks = async (checks = discoveredChecks) => {
   checkAttempt++
   const run = `${planId}-${checkAttempt}`
   const out = await treeAgent(
-    `[touchstone: checks:run]\n` +
-    `Run each line between the fence lines below as its own Bash call, exactly ` +
-    `as written, then STOP. Do not fix, edit, or investigate a failure; a later ` +
-    `phase does that.\n` +
-    `Every line is complete and self-contained: it runs one check, writes that ` +
-    `check's output to a log file itself, and prints one line about it. Never ` +
-    `edit, merge, split, reorder or re-quote a line, and never add to one.\n` +
-    `This one call is the exception to the rule above about never running ` +
-    `cd, and only in the bash -c form each line already takes: its cd ` +
-    `runs inside a child shell, which does not move this session's own ` +
-    `working directory. Never split one into a bare cd ${wt.path} && ` +
-    `<command>, which does.\n` +
-    `Run the lines one at a time, in the order given, each in the ` +
-    `foreground with a Bash timeout of 600000 ms: never with ` +
-    `run_in_background, never several at once, and wait for each to return ` +
-    `before starting the next. A call that does not return within the ` +
-    `timeout printed nothing and is simply not reported.\n` +
-    `Return output: every line the calls printed, copied verbatim and in ` +
-    `order, one per line, with no fence, comment or summary of your own. Never ` +
-    `write, change or reorder a line yourself; a line you did not see printed ` +
-    `is not reported.\n` +
-    '```bash\n' +
-    [...checks.map(c => checkLineFor(c, run)), endLineFor(run)].join('\n') +
-    '\n```',
+    runnerPrompt('checks:run', [...checks.map(c => checkLineFor(c, run)), endLineFor(run)]),
     { label: `checks:run:${checkAttempt}`, schema: CHECK_RUN, model: 'haiku', effort: 'low' })
   return parseCheckRun(out?.output, checks, run)
 }
-// reproducerRunOf's output cap: a cap stated only in a prompt is a request; a
-// slice is a bound. Head and tail both, since a gate prints the repo and
-// branch it resolved first and its verdict last.
-const OUTPUT_HEAD_BYTES = 1024
-const OUTPUT_TAIL_BYTES = 8192
-const truncateOutput = (s) => {
-  const t = String(s ?? '')
-  if (t.length <= OUTPUT_HEAD_BYTES + OUTPUT_TAIL_BYTES) return t
-  const omitted = t.length - OUTPUT_HEAD_BYTES - OUTPUT_TAIL_BYTES
-  return t.slice(0, OUTPUT_HEAD_BYTES) +
-    `\n[touchstone: truncated, ${omitted} bytes omitted]\n` +
-    t.slice(t.length - OUTPUT_TAIL_BYTES)
-}
-// The one record kept of what a reproducer actually did at a given round.
-// outcomeOf reads row.output raw, before this ever truncates the copy that
-// gets stored, so truncation can never hide the marker from the decision.
+// The one record kept of what a reproducer actually did at a given round: the
+// log path, never its output, which a fixer reads from the log itself.
 const reproducerRunOf = (row, round) =>
-  ({ outcome: outcomeOf(row), exit_code: row?.exit_code ?? null,
-     output: truncateOutput(row?.output), round })
+  ({ outcome: outcomeOf(row), exit_code: row?.exit_code ?? null, log: row?.log ?? null, round })
 // Splits a parsed run into a real red list (a check whose own line reads a
 // nonzero exit) and an unmeasured one. Unmeasured is never a pass, but it is
 // also never red: a reply this phase cannot trust is not evidence either way,
@@ -3241,62 +3300,63 @@ const classify = (f, ctx) => {
 
 // Replaces verifyOpen: whether a finding is fixed is decided by executing its
 // reproducer, never by a model's judgement of a diff. One haiku dispatch runs
-// every item's reproducer against the worktree's current HEAD; when
-// diffRange is given, the same call also fetches that range's own new-side
-// diff hunks, verbatim, for classify()'s out-of-range rule.
+// script-built lines against the worktree's current HEAD, the same way
+// checks:run does (runnerPrompt): a before line, one line per reproducer, the
+// range's new-side hunk headers when diffRange is given (for classify()'s
+// out-of-range rule), and an end line. Each reproducer's output goes to a log
+// under the worktree's git dir; the shell prints its exit code and whether
+// the log holds REPRODUCED_MARKER on a line of its own, so neither the exit
+// nor the marker is ever a model's copy. Porcelain before and after goes to
+// before.log and status.log beside it: dirt already there before anything
+// runs must never be blamed on a reproducer, and dirt a reproducer leaves
+// must not be carried into whatever commits next.
+let reproAttempt = 0
+const REPRO_AREA = 'touchstone-repro'
+const reproLineFor = (it, run) =>
+  `${logDirFor(run, REPRO_AREA)} && mkdir -p "$d" && { ${bashCommandFor(it.reproducer)} >|"$d/${it.id}.log" 2>&1; e=$?; ` +
+  `if grep -aqxE '[[:space:]]*${REPRODUCED_MARKER}[[:space:]]*' "$d/${it.id}.log"; then m=1; else m=0; fi; ` +
+  `printf 'TOUCHSTONE_REPRO %s %s %s %s\\n' ${it.id} "$e" "$m" "$d/${it.id}.log"; }`
+// The diff goes to a file rather than a pipe, so a git failure (a bad range)
+// prints nothing at all and the run reads as unmeasured, never as an empty
+// range.
+const hunksLineFor = (run, range) =>
+  `${logDirFor(run, REPRO_AREA)} && mkdir -p "$d" && ` +
+  `git -C ${shQuote(wt.path)} diff --unified=0 --no-color ${shQuote(range)} >|"$d/diff.log" 2>|"$d/diff.err" && ` +
+  `{ grep -aE '^(\\+\\+\\+ |@@ )' "$d/diff.log" >|"$d/hunks.log"; ` +
+  `printf 'TOUCHSTONE_HUNKS_BEGIN %s\\n' ${run}; cat "$d/hunks.log"; ` +
+  `printf 'TOUCHSTONE_HUNKS_END %s %s\\n' ${run} "$(grep -c '' "$d/hunks.log")"; }`
+const reproLinesFor = (runnable, run, diffRange) => [
+  statusLineFor(run, { area: REPRO_AREA, name: 'before', tag: 'TOUCHSTONE_REPRO_BEFORE' }),
+  ...runnable.map(it => reproLineFor(it, run)),
+  ...(diffRange ? [hunksLineFor(run, diffRange)] : []),
+  statusLineFor(run, { area: REPRO_AREA, tag: 'TOUCHSTONE_REPRO_END', withPath: true }),
+]
 const executeAtHead = async (items, label, diffRange) => {
   const runnable = items.filter(it => it.reproducer?.command)
-  const out = await treeAgent(
-    `First run git -C ${wt.path} status --porcelain and report its output in ` +
-    `porcelain_before, even when empty: dirt already there before anything ` +
-    `below runs must never be blamed on what runs next.\n` +
-    (runnable.length
-      ? `Run each reproducer below in this worktree, then STOP. Do not fix, ` +
-        `edit, or investigate a failure; a later phase does that.\n` +
-        `This one call is the exception to the rule above about never running ` +
-        `cd, and only in the bash -c form: run each command as ` +
-        `bash -c 'cd ${wt.path} && <command>'. Never a bare ` +
-        `cd ${wt.path} && <command>, which does move this session.\n` +
-        `Report each command's exit code verbatim, never your own judgement of ` +
-        `whether it passed. Report output as its combined stdout and stderr, ` +
-        `verbatim and complete -- do not summarise, truncate, or interpret ` +
-        `what it printed, since the script reads it.\n` +
-        runnable.map(it => `[${it.id}] ${it.reproducer.command}`).join('\n') + `\n`
-      : '') +
-    (diffRange
-      ? `Run git -C ${wt.path} diff --unified=0 --no-color ${diffRange} and return, ` +
-        `in diff_lines, every line of its output that starts with "+++ " or ` +
-        `"@@ ", verbatim and in order, with nothing else: no other line of the ` +
-        `diff, no summary, no comment of your own.\n`
-      : '') +
-    `Then run git -C ${wt.path} status --porcelain again and report whether it ` +
-    `printed anything (dirty) and, if so, its output (porcelain): a reproducer ` +
-    `that writes to the tree must be visible, not silently carried into ` +
-    `whatever commits next.`,
-    { label, schema: EXECUTE_RESULT, model: 'haiku', effort: 'low' })
-  // A Map, not the old [id, exit_code] pairs: outcomeOf needs each row's raw
-  // output too, to check the marker before truncateOutput ever runs on it.
-  const runs = new Map((Array.isArray(out?.results) ? out.results : [])
-    .filter(r => typeof r?.id === 'string')
-    .map(r => [stripBrackets(r.id), { exit_code: r.exit_code, output: r.output }]))
+  reproAttempt++
+  const run = `${planId}-${label.replace(/[^A-Za-z0-9._-]+/g, '-')}-${reproAttempt}`
+  const out = await treeAgent(runnerPrompt(label, reproLinesFor(runnable, run, diffRange)),
+    { label, schema: REPRO_RUN, model: 'haiku', effort: 'low' })
+  const parsed = parseReproRun(out?.output, runnable.map(it => it.id), run, Boolean(diffRange))
+  // An unmeasured run is read exactly as a call that returned nothing: no
+  // rows (so callers' not-executed handling applies), hunks unknown rather
+  // than empty, and nothing seen dirty.
+  if (parsed.reason) {
+    log(`${label}: unmeasured (${parsed.reason})`)
+    return { runs: new Map(), hunks: null, dirty: false, porcelain: '', preexisting: !runnable.length }
+  }
   return {
-    runs,
-    // null (not {}) when the fetch itself failed -- the executor returned
-    // nothing, failed schema, or omitted diff_lines -- so classify()'s
-    // ctx.hunks guard reads "could not measure" as unknown, never as "this
-    // range touched nothing", which would wrongly mark every fresh finding
-    // out-of-range.
-    hunks: diffRange && Array.isArray(out?.diff_lines) ? parseHunks(out.diff_lines) : null,
-    dirty: out?.dirty === true,
-    porcelain: out?.porcelain ?? '',
+    runs: new Map(parsed.rows.map(r => [r.id, { exit_code: r.exit, reproduced: r.reproduced, log: r.log }])),
+    hunks: diffRange ? parseHunks(parsed.hunkLines) : null,
+    dirty: parsed.dirty,
+    porcelain: parsed.statusLog,
     // True when nothing this call could have dirtied: either it ran no
     // reproducer at all (the mutation-hunk fetch calls with an empty items
     // list), or the tree was already dirty before anything below ran. Without
     // this, a fixer whose crap-commit.sh was refused -- the wrapper leaves the
     // staged changes in place, with no reset/stash/restore -- gets a halt
     // blaming "a reproducer execution" for dirt that predates it.
-    preexisting: !runnable.length ||
-      (typeof out?.porcelain_before === 'string' && out.porcelain_before.trim() !== ''),
+    preexisting: !runnable.length || parsed.before,
   }
 }
 
@@ -3312,10 +3372,10 @@ const dirtyReproducerHalt = async (phaseName, exec, extraOpen = []) => halted(ph
   unresolved_findings: [...open, ...extraOpen], notes, fix_rounds: round,
   note: exec.preexisting
     ? `The working tree was already dirty before this check ran, so nothing ` +
-      `it did caused it: ${exec.porcelain || '(no detail returned)'}. Find ` +
-      `what left it dirty earlier in this round, then re-run.`
-    : `A reproducer execution left the working tree dirty: ` +
-      `${exec.porcelain || '(no detail returned)'}. Nothing further ran; find ` +
+      `it did caused it. What git status reported afterwards is in ` +
+      `${exec.porcelain}. Find what left it dirty earlier in this round, then re-run.`
+    : `A reproducer execution left the working tree dirty. What git status ` +
+      `reported afterwards is in ${exec.porcelain}. Nothing further ran; find ` +
       `which reproducer writes to the tree, then re-run.`,
 })
 
@@ -3635,7 +3695,12 @@ while ((open.length || blockingChecksOpen()) && round < MAX_REVIEW_ROUNDS && !ou
             ? `\n  Its reproducer itself failed to run last round: exit ` +
               `${f.reproducer_run.exit_code}, no marker line. This is not a ` +
               `demonstration of the defect; find out why the command failed. ` +
-              `Output:\n${f.reproducer_run.output}`
+              (f.reproducer_run.log
+                ? `Its full output is in ${f.reproducer_run.log}, under the ` +
+                  `worktree's git directory, outside the worktree: you may Read ` +
+                  `it although it does not start with ${wt.path}/. Read it from ` +
+                  `the end.`
+                : '')
             : '')).join('\n') + `\n`
       : '') +
     (blockingChecksOpen()

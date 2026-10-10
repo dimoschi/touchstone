@@ -43,10 +43,11 @@ async function scenarioB() {
     result.unresolved_findings[0].file, 'fileB.js')
 }
 
-// Scenario G -- a verdict for an id that names no open finding is discarded,
-// and a finding with no verdict at all stays open.
+// Scenario G -- a row for an id nobody asked for is not discarded on its own:
+// the runner printed something the script did not ask for, so the whole run is
+// unmeasured, and the finding is never opened or settled on it.
 async function scenarioG() {
-  console.log('\n== scenario G: an unmatched verdict id is discarded, silence stays open')
+  console.log('\n== scenario G: a row for an unknown id makes the run unmeasured, and the finding is not decided on it')
   const { result } = await run({
     args: { maxReviewRounds: 1 },
     initialReview: {
@@ -57,9 +58,10 @@ async function scenarioG() {
     injectBogusVerdict: true, // a verdict for an id that names nothing open
     staleness: () => [],
   })
-  check('halted at Fix', result.halted_at, 'Fix')
-  check('the unverified finding stayed open', result.unresolved_findings.length, 1)
+  check('halted at Review, on measurement', result.halted_at, 'Review')
+  check('the unmeasured finding is carried', result.unresolved_findings.length, 1)
   check('it is still the same finding', result.unresolved_findings[0].file, 'only.js')
+  check('it was not decided either way', result.unresolved_findings[0].reproducer_run?.outcome, 'not-executed')
 }
 
 // Scenario C -- the staleness probe marks a surviving finding whose file has

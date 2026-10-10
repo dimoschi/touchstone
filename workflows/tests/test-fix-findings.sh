@@ -294,10 +294,10 @@ async function scenarioCU() {
 }
 
 // Scenario CV -- gh-106: a reproducer that writes to the tree halts outright
-// and names the porcelain output, the same principle runChecks already
+// and names the status log holding the porcelain, the same principle runChecks already
 // applies to the repo's own discovered checks.
 async function scenarioCV() {
-  console.log('\n== scenario CV: a reproducer execution that dirties the tree halts and names the porcelain output')
+  console.log('\n== scenario CV: a reproducer execution that dirties the tree halts and names the status log')
   const { result } = await run({
     initialReview: {
       correctness: [{ title: 'Needs a look', file: 'a.js', claim: 'c', evidence: 'e' }],
@@ -308,7 +308,9 @@ async function scenarioCV() {
     reproducerPorcelain: ' M fixture.txt',
   })
   check('halted at Review', result.halted_at, 'Review')
-  check('the note names the porcelain output', (result.note ?? '').includes('fixture.txt'), true)
+  const statusLog = (/ in (\/\S+\/status\.log)\./.exec(result.note ?? '') ?? [])[1] ?? '/nonexistent'
+  check('the note names the status log, which holds the porcelain output',
+    fs.readFileSync(statusLog, 'utf8').includes('fixture.txt'), true)
 }
 
 // Scenario CW -- gh-106: the expected outcome this ticket exists for. A run
@@ -586,8 +588,9 @@ async function scenarioDJ() {
   check('halted at Review', result.halted_at, 'Review')
   check('the note does not blame a reproducer for dirt nothing here ran',
     (result.note ?? '').includes('reproducer execution'), false)
-  check('the note still names the porcelain output',
-    (result.note ?? '').includes('stray-mutation-file.txt'), true)
+  const statusLog = (/ in (\/\S+\/status\.log)\./.exec(result.note ?? '') ?? [])[1] ?? '/nonexistent'
+  check('the note still names the status log, which holds the porcelain output',
+    fs.readFileSync(statusLog, 'utf8').includes('stray-mutation-file.txt'), true)
 }
 
 // Scenario DK -- a fix that a later round breaks is reopened inside the loop,

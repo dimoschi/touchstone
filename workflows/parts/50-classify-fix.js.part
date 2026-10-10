@@ -155,62 +155,63 @@ const classify = (f, ctx) => {
 
 // Replaces verifyOpen: whether a finding is fixed is decided by executing its
 // reproducer, never by a model's judgement of a diff. One haiku dispatch runs
-// every item's reproducer against the worktree's current HEAD; when
-// diffRange is given, the same call also fetches that range's own new-side
-// diff hunks, verbatim, for classify()'s out-of-range rule.
+// script-built lines against the worktree's current HEAD, the same way
+// checks:run does (runnerPrompt): a before line, one line per reproducer, the
+// range's new-side hunk headers when diffRange is given (for classify()'s
+// out-of-range rule), and an end line. Each reproducer's output goes to a log
+// under the worktree's git dir; the shell prints its exit code and whether
+// the log holds REPRODUCED_MARKER on a line of its own, so neither the exit
+// nor the marker is ever a model's copy. Porcelain before and after goes to
+// before.log and status.log beside it: dirt already there before anything
+// runs must never be blamed on a reproducer, and dirt a reproducer leaves
+// must not be carried into whatever commits next.
+let reproAttempt = 0
+const REPRO_AREA = 'touchstone-repro'
+const reproLineFor = (it, run) =>
+  `${logDirFor(run, REPRO_AREA)} && mkdir -p "$d" && { ${bashCommandFor(it.reproducer)} >|"$d/${it.id}.log" 2>&1; e=$?; ` +
+  `if grep -aqxE '[[:space:]]*${REPRODUCED_MARKER}[[:space:]]*' "$d/${it.id}.log"; then m=1; else m=0; fi; ` +
+  `printf 'TOUCHSTONE_REPRO %s %s %s %s\\n' ${it.id} "$e" "$m" "$d/${it.id}.log"; }`
+// The diff goes to a file rather than a pipe, so a git failure (a bad range)
+// prints nothing at all and the run reads as unmeasured, never as an empty
+// range.
+const hunksLineFor = (run, range) =>
+  `${logDirFor(run, REPRO_AREA)} && mkdir -p "$d" && ` +
+  `git -C ${shQuote(wt.path)} diff --unified=0 --no-color ${shQuote(range)} >|"$d/diff.log" 2>|"$d/diff.err" && ` +
+  `{ grep -aE '^(\\+\\+\\+ |@@ )' "$d/diff.log" >|"$d/hunks.log"; ` +
+  `printf 'TOUCHSTONE_HUNKS_BEGIN %s\\n' ${run}; cat "$d/hunks.log"; ` +
+  `printf 'TOUCHSTONE_HUNKS_END %s %s\\n' ${run} "$(grep -c '' "$d/hunks.log")"; }`
+const reproLinesFor = (runnable, run, diffRange) => [
+  statusLineFor(run, { area: REPRO_AREA, name: 'before', tag: 'TOUCHSTONE_REPRO_BEFORE' }),
+  ...runnable.map(it => reproLineFor(it, run)),
+  ...(diffRange ? [hunksLineFor(run, diffRange)] : []),
+  statusLineFor(run, { area: REPRO_AREA, tag: 'TOUCHSTONE_REPRO_END', withPath: true }),
+]
 const executeAtHead = async (items, label, diffRange) => {
   const runnable = items.filter(it => it.reproducer?.command)
-  const out = await treeAgent(
-    `First run git -C ${wt.path} status --porcelain and report its output in ` +
-    `porcelain_before, even when empty: dirt already there before anything ` +
-    `below runs must never be blamed on what runs next.\n` +
-    (runnable.length
-      ? `Run each reproducer below in this worktree, then STOP. Do not fix, ` +
-        `edit, or investigate a failure; a later phase does that.\n` +
-        `This one call is the exception to the rule above about never running ` +
-        `cd, and only in the bash -c form: run each command as ` +
-        `bash -c 'cd ${wt.path} && <command>'. Never a bare ` +
-        `cd ${wt.path} && <command>, which does move this session.\n` +
-        `Report each command's exit code verbatim, never your own judgement of ` +
-        `whether it passed. Report output as its combined stdout and stderr, ` +
-        `verbatim and complete -- do not summarise, truncate, or interpret ` +
-        `what it printed, since the script reads it.\n` +
-        runnable.map(it => `[${it.id}] ${it.reproducer.command}`).join('\n') + `\n`
-      : '') +
-    (diffRange
-      ? `Run git -C ${wt.path} diff --unified=0 --no-color ${diffRange} and return, ` +
-        `in diff_lines, every line of its output that starts with "+++ " or ` +
-        `"@@ ", verbatim and in order, with nothing else: no other line of the ` +
-        `diff, no summary, no comment of your own.\n`
-      : '') +
-    `Then run git -C ${wt.path} status --porcelain again and report whether it ` +
-    `printed anything (dirty) and, if so, its output (porcelain): a reproducer ` +
-    `that writes to the tree must be visible, not silently carried into ` +
-    `whatever commits next.`,
-    { label, schema: EXECUTE_RESULT, model: 'haiku', effort: 'low' })
-  // A Map, not the old [id, exit_code] pairs: outcomeOf needs each row's raw
-  // output too, to check the marker before truncateOutput ever runs on it.
-  const runs = new Map((Array.isArray(out?.results) ? out.results : [])
-    .filter(r => typeof r?.id === 'string')
-    .map(r => [stripBrackets(r.id), { exit_code: r.exit_code, output: r.output }]))
+  reproAttempt++
+  const run = `${planId}-${label.replace(/[^A-Za-z0-9._-]+/g, '-')}-${reproAttempt}`
+  const out = await treeAgent(runnerPrompt(label, reproLinesFor(runnable, run, diffRange)),
+    { label, schema: REPRO_RUN, model: 'haiku', effort: 'low' })
+  const parsed = parseReproRun(out?.output, runnable.map(it => it.id), run, Boolean(diffRange))
+  // An unmeasured run is read exactly as a call that returned nothing: no
+  // rows (so callers' not-executed handling applies), hunks unknown rather
+  // than empty, and nothing seen dirty.
+  if (parsed.reason) {
+    log(`${label}: unmeasured (${parsed.reason})`)
+    return { runs: new Map(), hunks: null, dirty: false, porcelain: '', preexisting: !runnable.length }
+  }
   return {
-    runs,
-    // null (not {}) when the fetch itself failed -- the executor returned
-    // nothing, failed schema, or omitted diff_lines -- so classify()'s
-    // ctx.hunks guard reads "could not measure" as unknown, never as "this
-    // range touched nothing", which would wrongly mark every fresh finding
-    // out-of-range.
-    hunks: diffRange && Array.isArray(out?.diff_lines) ? parseHunks(out.diff_lines) : null,
-    dirty: out?.dirty === true,
-    porcelain: out?.porcelain ?? '',
+    runs: new Map(parsed.rows.map(r => [r.id, { exit_code: r.exit, reproduced: r.reproduced, log: r.log }])),
+    hunks: diffRange ? parseHunks(parsed.hunkLines) : null,
+    dirty: parsed.dirty,
+    porcelain: parsed.statusLog,
     // True when nothing this call could have dirtied: either it ran no
     // reproducer at all (the mutation-hunk fetch calls with an empty items
     // list), or the tree was already dirty before anything below ran. Without
     // this, a fixer whose crap-commit.sh was refused -- the wrapper leaves the
     // staged changes in place, with no reset/stash/restore -- gets a halt
     // blaming "a reproducer execution" for dirt that predates it.
-    preexisting: !runnable.length ||
-      (typeof out?.porcelain_before === 'string' && out.porcelain_before.trim() !== ''),
+    preexisting: !runnable.length || parsed.before,
   }
 }
 
@@ -226,10 +227,10 @@ const dirtyReproducerHalt = async (phaseName, exec, extraOpen = []) => halted(ph
   unresolved_findings: [...open, ...extraOpen], notes, fix_rounds: round,
   note: exec.preexisting
     ? `The working tree was already dirty before this check ran, so nothing ` +
-      `it did caused it: ${exec.porcelain || '(no detail returned)'}. Find ` +
-      `what left it dirty earlier in this round, then re-run.`
-    : `A reproducer execution left the working tree dirty: ` +
-      `${exec.porcelain || '(no detail returned)'}. Nothing further ran; find ` +
+      `it did caused it. What git status reported afterwards is in ` +
+      `${exec.porcelain}. Find what left it dirty earlier in this round, then re-run.`
+    : `A reproducer execution left the working tree dirty. What git status ` +
+      `reported afterwards is in ${exec.porcelain}. Nothing further ran; find ` +
       `which reproducer writes to the tree, then re-run.`,
 })
 
@@ -549,7 +550,12 @@ while ((open.length || blockingChecksOpen()) && round < MAX_REVIEW_ROUNDS && !ou
             ? `\n  Its reproducer itself failed to run last round: exit ` +
               `${f.reproducer_run.exit_code}, no marker line. This is not a ` +
               `demonstration of the defect; find out why the command failed. ` +
-              `Output:\n${f.reproducer_run.output}`
+              (f.reproducer_run.log
+                ? `Its full output is in ${f.reproducer_run.log}, under the ` +
+                  `worktree's git directory, outside the worktree: you may Read ` +
+                  `it although it does not start with ${wt.path}/. Read it from ` +
+                  `the end.`
+                : '')
             : '')).join('\n') + `\n`
       : '') +
     (blockingChecksOpen()

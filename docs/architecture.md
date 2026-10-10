@@ -389,20 +389,47 @@ instead; a non-blocking category, a missing reproducer, an `unmet-criterion` quo
 is not a verbatim substring of the ticket text, or (from the first re-review on) a line
 span outside what the preceding fix or mutation range actually touched, each becomes a
 note with its own `reason`. What survives is a candidate, and `executeAtHead()` is what
-runs it: one haiku dispatch per batch, against the worktree's current HEAD, reporting
-each row's raw, combined stdout and stderr verbatim alongside its exit code.
+runs it: one haiku dispatch per batch, against the worktree's current HEAD, given lines
+the script builds and run the same way as the check runner's below (`reproLinesFor` in
+`50-classify-fix.js.part`, one foreground Bash call per line, `runnerPrompt` shared with
+`checks:run`). No model copies a command, an exit code, an output or a porcelain:
+
+- A before line writes `git status --porcelain` to `before.log` (stderr to `before.err`)
+  and prints `TOUCHSTONE_REPRO_BEFORE <run> clean|dirty`.
+- One line per reproducer runs `bash -c 'cd <worktree> && <command>'` with all its output
+  in `<id>.log`, then decides in the shell whether that log holds a line that is exactly
+  `REPRODUCED_MARKER` once surrounding whitespace (a CR included) is trimmed, and prints
+  `TOUCHSTONE_REPRO <id> <exit> <0|1> <log path>`. A marker inside a longer line, such as
+  a `set -x` echo, does not count, and a long output can never push the marker out of
+  view, since the grep reads the whole log.
+- When the call is given a range, one line writes `git diff --unified=0 --no-color
+  <range>` to `diff.log`, keeps only the lines starting with `+++ ` or `@@ `, and prints
+  them between `TOUCHSTONE_HUNKS_BEGIN <run>` and `TOUCHSTONE_HUNKS_END <run> <count>`,
+  the count computed by the shell. A git failure prints nothing.
+- An end line writes the porcelain after into `status.log` and prints
+  `TOUCHSTONE_REPRO_END <run> clean|dirty <status log path>`. It carries the path because
+  the mutation-hunk fetch runs no reproducer, so no row would name the directory.
+
+All of these sit in `touchstone-repro/<run>/` under the worktree's git dir, where `<run>`
+is the plan id, the label and a per-run counter. `parseReproRun` (pure, in
+`10-schemas.js.part`) accepts the reply only in that order: the before line first, one
+row per runnable id in order with an integer exit, a 0 or 1 marker flag and a log in this
+run's one directory, the hunks block when a range was asked for (its count equal to the
+lines between the markers, each a `+++ ` or `@@ ` line), and the end line last. Anything
+else makes the whole call unmeasured, read exactly as a call that returned nothing: no
+rows, hunks unknown rather than empty, nothing seen dirty. The reason is logged as
+`<label>: unmeasured (<reason>)`.
 
 `outcomeOf(row)` is what turns that row into a disposition, and it is the only place
 that does: no row is `not-executed`; exit 0 is `passed`, marker or not; 126 or 127 is
-`could-not-run`; any other nonzero is `reproduced` only when the row's raw output (read
-before `truncateOutput` ever runs on it) carries `REPRODUCED_MARKER` on a line of its
-own, and `errored` otherwise. A command that fails for its own reasons -- a missing
+`could-not-run`; any other nonzero is `reproduced` only when the shell's marker flag is
+1, and `errored` otherwise. A command that fails for its own reasons -- a missing
 environment variable, a wrong path, a syntax error -- exits nonzero same as a real
 demonstration, and used to read the same way; a reproducer now has to prove it observed
 the defect, not merely that it did not exit 0. `disposeCandidates()` opens a candidate
 only on `reproduced`; `passed`, `could-not-run` and `errored` become a note with its own
 reason (`did-not-reproduce`, `reproducer-could-not-run`, `reproducer-errored`) and its
-`reproducer_run` (the outcome, the exit code, and the truncated output) attached so the
+`reproducer_run` (the outcome, the exit code, and the log path) attached so the
 note keeps what actually happened.
 
 `not-executed` is neither: a missing row is even less evidence than an errored one, so
@@ -411,7 +438,10 @@ become a note either -- the same rule #116 applies to a discovered check the run
 never measured. `executeAndDispose()` retries whatever comes back `not-executed` exactly
 once, at the same head, as its own `executeAtHead()` call restricted to just those
 candidates and labelled with the original label plus `:retry` -- run alone in the
-worktree like every such call, so a dirty result there halts the same way. Whatever is
+worktree like every such call, so a dirty result there halts the same way. Since one
+missing or extra row makes the whole call unmeasured, the retry normally covers every
+candidate of the first call. A dirty result halts with a note naming the `status.log`
+that holds the porcelain, not a copy of it. Whatever is
 still `not-executed` after that halts the run (at Review for the initial review and the
 post-mutation review, at Fix for a fix round's fresh candidates), naming each finding by
 id and title and saying the halt is about measurement, not the code (gh-113).
@@ -428,8 +458,9 @@ happened: `not-executed` in a record therefore only ever names a candidate no ro
 back for, which is what a resumed `--existing` run measures again before anything else.
 Exit 0 settles it regardless of the marker; nonzero with
 the marker keeps it open as `reproduced`; nonzero without it keeps it open as `errored`,
-and the brief says the reproducer itself failed to run, with its exit code and output, so
-the fixer is not sent chasing a defect nobody demonstrated.
+and the brief says the reproducer itself failed to run, with its exit code and the path
+of its log (outside the worktree, read from the end), never the output itself, so the
+fixer is not sent chasing a defect nobody demonstrated.
 
 A settled finding is re-run at every head the code moves to after it settled: in every
 later fix round (`reproduce:settled:<round>`) and at the mutation gate's head
