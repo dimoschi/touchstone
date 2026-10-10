@@ -92,8 +92,8 @@ async function scenarioSignalsAreMeasuredOverTheDiffstatRange() {
     prResult: { opened: true, url: 'https://example.invalid/pr/141', note: 'stub ready' },
   })
   const range = `${COMMIT_RANGE.split('..')[0]}..${folded}`
-  const diffstat = captured.calls.find(c => c.label === 'draft-pr').prompt
-  check('the diffstat was measured over the folded range', diffstat.includes(`TOUCHSTONE_DIFFSTAT ${range};`), true)
+  const diffstat = captured.calls.find(c => c.label === 'diffstat').prompt
+  check('the diffstat was measured over the folded range', diffstat.includes(`printf 'TOUCHSTONE_DIFFSTAT %s\\n' ${range};`), true)
   check('so were the signals', result.signals?.range, range)
   const asked = signalsCalls(captured).map(c => /^change-signals\.sh \S+ (\S+)$/m.exec(c.prompt)?.[1])
   check('the probe was asked about the implementer\'s range, then that one', asked, [STUB_RANGE, range])

@@ -175,7 +175,7 @@ hooks/                           eight policy gates, with a manifest per host
 Four apply only to repos you opted in:
 
 - `crap-commit-gate.py` — refuses raw `git commit`, names `crap-commit.sh` instead. It does not guess which repo a command targets; it resolves `git -C` and `cd` chains and refuses decidably.
-- `mutation-pr-gate.py` — verifies the mutation ledger before `gh pr create`, a `git merge` onto a base branch, or a `git push` at one.
+- `mutation-pr-gate.py` — verifies the mutation ledger before a non-draft `gh pr create`, `gh pr ready` (not `--undo`), a `git merge` onto a base branch, or a `git push` at one.
 - `contributing-gate.py` — refuses the first edit until the repo's `CONTRIBUTING.md` has actually been Read this session. A repo shipping no guide is never gated.
 - `comment-policy-gate.py` — flags a newly added comment that matches a rule in the repo's own `.comment-gated` (one regex per line, blank and `#` lines ignored; a rule that itself must start with a literal `#`, such as `#\d+`, needs `\#\d+` instead, or the line reads as a marker comment and is dropped). The plugin ships no default rule, so an absent, empty, or comment-only marker flags nothing. Comment detection is prefix-based per file extension, not a parser: it never sees a block comment or a trailing (same-line) comment, and does not report a line number. It also flags a string literal, heredoc, or docstring line whose first non-space character happens to be the comment prefix, since it cannot tell that apart from a real comment: not a blind spot, the opposite of one.
 

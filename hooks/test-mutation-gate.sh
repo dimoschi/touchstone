@@ -190,6 +190,9 @@ expect "non-draft create, unrecorded -> blocked"   BLOCK "$WORK" "gh pr create -
 expect "draft then ready -> blocked"               BLOCK "$WORK" "gh pr create --draft --title x; gh pr ready 7"
 expect "ready then draft -> blocked"               BLOCK "$WORK" "gh pr ready 7 && gh pr create --draft"
 expect "--draft-mode is not --draft -> blocked"    BLOCK "$WORK" "gh pr create --draft-mode"
+# Converting a PR back to a draft withdraws a review request rather than making one.
+expect "ready --undo, unrecorded -> allowed"       ALLOW "$WORK" "gh pr ready 7 --undo"
+expect "ready --undo then ready -> blocked"        BLOCK "$WORK" "gh pr ready 7 --undo; gh pr ready 7"
 
 echo "copilot bash payloads hit the same mutation triggers"
 copilot_expect "copilot draft create, unrecorded -> allowed"      ALLOW "$WORK" "gh pr create --draft --title x"

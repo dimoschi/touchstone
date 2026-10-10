@@ -169,6 +169,37 @@ function mutationVerifyOutput(prompt, exit, head, trailer = exit, wtPath = STUB_
 function unreviewedFromOf(prompt) {
   return (/printf 'TOUCHSTONE_UNREVIEWED %s %s %s\\n' (\S+) /.exec(prompt) ?? [])[1] ?? ''
 }
+const PR_HEAD = 'cafe000000000000000000000000000000000042'
+function prBranchOf(prompt) {
+  return (/printf 'TOUCHSTONE_PR %s %s %s %s %s %s %s\\n' (\S+) /.exec(prompt) ?? [])[1] ?? ''
+}
+function prStateOutput(prompt, pr) {
+  const branch = prBranchOf(prompt)
+  if (!pr) return `TOUCHSTONE_PR ${branch} 0 none none none none 0`
+  if (pr.ghExit) return `TOUCHSTONE_PR ${branch} ${pr.ghExit} none none none none 0`
+  return `TOUCHSTONE_PR ${branch} 0 ${pr.number ?? 42} ${pr.state ?? 'OPEN'} ${pr.isDraft ?? true} ` +
+    `${pr.head ?? PR_HEAD} ${pr.ancestor ?? 1}`
+}
+function prRunOf(prompt, marker) {
+  return (new RegExp(`--git-path touchstone-pr/(\\S+) [\\s\\S]*TOUCHSTONE_${marker} `).exec(prompt) ?? [])[1] ?? ''
+}
+function prUndoOutput(prompt, exit, isDraft, wtPath = STUB_WT_PATH) {
+  const n = (/printf 'TOUCHSTONE_PR_UNDO %s %s %s %s\\n' (\S+) /.exec(prompt) ?? [])[1] ?? ''
+  return `TOUCHSTONE_PR_UNDO ${n} ${exit} ${isDraft} ${wtPath}/.git/touchstone-pr/${prRunOf(prompt, 'PR_UNDO')}/pr-undo.log`
+}
+function prPushOutput(prompt, exit, wtPath = STUB_WT_PATH) {
+  const branch = (/printf 'TOUCHSTONE_PUSH %s %s %s\\n' (\S+) /.exec(prompt) ?? [])[1] ?? ''
+  return `TOUCHSTONE_PUSH ${branch} ${exit} ${wtPath}/.git/touchstone-pr/${prRunOf(prompt, 'PUSH')}/push.log`
+}
+function diffstatRangeOf(prompt) {
+  return (/printf 'TOUCHSTONE_DIFFSTAT %s\\n' (\S+);/.exec(prompt) ?? [])[1] ?? COMMIT_RANGE
+}
+// files are [path, added, removed]; comments are [path, count].
+function diffstatOutput(range, files, comments = [], gitExit = 0) {
+  const body = [...files.map(([p, a, r]) => `${a}\t${r}\t${p}`), 'TOUCHSTONE_COMMENT_LINES',
+    ...comments.map(([p, c]) => `${c}\t${p}`)]
+  return [`TOUCHSTONE_DIFFSTAT ${range}`, ...body, `TOUCHSTONE_DIFFSTAT_END ${body.length} ${gitExit}`].join('\n')
+}
 // A checkRuns stub's row, in the old shape. The stub turns it into what a
 // runner would print for that check: only its exit code is read.
 function checkRow(id, command, exit, output) {
@@ -385,31 +416,44 @@ function makeAgent(scenario, captured) {
       if (custom === null) return null
       return { output: custom ?? `TOUCHSTONE_PLAN_LEAK ${range}\nTOUCHSTONE_PLAN_LEAK_END` }
     }
-    // draft-pr and size (gh-118): the diffstat probe and its one retry. Both
-    // read the range straight out of their own prompt (diffstatCommandFor
-    // embeds it verbatim after "TOUCHSTONE_DIFFSTAT "), so the default
-    // diffstat always names whatever range the script actually asked about,
-    // including a range a pre-review checks fix already folded in.
-    // diffstatFiles defaults to a two-file, two-lens-sized diff (matching
-    // this file's old implFilesChanged/implInsertions defaults, so the ~90
-    // scenarios that never touch sizing keep getting the same two lenses).
-    // scenario.diffstat/.sizeRetryDiffstat override one call each;
-    // scenario.sizeUnmeasured makes both return something parseDiffstat
-    // rejects, for the still-unmeasured-after-retry halt.
-    if (label === 'draft-pr' || label === 'size') {
-      const range = (/TOUCHSTONE_DIFFSTAT ([^\n;]+);/.exec(prompt) ?? [])[1]?.trim() ?? COMMIT_RANGE
-      const files = scenario.diffstatFiles ?? [['a.js', 100, 0], ['b.js', 100, 0]]
-      const goodDiffstat = `TOUCHSTONE_DIFFSTAT ${range}\n` +
-        files.map(([p, a, r]) => `${a}\t${r}\t${p}`).join('\n') +
-        `\nTOUCHSTONE_COMMENT_LINES\nTOUCHSTONE_DIFFSTAT_END`
-      if (label === 'size') {
+    // No PR unless scenario.prState(retry, prompt) returns PR fields (omitted
+    // ones default to open, draft, related), { output }, or null.
+    if (label === 'pr:state' || label === 'pr:state:retry') {
+      const custom = scenario.prState ? scenario.prState(label.endsWith(':retry'), prompt) : undefined
+      if (custom === null || typeof custom?.output === 'string') return custom
+      return { output: prStateOutput(prompt, custom) }
+    }
+    // Opens a PR only when the PR-state line found none. A scenario that
+    // wants one says so in draftPr; the default opens nothing.
+    if (label === 'draft-pr') {
+      return scenario.draftPr ?? { opened: false, detail: 'no draft in this test' }
+    }
+    // Converting an adopted ready PR back to a draft: it works unless
+    // scenario.prUndo(retry, prompt) returns { exit, isDraft }, { output }, or null.
+    if (label === 'pr:undo' || label === 'pr:undo:retry') {
+      const custom = scenario.prUndo ? scenario.prUndo(label.endsWith(':retry'), prompt) : undefined
+      if (custom === null || typeof custom?.output === 'string') return custom
+      return { output: prUndoOutput(prompt, custom?.exit ?? 0, custom?.isDraft ?? 'true') }
+    }
+    // Pushing an adopted PR's branch: exit 0 unless scenario.prPush(prompt)
+    // returns { exit }, { output }, or null.
+    if (label === 'pr:push' || label === 'pr:push:retry') {
+      const custom = scenario.prPush ? scenario.prPush(prompt) : undefined
+      if (custom === null || typeof custom?.output === 'string') return custom
+      return { output: prPushOutput(prompt, custom?.exit ?? 0) }
+    }
+    // The default names the range the line asked about and a two-lens diff.
+    // scenario.diffstat/.sizeRetryDiffstat are one call's raw output each;
+    // sizeUnmeasured makes both unparseable.
+    if (label === 'diffstat' || label === 'diffstat:retry') {
+      const good = diffstatOutput(diffstatRangeOf(prompt),
+        scenario.diffstatFiles ?? [['a.js', 100, 0], ['b.js', 100, 0]])
+      if (label === 'diffstat:retry') {
         if (scenario.sizeRetryFails) return null
-        return { diffstat: scenario.sizeRetryDiffstat ??
-          (scenario.sizeUnmeasured ? 'still not a real diffstat' : goodDiffstat) }
+        return { output: scenario.sizeRetryDiffstat ??
+          (scenario.sizeUnmeasured ? 'still not a real diffstat' : good) }
       }
-      const diffstat = scenario.diffstat ??
-        (scenario.sizeUnmeasured ? 'not a real diffstat' : goodDiffstat)
-      return { diffstat, ...(scenario.draftPr ?? { opened: false, detail: 'no draft in this test' }) }
+      return { output: scenario.diffstat ?? (scenario.sizeUnmeasured ? 'not a real diffstat' : good) }
     }
     // The change-signals probe. The reply names the range the script
     // asked about, read from the command line of its own prompt, so it always

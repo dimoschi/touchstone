@@ -7,7 +7,7 @@ export const meta = {
     { title: 'Triage', detail: 'one cheap agent checks the premise, sizes the job and judges its difficulty; a disproved premise halts, small work skips Plan, and the difficulty sets every later phase\'s reasoning effort' },
     { title: 'Plan', detail: 'planner produces a concise plan + acceptance criteria + risk areas; the whole plan is written to an untracked file in the worktree, which the implementer must read to its last line' },
     { title: 'Implement', detail: 'one implementer, TDD via crap-controlled-changes, many small signed commits' },
-    { title: 'Draft PR', detail: 'push the branch and open a draft PR, so the work is visible and any later halt has somewhere durable to be reported' },
+    { title: 'Draft PR', detail: 'push the branch and open a draft PR, or adopt the branch\'s open PR only when its head is an ancestor of the branch, converting a ready one back to a draft, so the work is visible and any later halt has somewhere durable to be reported' },
     { title: 'Review', detail: 'a measured diffstat (code churn, with comments, tests and docs counted apart) decides the reviewer lenses: correctness and devil\'s advocate normally, plus requirements coverage on a large or wide change, none on a one-liner; support code (tests, docs, comments) far outweighing the actual change halts here before any lens runs. Only a wrong-result, crash, gate-bypass or unmet-criterion finding with a demonstrated reproducer can hold the run; everything else reaches the PR as a note. Runs again on any commits a later phase adds, and from the first re-review on a finding also has to fall inside what that range actually changed' },
     { title: 'Fix', detail: 'fix confirmed findings, bounded rounds; a finding is fixed when its own reproducer exits 0, never by a model\'s judgement of the diff' },
     { title: 'Mutation', detail: 'pre-PR mutation gate; kill survivors with tests, never weaken code. Its own commits are reviewed before the PR' },
@@ -29,7 +29,7 @@ export const meta = {
 // against the manifest in scripts/check-version-bump.sh, so drift is a
 // gate's job rather than something this script verifies about itself.
 const PLUGIN_NAME = 'touchstone'
-const PIPELINE_VERSION = '0.34.0'
+const PIPELINE_VERSION = '0.36.0'
 
 // Boundaries. Wall-clock deadlines are not expressible here (no Date.now, by
 // design); the bounds are rounds, counts, and token budget instead.
@@ -255,12 +255,15 @@ const dispatch = async (prompt, opts) => {
   return await agent(prompt, opts)
 }
 
-// Set once the draft PR exists; read by halted() so a stop has somewhere
-// durable to be reported. Declared here because halted() is defined before the
-// phase that opens it.
+// Set once the run has a PR, opened or adopted (Draft PR phase, part 40):
+// { url, number, draft, stateUnknown, readyWhy, pushed }. draft is true only
+// when the run read it as a draft; stateUnknown when the undo left nothing it
+// could read; readyWhy says why it is not a draft; pushed whether this run's
+// push to an adopted PR succeeded, null when its result could not be read. Read by prNote() and halted(), which are
+// defined before the phase that sets it.
 let draftPr = null
 
-// Set once the diffstat probe (Draft PR phase, part 40) has measured the
+// Set once the diffstat line (Review phase, part 40) has measured the
 // real diff; null on every halt before that, and read unconditionally by
 // halted() below so every halt from Review onward carries it without each
 // call site having to pass it through `extra` by hand.
@@ -311,12 +314,22 @@ let carriedNotes = recordHead ? carry(args.priorRun.notes) : []
 // compare.
 let pipelineVersion = { executed: PIPELINE_VERSION, base_branch: null, mismatch: null }
 
-// Opening the draft is allowed to fail without ending the run, so a note that
-// states either outcome flatly is wrong half the time. Every halt note that
-// mentions the PR reads this instead of asserting one.
-const prNote = () => draftPr
-  ? `The PR was left as a draft`
-  : `No PR was opened, because the draft could not be opened earlier in this run`
+// Opening the draft is allowed to fail without ending the run, and an adopted
+// PR that was already ready may not convert back, so a note that states one
+// outcome flatly is wrong some of the time. Every halt note that mentions the
+// PR reads this instead of asserting one.
+const prNote = () => {
+  if (!draftPr) return `No PR was opened, because the draft could not be opened earlier in this run`
+  if (draftPr.draft) return `The PR was left as a draft`
+  const holds = draftPr.pushed === true ? `with commits the gates have not passed`
+    : draftPr.pushed === false ? `holding no commit from this run`
+    : `and whether this run's push reached it is unknown`
+  return draftPr.stateUnknown
+    ? `PR #${draftPr.number} was ready for review when this run adopted it, and its state is ` +
+      `unknown after converting it to a draft was tried, ${holds}: ${draftPr.readyWhy}`
+    : `PR #${draftPr.number} read as ready for review, ${holds}: it was ready when this run ` +
+      `adopted it, and ${draftPr.readyWhy}`
+}
 
 // A halt is a result, not an absence of one, and the run record is where it
 // survives the session. It used to be posted as a comment on the draft PR too.
@@ -343,8 +356,14 @@ const halted = async (at, extra) => {
     ...(split ? { scope_split: split } : {}),
     ...extra,
   }
+  // A ready PR holding ungated commits is the one PR state a reviewer cannot
+  // see from GitHub, so every halt says so, not only the notes that mention the PR.
+  if (draftPr && !draftPr.draft && typeof payload.note === 'string' && !payload.note.includes(prNote())) {
+    payload.note = `${payload.note} ${prNote()}.`
+  }
   if (draftPr?.number) {
-    log(`halt at ${at}: draft PR ${draftPr.url} left as it is; the reason is in ` +
+    log(`halt at ${at}: PR #${draftPr.number} left as it is ` +
+        `(${draftPr.draft ? 'a draft' : draftPr.stateUnknown ? 'state unknown' : 'ready for review'}); the reason is in ` +
         `this run's result and record`)
   }
   return payload

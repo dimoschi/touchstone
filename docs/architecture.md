@@ -139,7 +139,7 @@ branch it started from on its own:
 |---|---|---|
 | `crap-commit-gate.py` | `.crap-gated` | refuses a raw `git commit`, naming `crap-commit.sh` instead |
 | `contributing-gate.py` | `.crap-gated` | refuses the first edit until the repo's contribution guide has been read this session |
-| `mutation-pr-gate.py` | `.mutation-gated` | refuses `gh pr create`, a merge onto a base branch, or a push at one, while the ledger is unverified |
+| `mutation-pr-gate.py` | `.mutation-gated` | refuses a non-draft `gh pr create`, `gh pr ready` (but not `gh pr ready --undo`, which converts back to a draft), a merge onto a base branch, or a push at one, while the ledger is unverified |
 | `comment-policy-gate.py` | `.comment-gated` | `PostToolUse`, so it cannot refuse; it flags (exit 2, non-blocking) a newly added comment matching one of the marker's own regex rules after the edit has already landed. The plugin ships no default rule |
 
 Four fire everywhere, because each acts on its own evidence rather than on a marker:
@@ -557,6 +557,71 @@ about, an integer count and a 40-hex head. A count above 0 halts at PR without d
 (`pr-unreviewed:retry`) halts at PR as unmeasured. The `pr` prompt no longer runs or judges
 this count.
 
+### Draft PR: adopting by line, never by name
+
+The Draft PR phase used to hand one agent two jobs: find or open the branch's PR, and relay the
+diffstat. Nothing checked that an adopted PR shared history with the branch, so a fresh run once
+attached itself to an unrelated PR whose branch had the same name, and a resumed run pushed
+ungated commits to a PR that was already ready, then halted saying it was a draft. Now every
+decision there is read from a line the script builds and the shell prints
+(`40-implement-draft-review.js.part`, parsers in `10-schemas.js.part`).
+
+**Which PR.** A `pr:state` agent runs one line:
+
+```
+p="$(cd <worktree> && gh pr list --head <branch> --state all --json number,state,isDraft,headRefOid --limit 20 --jq 'sort_by(-.number) | (map(select(.state == "OPEN")) + .)[0] // empty | "\(.number) \(.state) \(.isDraft) \(.headRefOid)"' 2>/dev/null)"; g=$?; read -r n s r h <<<"$p"; if [ -n "$h" ] && git -C <worktree> merge-base --is-ancestor "$h" HEAD 2>/dev/null; then a=1; else a=0; fi; printf 'TOUCHSTONE_PR %s %s %s %s %s %s %s\n' <branch> "$g" "${n:-none}" "${s:-none}" "${r:-none}" "${h:-none}" "$a"
+```
+
+`gh` has no `-C`, so it runs in a subshell inside the worktree. `gh pr list` exits 0 and prints
+nothing when the branch has no PR, so the line prints `0 none none none none 0`; a `gh` that
+fails (bad credentials, no network) prints its own exit instead, and `parsePrState` reads any
+nonzero exit as unmeasured, never as "no PR". Of several PRs for the branch the open one is
+taken, else the highest-numbered, with its real state. The ancestry is git's: a PR head this
+clone does not have is not an ancestor either. `parsePrState` accepts exactly one line naming
+this branch with gh exit 0, then either all `none` with ancestor `0`, or an integer number, a
+state of `OPEN`, `CLOSED` or `MERGED`, `true` or `false`, a 40-hex head and `0` or `1`. The script
+checks the state first, then the ancestry:
+
+| Line | Run |
+|---|---|
+| no PR | the `draft-pr` agent pushes and opens a draft (its prompt only creates; it never adopts) |
+| a merged PR | halt at Draft PR: the PR is merged; pick another branch name |
+| a closed PR | halt at Draft PR: the PR is closed; pick another branch name or reopen it |
+| an open PR whose head is not an ancestor of the branch head | halt at Draft PR naming the PR, its head and the branch, as an unrelated PR under the same name; nothing is adopted or pushed |
+| an open PR that is an ancestor | adopted, with the number from the line, then pushed by a `pr:push` line |
+
+Unparseable twice, or `gh` failing twice (`pr:state:retry`), the run opens and adopts nothing and
+goes on without a PR: not knowing is no reason to open one next to a PR the run must not touch.
+If it then gets as far as the PR phase, it halts there before `pr` is dispatched, with both
+reasons, rather than opening a PR beside one it never read.
+
+**A ready PR.** An adopted PR that is ready for review is converted back to a draft before the
+push, by a `pr:undo` line that runs `gh pr ready <n> --undo` (log under
+`<git dir>/touchstone-pr/<run>/pr-undo.log`), re-reads `isDraft` and prints
+`TOUCHSTONE_PR_UNDO <n> <exit> <true|false|none> <log>`. The re-read decides, not the exit:
+`true` is a draft, `false` is still ready, and `none` (the re-read failed) or a line unparseable
+twice leaves the state unknown. `mutation-pr-gate.py` lets `gh pr ready --undo` through, since it
+withdraws a review request rather than making one. Every `gh pr ready` in the command is judged
+on its own: a command starts at the beginning or after `;`, `&`, `|`, `(`, a newline or a backtick,
+and ends at `;`, `&`, `|`, `)`, a newline, a backtick or `#`. Only that command's own words count,
+and the last `--undo`/`--undo=<v>` wins, as in pflag, so `gh pr ready 5 # --undo`,
+`gh pr ready 5 --undo --undo=false`, and `gh pr ready 5 --undo` followed by a plain
+`gh pr ready 5` on the next line are all still gated.
+
+**The push.** `pr:push` runs `git -C <worktree> push -u origin <branch>` and prints
+`TOUCHSTONE_PUSH <branch> <exit> <log>`, retried once (`pr:push:retry`) when it does not parse. A
+failed push is logged and is not fatal; the PR phase pushes again.
+
+**What a halt says.** `draftPr` records what the run read: `draft`, `stateUnknown`, why it is not
+a draft (`readyWhy`), and whether this run's push succeeded (`pushed`). `prNote()` builds its
+sentence from those fields: "The PR was left as a draft", "No PR was opened ...", "PR #<n> read as
+ready for review, ...", or "PR #<n> was ready for review when this run adopted it, and its state is
+unknown after converting it to a draft was tried, ...". It says "with commits the gates have not
+passed" only when the push succeeded, "holding no commit from this run" when it failed, and that
+whether the push reached it is unknown when its result could not be read. While the
+PR is not a draft, `halted()` appends that sentence to every halt note that does not already carry
+it, so a halt at any phase after the push says so.
+
 ### Check discovery
 
 Folded into the `branch`/`branch:existing` call's own last step (`checks_source` on
@@ -668,19 +733,23 @@ read that log and quote what the check reported, and never to put the path in th
 
 ### Measuring the diff: `size`, lens count, and the ratio halt
 
-The `draft-pr` call also runs a probe command (`diffstatCommandFor`): a `git diff
+At the start of Review a `diffstat` agent (haiku, low effort, `runnerPrompt`) runs one
+script-built line (`diffstatLineFor`): a `git diff
 --numstat` pass over `impl.commit_range` (after the pre-review checks fix, if one
 landed, folds into that range), then an `awk` pass over `git diff --unified=0` counting,
 per file, added lines whose trimmed text opens a comment: `//` or `/*` anywhere, a bare
 `*` only when it opens a block-comment continuation or close (`* foo`, `*/`, not a Go/C
 pointer write like `*p = v`), and `#` unless it is `#!` (a shebang) or `#[` (a PHP 8
-attribute, e.g. `#[ORM\Column]`). Three markers (`TOUCHSTONE_DIFFSTAT <range>`, `TOUCHSTONE_COMMENT_LINES`,
-`TOUCHSTONE_DIFFSTAT_END`) bound the response so `parseDiffstat` -- a pure function --
-can tell a well-formed one from a truncated or off-range one: the begin line has to name
-the exact range asked about, or the whole response counts as unmeasured, the same as a
-numstat row or a comment-count row that does not match its own regex. Unmeasured gets
-one retry, via a dedicated `size`-labelled call re-running the identical command; still
-unmeasured after that halts at Review as a measurement problem, never reaching a lens.
+attribute, e.g. `#[ORM\Column]`). Both passes write to `<git dir>/touchstone-diffstat/<run>/diffstat.log`,
+and only then does the line print it between `TOUCHSTONE_DIFFSTAT <range>` and
+`TOUCHSTONE_DIFFSTAT_END <lines> <numstat exit>`, with `TOUCHSTONE_COMMENT_LINES` separating the
+two passes inside the log. The line count is `grep -c ''` of the log, so the shell, not the relay,
+says how many rows there are. `parseDiffstat` -- a pure function -- accepts the output only when
+the begin line names the exact range asked about, the end line is last, its count equals the
+lines between them, numstat exited 0 (a failed `git diff` would otherwise read as an empty diff
+and skip review), and every numstat and comment-count row matches its own regex. Unmeasured gets
+one retry (`diffstat:retry`), the same line under a new run; still unmeasured after that halts
+at Review as a measurement problem, never reaching a lens.
 
 `sizeOf` classifies each file by path (`test`, `doc`, or `code`; see the function for the
 exact patterns) and aggregates: `code` is a code file's added lines minus its own comment

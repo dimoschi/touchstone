@@ -19,7 +19,7 @@ ready`, which is one *route* to a base branch, not the condition that
 matters. It now fires on three routes -- kept as one file, not renamed,
 because hooks.json references it by this exact path:
 
-  - `gh pr create` (except `--draft`) / `gh pr ready`
+  - `gh pr create` (except `--draft`) / `gh pr ready` (except `--undo`)
   - `git merge <branch>` while HEAD is a base branch
   - `git push` whose destination refspec names a base branch, or whose HEAD is one
 
@@ -62,8 +62,19 @@ MUTATION_CHECK = Path(__file__).resolve().parent.parent / \
 # because a command can contain both. Treating "a draft create is present" as
 # grounds to skip let `gh pr create --draft && gh pr ready 7` through with no
 # check at all -- the exemption became the bypass.
-GH_PR_READY = re.compile(r'(?:^|[;&|(]\s*)gh\s+pr\s+ready\b')
-GH_PR_CREATE = re.compile(r'(?:^|[;&|(]\s*)gh\s+pr\s+create\b')
+# A command starts at the beginning, after a separator, or after a newline or
+# backtick: without the last two, `x\ngh pr ready 5` or a ready inside `...`
+# was never seen at all.
+COMMAND_START = r'(?:^|[;&|(\n`]\s*)'
+GH_PR_READY = re.compile(COMMAND_START + r'gh\s+pr\s+ready\b')
+# `gh pr ready --undo` converts a PR back to a draft: it withdraws a review
+# request, so it is the one ready form that is not gated. Only that command's
+# own words count: a newline or `#` ends it as surely as `;` does, or
+# `gh pr ready 5 # --undo` would pass as an undo.
+READY_COMMAND_END = re.compile(r'[;&|)\n`#]')
+# strconv.ParseBool's true spellings, which is what pflag gives a bool flag.
+PFLAG_TRUE = {'1', 't', 'T', 'true', 'TRUE', 'True'}
+GH_PR_CREATE = re.compile(COMMAND_START + r'gh\s+pr\s+create\b')
 # A draft is not a request to review. Opening one is how work in progress is
 # made visible -- pushed, discoverable, and reportable if a run stops early --
 # and gating that would force the work to stay invisible until it is finished,
@@ -72,10 +83,10 @@ GH_PR_CREATE = re.compile(r'(?:^|[;&|(]\s*)gh\s+pr\s+create\b')
 # `(?=\s|$)` not `\b`: a word boundary matches inside `--draft-mode`, so any
 # future flag merely starting with "--draft" would have silently exempted a
 # real create.
-GH_PR_DRAFT = re.compile(r'(?:^|[;&|(]\s*)gh\s+pr\s+create\b[^;&|]*\s--draft(?=\s|$)')
+GH_PR_DRAFT = re.compile(COMMAND_START + r'gh\s+pr\s+create\b[^;&|\n`]*\s--draft(?=\s|$)')
 GIT_MERGE = re.compile(
-    r'(?:^|[;&|(]\s*)git\s+merge\s+(?:-\S+\s+)*(?P<branch>[A-Za-z0-9][\w./-]*)')
-GIT_PUSH = re.compile(r'(?:^|[;&|(]\s*)git\s+push\b(?P<rest>[^;&|]*)')
+    COMMAND_START + r'git\s+merge\s+(?:-\S+\s+)*(?P<branch>[A-Za-z0-9][\w./-]*)')
+GIT_PUSH = re.compile(COMMAND_START + r'git\s+push\b(?P<rest>[^;&|\n`]*)')
 DIAG_LINES = 60
 
 
@@ -163,13 +174,36 @@ def push_hit(repo, m):
     return None
 
 
+def undoes(rest):
+    """True when the `gh pr ready` arguments at the start of `rest` leave --undo set.
+
+    pflag lets the last occurrence of a flag win, so `--undo --undo=false` is
+    a real ready.
+    """
+    undo = False
+    for token in READY_COMMAND_END.split(rest)[0].split():
+        if token == '--undo':
+            undo = True
+        elif token.startswith('--undo='):
+            undo = token[len('--undo='):] in PFLAG_TRUE
+    return undo
+
+
+def ready_route(cmd):
+    """The first `gh pr ready` in `cmd` that asks for review, or None."""
+    for m in GH_PR_READY.finditer(cmd):
+        if not undoes(cmd[m.end():]):
+            return m
+    return None
+
+
 def trigger(cmd, cwd):
     """Return (repo, branch_arg) if cmd should be gated, else None.
 
     branch_arg is None for "verify current HEAD" (mutation-check.sh's own
     default); otherwise it names the branch to verify explicitly.
     """
-    m = GH_PR_READY.search(cmd)
+    m = ready_route(cmd)
     if m:
         repo = gh_route_repo(cmd, m, cwd)
         return (repo, None) if repo else None

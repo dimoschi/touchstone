@@ -55,7 +55,7 @@ check "the 'left as a draft' wording appears only in prNote" \
 check "no text claims the work cannot open a PR, which the draft already did" \
   "$(grep -Fc 'cannot open a PR' "$SCRIPT" || true)" 0
 check "every note that reports the PR's fate reads the helper" \
-  "$(grep -Fc '${prNote()}' "$SCRIPT" || true)" 11
+  "$(grep -Fc '${prNote()}' "$SCRIPT" || true)" 12
 
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
@@ -160,28 +160,25 @@ function makeAgent(scenario, captured) {
     if (label === 'implementer') {
       return { plan_id: captured.planId, ...scenario.implementer }
     }
-    // draft-pr and size (gh-118): the diffstat probe and its one retry. Every
-    // scenario here defaults args.reviewers to 0, but the diffstat still has
-    // to measure cleanly first -- lensKeysFor only decides how many of its
-    // lenses survive the args.reviewers slice, not whether sizing runs at
-    // all -- so a scenario overriding draftPr's other fields still needs a
-    // diffstat, read straight out of this call's own prompt so it always
-    // names whatever range the script actually asked about.
-    if (label === 'draft-pr' || label === 'size') {
-      const range = (/TOUCHSTONE_DIFFSTAT ([^\n;]+);/.exec(prompt) ?? [])[1]?.trim() ?? ''
-      // Two files, 100 added each: past ONE_LENS_LOC but under BIG_LOC, so
-      // lensKeysFor gives two lenses by default -- the same shape scenarioFixHalts
-      // needs before args.reviewers:1 slices it down to one. A single small
-      // file here would trip the files<=1/totalChurn trivial case and leave
-      // reviewerCount at 0 regardless of args.reviewers.
-      const goodDiffstat = `TOUCHSTONE_DIFFSTAT ${range}\n100\t0\ta.js\n100\t0\tb.js\n` +
-        `TOUCHSTONE_COMMENT_LINES\nTOUCHSTONE_DIFFSTAT_END`
-      if (label === 'size') return { diffstat: goodDiffstat }
+    // The PR-state line finds no PR, so draft-pr is asked to open one.
+    if (label === 'pr:state') {
       captured.draftPrCalled = true
+      const branch = (/printf 'TOUCHSTONE_PR %s %s %s %s %s %s %s\\n' (\S+) /.exec(prompt) ?? [])[1] ?? ''
+      return { output: `TOUCHSTONE_PR ${branch} 0 none none none none 0` }
+    }
+    if (label === 'draft-pr') {
       // Default has no number, so draftPr stays null and prNote() reports that
       // nothing was opened. A scenario that wants a draft must say so.
-      return { diffstat: goodDiffstat,
-        ...(scenario.draftPr ?? { opened: false, detail: 'should not be reached' }) }
+      return scenario.draftPr ?? { opened: false, detail: 'should not be reached' }
+    }
+    // Every scenario here defaults args.reviewers to 0, but the diffstat still
+    // has to measure cleanly first. Two files, 100 added each: past
+    // ONE_LENS_LOC but under BIG_LOC, so lensKeysFor gives the two lenses
+    // scenarioFixHalts needs before args.reviewers:1 slices it down to one.
+    if (label === 'diffstat' || label === 'diffstat:retry') {
+      const range = (/printf 'TOUCHSTONE_DIFFSTAT %s\\n' (\S+);/.exec(prompt) ?? [])[1] ?? ''
+      return { output: `TOUCHSTONE_DIFFSTAT ${range}\n100\t0\ta.js\n100\t0\tb.js\n` +
+        `TOUCHSTONE_COMMENT_LINES\nTOUCHSTONE_DIFFSTAT_END 3 0` }
     }
     // The change-signals probe: nothing in this suite is about the signals, so
     // it gets a well-formed record for the range it asked about.

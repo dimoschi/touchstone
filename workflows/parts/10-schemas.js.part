@@ -309,8 +309,9 @@ const parseReproRun = (output, ids, run, withHunks) => {
   return { rows, before: before[2] === 'dirty', dirty: end.dirty, statusLog: end.path, hunkLines, diffExit }
 }
 
-// What a gate verdict relay returns (mutation-verify, pr-unreviewed in
-// 60-mutation-pr.js.part): the one line its script-built command printed.
+// What a one-line relay returns (mutation-verify, pr-unreviewed in
+// 60-mutation-pr.js.part; pr:state, pr:undo, pr:push and diffstat in
+// 40-implement-draft-review.js.part): what its script-built command printed.
 const VERDICT_RUN = {
   type: 'object', additionalProperties: false, required: ['output'],
   properties: { output: { type: 'string' } },
@@ -360,6 +361,60 @@ const parseUnreviewed = (output, from) => {
   if (!/^\d+$/.test(count)) return { reason: 'count is not an integer' }
   if (!COMMIT_TOKEN.test(head)) return { reason: 'head is not a commit id' }
   return { count: Number(count), head }
+}
+// The branch's PR as gh reported it, gh's exit, and whether the PR head is an
+// ancestor of the branch head, which the shell decides (prStateLine in part
+// 40). No PR prints none in every field with gh exit 0; a gh that failed is
+// unmeasured, never "no PR", since a run that opened a draft on bad
+// credentials would push onto a PR it never read.
+const PR_STATE_LINE = /^TOUCHSTONE_PR (\S+) (\S+) (\S+) (\S+) (\S+) (\S+) (\S+)$/
+const PR_STATES = ['OPEN', 'CLOSED', 'MERGED']
+const parsePrState = (output, branch) => {
+  const { line, reason } = oneLineOf(output)
+  if (reason) return { reason }
+  const m = PR_STATE_LINE.exec(line)
+  if (!m) return { reason: 'malformed PR line' }
+  const [, b, ghExit, number, state, isDraft, head, ancestor] = m
+  if (b !== branch) return { reason: `PR line names branch ${b}, not ${branch}` }
+  if (!/^\d+$/.test(ghExit)) return { reason: 'gh exit is not an integer' }
+  if (ghExit !== '0') return { reason: `gh exited ${ghExit}` }
+  if (number === 'none') {
+    return [state, isDraft, head, ancestor].join(' ') === 'none none none 0'
+      ? { number: null } : { reason: 'PR line says none but carries PR fields' }
+  }
+  if (!/^[1-9]\d*$/.test(number)) return { reason: 'PR number is not an integer' }
+  if (!PR_STATES.includes(state)) return { reason: `unknown PR state ${state}` }
+  if (isDraft !== 'true' && isDraft !== 'false') return { reason: 'isDraft is not true or false' }
+  if (!COMMIT_TOKEN.test(head)) return { reason: 'PR head is not a commit id' }
+  if (ancestor !== '0' && ancestor !== '1') return { reason: 'ancestor is not 0 or 1' }
+  return { number: Number(number), state, draft: isDraft === 'true', head, ancestor: ancestor === '1' }
+}
+const underPrRun = (p, run, name) => p.startsWith('/') && p.endsWith(`/touchstone-pr/${run}/${name}`)
+// isDraft is what gh reported after the undo, none when it reported nothing.
+const PR_UNDO_LINE = /^TOUCHSTONE_PR_UNDO (\S+) (\S+) (\S+) (.+)$/
+const parsePrUndo = (output, number, run) => {
+  const { line, reason } = oneLineOf(output)
+  if (reason) return { reason }
+  const m = PR_UNDO_LINE.exec(line)
+  if (!m) return { reason: 'malformed undo line' }
+  const [, n, exit, isDraft, log] = m
+  if (n !== String(number)) return { reason: `undo line names PR ${n}, not ${number}` }
+  if (!/^\d+$/.test(exit)) return { reason: 'exit is not an integer' }
+  if (!['true', 'false', 'none'].includes(isDraft)) return { reason: 'isDraft is not true, false or none' }
+  if (!underPrRun(log, run, 'pr-undo.log')) return { reason: 'log path is not under this run' }
+  return { exit: Number(exit), draft: isDraft === 'true', isDraft, log }
+}
+const PUSH_LINE = /^TOUCHSTONE_PUSH (\S+) (\S+) (.+)$/
+const parsePush = (output, branch, run) => {
+  const { line, reason } = oneLineOf(output)
+  if (reason) return { reason }
+  const m = PUSH_LINE.exec(line)
+  if (!m) return { reason: 'malformed push line' }
+  const [, b, exit, log] = m
+  if (b !== branch) return { reason: `push line names branch ${b}, not ${branch}` }
+  if (!/^\d+$/.test(exit)) return { reason: 'exit is not an integer' }
+  if (!underPrRun(log, run, 'push.log')) return { reason: 'log path is not under this run' }
+  return { exit: Number(exit), log }
 }
 // The only heading that is a check list. Only trailing whitespace is
 // ignored: '## checks', '### Checks', '##Checks', '## Checks ##' and

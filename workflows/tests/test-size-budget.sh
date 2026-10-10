@@ -148,7 +148,7 @@ async function scenarioSBF() {
 async function scenarioSBG() {
   console.log('\n== scenario SBG: a budget refusal inside a parallel review lens halts, rather than reading as a clean review')
   const { result, captured } = await run({
-    args: { runBudget: 750 },
+    args: { runBudget: 950 },
     budgetPerAgentCall: 100,
     initialReview: { correctness: [], advocate: [] },
   })
@@ -226,7 +226,7 @@ async function scenarioSBM() {
     sizeUnmeasured: true,
   })
   check('halted at Review', result.halted_at, 'Review')
-  check('the retry ran exactly once', callCount(captured, 'size'), 1)
+  check('the retry ran exactly once', callCount(captured, 'diffstat:retry'), 1)
   check('no review lens ran', captured.calls.some(c => c.label.startsWith('review:')), false)
   check('the note says this is a measurement problem', (result.note ?? '').includes('measurement problem'), true)
 }
@@ -239,7 +239,7 @@ async function scenarioSBN() {
   const { result, captured } = await run({
     diffstat: 'TOUCHSTONE_DIFFSTAT wrong..range\n100\t0\ta.js\nTOUCHSTONE_COMMENT_LINES\nTOUCHSTONE_DIFFSTAT_END',
   })
-  check('the retry ran exactly once', callCount(captured, 'size'), 1)
+  check('the retry ran exactly once', callCount(captured, 'diffstat:retry'), 1)
   check('the run recovered rather than halting', result.halted_at, undefined)
 }
 
@@ -367,20 +367,17 @@ async function scenarioSBV() {
 
 // Scenario SBW -- the probe's comment-line count against a real scratch repo:
 // a PHP 8 attribute and a Go pointer write are code, in languages the gates
-// support, and must not be counted as comments. Runs the probe's own command,
-// lifted from its draft-pr prompt, so this exercises the actual awk rather
-// than a JS reimplementation of it.
+// support, and must not be counted as comments. Runs the diffstat line itself,
+// lifted from its own prompt, so this exercises the actual awk rather than a
+// JS reimplementation of it.
 async function scenarioSBW() {
   console.log('\n== scenario SBW: a PHP attribute and a Go pointer write are not counted as comments')
   const repo = process.env.COMMENT_REPO
   const git = (...a) => execFileSync('git', ['-C', repo, ...a], { encoding: 'utf8' }).trim()
   const realRange = `${git('rev-parse', 'HEAD~1')}..${git('rev-parse', 'HEAD')}`
   const probe = await run({})
-  const draftPrompt = probe.captured.calls.find(c => c.label === 'draft-pr')?.prompt ?? ''
-  const at = draftPrompt.indexOf('echo TOUCHSTONE_DIFFSTAT ')
-  const cmd = draftPrompt.slice(at).split(COMMIT_RANGE).join(realRange)
-    .split('/tmp/stub-worktree').join(repo)
-  const real = execFileSync('bash', ['-c', cmd], { encoding: 'utf8' })
+  const prompt = probe.captured.calls.find(c => c.label === 'diffstat')?.prompt ?? ''
+  const real = runRunnerLines(prompt.split(COMMIT_RANGE).join(realRange).split('/tmp/stub-worktree').join(repo))
     .split(realRange).join(COMMIT_RANGE)
   const { result } = await run({ diffstat: real })
   check('no comment lines are counted', result.size?.comment, 0)

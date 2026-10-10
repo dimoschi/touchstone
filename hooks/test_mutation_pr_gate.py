@@ -58,6 +58,69 @@ def test_trigger_gh_pr_ready(tmp_path):
     assert branch is None
 
 
+def test_trigger_gh_pr_ready_undo_is_exempt(tmp_path):
+    repo = _repo(tmp_path)
+    assert gate.trigger("gh pr ready 7 --undo", repo) is None
+    assert gate.trigger(f"(cd {repo} && gh pr ready 7 --undo) >|log 2>&1; e=$?", repo) is None
+
+
+def test_trigger_gh_pr_ready_undo_then_ready_is_gated(tmp_path):
+    repo = _repo(tmp_path)
+    assert gate.trigger("gh pr ready 7 --undo; gh pr ready 7", repo) == (repo.resolve(), None)
+    assert gate.trigger("gh pr ready 7 && gh pr ready 8 --undo", repo) == (repo.resolve(), None)
+
+
+def test_trigger_gh_pr_ready_undo_must_be_its_own_flag(tmp_path):
+    repo = _repo(tmp_path)
+    assert gate.trigger("gh pr ready 7 --undone", repo) == (repo.resolve(), None)
+    assert gate.trigger("gh pr ready 7; echo --undo", repo) == (repo.resolve(), None)
+
+
+def test_trigger_gh_pr_ready_undo_stops_at_a_comment_or_newline(tmp_path):
+    repo = _repo(tmp_path)
+    assert gate.trigger("gh pr ready 5 # --undo", repo) == (repo.resolve(), None)
+    assert gate.trigger("gh pr ready 5\necho --undo", repo) == (repo.resolve(), None)
+
+
+def test_trigger_gh_pr_ready_undo_last_value_wins(tmp_path):
+    repo = _repo(tmp_path)
+    assert gate.trigger("gh pr ready 5 --undo --undo=false", repo) == (repo.resolve(), None)
+    assert gate.trigger("gh pr ready 5 --undo=false", repo) == (repo.resolve(), None)
+    assert gate.trigger("gh pr ready 5 --undo=0", repo) == (repo.resolve(), None)
+    assert gate.trigger("gh pr ready 5 --undo=false --undo", repo) is None
+    assert gate.trigger("gh pr ready 5 --undo=true", repo) is None
+
+
+def test_trigger_gh_pr_ready_undo_still_allowed_after_a_push(tmp_path):
+    repo = _repo(tmp_path, branch="feature")
+    assert gate.trigger("gh pr ready 5 --undo", repo) is None
+    assert gate.trigger(f"git -C {repo} push && gh pr ready 5 --undo", repo) is None
+
+
+def test_trigger_each_ready_is_judged_on_its_own_words(tmp_path):
+    repo = _repo(tmp_path)
+    hit = (repo.resolve(), None)
+    assert gate.trigger("gh pr ready 5 --undo\ngh pr ready 5", repo) == hit
+    assert gate.trigger("gh pr ready 5 --undo `gh pr ready 6`", repo) == hit
+    assert gate.trigger("echo x\ngh pr ready 5", repo) == hit
+    assert gate.trigger("gh pr ready 5 --undo\ngh pr ready 6 --undo", repo) is None
+
+
+def test_trigger_create_and_push_start_after_a_newline_or_backtick(tmp_path):
+    repo = _repo(tmp_path)
+    assert gate.trigger("echo x\ngh pr create --title x", repo) == (repo.resolve(), None)
+    assert gate.trigger("echo `gh pr create --title x`", repo) == (repo.resolve(), None)
+    assert gate.trigger("gh pr create --title x\necho --draft", repo) == (repo.resolve(), None)
+    assert gate.trigger("echo x\ngit push origin main", repo) == (repo.resolve(), "main")
+    assert gate.trigger("git push origin feature\necho main:main", repo) is None
+
+
+def test_undoes_returns_a_bool():
+    assert gate.undoes(" 5") is False
+    assert gate.undoes(" 5 --undo") is True
+    assert gate.undoes(" 5 --undo=false") is False
+
+
 def test_trigger_gh_pr_create_non_draft(tmp_path):
     repo = _repo(tmp_path)
     hit_repo, branch = gate.trigger("gh pr create --title x", repo)

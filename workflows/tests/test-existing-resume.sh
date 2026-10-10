@@ -67,19 +67,19 @@ async function scenarioR1() {
     lenses.every(c => c.prompt.includes(`read git diff ${range} yourself`)), true)
   check('no initial lens prompt names the implementer\'s whole-branch range',
     lenses.some(c => c.prompt.includes(COMMIT_RANGE)), false)
-  const draft = captured.calls.find(c => c.label === 'draft-pr')?.prompt ?? ''
-  check('the draft-pr diffstat command names the narrowed range',
-    draft.includes(`echo TOUCHSTONE_DIFFSTAT ${range};`) &&
-    draft.includes(`diff --numstat --no-renames ${range};`), true)
-  check('the draft-pr prompt does not name the whole-branch range', draft.includes(COMMIT_RANGE), false)
+  const diffstat = captured.calls.find(c => c.label === 'diffstat')?.prompt ?? ''
+  check('the diffstat line names the narrowed range',
+    diffstat.includes(`printf 'TOUCHSTONE_DIFFSTAT %s\\n' ${range};`) &&
+    diffstat.includes(`diff --numstat --no-renames ${range} `), true)
+  check('the diffstat line does not name the whole-branch range', diffstat.includes(COMMIT_RANGE), false)
   const labels = captured.calls.map(c => c.label)
   check('the head is checked once, and before the range is measured',
     [callCount(captured, 'resume:range-check'), labels.indexOf('resume:range-check') < labels.indexOf('draft-pr')],
     [1, true])
 
   const retried = await run(resumed({}, { diffstat: 'not a diffstat' }))
-  const size = retried.captured.calls.find(c => c.label === 'size')?.prompt ?? ''
-  check('the diffstat retry measures the narrowed range', size.includes(`echo TOUCHSTONE_DIFFSTAT ${range};`), true)
+  const size = retried.captured.calls.find(c => c.label === 'diffstat:retry')?.prompt ?? ''
+  check('the diffstat retry measures the narrowed range', size.includes(`printf 'TOUCHSTONE_DIFFSTAT %s\\n' ${range};`), true)
   check('a retry that recovers still reviews the narrowed range',
     initialLensCalls(retried.captured).every(c => c.prompt.includes(`Commit range: ${range}\n`)), true)
   const unmeasured = await run(resumed({}, { sizeUnmeasured: true }))
@@ -668,7 +668,7 @@ async function scenarioR13() {
     check('no lens range holds the base\'s own changes',
       lenses.flatMap(c => gitIn(repo, 'diff', '--name-only', rangeOf(c)).split('\n')).includes('main-only.txt'), false)
     check('the diffstat measures the whole branch, not the range from the record\'s head',
-      (merged.captured.calls.find(c => c.label === 'draft-pr')?.prompt ?? '').includes(`echo TOUCHSTONE_DIFFSTAT ${whole};`), true)
+      (merged.captured.calls.find(c => c.label === 'diffstat')?.prompt ?? '').includes(`printf 'TOUCHSTONE_DIFFSTAT %s\\n' ${whole};`), true)
     check('the budget is raised to fit the whole branch it now reviews',
       merged.captured.logs.includes(`run budget raised to 1000k (first review range ${whole}, 1000 changed lines)`), true)
     check('the record is still carried',
