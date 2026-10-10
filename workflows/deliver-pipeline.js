@@ -1200,13 +1200,16 @@ const preparedManifestOk = (m) => isObj(m) && isBool(m.found) && isBool(m.refres
 // An existing worktree lives wherever git says it does, and is this ticket's when
 // its branch or its directory carries the marker. An adopted one is the
 // checkout's own unmarked branch, which the script takes only when nothing
-// carries the marker; it must carry no ticket marker at all.
+// carries the marker; it must carry no ticket marker anywhere in its name.
+// None of them is ever the base branch.
 const preparedExisting = Boolean(args?.existingBranch)
-const afterTypePrefix = (b) => b.includes('/') ? b.slice(b.indexOf('/') + 1) : ''
-const anyTicketMarker = (b) => /^(gh-[0-9]+|jira-[A-Za-z][A-Za-z0-9]*-[0-9]+)-/.test(afterTypePrefix(b))
-const existingBranchOk = (p) => isStr(p.branch) && /^\S+$/.test(p.branch) && (p.worktree_action === 'adopted'
-  ? !anyTicketMarker(p.branch)
-  : carriesMarker(p.branch) || markerTail(String(p.worktree).split('/').pop()))
+const markersIn = (b) => [...String(b).matchAll(
+  /(?<![A-Za-z0-9])(gh-[0-9]+|jira-[A-Za-z][A-Za-z0-9]*-[0-9]+)(?![A-Za-z0-9])/g)].map(m => m[1])
+const otherMarkersIn = (b) => markersIn(b).filter(m => m.toLowerCase() !== ticketMarker.toLowerCase())
+const existingBranchOk = (p) => isStr(p.branch) && /^\S+$/.test(p.branch) && p.branch !== p.base &&
+  (p.worktree_action === 'adopted'
+    ? !markersIn(p.branch).length
+    : carriesMarker(p.branch) || markerTail(String(p.worktree).split('/').pop()))
 
 const PREPARED_FIELDS = [
   ['repo_root', (p) => isAbsPath(p.repo_root), 'an absolute path with no trailing slash'],
@@ -1214,8 +1217,8 @@ const PREPARED_FIELDS = [
     preparedExisting ? 'an absolute path' : `<repo_root>/.claude/worktrees/${ticketMarker}-<slug>`],
   ['branch', (p) => preparedExisting ? existingBranchOk(p) : carriesMarker(p.branch),
     preparedExisting
-      ? `a branch carrying ${ticketMarker}, or one in a worktree directory that does; when adopted, ` +
-        `a branch carrying no ticket marker`
+      ? `a branch other than the base carrying ${ticketMarker}, or one in a worktree directory that ` +
+        `does; when adopted, a branch carrying no ticket marker anywhere`
       : `<type>/${ticketMarker}-<slug>`],
   ['base', (p) => isStr(p.base) && (/^[0-9a-f]{40}$/.test(p.base) || REF_NAME.test(p.base)) &&
     (!baseOverride || p.base === baseOverride),
@@ -1720,12 +1723,15 @@ const askFresh = (label) => dispatch(
 // still has to agree with the reply's own facts, since the schema forces
 // branch and path and a failing agent fills in the names it meant to use. A
 // reply that disagrees with itself is asked again once, then halts. An
-// existing-mode branch need not carry the marker: step 6 adopts an unmarked one.
+// existing-mode branch need not carry the marker, since step 6 adopts an
+// unmarked one, but no reply may name the base or another ticket's branch.
 const replyFacts = (w) => [
   [w?.dirty !== true, 'dirty is true'],
   [isStr(w?.branch) && w.branch !== '', 'branch is empty'],
   [isAbsPath(w?.path), 'path is not absolute'],
   [Boolean(args?.existingBranch) || carriesMarker(w?.branch), `branch does not carry ${ticketMarker}`],
+  [![baseOverride, w?.base].includes(w?.branch), 'branch is the base'],
+  [!otherMarkersIn(w?.branch).length, 'branch carries another ticket\'s marker'],
 ].filter(([ok]) => !ok).map(([, why]) => why)
 const contradictionIn = (w) =>
   w?.halt_reason === 'none' && replyFacts(w).length ? `halt_reason is none but ${replyFacts(w).join(', ')}`

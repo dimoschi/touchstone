@@ -469,12 +469,15 @@ const askFresh = (label) => dispatch(
 // still has to agree with the reply's own facts, since the schema forces
 // branch and path and a failing agent fills in the names it meant to use. A
 // reply that disagrees with itself is asked again once, then halts. An
-// existing-mode branch need not carry the marker: step 6 adopts an unmarked one.
+// existing-mode branch need not carry the marker, since step 6 adopts an
+// unmarked one, but no reply may name the base or another ticket's branch.
 const replyFacts = (w) => [
   [w?.dirty !== true, 'dirty is true'],
   [isStr(w?.branch) && w.branch !== '', 'branch is empty'],
   [isAbsPath(w?.path), 'path is not absolute'],
   [Boolean(args?.existingBranch) || carriesMarker(w?.branch), `branch does not carry ${ticketMarker}`],
+  [![baseOverride, w?.base].includes(w?.branch), 'branch is the base'],
+  [!otherMarkersIn(w?.branch).length, 'branch carries another ticket\'s marker'],
 ].filter(([ok]) => !ok).map(([, why]) => why)
 const contradictionIn = (w) =>
   w?.halt_reason === 'none' && replyFacts(w).length ? `halt_reason is none but ${replyFacts(w).join(', ')}`

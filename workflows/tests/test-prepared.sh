@@ -133,6 +133,18 @@ const MALFORMED = [
     prepared({ mode: 'existing', worktree_action: 'adopted' }), { existingBranch: true }],
   ['an adopted branch that carries another ticket', 'branch',
     prepared({ mode: 'existing', worktree_action: 'adopted', branch: 'feat/jira-ABC-9-x' }), { existingBranch: true }],
+  ['an adopted branch with another ticket and no type', 'branch',
+    prepared({ mode: 'existing', worktree_action: 'adopted', branch: 'gh-99-other' }), { existingBranch: true }],
+  ['an adopted branch with another ticket deep in its name', 'branch',
+    prepared({ mode: 'existing', worktree_action: 'adopted', branch: 'feat/legacy-gh-99' }), { existingBranch: true }],
+  ['an adopted base branch', 'branch',
+    prepared({ mode: 'existing', worktree_action: 'adopted', branch: 'main', worktree: ROOT,
+      checks_source: { file: '', sections: [], detail: '' } }), { existingBranch: true }],
+  ['a reused base branch in a marked directory', 'branch',
+    prepared({ mode: 'existing', worktree_action: 'reused', branch: 'main' }), { existingBranch: true }],
+  ['a reattached branch equal to a given base', 'branch',
+    prepared({ mode: 'existing', worktree_action: 'reattached', branch: 'feat/gh-21-stub', base: 'feat/gh-21-stub' }),
+    { existingBranch: true, base: 'feat/gh-21-stub' }],
   ['existing mode on a fresh run', 'mode', prepared({ mode: 'existing', worktree_action: 'reused' })],
   ['fresh mode on an existing run', 'mode', prepared(), { existingBranch: true }],
   ['reused on a fresh run', 'worktree_action', prepared({ worktree_action: 'reused' })],
@@ -308,6 +320,7 @@ async function scenarioPM() {
     ['none on a dirty tree', reply({ dirty: true })],
     ['none on an unmarked fresh branch', reply({ branch: 'feat/other' })],
     ['dirty on a clean tree', reply({ halt_reason: 'dirty', dirty: false })],
+    ['none on another ticket\'s fresh branch', reply({ branch: 'feat/gh-21-x-gh-99' })],
   ]
   for (const [what, r] of bad) {
     const { result, captured } = await run({ branchResult: r, ...quiet })
@@ -324,6 +337,20 @@ async function scenarioPM() {
   const ex = await run({ args: { existingBranch: true }, existingBranchResult: reply({ path: '' }), ...quiet })
   check('existing mode retries under its own label', callCount(ex.captured, 'branch:existing:retry'), 1)
   check('existing mode halts after it', ex.result.halted_at, 'Worktree')
+  for (const [what, r] of [
+    ['the base branch', reply({ branch: 'main', path: '/work/repo' })],
+    ['a given base', reply({ branch: 'feat/legacy', path: '/work/repo', base: 'feat/legacy' })],
+    ['another ticket\'s branch', reply({ branch: 'feat/gh-99-x', path: '/work/repo' })],
+    ['another ticket\'s branch with no type', reply({ branch: 'gh-99-x', path: '/work/repo' })],
+  ]) {
+    const { result, captured } = await run({ args: { existingBranch: true }, existingBranchResult: r, ...quiet })
+    check(`existing, none on ${what}: retried once`, callCount(captured, 'branch:existing:retry'), 1)
+    check(`existing, none on ${what}: halts naming the contradiction`,
+      String(result.note).startsWith('The worktree step\'s reply contradicted itself twice'), true)
+  }
+  const stackedBase = await run({ args: { existingBranch: true, base: 'feat/parent' },
+    existingBranchResult: reply({ branch: 'feat/parent', base: 'main', path: '/work/repo' }), ...quiet })
+  check('existing, none on args.base: halts', stackedBase.result.halted_at, 'Worktree')
   const okFirst = await run({ branchResult: reply({}), ...quiet })
   check('a consistent reply is not retried', callCount(okFirst.captured, 'branch:retry'), 0)
 }
@@ -341,6 +368,8 @@ check "deliver.md passes the output as prepared" \
   "$(grep -Fc 'pass the printed JSON unchanged as `prepared`' "$DELIVER_MD")" 1
 check "deliver.md stops on a refusal" \
   "$(grep -Fc 'report both verbatim and stop.' "$DELIVER_MD")" 1
+check "deliver.md passes the session's own checkout, not the main one" \
+  "$(grep -Fc 'the toplevel of the checkout you are running in (`git rev-parse --show-toplevel`)' "$DELIVER_MD")" 1
 check "deliver.md derives the slug from the ticket title" \
   "$(grep -Fc 'Derive the slug from it: lowercase,' "$DELIVER_MD")" 1
 

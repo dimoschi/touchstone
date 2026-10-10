@@ -24,7 +24,7 @@ GH = "gh"
 SHA = re.compile(r"[0-9a-f]{40}")
 SLUG = re.compile(r"[a-z0-9]+(?:-[a-z0-9]+){0,5}")
 FENCE = re.compile(r"^ {0,3}(`{3,}|~{3,})")
-OTHER_MARKER = re.compile(r"(gh-[0-9]+|jira-[A-Za-z][A-Za-z0-9]*-[0-9]+)-")
+ANY_MARKER = re.compile(r"(?<![A-Za-z0-9])(gh-[0-9]+|jira-[A-Za-z][A-Za-z0-9]*-[0-9]+)(?![A-Za-z0-9])")
 PRIOR_HEAD = "TOUCHSTONE_PRIOR_HEAD_LINEAR"
 
 
@@ -250,14 +250,10 @@ def _one(found, marker, what):
     return found[0] if found else None
 
 
-def latest_pr(text):
+def latest_pr(data):
     """The open PR if there is one, else the highest-numbered, as the draft-PR step picks."""
-    prs = sorted(_prs(_json_or_none(text)), key=lambda d: -d["number"])
+    prs = sorted((d for d in data if _is_pr(d)), key=lambda d: -d["number"])
     return next((d for d in prs if d["state"] == "OPEN"), prs[0] if prs else None)
-
-
-def _prs(data):
-    return [d for d in data if _is_pr(d)] if isinstance(data, list) else []
 
 
 def _is_pr(d):
@@ -273,7 +269,10 @@ def _merged_check(root, branch):
         return f"; merged check skipped: could not run {GH}: {error}"
     if done.returncode:
         return f"; merged check skipped: gh exited {done.returncode}"
-    pr = latest_pr(done.stdout)
+    data = _json_or_none(done.stdout)
+    if not isinstance(data, list):
+        return "; merged check skipped: gh printed no JSON list"
+    pr = latest_pr(data)
     if pr and pr["state"] == "MERGED":
         raise Refusal("merged", f"branch {branch}'s latest pull request (#{pr['number']}) merged; "
                       f"that work shipped, so it is not a tree to keep implementing into")
@@ -287,23 +286,33 @@ def _refuse_dirty(path):
                       f"sweep into a commit: {(r.out + r.err).strip()}")
 
 
-def _adopt(here, marker, bases):
+def _refuse_marked(current, marker):
+    """An adopted branch carries no ticket marker anywhere: another ticket's, or this one's out of place."""
+    found = ANY_MARKER.findall(current)
+    others = [m for m in found if m.lower() != marker.lower()]
+    if others:
+        raise Refusal("wrong-ticket", f"no worktree or branch carries {marker}, and the checkout is on "
+                      f"{current}, which belongs to {others[0]}")
+    if found:
+        raise Refusal("not-found", f"no branch carries {marker} as <type>/{marker}-<slug>, and the checkout "
+                      f"is on {current}, which names it elsewhere; rename it or run without --existing")
+
+
+def _adopt(root, here, marker, bases):
     """The checkout's own branch, when nothing carries the marker: a branch older than the convention."""
     current = git(here, "branch", "--show-current").out.strip()
-    other = OTHER_MARKER.match(current.partition("/")[2])
-    if other:
-        raise Refusal("wrong-ticket", f"no worktree or branch carries {marker}, and the checkout is on "
-                      f"{current}, which belongs to {other.group(1)}")
+    _refuse_marked(current, marker)
     if not current or current in bases:
         raise Refusal("not-found", f"no worktree or branch carries the {marker} marker, and the checkout "
                       f"is not on a feature branch; run without --existing to cut one")
-    return git(here, "rev-parse", "--show-toplevel").out.strip(), current, "adopted", ""
+    note = _merged_check(root, current)
+    return git(here, "rev-parse", "--show-toplevel").out.strip(), current, "adopted", note
 
 
 def _reattach(root, here, marker, bases):
     branch = _one([b for b in local_branches(root) if carries(b, marker)], marker, "branch")
     if branch is None:
-        return _adopt(here, marker, bases)
+        return _adopt(root, here, marker, bases)
     note = _merged_check(root, branch)
     path = canonical(root, branch.partition("/")[2].replace("/", "-"))
     if os.path.lexists(path):

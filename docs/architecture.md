@@ -230,11 +230,13 @@ in fresh mode, fetch the base and refuse (exit 3) a branch name that exists loca
 origin (`git ls-remote origin refs/heads/<name>`), or an occupied path, then cut
 `<repo>/.claude/worktrees/<marker>-<slug>`; in existing mode, find the ticket's worktree
 (used where it is), then a branch with no worktree, by marker, and failing both, adopt
-the checkout's own unmarked feature branch unrenamed (`worktree_action: adopted`; the
-mutation ledger keys on branch names). It refuses a branch whose latest PR merged (from
+the branch of the checkout it was pointed at (the invoking session's own, as
+`commands/deliver.md` passes it) unrenamed (`worktree_action: adopted`; the mutation
+ledger keys on branch names), unless it is detached, a base branch, or carries any
+ticket marker anywhere in its name. It refuses a branch whose latest PR merged (from
 `gh pr list --head <branch> --state all`, the open one else the highest-numbered, the
-draft-PR step's rule; a gh that cannot answer is noted in `detail` and treated as not
-merged), a dirty tree, more than one match, a checkout on another ticket's branch, or
+draft-PR step's rule, adopted branches included; a gh that cannot answer or prints no
+JSON list is noted in `detail` and treated as not merged), a dirty tree, more than one match, a checkout on another ticket's branch, or
 nothing to use. Every git and gh call runs with stdin closed and
 `GIT_TERMINAL_PROMPT=0`, so a credential prompt fails instead of hanging the session;
 existing mode's fetch failing is not fatal. It then reads the gate markers at the repo root,
@@ -247,8 +249,8 @@ Every field of `args.prepared` is validated (`workflows/parts/15-prepared.js.par
 before anything is dispatched, and the first that fails halts at Worktree naming it. A
 fresh worktree must sit directly under `<repo_root>/.claude/worktrees/` and carry the
 ticket marker, as must its branch. An existing one may be any absolute path, with the
-marker on its branch or its directory name; an adopted one must carry no ticket marker
-at all. The ticket and marker must be this run's, the base a ref name or 40-hex SHA (and
+marker on its branch or its directory name, and its branch is never the base; an
+adopted one must carry no ticket marker anywhere. The ticket and marker must be this run's, the base a ref name or 40-hex SHA (and
 equal `args.base` when one is given), the mode and action must match `existingBranch`,
 and the plugin must be this run's own name and `PIPELINE_VERSION`. A valid one skips
 the branch dispatch, and `setup` asks for the ticket alone (`SETUP_TICKET`).
@@ -257,8 +259,8 @@ Without `args.prepared` the agent path below still runs. Both branch schemas req
 `halt_reason`, with a value for every failure their prompt describes, and `created` is
 never read: one agent read it as "newly created" and halted a run whose lookup had
 succeeded. A reply proceeds only on `halt_reason: none` with facts that agree: not
-dirty, a non-empty branch, an absolute path, and in fresh mode a branch carrying the
-marker. The facts matter because the schema forces branch and path, so a failing agent
+dirty, a non-empty branch that is neither the base nor marked for another ticket, an
+absolute path, and in fresh mode a branch carrying the marker. The facts matter because the schema forces branch and path, so a failing agent
 fills in the names it meant to use. A reply that contradicts itself (`none` with facts
 that fail, or `dirty` on a clean tree) is asked once more under a `:retry` label, then
 halts naming the contradiction. The fresh prompt also runs `git ls-remote --heads origin <name>` and

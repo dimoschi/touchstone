@@ -332,8 +332,8 @@ def test_existing_refuses_a_branch_whose_pr_merged_without_reattaching(world, ca
     assert not os.path.exists(wt_path(world, "gh-163-done"))
 
 
-@pytest.mark.parametrize("reply", ["not json", '{"number": 1, "state": "MERGED"}', "[]", '[{"id": 1}]',
-                                   '[{"number": 1}]', '[{"state": "MERGED"}]', '[{"number": "1", "state": "MERGED"}]'])
+@pytest.mark.parametrize("reply", ["[]", '[{"id": 1}]', '[{"number": 1}]', '[{"state": "MERGED"}]',
+                                   '[{"number": "1", "state": "MERGED"}]'])
 def test_existing_treats_an_unusable_or_empty_gh_reply_as_live(world, capsys, reply):
     path = make_branch_worktree(world, "feat/gh-163-live", "gh-163-live")
     world.gh_out.write_text(reply)
@@ -826,10 +826,66 @@ def test_carries_reads_the_marker_after_the_first_slash(branch, want):
     assert pd.carries(branch, "gh-163") is want
 
 
-def test_a_marker_deeper_than_the_first_segment_is_not_another_ticket(world, capsys):
-    git(world.repo, "checkout", "-q", "-b", "x/feat/jira-ABC-9-y")
+@pytest.mark.parametrize("branch,other", [
+    ("x/feat/jira-ABC-9-y", "jira-ABC-9"), ("gh-99-other", "gh-99"), ("feat/legacy-gh-99", "gh-99"),
+    ("feat/old-jira-abc-12-x", "jira-abc-12"),
+])
+def test_another_tickets_marker_anywhere_in_the_name_refuses(world, capsys, branch, other):
+    git(world.repo, "checkout", "-q", "-b", branch)
     code, out = run(world, capsys, "--existing")
-    assert (code, out["branch"], out["worktree_action"]) == (0, "x/feat/jira-ABC-9-y", "adopted")
+    assert (code, out["error"]) == (3, "wrong-ticket")
+    assert out["reason"] == (f"no worktree or branch carries gh-163, and the checkout is on {branch}, "
+                             f"which belongs to {other}")
+
+
+@pytest.mark.parametrize("branch", ["gh-163-no-type", "feat/old/gh-163-deep"])
+def test_this_tickets_marker_out_of_place_is_not_adopted(world, capsys, branch):
+    git(world.repo, "checkout", "-q", "-b", branch)
+    code, out = run(world, capsys, "--existing")
+    assert (code, out["error"]) == (3, "not-found")
+    assert out["reason"] == (f"no branch carries gh-163 as <type>/gh-163-<slug>, and the checkout is on "
+                             f"{branch}, which names it elsewhere; rename it or run without --existing")
+
+
+@pytest.mark.parametrize("branch", ["feat/xgh-99-y", "feat/gh-99x"])
+def test_marker_lookalikes_are_adopted(world, capsys, branch):
+    git(world.repo, "checkout", "-q", "-b", branch)
+    code, out = run(world, capsys, "--existing")
+    assert (code, out["worktree_action"]) == (0, "adopted")
+
+
+def test_an_adopted_branch_whose_latest_pr_merged_is_refused(world, capsys):
+    git(world.repo, "checkout", "-q", "-b", "feat/legacy-work")
+    world.gh_out.write_text('[{"number": 9, "state": "MERGED"}]')
+    code, out = run(world, capsys, "--existing")
+    assert (code, out["error"]) == (3, "merged")
+    assert world.gh_log.read_text().startswith(f"{world.repo} pr list --head feat/legacy-work ")
+
+
+def test_an_adopted_branch_carries_the_merged_check_note(world, capsys, monkeypatch):
+    git(world.repo, "checkout", "-q", "-b", "feat/legacy-work")
+    (world.tmp / "gh-code").write_text("4")
+    code, out = run(world, capsys, "--existing")
+    assert code == 0
+    assert out["detail"] == "adopted the worktree of feat/legacy-work; merged check skipped: gh exited 4"
+
+
+def test_the_session_checkout_decides_what_is_adopted_not_the_main_one(world, capsys):
+    git(world.repo, "checkout", "-q", "-b", "feat/main-checkout-work")
+    session = os.path.realpath(world.tmp) + "/session"
+    git(world.repo, "worktree", "add", "-q", "--detach", session, "origin/main")
+    argv = [session, "--ticket", "163", "--type", "fix", "--slug", "x", "--plugin-json", str(world.plugin), "--existing"]
+    assert pd.main(argv) == 3
+    assert json.loads(capsys.readouterr().out)["error"] == "not-found"
+
+
+@pytest.mark.parametrize("reply", ["not json", '{"number": 1, "state": "MERGED"}', ""])
+def test_gh_output_that_is_not_a_json_list_skips_the_check_out_loud(world, capsys, reply):
+    make_branch_worktree(world, "feat/gh-163-live", "gh-163-live")
+    world.gh_out.write_text(reply)
+    code, out = run(world, capsys, "--existing")
+    assert code == 0
+    assert out["detail"] == "reused the worktree of feat/gh-163-live; merged check skipped: gh printed no JSON list"
 
 
 def test_a_tag_carrying_the_marker_is_not_a_branch(world, capsys):

@@ -64,8 +64,10 @@ plugin ships:
    issue, the Atlassian tools for a Jira key. Derive the slug from it: lowercase,
    hyphen-separated, at most 6 words, letters and digits only. With `--existing` the slug
    is not used to find anything, but the script still requires one.
-2. Run it with the main checkout's absolute path, redirecting its output to a file and
-   reading that file:
+2. Run it with the toplevel of the checkout you are running in (`git rev-parse --show-toplevel`),
+   not the main checkout's path: the script finds the main checkout from it, and with
+   `--existing` it falls back to that checkout's own branch. Redirect its output to a file
+   and read that file:
 
    ```
    ${CLAUDE_PLUGIN_ROOT}/skills/crap-controlled-changes/prepare-delivery.sh <absolute repo path> --ticket <ref> --type <type> --slug <slug> [--existing] [--base <ref>] [--prior-head <sha>]
