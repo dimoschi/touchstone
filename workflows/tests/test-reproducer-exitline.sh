@@ -168,7 +168,7 @@ async function scenarioFF() {
       advocate: [],
     },
     verify: (id, round) => { phase = `verify:${round}`; return (id === 'f1' || id === 'f2') ? true : undefined },
-    mutationResult: () => ({ green: true, head_sha: 'mut0000000000000000000000000000000000001',
+    mutationResult: () => ({ green: true, head_sha: 'aaa0000000000000000000000000000000000001',
       detail: 'stub green', scored: true }),
     settledExit: (id, round) => { phase = `settled:${round}`; return (round === 'mutation') ? 1 : 0 },
     outputFor: (id, code) => {
@@ -387,7 +387,7 @@ async function scenarioFK() {
   const { result, captured } = await run(convergedWithSuspect({
     args: { openPr: true },
     prResult: { opened: true, url: 'https://example.invalid/pr/23', note: 'stub ready' },
-    mutationResult: () => ({ green: true, head_sha: 'mut0000000000000000000000000000000000001',
+    mutationResult: () => ({ green: true, head_sha: 'aaa0000000000000000000000000000000000001',
       detail: 'stub green', scored: true }),
     postMutationReview: [{ title: 'New nil deref in the added test helper',
       file: 'src/helper.js', claim: 'deref before the guard', evidence: 'helper.js:8' }],
@@ -468,7 +468,7 @@ async function scenarioFN() {
   const { result } = await run({
     initialReview: { correctness: [], advocate: [] },
     mutationGated: true,
-    mutationResult: () => ({ green: true, head_sha: 'mut0000000000000000000000000000000000001',
+    mutationResult: () => ({ green: true, head_sha: 'aaa0000000000000000000000000000000000001',
       detail: 'stub green', scored: true }),
     postMutationReview: [
       { title: 'Reproduced post-mutation', file: 'a.js', claim: 'c1', evidence: 'e1' },

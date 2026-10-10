@@ -55,7 +55,7 @@ check "the 'left as a draft' wording appears only in prNote" \
 check "no text claims the work cannot open a PR, which the draft already did" \
   "$(grep -Fc 'cannot open a PR' "$SCRIPT" || true)" 0
 check "every note that reports the PR's fate reads the helper" \
-  "$(grep -Fc '${prNote()}' "$SCRIPT" || true)" 10
+  "$(grep -Fc '${prNote()}' "$SCRIPT" || true)" 11
 
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
@@ -106,11 +106,13 @@ function baseArgs(overrides) {
 // every default below it; a label not listed falls through to the defaults,
 // which is what makes each scenario only state the one call it cares about.
 // What the mutation verdict line prints: exit 0 when the last mutation answer
-// said green, else 1, at the head it reported.
+// said green, else 5 (no green run recorded), with the gate's matching
+// trailer, at a fixed 40-hex head.
 function mutationVerifyReply(prompt, last) {
-  const run = (/printf 'TOUCHSTONE_MUTATION_VERIFY %s %s %s %s\\n' (\S+) /.exec(prompt) ?? [])[1] ?? ''
-  return { output: `TOUCHSTONE_MUTATION_VERIFY ${run} ${last?.green ? 0 : 1} ` +
-    `${last?.head_sha || 'impl0000000000000000000000000000000000000'} /stub-worktree/.git/touchstone-gates/${run}/mutation-verify.log` }
+  const run = (/printf 'TOUCHSTONE_MUTATION_VERIFY %s %s %s %s %s\\n' (\S+) /.exec(prompt) ?? [])[1] ?? ''
+  const exit = last?.green ? 0 : 5
+  return { output: `TOUCHSTONE_MUTATION_VERIFY ${run} ${exit} ${exit} ` +
+    `c0ffee0000000000000000000000000000000001 /stub-worktree/.git/touchstone-gates/${run}/mutation-verify.log` }
 }
 
 function makeAgent(scenario, captured) {

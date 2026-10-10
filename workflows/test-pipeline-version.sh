@@ -147,11 +147,13 @@ function baseArgs(overrides) {
 const DEFAULT_DIFFSTAT_BODY = '5\t0\ta.js\nTOUCHSTONE_COMMENT_LINES\nTOUCHSTONE_DIFFSTAT_END'
 
 // What the mutation verdict line prints: exit 0 when the last mutation answer
-// said green, else 1, at the head it reported.
+// said green, else 5 (no green run recorded), with the gate's matching
+// trailer, at a fixed 40-hex head.
 function mutationVerifyReply(prompt, last) {
-  const run = (/printf 'TOUCHSTONE_MUTATION_VERIFY %s %s %s %s\\n' (\S+) /.exec(prompt) ?? [])[1] ?? ''
-  return { output: `TOUCHSTONE_MUTATION_VERIFY ${run} ${last?.green ? 0 : 1} ` +
-    `${last?.head_sha || 'impl0000000000000000000000000000000000000'} /stub-worktree/.git/touchstone-gates/${run}/mutation-verify.log` }
+  const run = (/printf 'TOUCHSTONE_MUTATION_VERIFY %s %s %s %s %s\\n' (\S+) /.exec(prompt) ?? [])[1] ?? ''
+  const exit = last?.green ? 0 : 5
+  return { output: `TOUCHSTONE_MUTATION_VERIFY ${run} ${exit} ${exit} ` +
+    `c0ffee0000000000000000000000000000000001 /stub-worktree/.git/touchstone-gates/${run}/mutation-verify.log` }
 }
 
 function makeAgent(scenario, captured) {

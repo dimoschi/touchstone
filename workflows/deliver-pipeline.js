@@ -695,25 +695,34 @@ const VERDICT_RUN = {
   type: 'object', additionalProperties: false, required: ['output'],
   properties: { output: { type: 'string' } },
 }
-// Lowercase letters as well as hex digits, because the stubbed heads the
-// workflow suites use (mut000..., head000...) are not hex; what is rejected is
-// a revision expression, a quote or a second token.
-const COMMIT_TOKEN = /^[0-9a-z]+$/
+const COMMIT_TOKEN = /^[0-9a-f]{40}$/
 const oneLineOf = (output) => {
   const lines = runnerLinesOf(output)
   if (!lines.length) return { reason: 'no output' }
   if (lines.length > 1) return { reason: `${lines.length} lines where one was expected` }
   return { line: lines[0] }
 }
-const MUTATION_VERIFY_LINE = /^TOUCHSTONE_MUTATION_VERIFY (\S+) (\S+) (\S+) (.+)$/
+const MUTATION_VERIFY_LINE = /^TOUCHSTONE_MUTATION_VERIFY (\S+) (\S+) (\S+) (\S+) (.+)$/
+// The real mutation-check.sh ends every run past its own setup with
+// `mutation-check: EXIT=<n> ...`, so a 0 or a 5 without that trailer, or with
+// a different number, came from something else: a substituted `true`, another
+// script. A setup exit (127 not found, 2 before the trailer trap is set) may
+// carry none and is still a verdict about the gate.
+const trailerProblem = (exit, trailer) => {
+  if (trailer === '-') return exit === 0 || exit === 5 ? `exit ${exit} with no gate trailer in the log` : null
+  if (!/^\d+$/.test(trailer)) return 'trailer is not an integer'
+  return Number(trailer) === exit ? null : `gate trailer says EXIT=${trailer}, the shell says ${exit}`
+}
 const parseMutationVerify = (output, run) => {
   const { line, reason } = oneLineOf(output)
   if (reason) return { reason }
   const m = MUTATION_VERIFY_LINE.exec(line)
   if (!m) return { reason: 'malformed verdict line' }
-  const [, r, exit, head, log] = m
+  const [, r, exit, trailer, head, log] = m
   if (r !== run) return { reason: `verdict line names run ${r}, not ${run}` }
   if (!/^\d+$/.test(exit)) return { reason: 'exit is not an integer' }
+  const mismatch = trailerProblem(Number(exit), trailer)
+  if (mismatch) return { reason: mismatch }
   if (!COMMIT_TOKEN.test(head)) return { reason: 'head is not a commit id' }
   if (!log.startsWith('/') || !log.endsWith(`/touchstone-gates/${run}/mutation-verify.log`)) {
     return { reason: 'log path is not under this run' }
@@ -4108,11 +4117,14 @@ if (!mutationGated) {
 // The line names mutation-check.sh without its directory, so the agent
 // running the line supplies the path, as the signals probe does.
 let verdictAttempt = 0
+// What --verify exits when the ledger is missing or stale for this head.
+const VERIFY_UNRECORDED = 5
 const mutationVerifyLineFor = (run) =>
   `${logDirFor(run, 'touchstone-gates')} && mkdir -p "$d" && ` +
   `h="$(git -C ${shQuote(wt.path)} rev-parse HEAD 2>/dev/null)" && ` +
   `{ mutation-check.sh ${shQuote(wt.path)} --verify >|"$d/mutation-verify.log" 2>&1; e=$?; ` +
-  `printf 'TOUCHSTONE_MUTATION_VERIFY %s %s %s %s\\n' ${run} "$e" "$h" "$d/mutation-verify.log"; }`
+  `t="$(sed -n '$s/^mutation-check: EXIT=\\([0-9][0-9]*\\) .*$/\\1/p' "$d/mutation-verify.log")"; ` +
+  `printf 'TOUCHSTONE_MUTATION_VERIFY %s %s %s %s %s\\n' ${run} "$e" "\${t:--}" "$h" "$d/mutation-verify.log"; }`
 const MUTATION_CHECK_PATH_NOTE =
   `mutation-check.sh is named without its directory. It sits in the ` +
   `crap-controlled-changes skill's directory, beside crap-check.sh: invoke ` +
@@ -4136,10 +4148,12 @@ const verifyMutation = async (label) => {
 // needs_user_run breaks the loop instead of retrying: a run that cannot fit the
 // Bash ceiling returns the same answer every attempt, and each one costs the
 // ceiling in wall clock before saying so. An unmeasured verdict breaks it too:
-// another mutation run cannot fix a relay that did not print its line.
+// another mutation run cannot fix a relay that did not print its line, and so
+// does a --verify that could not run at all (127, 2): another attempt meets
+// the same missing script or setup failure.
 for (let attempt = 1; attempt <= MAX_GATE_ATTEMPTS && !mutation.green
      && !mutation.needs_user_run && !mutation.unsupported_language
-     && !mutation.verdict_unmeasured
+     && !mutation.verdict_unmeasured && !mutation.verify_setup
      && !outOfBudget() && !sMut.over(); attempt++) {
   const reported = await treeAgent(
     `Run mutation-check.sh ${wt.path} from the crap-controlled-changes skill in ` +
@@ -4211,10 +4225,12 @@ for (let attempt = 1; attempt <= MAX_GATE_ATTEMPTS && !mutation.green
     unscoredNote = reported.gate_note
   }
   const verdict = await verifyMutation(`mutation-verify:${attempt}`)
+  const { head_sha: agentHead, ...agentSaid } = reported ?? mutation
   mutation = verdict.reasons
-    ? { ...(reported ?? mutation), green: false, verdict_unmeasured: true, verdict_reasons: verdict.reasons }
-    : { ...(reported ?? mutation), green: verdict.exit === 0, head_sha: verdict.head,
-        verify: { exit: verdict.exit, log: verdict.log } }
+    ? { ...agentSaid, green: false, verdict_unmeasured: true, verdict_reasons: verdict.reasons }
+    : { ...agentSaid, green: verdict.exit === 0, head_sha: verdict.head,
+        verify: { exit: verdict.exit, log: verdict.log },
+        ...(verdict.exit !== 0 && verdict.exit !== VERIFY_UNRECORDED ? { verify_setup: true } : {}) }
 }
 sMut.close()
 
@@ -4246,15 +4262,23 @@ if (!mutation.green) {
         `second: ${mutation.verdict_reasons[1]}). This halt is about ` +
         `measurement, not about mutants. ${prNote()}, and ` +
         `mutation-pr-gate.py would block marking it ready until --verify reads green.`
-      : `Mutation gate still red after ${MAX_GATE_ATTEMPTS} attempt(s): ` +
+      : mutation.verify_setup
+      ? `mutation-check.sh ${wt.path} --verify could not run: it exited ` +
+        `${mutation.verify.exit} (${mutation.verify.log}), which is neither green ` +
+        `(0) nor a missing or stale ledger (${VERIFY_UNRECORDED}). 127 means the ` +
+        `script was not found and 2 is a setup failure. No further mutation ` +
+        `attempt was made. ${prNote()}, and mutation-pr-gate.py would block ` +
+        `marking it ready until --verify reads green.`
+      : `Mutation gate still red after ${MAX_GATE_ATTEMPTS} attempt(s)` +
         (mutation.verify
-          ? `mutation-check.sh --verify exited ${mutation.verify.exit} (${mutation.verify.log}). `
+          ? `: mutation-check.sh --verify exited ${mutation.verify.exit} ` +
+            `(${mutation.verify.log}), so the gate has not recorded a green run ` +
+            `for this head, either because mutants survived or because no run ` +
+            `was recorded`
           : '') +
-        `Surviving ` +
-        `mutants are behaviour the tests cannot detect. ${prNote()}, and ` +
-        `mutation-pr-gate.py would block marking it ready. Kill them ` +
-        `with tests, or approve a provably equivalent mutant with ` +
-        `mutation-check.sh ${wt.path} --accept.`,
+        `. ${prNote()}, and mutation-pr-gate.py would block marking it ready. ` +
+        `Kill surviving mutants with tests, or approve a provably equivalent ` +
+        `mutant with mutation-check.sh ${wt.path} --accept.`,
   })
 }
 

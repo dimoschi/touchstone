@@ -315,25 +315,34 @@ const VERDICT_RUN = {
   type: 'object', additionalProperties: false, required: ['output'],
   properties: { output: { type: 'string' } },
 }
-// Lowercase letters as well as hex digits, because the stubbed heads the
-// workflow suites use (mut000..., head000...) are not hex; what is rejected is
-// a revision expression, a quote or a second token.
-const COMMIT_TOKEN = /^[0-9a-z]+$/
+const COMMIT_TOKEN = /^[0-9a-f]{40}$/
 const oneLineOf = (output) => {
   const lines = runnerLinesOf(output)
   if (!lines.length) return { reason: 'no output' }
   if (lines.length > 1) return { reason: `${lines.length} lines where one was expected` }
   return { line: lines[0] }
 }
-const MUTATION_VERIFY_LINE = /^TOUCHSTONE_MUTATION_VERIFY (\S+) (\S+) (\S+) (.+)$/
+const MUTATION_VERIFY_LINE = /^TOUCHSTONE_MUTATION_VERIFY (\S+) (\S+) (\S+) (\S+) (.+)$/
+// The real mutation-check.sh ends every run past its own setup with
+// `mutation-check: EXIT=<n> ...`, so a 0 or a 5 without that trailer, or with
+// a different number, came from something else: a substituted `true`, another
+// script. A setup exit (127 not found, 2 before the trailer trap is set) may
+// carry none and is still a verdict about the gate.
+const trailerProblem = (exit, trailer) => {
+  if (trailer === '-') return exit === 0 || exit === 5 ? `exit ${exit} with no gate trailer in the log` : null
+  if (!/^\d+$/.test(trailer)) return 'trailer is not an integer'
+  return Number(trailer) === exit ? null : `gate trailer says EXIT=${trailer}, the shell says ${exit}`
+}
 const parseMutationVerify = (output, run) => {
   const { line, reason } = oneLineOf(output)
   if (reason) return { reason }
   const m = MUTATION_VERIFY_LINE.exec(line)
   if (!m) return { reason: 'malformed verdict line' }
-  const [, r, exit, head, log] = m
+  const [, r, exit, trailer, head, log] = m
   if (r !== run) return { reason: `verdict line names run ${r}, not ${run}` }
   if (!/^\d+$/.test(exit)) return { reason: 'exit is not an integer' }
+  const mismatch = trailerProblem(Number(exit), trailer)
+  if (mismatch) return { reason: mismatch }
   if (!COMMIT_TOKEN.test(head)) return { reason: 'head is not a commit id' }
   if (!log.startsWith('/') || !log.endsWith(`/touchstone-gates/${run}/mutation-verify.log`)) {
     return { reason: 'log path is not under this run' }

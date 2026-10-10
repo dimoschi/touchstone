@@ -152,7 +152,7 @@ async function scenarioAL() {
   console.log('\n== scenario AL: an ungated repo\'s Mutation halt reports bypass_blocked=false')
   const { result } = await run(convergedWithSuspect({
     crapGated: false,
-    mutationResult: () => ({ green: false, head_sha: 'mut0000000000000000000000000000000000001',
+    mutationResult: () => ({ green: false, head_sha: 'aaa0000000000000000000000000000000000001',
       detail: 'stub red', survivors: 1, scored: true }),
   }))
   check('halted at Mutation', result.halted_at, 'Mutation')
@@ -288,7 +288,7 @@ async function scenarioAW() {
     verify: () => undefined,
     staleness: () => [],
     mutationGated: true,
-    mutationResult: () => ({ green: true, head_sha: 'mut0000000000000000000000000000000000003',
+    mutationResult: () => ({ green: true, head_sha: 'aaa0000000000000000000000000000000000003',
       detail: 'stub green', scored: true }),
   })
   check('halted_at is absent', result.halted_at, undefined)
@@ -307,7 +307,7 @@ async function scenarioAX() {
     verify: () => undefined,
     staleness: () => [],
     mutationGated: true,
-    mutationResult: () => ({ green: false, head_sha: 'mut0000000000000000000000000000000000004',
+    mutationResult: () => ({ green: false, head_sha: 'aaa0000000000000000000000000000000000004',
       detail: 'stub red', survivors: 1, scored: true }),
   })
   check('halted at Mutation', result.halted_at, 'Mutation')

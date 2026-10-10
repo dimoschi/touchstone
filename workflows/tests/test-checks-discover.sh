@@ -103,7 +103,7 @@ async function scenarioDP() {
   const { result, captured } = await run(convergedWithSuspect({
     tailReview: [],
     postMutationReview: [],
-    mutationResult: () => ({ green: true, head_sha: 'mut0000000000000000000000000000000000001', detail: 'stub green', scored: true }),
+    mutationResult: () => ({ green: true, head_sha: 'aaa0000000000000000000000000000000000001', detail: 'stub green', scored: true }),
     settledExit: (id, round) => (id === 'f1' && round === 'mutation' ? 1 : 0),
   }))
   check('halted at Review', result.halted_at, 'Review')

@@ -8,7 +8,7 @@ source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/harness.sh"
 run_js_scenarios <<'JS_EOF'
 const promptOf = (captured, label) => captured.calls.find(c => c.label === label)?.prompt ?? ''
 const fenceOf = (prompt) => /```bash\n([\s\S]*?)\n```/.exec(prompt)?.[1].split('\n') ?? []
-const MUT_HEAD = 'mut0000000000000000000000000000000000001'
+const MUT_HEAD = 'aaa0000000000000000000000000000000000001'
 const SHELL_HEAD = 'abc0000000000000000000000000000000000009'
 const gated = (over = {}) => ({ mutationGated: true, ...over })
 const red = (head = MUT_HEAD) => () => ({ green: false, head_sha: head, detail: 'stub red', scored: false })
@@ -27,7 +27,8 @@ async function scenarioVerifyLine() {
     `d="$(git -C /tmp/stub-worktree rev-parse --path-format=absolute --git-path touchstone-gates/${rid} 2>/dev/null)" && mkdir -p "$d" && ` +
     `h="$(git -C /tmp/stub-worktree rev-parse HEAD 2>/dev/null)" && ` +
     `{ mutation-check.sh /tmp/stub-worktree --verify >|"$d/mutation-verify.log" 2>&1; e=$?; ` +
-    `printf 'TOUCHSTONE_MUTATION_VERIFY %s %s %s %s\\n' ${rid} "$e" "$h" "$d/mutation-verify.log"; }`])
+    `t="$(sed -n '$s/^mutation-check: EXIT=\\([0-9][0-9]*\\) .*$/\\1/p' "$d/mutation-verify.log")"; ` +
+    `printf 'TOUCHSTONE_MUTATION_VERIFY %s %s %s %s %s\\n' ${rid} "$e" "\${t:--}" "$h" "$d/mutation-verify.log"; }`])
   check('it runs after the mutation attempt',
     captured.calls.findIndex(c => c.label === 'mutation-verify:1') > captured.calls.findIndex(c => c.label === 'mutation:1'), true)
   check('the schema asks for output and nothing else', JSON.stringify(call?.schema), OUTPUT_ONLY)
@@ -37,13 +38,34 @@ async function scenarioVerifyLine() {
 }
 
 async function scenarioClaimedGreenButRed() {
-  console.log('\n== scenario GB: an agent claiming green while --verify exits 1 halts at Mutation')
-  const { result, captured } = await run(gated({ mutationResult: green(), mutationVerify: () => ({ exit: 1 }) }))
+  console.log('\n== scenario GB: an agent claiming green while --verify exits 5 halts at Mutation')
+  const { result, captured } = await run(gated({ mutationResult: green(), mutationVerify: () => ({ exit: 5 }) }))
   check('halted at Mutation', result.halted_at, 'Mutation')
   check('the result is not green', result.mutation?.green, false)
-  const log = mutationVerifyOutput(promptOf(captured, 'mutation-verify:1'), 1, MUT_HEAD).split(' ').pop()
-  check('the note names the verify exit and its log', (result.note ?? '').includes(`--verify exited 1 (${log})`), true)
+  const log = mutationVerifyOutput(promptOf(captured, 'mutation-verify:1'), 5, MUT_HEAD).split(' ').pop()
+  check('the note names the verify exit and its log', (result.note ?? '').includes(`--verify exited 5 (${log})`), true)
+  check('the note says no green run is recorded for this head',
+    (result.note ?? '').includes('has not recorded a green run for this head'), true)
   check('the PR never ran', callCount(captured, 'pr'), 0)
+  const twice = await run(gated({ args: { maxGateAttempts: 2 }, mutationResult: green(), mutationVerify: () => ({ exit: 5 }) }))
+  check('exit 5 keeps the loop going: a second attempt runs', callCount(twice.captured, 'mutation:2'), 1)
+}
+
+async function scenarioSetupExitStops() {
+  console.log('\n== scenario GM: an exit other than 0 or 5 is a setup failure: no further attempt, its own halt note')
+  for (const [exit, trailer] of [[127, '-'], [2, 2]]) {
+    const { result, captured } = await run(gated({ args: { maxGateAttempts: 3 }, mutationResult: green(),
+      mutationVerify: () => ({ exit, trailer }) }))
+    const log = mutationVerifyOutput(promptOf(captured, 'mutation-verify:1'), exit, MUT_HEAD).split(' ').pop()
+    const note = result.note ?? ''
+    check(`exit ${exit}: halted at Mutation after exactly one attempt`,
+      [result.halted_at, captured.calls.filter(c => /^mutation:\d+$/.test(c.label)).length], ['Mutation', 1])
+    check(`exit ${exit}: not retried as unmeasured`, callCount(captured, 'mutation-verify:1:retry'), 0)
+    check(`exit ${exit}: the note names the exit and the log`, note.includes(`exited ${exit}`) && note.includes(log), true)
+    check(`exit ${exit}: it is a setup note, not survivors or unmeasured`,
+      [/could not run/.test(note), /[Ss]urviving|has not recorded/.test(note), /could not be measured/.test(note)],
+      [true, false, false])
+  }
 }
 
 async function scenarioClaimedRedButGreen() {
@@ -88,8 +110,11 @@ async function scenarioParserRejects() {
     'no output': () => '',
     'two lines': (good) => `${good}\n${good}`,
     'another run': (good) => good.replace(/-mutation-verify-\d+ /, '-mutation-verify-99 '),
-    'a non-integer exit': (good) => good.replace(/^(\S+ \S+) 0 /, '$1 zero '),
+    'a non-integer exit': (good) => good.replace(/^(\S+ \S+) 0 0 /, '$1 zero zero '),
     'a head that is not a sha': (good) => good.replace(` ${MUT_HEAD} `, ' HEAD~1 '),
+    'a 7-char head': (good) => good.replace(` ${MUT_HEAD} `, ` ${MUT_HEAD.slice(0, 7)} `),
+    'a trailer that disagrees with the exit': (good) => good.replace(/^(\S+ \S+ 0) 0 /, '$1 1 '),
+    'exit 0 with no gate trailer': (good) => good.replace(/^(\S+ \S+ 0) 0 /, '$1 - '),
     'a log outside the run': (good) => good.replace(/\/touchstone-gates\//, '/elsewhere/'),
     'a relative log': (good) => good.replace(/ \/\S+$/, ' mutation-verify.log'),
     'a prefixed line': (good) => `ok: ${good}`,
@@ -115,6 +140,9 @@ async function scenarioUnparseableTwiceHalts() {
   check('it names both reasons', (result.note ?? '').includes('malformed verdict line') && (result.note ?? '').includes('no output'), true)
   check('it does not blame surviving mutants', /[Ss]urviving/.test(result.note ?? ''), false)
   check('no second mutation attempt is spent on a relay failure', callCount(captured, 'mutation:2'), 0)
+  check('the agent\'s head is not carried as if measured', result.mutation?.head_sha, undefined)
+  const noTrailer = await run(gated({ mutationResult: green(), mutationVerify: () => ({ exit: 5, trailer: '-' }) }))
+  check('exit 5 with no gate trailer is unmeasured too', /verdict could not be measured/.test(noTrailer.result.note ?? ''), true)
 }
 
 const prRun = ({ args, ...over } = {}) => ({
@@ -154,6 +182,7 @@ async function scenarioUnreviewedUnparseable() {
     'another reviewed head': (from) => `TOUCHSTONE_UNREVIEWED ${MUT_HEAD} 0 ${from}`,
     'a non-integer count': (from) => `TOUCHSTONE_UNREVIEWED ${from} none ${from}`,
     'a missing head': (from) => `TOUCHSTONE_UNREVIEWED ${from} 0`,
+    'a 7-char head': (from) => `TOUCHSTONE_UNREVIEWED ${from} 0 ${from.slice(0, 7)}`,
     'two lines': (from) => `TOUCHSTONE_UNREVIEWED ${from} 0 ${from}\nTOUCHSTONE_UNREVIEWED ${from} 0 ${from}`,
   }
   for (const [name, mangle] of Object.entries(bad)) {
@@ -190,46 +219,58 @@ const scratchRepo = () => {
 }
 const branchAt = (dir) => ({ created: true, branch: 'feat/gh-21-stub', base: 'main', path: dir,
   ticket: '21', detail: 'stub', dirty: false })
-// A fake mutation-check.sh first on PATH: it logs its arguments and exits
-// with whatever FAKE_MUTATION_EXIT holds.
-const withFakeGate = async (exit, fn) => {
+// PATH without any real mutation-check.sh, plus `bin` first when given, so
+// the bare name in the line resolves only to what a scenario put there.
+const withPath = async (bin, env, fn) => {
+  const saved = { ...process.env }
+  const clean = process.env.PATH.split(':').filter(d => !fs.existsSync(path.join(d, 'mutation-check.sh')))
+  process.env.PATH = [...(bin ? [bin] : []), ...clean].join(':')
+  Object.assign(process.env, env)
+  try { return await fn() } finally {
+    for (const k of Object.keys(process.env)) if (!(k in saved)) delete process.env[k]
+    Object.assign(process.env, saved)
+  }
+}
+// A fake mutation-check.sh: it logs its arguments, prints the real gate's
+// trailer unless FAKE_NO_TRAILER is set, and exits with FAKE_MUTATION_EXIT.
+const withFakeGate = async (exit, fn, env = {}) => {
   const bin = fs.mkdtempSync(path.join(os.tmpdir(), 'fake-gate-'))
   fs.writeFileSync(path.join(bin, 'mutation-check.sh'),
-    '#!/usr/bin/env bash\nprintf \'fake verify %s\\n\' "$*"\nexit "$FAKE_MUTATION_EXIT"\n', { mode: 0o755 })
-  const saved = { PATH: process.env.PATH, FAKE: process.env.FAKE_MUTATION_EXIT }
-  process.env.PATH = `${bin}:${process.env.PATH}`
-  process.env.FAKE_MUTATION_EXIT = String(exit)
-  try { return await fn() } finally {
-    process.env.PATH = saved.PATH
-    if (saved.FAKE === undefined) delete process.env.FAKE_MUTATION_EXIT
-    else process.env.FAKE_MUTATION_EXIT = saved.FAKE
+    '#!/usr/bin/env bash\nprintf \'fake verify %s\\n\' "$*"\n' +
+    '[ -n "${FAKE_NO_TRAILER:-}" ] || echo "mutation-check: EXIT=$FAKE_MUTATION_EXIT FAKE_VERDICT"\n' +
+    'exit "$FAKE_MUTATION_EXIT"\n', { mode: 0o755 })
+  try { return await withPath(bin, { FAKE_MUTATION_EXIT: String(exit), ...env }, fn) } finally {
     fs.rmSync(bin, { recursive: true, force: true })
   }
 }
-const realVerify = (outs) => (attempt, prompt) => {
-  const output = runRunnerLines(prompt)
+const realVerify = (outs, edit = (l) => l) => (attempt, prompt) => {
+  const fence = /```bash\n([\s\S]*?)\n```/.exec(prompt)
+  const output = spawnSync('bash', ['-c', edit(fence[1])], { encoding: 'utf8' }).stdout
   outs.push(output)
   return { output }
 }
+const VERIFY_ROW = /^TOUCHSTONE_MUTATION_VERIFY (\S+) (\d+) (\S+) (\S+) (\/.+)$/
+const attemptsOf = (captured) => captured.calls.filter(c => /^mutation:\d+$/.test(c.label)).length
 
 async function scenarioRealVerify() {
   console.log('\n== scenario GR: the real verdict line, run in bash against a scratch repo with a fake gate')
   const { dir, commit } = scratchRepo()
   try {
     const head = commit('a.txt')
-    for (const [exit, wantHalt] of [[1, 'Mutation'], [0, undefined]]) {
+    for (const [exit, wantHalt] of [[5, 'Mutation'], [0, undefined]]) {
       await withFakeGate(exit, async () => {
         const outs = []
         const { result } = await run(gated({ branchResult: branchAt(dir), mutationResult: green(),
           mutationVerify: realVerify(outs) }))
-        const m = /^TOUCHSTONE_MUTATION_VERIFY (\S+) (\d+) (\S+) (\/.+)$/.exec(outs[0]?.trim() ?? '')
+        const m = VERIFY_ROW.exec(outs[0]?.trim() ?? '')
         check(`exit ${exit}: one line, printed by the shell`, [outs[0]?.trim().split('\n').length, Boolean(m)], [1, true])
-        check(`exit ${exit}: the exit is the gate's`, m?.[2], String(exit))
-        check(`exit ${exit}: the head is git's`, m?.[3], head)
+        check(`exit ${exit}: the exit and the gate's trailer`, [m?.[2], m?.[3]], [String(exit), String(exit)])
+        check(`exit ${exit}: the head is git's`, m?.[4], head)
         check(`exit ${exit}: the log holds the gate's output, given the worktree and --verify`,
-          fs.readFileSync(m?.[4] ?? '/nonexistent', 'utf8'), `fake verify ${dir} --verify\n`)
+          fs.readFileSync(m?.[5] ?? '/nonexistent', 'utf8'),
+          `fake verify ${dir} --verify\nmutation-check: EXIT=${exit} FAKE_VERDICT\n`)
         check(`exit ${exit}: the log sits under the worktree's git dir`,
-          path.dirname(fs.realpathSync(m?.[4] ?? '/nonexistent')),
+          path.dirname(fs.realpathSync(m?.[5] ?? '/nonexistent')),
           path.join(fs.realpathSync(dir), '.git', 'touchstone-gates', m?.[1] ?? ''))
         check(`exit ${exit}: the run's outcome`, [result.halted_at, result.mutation?.green], [wantHalt, exit === 0])
         check(`exit ${exit}: the tree stays clean`, execFileSync('git', ['-C', dir, 'status', '--porcelain'], { encoding: 'utf8' }), '')
@@ -238,6 +279,61 @@ async function scenarioRealVerify() {
   } finally {
     fs.rmSync(dir, { recursive: true, force: true })
   }
+}
+
+async function scenarioRealVerifyNotTheGate() {
+  console.log('\n== scenario GT: a line that did not run the real gate is not read as green, and a missing gate is a setup halt')
+  const { dir, commit } = scratchRepo()
+  try {
+    commit('a.txt')
+    await withFakeGate(0, async () => {
+      const outs = []
+      const { result, captured } = await run(gated({ branchResult: branchAt(dir), mutationResult: green(),
+        mutationVerify: realVerify(outs, (l) => l.replace('{ mutation-check.sh ', '{ true ')) }))
+      check('`true` substituted prints exit 0 with no trailer', VERIFY_ROW.exec(outs[0]?.trim() ?? '')?.slice(2, 4), ['0', '-'])
+      check('and reads as unmeasured after the retry', [result.halted_at, /verdict could not be measured/.test(result.note ?? ''),
+        callCount(captured, 'mutation-verify:1:retry')], ['Mutation', true, 1])
+    })
+    await withFakeGate(0, async () => {
+      const { result } = await run(gated({ branchResult: branchAt(dir), mutationResult: green(),
+        mutationVerify: realVerify([]) }))
+      check('a gate that exits 0 without its trailer is unmeasured', /verdict could not be measured/.test(result.note ?? ''), true)
+    }, { FAKE_NO_TRAILER: '1' })
+    await withPath(null, {}, async () => {
+      const outs = []
+      const { result, captured } = await run(gated({ args: { maxGateAttempts: 3 }, branchResult: branchAt(dir),
+        mutationResult: green(), mutationVerify: realVerify(outs) }))
+      check('no gate on PATH: exit 127, no trailer', VERIFY_ROW.exec(outs[0]?.trim() ?? '')?.slice(2, 4), ['127', '-'])
+      check('a setup halt at Mutation after exactly one attempt',
+        [result.halted_at, attemptsOf(captured), /exited 127/.test(result.note ?? '')], ['Mutation', 1, true])
+    })
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true })
+  }
+}
+
+// The lines the script builds have to get past the plugin's own gate-pipe
+// hook, which an agent running them in a gated session triggers.
+const HOOK = path.join(path.dirname(SCRIPT_PATH), '..', 'hooks', 'gate-pipe-gate.py')
+const hookExit = (command) => spawnSync('python3', [HOOK],
+  { input: JSON.stringify({ tool_input: { command } }), encoding: 'utf8' }).status
+
+async function scenarioHookAllowsLines() {
+  console.log('\n== scenario GN: gate-pipe-gate.py allows every built line, including ones that name a gate')
+  const { captured } = await run(prRun({ mutationGated: true, mutationResult: green(),
+    discovery: { file: '/repo/AGENTS.md', sections: [{ heading: '## Checks',
+      fence: 'mutation-check.sh /repo --verify' }], detail: 'stub' },
+    initialReview: { correctness: [{ title: 't', file: 't.js', claim: 'c', evidence: 'e', category: 'wrong-result',
+      reproducer: { kind: 'command', command: 'crap-check.sh /repo > /dev/null', expected: 'exit 0', actual: 'exit 1' } }],
+      advocate: [] },
+    verify: () => true, fixHead: () => 'fff0000000000000000000000000000000000001', staleness: () => [] }))
+  const linesOf = (label) => fenceOf(promptOf(captured, label))
+  for (const label of ['mutation-verify:1', 'pr-unreviewed', 'checks:run:1', 'reproduce:review']) {
+    const lines = linesOf(label)
+    check(`${label}: has lines`, lines.length > 0, true)
+    check(`${label}: every line passes the hook`, lines.map(hookExit), lines.map(() => 0))
+  }
+  check('the hook still refuses a real pipe of the gate', hookExit('mutation-check.sh /r --verify | tail'), 2)
 }
 
 async function scenarioRealUnreviewed() {
@@ -261,10 +357,10 @@ async function scenarioRealUnreviewed() {
   }
 }
 
-const SCENARIOS = [scenarioVerifyLine, scenarioClaimedGreenButRed, scenarioClaimedRedButGreen,
+const SCENARIOS = [scenarioVerifyLine, scenarioClaimedGreenButRed, scenarioSetupExitStops, scenarioHookAllowsLines, scenarioClaimedRedButGreen,
   scenarioHeadFromShell, scenarioNullAgentStillMeasured, scenarioUngatedSkips, scenarioParserRejects,
   scenarioUnparseableTwiceHalts, scenarioUnreviewedLine, scenarioUnreviewedHalts,
-  scenarioUnreviewedUnparseable, scenarioNoReviewersNoCount, scenarioRealVerify, scenarioRealUnreviewed]
+  scenarioUnreviewedUnparseable, scenarioNoReviewersNoCount, scenarioRealVerify, scenarioRealVerifyNotTheGate, scenarioRealUnreviewed]
 JS_EOF
 
 finish

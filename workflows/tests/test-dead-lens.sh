@@ -9,7 +9,7 @@ source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/harness.sh"
 run_js_scenarios <<'JS_EOF'
 const P = 'a1b2c3d4e5f60718293a4b5c6d7e8f9012345678'
 const FIX_HEAD = 'fix00000000000000000000000000000000000001'
-const MUT_HEAD = 'mut00000000000000000000000000000000000001'
+const MUT_HEAD = 'aaa0000000000000000000000000000000000001'
 const NOT_RUN = 'the review did not run'
 
 const bug = (n) => ({ title: `Bug ${n}`, file: `src/b${n}.js`, claim: `claim ${n}`, evidence: `b${n}.js:1` })

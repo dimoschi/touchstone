@@ -40,3 +40,20 @@ def test_main_blocks_piped_gate(monkeypatch, capsys):
 def test_main_ignores_quoted_pipe_in_commit_message(monkeypatch):
     cmd = 'git commit -m "crap-check.sh | tail is bad, do not do it"'
     assert _run(monkeypatch, cmd) == 0
+
+
+def test_pipes_a_gate_false_for_clobber_redirect():
+    assert gate_pipe.pipes_a_gate('mutation-check.sh /r --verify >|"$d/v.log" 2>&1') is False
+
+
+def test_pipes_a_gate_true_for_real_pipe_beside_clobber_redirect():
+    assert gate_pipe.pipes_a_gate('mutation-check.sh /r >|/tmp/a.log | tail') is True
+
+
+def test_pipes_a_gate_true_for_stderr_pipe():
+    assert gate_pipe.pipes_a_gate('mutation-check.sh /r |& tail') is True
+
+
+def test_main_allows_gate_with_clobber_redirect(monkeypatch):
+    cmd = '{ mutation-check.sh /r --verify >|"$d/mutation-verify.log" 2>&1; e=$?; }'
+    assert _run(monkeypatch, cmd) == 0
