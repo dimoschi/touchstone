@@ -63,6 +63,7 @@ trap 'rm -rf "$WORK"' EXIT
 cat > "$WORK/harness.mjs" <<'JS_EOF'
 import fs from 'node:fs'
 import vm from 'node:vm'
+import { execFileSync } from 'node:child_process'
 
 const SCRIPT_PATH = process.argv[2]
 const src = fs.readFileSync(SCRIPT_PATH, 'utf8')
@@ -195,12 +196,14 @@ function makeAgent(scenario, captured) {
     // The reply is what the runner's lines print: the ids, the run and the log
     // directory are read back out of the prompt.
     if (label === 'reproduce:review') {
-      const ids = [...prompt.matchAll(/printf 'TOUCHSTONE_REPRO %s %s %s %s\\n' (\S+) /g)].map(m => m[1])
-      const run = (/printf 'TOUCHSTONE_REPRO_END %s %s %s\\n' (\S+) /.exec(prompt) ?? [])[1]
+      const ids = [...prompt.matchAll(/printf 'TOUCHSTONE_REPRO %s %s %s %s' (\S+) /g)].map(m => m[1])
+      const run = (/printf 'TOUCHSTONE_REPRO_END %s %s %s %s\\n' (\S+) /.exec(prompt) ?? [])[1]
       const dir = `/tmp/stub-worktree/.git/touchstone-repro/${run}`
-      return { output: [`TOUCHSTONE_REPRO_BEFORE ${run} clean`,
-        ...ids.map(id => `TOUCHSTONE_REPRO ${id} 1 1 ${dir}/${id}.log`),
-        `TOUCHSTONE_REPRO_END ${run} clean ${dir}/status.log`].join('\n') }
+      const rows = ids.map(id => `TOUCHSTONE_REPRO ${id} 1 1 ${dir}/${id}.log`)
+      const sum = execFileSync('cksum', { input: rows.length ? `${rows.join('\n')}\n` : '', encoding: 'utf8' })
+        .trim().split(/\s+/).join(' ')
+      return { output: [`TOUCHSTONE_REPRO_BEFORE ${run} clean`, ...rows,
+        `TOUCHSTONE_REPRO_END ${run} clean ${sum} ${dir}/status.log`].join('\n') }
     }
     if (['ticket', 'plugin:version', 'gate:opt-in', 'checks:discover', 'run-record'].includes(label)) {
       throw new Error(`agent '${label}' should no longer be dispatched (folded into setup/branch, or dropped)`)

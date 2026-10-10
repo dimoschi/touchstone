@@ -364,13 +364,7 @@ const fnv1a = (s) => {
 const contentDigest = (s) => {
   let h = 0x811c9dc5
   const add = (b) => { h ^= b; h = Math.imul(h, 0x01000193) }
-  for (const ch of s.replace(/[ \t\n\r]+/g, ' ').replace(/^ | $/g, '')) {
-    const cp = ch.codePointAt(0)
-    if (cp < 0x80) add(cp)
-    else if (cp < 0x800) { add(0xc0 | cp >> 6); add(0x80 | cp & 0x3f) }
-    else if (cp < 0x10000) { add(0xe0 | cp >> 12); add(0x80 | cp >> 6 & 0x3f); add(0x80 | cp & 0x3f) }
-    else { add(0xf0 | cp >> 18); add(0x80 | cp >> 12 & 0x3f); add(0x80 | cp >> 6 & 0x3f); add(0x80 | cp & 0x3f) }
-  }
+  utf8Bytes(s.replace(/[ \t\n\r]+/g, ' ').replace(/^ | $/g, '')).forEach(add)
   return (h >>> 0).toString(16).padStart(8, '0')
 }
 const planId = fnv1a(`${ticket}${plan.plan}`)
@@ -471,23 +465,27 @@ let checkAttempt = 0
 const bashCommandFor = (c) => `bash -c ${shQuote(`cd ${shQuote(wt.path)} && ${c.command}`)}`
 const logDirFor = (run, area = 'touchstone-checks') =>
   `d="$(git -C ${shQuote(wt.path)} rev-parse --path-format=absolute --git-path ${area}/${run} 2>/dev/null)"`
-const checkLineFor = (c, run) =>
-  `${logDirFor(run)} && mkdir -p "$d" && { ${bashCommandFor(c)} >|"$d/${c.id}.log" 2>&1; ` +
-  `printf 'TOUCHSTONE_CHECK %s %s %s\\n' ${c.id} "$?" "$d/${c.id}.log"; }`
+// The printed row is also written to the run's rows file (rowsSumMatches): the
+// first line of a batch starts the file, so a re-run in the same directory
+// never sums the previous run's rows.
+const rowTo = (first) =>
+  `printf '%s\\n' "$r" ${first ? '>|' : '>>'}"$d/rows"; printf '%s\\n' "$r"`
+const checkLineFor = (c, run, first) =>
+  `${logDirFor(run)} && mkdir -p "$d" && { ${bashCommandFor(c)} >|"$d/${c.id}.log" 2>&1; e=$?; ` +
+  `r="$(printf 'TOUCHSTONE_CHECK %s %s %s' ${c.id} "$e" "$d/${c.id}.log")"; ${rowTo(first)}; }`
 // The tree is looked at once, after the last check: a check that writes to it
 // (a ledger, a generated file) must be visible, not silently carried into
 // whatever commits next. The porcelain goes to a log beside the others and its
 // stderr to status.err; a human reads both, so neither is ever relayed. Only
-// stdout decides dirty. reproduce:* reuses this for its before and end lines,
-// under its own area, log name and tag.
-const statusLineFor = (run, { area = 'touchstone-checks', name = 'status',
-  tag = 'TOUCHSTONE_CHECKS_END', withPath = false } = {}) =>
-  `${logDirFor(run, area)} && mkdir -p "$d" && git -C ${shQuote(wt.path)} status --porcelain >|"$d/${name}.log" 2>|"$d/${name}.err" && ` +
-  `{ if [ -s "$d/${name}.log" ]; then s=dirty; else s=clean; fi; ` +
-  (withPath
-    ? `printf '${tag} %s %s %s\\n' ${run} "$s" "$d/${name}.log"; }`
-    : `printf '${tag} %s %s\\n' ${run} "$s"; }`)
-const endLineFor = (run) => statusLineFor(run)
+// stdout decides dirty. reproduce:* reuses these pieces for its before and end
+// lines. The end line also prints the rows file's cksum.
+const porcelainTo = (name) =>
+  `git -C ${shQuote(wt.path)} status --porcelain >|"$d/${name}.log" 2>|"$d/${name}.err"`
+const stateOf = (name) => `if [ -s "$d/${name}.log" ]; then s=dirty; else s=clean; fi`
+const rowsSumTo = `k="$(cksum < "$d/rows")"`
+const endLineFor = (run) =>
+  `${logDirFor(run)} && mkdir -p "$d" && ${porcelainTo('status')} && ${rowsSumTo} && ` +
+  `{ ${stateOf('status')}; printf 'TOUCHSTONE_CHECKS_END %s %s %s\\n' ${run} "$s" "$k"; }`
 // The instructions every runner call gets around its fenced lines: checks:run
 // and reproduce:* alike.
 const runnerPrompt = (label, lines) =>
@@ -500,10 +498,10 @@ const runnerPrompt = (label, lines) =>
   `back. Never edit, merge, split, reorder or re-quote a line, and never add ` +
   `to one.\n` +
   `This one call is the exception to the rule above about never running ` +
-  `cd, and only in the bash -c form each line already takes: its cd ` +
-  `runs inside a child shell, which does not move this session's own ` +
-  `working directory. Never split one into a bare cd ${wt.path} && ` +
-  `<command>, which does.\n` +
+  `cd, and only in the form each line already takes: its cd runs inside a ` +
+  `child shell (bash -c, or a subshell in parentheses), which does not move ` +
+  `this session's own working directory. Never split one into a bare ` +
+  `cd ${wt.path} && <command>, which does.\n` +
   `Run the lines one at a time, in the order given, each in the ` +
   `foreground with a Bash timeout of 600000 ms: never with ` +
   `run_in_background, never several at once, and wait for each to return ` +
@@ -518,7 +516,7 @@ const executeChecks = async (checks = discoveredChecks) => {
   checkAttempt++
   const run = `${planId}-${checkAttempt}`
   const out = await treeAgent(
-    runnerPrompt('checks:run', [...checks.map(c => checkLineFor(c, run)), endLineFor(run)]),
+    runnerPrompt('checks:run', [...checks.map((c, i) => checkLineFor(c, run, i === 0)), endLineFor(run)]),
     { label: `checks:run:${checkAttempt}`, schema: CHECK_RUN, model: 'haiku', effort: 'low' })
   return parseCheckRun(out?.output, checks, run)
 }

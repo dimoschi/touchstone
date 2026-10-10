@@ -469,7 +469,55 @@ const CHECK_RUN = {
   properties: { output: { type: 'string' } },
 }
 const CHECK_END_PREFIX = 'TOUCHSTONE_CHECKS_END'
-const CHECK_END_LINE = /^TOUCHSTONE_CHECKS_END (\S+) (clean|dirty)$/
+const CHECK_END_LINE = /^TOUCHSTONE_CHECKS_END (\S+) (clean|dirty) (\d+)[ \t]+(\d+)$/
+// The script has no Buffer or TextEncoder, so text reaches cksum and base64
+// as UTF-8 bytes through this.
+const utf8Bytes = (s) => {
+  const out = []
+  for (const ch of String(s)) {
+    const cp = ch.codePointAt(0)
+    if (cp < 0x80) out.push(cp)
+    else if (cp < 0x800) out.push(0xc0 | cp >> 6, 0x80 | cp & 0x3f)
+    else if (cp < 0x10000) out.push(0xe0 | cp >> 12, 0x80 | cp >> 6 & 0x3f, 0x80 | cp & 0x3f)
+    else out.push(0xf0 | cp >> 18, 0x80 | cp >> 12 & 0x3f, 0x80 | cp >> 6 & 0x3f, 0x80 | cp & 0x3f)
+  }
+  return out
+}
+// POSIX cksum: a 32-bit CRC, polynomial 0x04C11DB7, MSB first, over the bytes
+// and then the byte count (least significant byte first, as few bytes as it
+// needs), complemented. Printed as `cksum` prints it: "<crc> <bytes>".
+const CKSUM_TABLE = Array.from({ length: 256 }, (_, i) => {
+  let c = i << 24
+  for (let k = 0; k < 8; k++) c = c & 0x80000000 ? (c << 1) ^ 0x04c11db7 : c << 1
+  return c >>> 0
+})
+const cksum = (s) => {
+  const bytes = utf8Bytes(s)
+  let crc = 0
+  const add = (b) => { crc = ((crc << 8) ^ CKSUM_TABLE[((crc >>> 24) ^ b) & 0xff]) >>> 0 }
+  bytes.forEach(add)
+  for (let n = bytes.length; n > 0; n = Math.floor(n / 256)) add(n & 0xff)
+  return `${(~crc) >>> 0} ${bytes.length}`
+}
+const BASE64_ALPHABET = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/'
+const base64Of = (s) => {
+  const b = utf8Bytes(s)
+  let out = ''
+  for (let i = 0; i < b.length; i += 3) {
+    const n = (b[i] << 16) | ((b[i + 1] ?? 0) << 8) | (b[i + 2] ?? 0)
+    out += BASE64_ALPHABET[n >> 18 & 63] + BASE64_ALPHABET[n >> 12 & 63] +
+      (i + 1 < b.length ? BASE64_ALPHABET[n >> 6 & 63] : '=') +
+      (i + 2 < b.length ? BASE64_ALPHABET[n & 63] : '=')
+  }
+  return out
+}
+// Every row line also appends the row it printed to <run dir>/rows, and the
+// end line prints that file's cksum. A row a model invented, or one it copied
+// with a slip, was never written there, so the sums differ. The rows are the
+// lines the parser accepted, joined as the shell wrote them.
+const ROWS_SUM_REASON = 'rows checksum does not match what the runner wrote'
+const rowsSumMatches = (rows, sum) =>
+  cksum(rows.length ? `${rows.map(r => r.line).join('\n')}\n` : '') === sum
 const CHECK_ROW_LINE = /^TOUCHSTONE_CHECK (\S+) (\S+) (.+)$/
 // The end line closes the batch: it names this run and says whether the tree
 // was dirty once every check had run. It must be the last line and the only one.
@@ -481,7 +529,7 @@ const parseCheckEnd = (lines, run, prefix = CHECK_END_PREFIX, pattern = CHECK_EN
   const m = pattern.exec(ends[0])
   if (!m) return { reason: 'malformed end line' }
   if (m[1] !== run) return { reason: `end line names run ${m[1]}, not ${run}` }
-  return { dirty: m[2] === 'dirty', path: m[3] }
+  return { dirty: m[2] === 'dirty', sum: `${Number(m[3])} ${Number(m[4])}`, path: m[5] }
 }
 // One check line, read against the rows already accepted: the next row has to
 // be the next discovered check, and its log has to be where this run puts it.
@@ -500,7 +548,7 @@ const parseCheckRow = (line, checks, rows, run) => {
   if (!log.startsWith('/') || !log.endsWith(`/touchstone-checks/${run}/${id}.log`)) {
     return { reason: `log path of ${id} is not under this run` }
   }
-  return { row: { id, exit: Number(exit), log } }
+  return { row: { id, exit: Number(exit), log, line } }
 }
 // Pure, like parseDiffstat: reads only the shape of what the runner printed,
 // never a model's account of it. Every discovered id has to appear exactly
@@ -528,6 +576,7 @@ const parseCheckRun = (output, checks, run) => {
   const dir = dirOf(rows[0].log)
   const stray = rows.find(r => dirOf(r.log) !== dir)
   if (stray) return { reason: `log path of ${stray.id} is not in the run directory` }
+  if (!rowsSumMatches(rows, end.sum)) return { reason: ROWS_SUM_REASON }
   return { rows, dirty: end.dirty, statusLog: `${dir}/status.log` }
 }
 
@@ -546,7 +595,7 @@ const REPRO_ROW_LINE = /^TOUCHSTONE_REPRO (\S+) (\S+) (\S+) (.+)$/
 // because a call that runs no reproducer (the mutation-hunk fetch) has no row
 // to read the run directory from, and a dirty tree's halt has to name it.
 const REPRO_END_PREFIX = 'TOUCHSTONE_REPRO_END'
-const REPRO_END_LINE = /^TOUCHSTONE_REPRO_END (\S+) (clean|dirty) (.+)$/
+const REPRO_END_LINE = /^TOUCHSTONE_REPRO_END (\S+) (clean|dirty) (\d+)[ \t]+(\d+) (.+)$/
 const HUNKS_PREFIX = 'TOUCHSTONE_HUNKS_'
 const HUNKS_BEGIN_PREFIX = 'TOUCHSTONE_HUNKS_BEGIN'
 const HUNKS_FAILED_PREFIX = 'TOUCHSTONE_HUNKS_FAILED'
@@ -569,7 +618,7 @@ const parseReproRow = (line, ids, rows, run) => {
   if (!/^\d+$/.test(exit)) return { reason: `exit of ${id} is not an integer` }
   if (marker !== '0' && marker !== '1') return { reason: `marker of ${id} is not 0 or 1` }
   if (!underRun(log, run, `${id}.log`)) return { reason: `log path of ${id} is not under this run` }
-  return { row: { id, exit: Number(exit), reproduced: marker === '1', log } }
+  return { row: { id, exit: Number(exit), reproduced: marker === '1', log, line } }
 }
 // The block between the begin and end lines is the kept diff header lines,
 // and the end line's count, computed by the shell, has to match them. A failed
@@ -633,6 +682,7 @@ const parseReproRun = (output, ids, run, withHunks) => {
   if (!underRun(end.path, run, 'status.log')) return { reason: 'status log is not in the run directory' }
   const stray = rows.find(r => dirOf(r.log) !== dir)
   if (stray) return { reason: `log path of ${stray.id} is not in the run directory` }
+  if (!rowsSumMatches(rows, end.sum)) return { reason: ROWS_SUM_REASON }
   return { rows, before: before[2] === 'dirty', dirty: end.dirty, statusLog: end.path, hunkLines, diffExit }
 }
 // The only heading that is a check list. Only trailing whitespace is
@@ -2006,13 +2056,7 @@ const fnv1a = (s) => {
 const contentDigest = (s) => {
   let h = 0x811c9dc5
   const add = (b) => { h ^= b; h = Math.imul(h, 0x01000193) }
-  for (const ch of s.replace(/[ \t\n\r]+/g, ' ').replace(/^ | $/g, '')) {
-    const cp = ch.codePointAt(0)
-    if (cp < 0x80) add(cp)
-    else if (cp < 0x800) { add(0xc0 | cp >> 6); add(0x80 | cp & 0x3f) }
-    else if (cp < 0x10000) { add(0xe0 | cp >> 12); add(0x80 | cp >> 6 & 0x3f); add(0x80 | cp & 0x3f) }
-    else { add(0xf0 | cp >> 18); add(0x80 | cp >> 12 & 0x3f); add(0x80 | cp >> 6 & 0x3f); add(0x80 | cp & 0x3f) }
-  }
+  utf8Bytes(s.replace(/[ \t\n\r]+/g, ' ').replace(/^ | $/g, '')).forEach(add)
   return (h >>> 0).toString(16).padStart(8, '0')
 }
 const planId = fnv1a(`${ticket}${plan.plan}`)
@@ -2113,23 +2157,27 @@ let checkAttempt = 0
 const bashCommandFor = (c) => `bash -c ${shQuote(`cd ${shQuote(wt.path)} && ${c.command}`)}`
 const logDirFor = (run, area = 'touchstone-checks') =>
   `d="$(git -C ${shQuote(wt.path)} rev-parse --path-format=absolute --git-path ${area}/${run} 2>/dev/null)"`
-const checkLineFor = (c, run) =>
-  `${logDirFor(run)} && mkdir -p "$d" && { ${bashCommandFor(c)} >|"$d/${c.id}.log" 2>&1; ` +
-  `printf 'TOUCHSTONE_CHECK %s %s %s\\n' ${c.id} "$?" "$d/${c.id}.log"; }`
+// The printed row is also written to the run's rows file (rowsSumMatches): the
+// first line of a batch starts the file, so a re-run in the same directory
+// never sums the previous run's rows.
+const rowTo = (first) =>
+  `printf '%s\\n' "$r" ${first ? '>|' : '>>'}"$d/rows"; printf '%s\\n' "$r"`
+const checkLineFor = (c, run, first) =>
+  `${logDirFor(run)} && mkdir -p "$d" && { ${bashCommandFor(c)} >|"$d/${c.id}.log" 2>&1; e=$?; ` +
+  `r="$(printf 'TOUCHSTONE_CHECK %s %s %s' ${c.id} "$e" "$d/${c.id}.log")"; ${rowTo(first)}; }`
 // The tree is looked at once, after the last check: a check that writes to it
 // (a ledger, a generated file) must be visible, not silently carried into
 // whatever commits next. The porcelain goes to a log beside the others and its
 // stderr to status.err; a human reads both, so neither is ever relayed. Only
-// stdout decides dirty. reproduce:* reuses this for its before and end lines,
-// under its own area, log name and tag.
-const statusLineFor = (run, { area = 'touchstone-checks', name = 'status',
-  tag = 'TOUCHSTONE_CHECKS_END', withPath = false } = {}) =>
-  `${logDirFor(run, area)} && mkdir -p "$d" && git -C ${shQuote(wt.path)} status --porcelain >|"$d/${name}.log" 2>|"$d/${name}.err" && ` +
-  `{ if [ -s "$d/${name}.log" ]; then s=dirty; else s=clean; fi; ` +
-  (withPath
-    ? `printf '${tag} %s %s %s\\n' ${run} "$s" "$d/${name}.log"; }`
-    : `printf '${tag} %s %s\\n' ${run} "$s"; }`)
-const endLineFor = (run) => statusLineFor(run)
+// stdout decides dirty. reproduce:* reuses these pieces for its before and end
+// lines. The end line also prints the rows file's cksum.
+const porcelainTo = (name) =>
+  `git -C ${shQuote(wt.path)} status --porcelain >|"$d/${name}.log" 2>|"$d/${name}.err"`
+const stateOf = (name) => `if [ -s "$d/${name}.log" ]; then s=dirty; else s=clean; fi`
+const rowsSumTo = `k="$(cksum < "$d/rows")"`
+const endLineFor = (run) =>
+  `${logDirFor(run)} && mkdir -p "$d" && ${porcelainTo('status')} && ${rowsSumTo} && ` +
+  `{ ${stateOf('status')}; printf 'TOUCHSTONE_CHECKS_END %s %s %s\\n' ${run} "$s" "$k"; }`
 // The instructions every runner call gets around its fenced lines: checks:run
 // and reproduce:* alike.
 const runnerPrompt = (label, lines) =>
@@ -2142,10 +2190,10 @@ const runnerPrompt = (label, lines) =>
   `back. Never edit, merge, split, reorder or re-quote a line, and never add ` +
   `to one.\n` +
   `This one call is the exception to the rule above about never running ` +
-  `cd, and only in the bash -c form each line already takes: its cd ` +
-  `runs inside a child shell, which does not move this session's own ` +
-  `working directory. Never split one into a bare cd ${wt.path} && ` +
-  `<command>, which does.\n` +
+  `cd, and only in the form each line already takes: its cd runs inside a ` +
+  `child shell (bash -c, or a subshell in parentheses), which does not move ` +
+  `this session's own working directory. Never split one into a bare ` +
+  `cd ${wt.path} && <command>, which does.\n` +
   `Run the lines one at a time, in the order given, each in the ` +
   `foreground with a Bash timeout of 600000 ms: never with ` +
   `run_in_background, never several at once, and wait for each to return ` +
@@ -2160,7 +2208,7 @@ const executeChecks = async (checks = discoveredChecks) => {
   checkAttempt++
   const run = `${planId}-${checkAttempt}`
   const out = await treeAgent(
-    runnerPrompt('checks:run', [...checks.map(c => checkLineFor(c, run)), endLineFor(run)]),
+    runnerPrompt('checks:run', [...checks.map((c, i) => checkLineFor(c, run, i === 0)), endLineFor(run)]),
     { label: `checks:run:${checkAttempt}`, schema: CHECK_RUN, model: 'haiku', effort: 'low' })
   return parseCheckRun(out?.output, checks, run)
 }
@@ -3324,10 +3372,17 @@ const classify = (f, ctx) => {
 // must not be carried into whatever commits next.
 let reproAttempt = 0
 const REPRO_AREA = 'touchstone-repro'
+// A reproducer command can span several lines (a python3 -c script, a
+// heredoc), and a newline spliced into the fence would split one line into
+// fragments the runner executes on their own, outside the worktree and the
+// log. So it travels base64-encoded and is decoded inside the line; an empty
+// decode prints nothing, which reads as unmeasured rather than as a pass.
 const reproLineFor = (it, run) =>
-  `${logDirFor(run, REPRO_AREA)} && mkdir -p "$d" && { ${bashCommandFor(it.reproducer)} >|"$d/${it.id}.log" 2>&1; e=$?; ` +
+  `${logDirFor(run, REPRO_AREA)} && mkdir -p "$d" && ` +
+  `c="$(printf %s ${base64Of(it.reproducer.command)} | base64 --decode)" && [ -n "$c" ] && ` +
+  `{ (cd ${shQuote(wt.path)} && bash -c "$c") >|"$d/${it.id}.log" 2>&1; e=$?; ` +
   `if grep -aqxE '[[:space:]]*${REPRODUCED_MARKER}[[:space:]]*' "$d/${it.id}.log"; then m=1; else m=0; fi; ` +
-  `printf 'TOUCHSTONE_REPRO %s %s %s %s\\n' ${it.id} "$e" "$m" "$d/${it.id}.log"; }`
+  `r="$(printf 'TOUCHSTONE_REPRO %s %s %s %s' ${it.id} "$e" "$m" "$d/${it.id}.log")"; ${rowTo(false)}; }`
 // The diff goes to a file rather than a pipe, so its own exit decides which
 // block is printed: a git failure (a bad range) prints a failed line, which
 // leaves the hunks unknown without voiding the reproducer rows.
@@ -3338,11 +3393,14 @@ const hunksLineFor = (run, range) =>
   `else grep -aE '^(\\+\\+\\+ |@@ )' "$d/diff.log" >|"$d/hunks.log"; ` +
   `printf 'TOUCHSTONE_HUNKS_BEGIN %s\\n' ${run}; cat "$d/hunks.log"; ` +
   `printf 'TOUCHSTONE_HUNKS_END %s %s\\n' ${run} "$(grep -c '' "$d/hunks.log")"; fi; }`
+// The before line starts the rows file, so every reproducer line appends.
 const reproLinesFor = (runnable, run, diffRange) => [
-  statusLineFor(run, { area: REPRO_AREA, name: 'before', tag: 'TOUCHSTONE_REPRO_BEFORE' }),
+  `${logDirFor(run, REPRO_AREA)} && mkdir -p "$d" && : >|"$d/rows" && ${porcelainTo('before')} && ` +
+    `{ ${stateOf('before')}; printf 'TOUCHSTONE_REPRO_BEFORE %s %s\\n' ${run} "$s"; }`,
   ...runnable.map(it => reproLineFor(it, run)),
   ...(diffRange ? [hunksLineFor(run, diffRange)] : []),
-  statusLineFor(run, { area: REPRO_AREA, tag: 'TOUCHSTONE_REPRO_END', withPath: true }),
+  `${logDirFor(run, REPRO_AREA)} && mkdir -p "$d" && ${porcelainTo('status')} && ${rowsSumTo} && ` +
+    `{ ${stateOf('status')}; printf 'TOUCHSTONE_REPRO_END %s %s %s %s\\n' ${run} "$s" "$k" "$d/status.log"; }`,
 ]
 const executeAtHead = async (items, label, diffRange) => {
   const runnable = items.filter(it => it.reproducer?.command)
@@ -3356,7 +3414,8 @@ const executeAtHead = async (items, label, diffRange) => {
   // than empty, and nothing seen dirty.
   if (parsed.reason) {
     log(`${label}: unmeasured (${parsed.reason})`)
-    return { runs: new Map(), hunks: null, dirty: false, porcelain: '', preexisting: !runnable.length }
+    return { runs: new Map(), hunks: null, dirty: false, porcelain: '', preexisting: !runnable.length,
+      unmeasured: parsed.reason }
   }
   if (parsed.diffExit !== undefined) {
     log(`${label}: git diff exited ${parsed.diffExit}, so this range's hunks are unknown`)
@@ -3373,7 +3432,22 @@ const executeAtHead = async (items, label, diffRange) => {
     // staged changes in place, with no reset/stash/restore -- gets a halt
     // blaming "a reproducer execution" for dirt that predates it.
     preexisting: !runnable.length || parsed.before,
+    unmeasured: null,
   }
+}
+
+// A settled finding's re-check gets the retry a candidate gets: an unmeasured
+// call has no rows at all, and regressedOf reads a missing row as regressed,
+// so one copy slip would otherwise reopen every settled finding and, at the
+// mutation head, blame the gate's commits for undoing them. Still unmeasured
+// after the retry, the result carries both reasons for unmeasuredSettledHalt.
+// A missing row inside a measured call keeps its meaning there.
+const executeSettled = async (items, label) => {
+  const first = await executeAtHead(items, label)
+  if (first.dirty || !first.unmeasured) return first
+  const second = await executeAtHead(items, `${label}:retry`)
+  if (second.dirty || !second.unmeasured) return second
+  return { ...second, reasons: [first.unmeasured, second.unmeasured] }
 }
 
 // A reproducer run that leaves the tree dirty halts outright: a check that
@@ -3507,6 +3581,20 @@ const deadLensHalt = (at, dead, extra) => {
     checks: checksPayload(), ...extra, note,
   })
 }
+
+// Same shape and TDZ reasoning as notExecutedHalt. The settled findings are
+// carried in unresolved_findings with their last measured run, so the record
+// keeps them and a re-run checks them again; nothing was reopened.
+const unmeasuredSettledHalt = (at, items, exec, extra) => halted(at, {
+  plan: plan.plan, implemented: impl.summary, gates: gatesPayload(),
+  checks: checksPayload(), ...extra,
+  note: `The re-check of ${items.length} settled finding(s) could not be ` +
+    `measured, even after a retry (first run ${exec.reasons[0]}; second run ` +
+    `${exec.reasons[1]}). This is a measurement failure, not a regression: ` +
+    `no fix was shown undone, and each is carried below with its last measured ` +
+    `run so a re-run checks it again.\n` +
+    items.map(f => `- ${f.id}: ${f.title}`).join('\n'),
+})
 
 let settled = []
 // A carried finding whose reproducer nobody ran (notExecutedHalt recorded it)
@@ -3775,9 +3863,16 @@ while ((open.length || blockingChecksOpen()) && round < MAX_REVIEW_ROUNDS && !ou
   const execOld = await executeAtHead(open, `reproduce:fix:${round}`, roundRange)
   if (execOld?.dirty) { sFix.close(); return await dirtyReproducerHalt('Fix', execOld) }
   const execSettled = settledBefore.length
-    ? await executeAtHead(settledBefore, `reproduce:settled:${round}`)
+    ? await executeSettled(settledBefore, `reproduce:settled:${round}`)
     : null
   if (execSettled?.dirty) { sFix.close(); return await dirtyReproducerHalt('Fix', execSettled) }
+  if (execSettled?.reasons) {
+    sFix.close()
+    return await unmeasuredSettledHalt('Fix', settledBefore, execSettled, {
+      unresolved_findings: [...open, ...settledBefore], notes, fix_rounds: round,
+      fix_round_output: fixRoundSpend,
+    })
+  }
   const tail = tailReviewable
     ? await reviewOf(roundRange, `review:fix:${round}`, [LENS.correctness], knownForRound())
     : { raised: [], dead: [] }
@@ -3792,7 +3887,7 @@ while ((open.length || blockingChecksOpen()) && round < MAX_REVIEW_ROUNDS && !ou
   for (const f of open) {
     const row = execOld?.runs?.get(f.id)
     const outcome = outcomeOf(row)
-    if (outcome === 'passed') { settled.push(f); continue }
+    if (outcome === 'passed') { settled.push({ ...f, reproducer_run: reproducerRunOf(row, round) }); continue }
     if (outcome === 'errored') erroredOpen++
     stillOpen.push({ ...f, reproducer_run: latestRun(f, reproducerRunOf(row, round)) })
   }
@@ -4071,8 +4166,14 @@ if (mutHead && mutHead !== reviewedThrough) {
   if (leak) return leak
 }
 if (mutHead && mutHead !== reviewedThrough && settled.length) {
-  const execSettledMut = await executeAtHead(settled, 'reproduce:settled:mutation')
+  const execSettledMut = await executeSettled(settled, 'reproduce:settled:mutation')
   if (execSettledMut.dirty) return await dirtyReproducerHalt('Review', execSettledMut)
+  if (execSettledMut.reasons) {
+    return await unmeasuredSettledHalt('Review', settled, execSettledMut, {
+      mutation, unresolved_findings: [...open, ...settled], fix_rounds: round,
+      fix_round_output: fixRoundSpend, notes,
+    })
+  }
   const { regressed: undone, errored: erroredMut } = regressedOf(settled, execSettledMut, 'mutation')
   if (undone.length || erroredMut.length) {
     return await halted('Review', {

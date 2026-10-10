@@ -74,7 +74,7 @@ function baseArgs(overrides) {
 // reproduce and staleness stubs learn which ids the script actually assigned,
 // without the scenario needing to predict them.
 function idsIn(prompt) {
-  return [...prompt.matchAll(/\[(f\d+)\]|printf 'TOUCHSTONE_REPRO %s %s %s %s\\n' (f\d+) /g)]
+  return [...prompt.matchAll(/\[(f\d+)\]|printf 'TOUCHSTONE_REPRO %s %s %s %s' (f\d+) /g)]
     .map(m => m[1] ?? m[2])
 }
 
@@ -124,25 +124,30 @@ function planEndCommand(id) {
 // never predicted by a scenario, so a stub answers whatever the script asked.
 // The log paths sit where a real runner puts them, under the worktree's git dir.
 function checkIdsOf(prompt) {
-  return [...prompt.matchAll(/printf 'TOUCHSTONE_CHECK %s %s %s\\n' (\S+) "\$\?"/g)].map(m => m[1])
+  return [...prompt.matchAll(/printf 'TOUCHSTONE_CHECK %s %s %s' (\S+) "\$e"/g)].map(m => m[1])
 }
 function runIdOf(prompt) {
-  return (/printf 'TOUCHSTONE_CHECKS_END %s %s\\n' (\S+) "\$s"/.exec(prompt) ?? [])[1] ?? ''
+  return (/printf 'TOUCHSTONE_CHECKS_END %s %s %s\\n' (\S+) "\$s"/.exec(prompt) ?? [])[1] ?? ''
+}
+// What `cksum < "$d/rows"` prints for these rows, from the real cksum, so
+// every stubbed run also holds the script's own cksum to the real one.
+function rowsSum(rows) {
+  return execFileSync('cksum', { input: rows.length ? `${rows.join('\n')}\n` : '', encoding: 'utf8' })
+    .trim().split(/\s+/).join(' ')
 }
 function runnerLogOf(run, id, wtPath = STUB_WT_PATH) {
   return `${wtPath}/.git/touchstone-checks/${run}/${id}.log`
 }
 // The one line of the prompt that runs `id`.
 function runnerLineOf(prompt, id) {
-  return prompt.split('\n').find(l => l.includes(`printf 'TOUCHSTONE_CHECK %s %s %s\\n' ${id} `)) ?? ''
+  return prompt.split('\n').find(l => l.includes(`printf 'TOUCHSTONE_CHECK %s %s %s' ${id} `)) ?? ''
 }
 // Well-formed runner output for the prompt's own checks: exits[i] is the i-th
 // check's exit code (0 when absent).
 function runnerOutput(prompt, exits = [], state = 'clean') {
   const run = runIdOf(prompt)
-  return [...checkIdsOf(prompt).map((id, i) =>
-    `TOUCHSTONE_CHECK ${id} ${exits[i] ?? 0} ${runnerLogOf(run, id)}`),
-  `TOUCHSTONE_CHECKS_END ${run} ${state}`].join('\n')
+  const rows = checkIdsOf(prompt).map((id, i) => `TOUCHSTONE_CHECK ${id} ${exits[i] ?? 0} ${runnerLogOf(run, id)}`)
+  return [...rows, `TOUCHSTONE_CHECKS_END ${run} ${state} ${rowsSum(rows)}`].join('\n')
 }
 // The lines inside the prompt's one fence, run for real, one bash per line as
 // the agent runs them. stdout is what the agent would return.
@@ -215,10 +220,10 @@ const REPRODUCED_MARKER = 'TOUCHSTONE_DEFECT_REPRODUCED'
 // path a finding carries holds.
 const STUB_GIT_DIR = path.join(path.dirname(process.argv[1]), 'stub-git')
 function reproIdsOf(prompt) {
-  return [...prompt.matchAll(/printf 'TOUCHSTONE_REPRO %s %s %s %s\\n' (\S+) "\$e"/g)].map(m => m[1])
+  return [...prompt.matchAll(/printf 'TOUCHSTONE_REPRO %s %s %s %s' (\S+) "\$e"/g)].map(m => m[1])
 }
 function reproRunOf(prompt) {
-  return (/printf 'TOUCHSTONE_REPRO_END %s %s %s\\n' (\S+) "\$s"/.exec(prompt) ?? [])[1] ?? ''
+  return (/printf 'TOUCHSTONE_REPRO_END %s %s %s %s\\n' (\S+) "\$s"/.exec(prompt) ?? [])[1] ?? ''
 }
 function reproDirOf(run) {
   return `${STUB_GIT_DIR}/touchstone-repro/${run}`
@@ -236,15 +241,16 @@ function reproOutput(prompt, rows, { before = 'clean', dirty = false, porcelain 
   const dir = reproDirOf(run)
   fs.mkdirSync(dir, { recursive: true })
   const lines = [`TOUCHSTONE_REPRO_BEFORE ${run} ${before}`]
-  for (const r of rows) {
+  const printed = rows.map(r => {
     fs.writeFileSync(`${dir}/${r.id}.log`, r.output ?? '')
-    lines.push(`TOUCHSTONE_REPRO ${r.id} ${r.exit} ${markerLineIn(r.output ?? '') ? 1 : 0} ${dir}/${r.id}.log`)
-  }
+    return `TOUCHSTONE_REPRO ${r.id} ${r.exit} ${markerLineIn(r.output ?? '') ? 1 : 0} ${dir}/${r.id}.log`
+  })
+  lines.push(...printed)
   if (prompt.includes('TOUCHSTONE_HUNKS_BEGIN') && Array.isArray(hunkLines)) {
     lines.push(`TOUCHSTONE_HUNKS_BEGIN ${run}`, ...hunkLines, `TOUCHSTONE_HUNKS_END ${run} ${hunkLines.length}`)
   }
   fs.writeFileSync(`${dir}/status.log`, dirty ? `${porcelain}\n` : '')
-  lines.push(`TOUCHSTONE_REPRO_END ${run} ${dirty ? 'dirty' : 'clean'} ${dir}/status.log`)
+  lines.push(`TOUCHSTONE_REPRO_END ${run} ${dirty ? 'dirty' : 'clean'} ${rowsSum(printed)} ${dir}/status.log`)
   return lines.join('\n')
 }
 
@@ -504,7 +510,7 @@ function makeAgent(scenario, captured) {
       const at = base.slice('reproduce:settled:'.length)
       const round = /^\d+$/.test(at) ? Number(at) : at
       return reproduceResponse(prompt, scenario,
-        (id) => scenario.settledExit ? scenario.settledExit(id, round) : 0)
+        (id) => scenario.settledExit ? scenario.settledExit(id, round, retry) : 0)
     }
     if (base === 'reproduce:mutation') {
       const hunkLines = scenario.hunks ? scenario.hunks('mutation') : defaultHunkLines(filesOf(scenario.postMutationReview))
@@ -525,9 +531,10 @@ function makeAgent(scenario, captured) {
       const exits = checkIdsOf(prompt).map(id =>
         reply?.results ? reply.results.find(r => r.id === id)?.exit_code : 0)
       const run = runIdOf(prompt)
-      return { output: [...checkIdsOf(prompt).flatMap((id, i) => Number.isInteger(exits[i])
-        ? [`TOUCHSTONE_CHECK ${id} ${exits[i]} ${runnerLogOf(run, id)}`] : []),
-      `TOUCHSTONE_CHECKS_END ${run} ${reply?.dirty === true ? 'dirty' : 'clean'}`].join('\n') }
+      const rows = checkIdsOf(prompt).flatMap((id, i) => Number.isInteger(exits[i])
+        ? [`TOUCHSTONE_CHECK ${id} ${exits[i]} ${runnerLogOf(run, id)}`] : [])
+      return { output: [...rows,
+        `TOUCHSTONE_CHECKS_END ${run} ${reply?.dirty === true ? 'dirty' : 'clean'} ${rowsSum(rows)}`].join('\n') }
     }
     if (label === 'checks:fix') {
       return scenario.checksFixResult ??

@@ -24,17 +24,19 @@ async function scenarioPromptIsOneLinePerReproducer() {
   check('the run is the plan id, the label and a counter', /^[0-9a-f]{8}-reproduce-review-\d+$/.test(rid), true)
   const dir = `d="$(git -C /tmp/stub-worktree rev-parse --path-format=absolute --git-path touchstone-repro/${rid} 2>/dev/null)" && mkdir -p "$d"`
   const lineFor = (id, cmd) =>
-    `${dir} && { bash -c 'cd /tmp/stub-worktree && ${cmd}' >|"$d/${id}.log" 2>&1; e=$?; ` +
+    `${dir} && c="$(printf %s ${Buffer.from(cmd).toString('base64')} | base64 --decode)" && [ -n "$c" ] && ` +
+    `{ (cd /tmp/stub-worktree && bash -c "$c") >|"$d/${id}.log" 2>&1; e=$?; ` +
     `if ${MARKER_GREP} "$d/${id}.log"; then m=1; else m=0; fi; ` +
-    `printf 'TOUCHSTONE_REPRO %s %s %s %s\\n' ${id} "$e" "$m" "$d/${id}.log"; }`
-  const before = `${dir} && git -C /tmp/stub-worktree status --porcelain >|"$d/before.log" 2>|"$d/before.err" && ` +
+    `r="$(printf 'TOUCHSTONE_REPRO %s %s %s %s' ${id} "$e" "$m" "$d/${id}.log")"; ` +
+    `printf '%s\\n' "$r" >>"$d/rows"; printf '%s\\n' "$r"; }`
+  const before = `${dir} && : >|"$d/rows" && git -C /tmp/stub-worktree status --porcelain >|"$d/before.log" 2>|"$d/before.err" && ` +
     `{ if [ -s "$d/before.log" ]; then s=dirty; else s=clean; fi; ` +
     `printf 'TOUCHSTONE_REPRO_BEFORE %s %s\\n' ${rid} "$s"; }`
   const end = `${dir} && git -C /tmp/stub-worktree status --porcelain >|"$d/status.log" 2>|"$d/status.err" && ` +
-    `{ if [ -s "$d/status.log" ]; then s=dirty; else s=clean; fi; ` +
-    `printf 'TOUCHSTONE_REPRO_END %s %s %s\\n' ${rid} "$s" "$d/status.log"; }`
+    `k="$(cksum < "$d/rows")" && { if [ -s "$d/status.log" ]; then s=dirty; else s=clean; fi; ` +
+    `printf 'TOUCHSTONE_REPRO_END %s %s %s %s\\n' ${rid} "$s" "$k" "$d/status.log"; }`
   check('the fence is the before line, a line per reproducer, then the end line',
-    fenceOf(p), [before, lineFor('f1', 'make test'), lineFor('f2', `bash t.sh '\\''a b'\\''`), end])
+    fenceOf(p), [before, lineFor('f1', 'make test'), lineFor('f2', "bash t.sh 'a b'"), end])
   check('the schema asks for output and nothing else', JSON.stringify(call?.schema),
     JSON.stringify({ type: 'object', additionalProperties: false, required: ['output'],
       properties: { output: { type: 'string' } } }))
@@ -340,11 +342,11 @@ async function scenarioRealDirty() {
     const lines = outs['reproduce:review'].split('\n').filter(Boolean)
     const end = lines.pop().split(' ')
     check('before clean, end dirty', [lines[0].split(' ')[2], end[2]], ['clean', 'dirty'])
-    check('the status log holds the porcelain', fs.readFileSync(end.slice(3).join(' '), 'utf8'), '?? stray.txt\n')
+    check('the status log holds the porcelain', fs.readFileSync(end.slice(5).join(' '), 'utf8'), '?? stray.txt\n')
     check('halted at Review', result.halted_at, 'Review')
     check('the note blames a reproducer and names the status log',
       (result.note ?? '').includes('A reproducer execution left the working tree dirty') &&
-      (result.note ?? '').includes(end.slice(3).join(' ')), true)
+      (result.note ?? '').includes(end.slice(5).join(' ')), true)
   } finally {
     fs.rmSync(dir, { recursive: true, force: true })
   }
@@ -434,10 +436,163 @@ async function scenarioRealBadRange() {
   }
 }
 
+// The script's pure helpers, lifted out of its source and run on their own:
+// each definition runs from its `const` to the next top-level statement.
+const defsOf = (names) => names.map(n => {
+  const start = src.search(new RegExp(`^const ${n} =`, 'm'))
+  const rest = src.slice(start)
+  return rest.slice(0, rest.slice(1).search(/^(const |let |function |\/\/)/m) + 1)
+}).join('\n')
+const pure = vm.runInNewContext(
+  `${defsOf(['utf8Bytes', 'CKSUM_TABLE', 'cksum', 'BASE64_ALPHABET', 'base64Of'])}\n;({ cksum, base64Of })`)
+const CKSUM_INPUTS = ['', 'abc\n', 'TOUCHSTONE_CHECK check:1 0 /tmp/x/check:1.log\n',
+  'Grüße — 日本語 🎉\n', 'x'.repeat(300), 'y'.repeat(70000)]
+
+async function scenarioCksumMatchesPosix() {
+  console.log('\n== scenario PX: the script\'s cksum matches the real cksum, non-ASCII and long input included')
+  for (const input of CKSUM_INPUTS) {
+    const real = execFileSync('cksum', { input: Buffer.from(input, 'utf8'), encoding: 'utf8' }).trim().split(/\s+/).join(' ')
+    check(`cksum of ${JSON.stringify(input.slice(0, 20))} (${input.length} chars)`, pure.cksum(input), real)
+  }
+}
+
+async function scenarioBase64MatchesUtf8() {
+  console.log('\n== scenario PY: the script\'s base64 encodes the UTF-8 bytes, and base64 --decode gives the text back')
+  for (const input of ['', 'a', 'ab', 'abc', "python3 -c 'print(1)'\nexit 3", 'Grüße — 日本語 🎉']) {
+    const b64 = pure.base64Of(input)
+    check(`base64 of ${JSON.stringify(input)}`, b64, Buffer.from(input, 'utf8').toString('base64'))
+    check(`it decodes back with base64 --decode`,
+      spawnSync('bash', ['-c', `printf %s ${b64} | base64 --decode`], { encoding: 'utf8' }).stdout, input)
+  }
+}
+
+async function scenarioRealMultiLine() {
+  console.log('\n== scenario PW: multi-line commands stay one physical fence line each, and run whole in the worktree')
+  const { dir } = scratchRepo()
+  try {
+    const { outs, reproRuns } = realOutputs(['reproduce:review'])
+    const { result, captured } = await run({
+      args: { maxReviewRounds: 1 },
+      branchResult: branchAt(dir),
+      initialReview: reviewOf(
+        finding('python', `python3 -c 'import os, sys\nprint(os.getcwd())\nprint("${REPRODUCED_MARKER}")\nsys.exit(3)'`),
+        finding('heredoc', `bash <<'EOS'\npwd -P\necho "${REPRODUCED_MARKER}"\nexit 4\nEOS`),
+      ),
+      reproRuns, verify: () => false, staleness: () => [],
+    })
+    check('the fence has exactly the before line, two reproducer lines and the end line',
+      fenceOf(promptOf(captured, 'reproduce:review')).length, 4)
+    const lines = outs['reproduce:review'].split('\n').filter(Boolean)
+    check('the runner printed exactly four lines', lines.length, 4)
+    const row = (id) => lines.find(l => l.startsWith(`TOUCHSTONE_REPRO ${id} `))?.split(' ') ?? []
+    const real = fs.realpathSync(dir)
+    check('the python row: its own exit, marker seen', row('f1').slice(2, 4), ['3', '1'])
+    check('the python command ran in the worktree', fs.readFileSync(row('f1').slice(4).join(' '), 'utf8'),
+      `${real}\n${REPRODUCED_MARKER}\n`)
+    check('the heredoc row: its own exit, marker seen', row('f2').slice(2, 4), ['4', '1'])
+    check('the heredoc ran in the worktree', fs.readFileSync(row('f2').slice(4).join(' '), 'utf8'),
+      `${real}\n${REPRODUCED_MARKER}\n`)
+    check('both opened', result.unresolved_findings?.map(f => f.title).sort(), ['heredoc', 'python'])
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true })
+  }
+}
+
+async function scenarioRealInventedRow() {
+  console.log('\n== scenario PZ: a reply with a row the runner never wrote is unmeasured, even when it looks right')
+  const { dir } = scratchRepo()
+  try {
+    const { result, captured } = await run({
+      branchResult: branchAt(dir),
+      initialReview: reviewOf(finding('one', `echo ${REPRODUCED_MARKER}; exit 1`), finding('two', 'exit 0')),
+      reproRuns: (label, prompt) => {
+        const fence = fenceOf(prompt)
+        const ran = [fence[0], fence[1], fence[3]].map(line => spawnSync('bash', ['-c', line], { encoding: 'utf8' }).stdout)
+        const f1 = ran[1].trim()
+        const invented = f1.replace(' f1 1 1 ', ' f2 0 0 ').replace(/f1\.log$/, 'f2.log')
+        return { output: [ran[0].trim(), f1, invented, ran[2].trim()].join('\n') }
+      },
+    })
+    check('the run is unmeasured on the checksum',
+      captured.logs.some(l => l.startsWith('reproduce:review: unmeasured (rows checksum does not match')), true)
+    check('halted on measurement, nothing decided', [result.halted_at,
+      result.unresolved_findings?.map(f => f.reproducer_run?.outcome)], ['Review', ['not-executed', 'not-executed']])
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true })
+  }
+}
+
+async function scenarioRealGenuineRunPassesChecksum() {
+  console.log('\n== scenario PQ: a genuine run, re-run in the same directory, still passes the checksum')
+  const { dir } = scratchRepo()
+  try {
+    const { result, captured } = await run({
+      branchResult: branchAt(dir),
+      initialReview: reviewOf(finding('one', 'exit 0')),
+      reproRuns: (label, prompt) => { runRunnerLines(prompt); return { output: runRunnerLines(prompt) } },
+    })
+    check('measured', captured.logs.some(l => l.includes('unmeasured')), false)
+    check('exit 0 is a did-not-reproduce note', result.notes?.[0]?.reason, 'did-not-reproduce')
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true })
+  }
+}
+
+const SETTLED_BY_ROUND_1 = {
+  args: { maxReviewRounds: 2 },
+  initialReview: reviewOf(finding('gets fixed', 'a'), finding('stays open', 'b')),
+  verify: (id, round) => id === 'f1' && round >= 1 ? 0 : 1,
+  fixHead: (round) => `fix000000000000000000000000000000000000${String(round).padStart(2, '0')}`,
+  staleness: () => [],
+}
+
+async function scenarioSettledUnmeasuredFixRound() {
+  console.log('\n== scenario PJ: a settled re-check unmeasured twice in a fix round halts on measurement and reopens nothing')
+  const { result, captured } = await run({ ...SETTLED_BY_ROUND_1,
+    reproRuns: (label) => label.startsWith('reproduce:settled:2') ? { output: 'all still pass' } : undefined })
+  check('retried once', [callCount(captured, 'reproduce:settled:2:retry'), callCount(captured, 'reproduce:settled:2:retry:retry')], [1, 0])
+  check('halted at Fix', result.halted_at, 'Fix')
+  check('the note says the re-check could not be measured, and that it is not a regression',
+    /re-check of 1 settled finding\(s\) could not be measured/.test(result.note ?? '') &&
+    (result.note ?? '').includes('not a regression'), true)
+  check('the note names the settled finding', (result.note ?? '').includes('f1: gets fixed'), true)
+  check('nothing was logged as an undone fix', captured.logs.some(l => l.includes('no longer hold')), false)
+  const f1 = result.unresolved_findings?.find(f => f.id === 'f1')
+  check('the settled finding is kept with its last measured run, not a regression', f1?.reproducer_run?.outcome, 'passed')
+  check('the open finding is kept', result.unresolved_findings?.some(f => f.id === 'f2'), true)
+}
+
+async function scenarioSettledRetryMeasures() {
+  console.log('\n== scenario PK: a settled re-check unmeasured once and measured on its retry goes on as before')
+  const { result, captured } = await run({ ...SETTLED_BY_ROUND_1,
+    reproRuns: (label) => label === 'reproduce:settled:2' ? { output: 'all still pass' } : undefined })
+  check('retried once', callCount(captured, 'reproduce:settled:2:retry'), 1)
+  check('the loop ran to its limit, not a measurement halt',
+    [result.halted_at, (result.note ?? '').includes('could not be measured')], ['Fix', false])
+  check('the settled finding stayed settled', result.unresolved_findings?.map(f => f.id), ['f2'])
+}
+
+async function scenarioSettledUnmeasuredMutation() {
+  console.log('\n== scenario PL: a settled re-check at the mutation head unmeasured twice halts on measurement, never blaming the mutation commits')
+  const { result, captured } = await run(convergedWithSuspect({
+    tailReview: [],
+    mutationResult: () => ({ green: true, head_sha: 'mut0000000000000000000000000000000000001', detail: 'stub green', scored: true }),
+    reproRuns: (label) => label.startsWith('reproduce:settled:mutation') ? null : undefined,
+  }))
+  check('retried once', callCount(captured, 'reproduce:settled:mutation:retry'), 1)
+  check('halted at Review', result.halted_at, 'Review')
+  check('the note says it could not be measured', (result.note ?? '').includes('could not be measured'), true)
+  check('the note does not say the mutation commits undid a fix', /undid|mutation gate's own commits/.test(result.note ?? ''), false)
+  check('the settled finding is carried with its last measured run',
+    result.unresolved_findings?.map(f => [f.id, f.reproducer_run?.outcome]), [['f1', 'passed']])
+}
+
 const SCENARIOS = [scenarioPromptIsOneLinePerReproducer, scenarioPromptWithRange, scenarioOutcomesFromTheShell,
   scenarioTolerance, scenarioRejects, scenarioNullIsUnmeasured, scenarioHunksRejected, scenarioFixerGetsLogPath,
   scenarioHunksFailed, scenarioRealOutcomes, scenarioRealDirty, scenarioRealDirtyBefore, scenarioRealHunks,
-  scenarioRealBadRange]
+  scenarioRealBadRange, scenarioCksumMatchesPosix, scenarioBase64MatchesUtf8, scenarioRealMultiLine,
+  scenarioRealInventedRow, scenarioRealGenuineRunPassesChecksum, scenarioSettledUnmeasuredFixRound,
+  scenarioSettledRetryMeasures, scenarioSettledUnmeasuredMutation]
 JS_EOF
 
 finish

@@ -167,10 +167,17 @@ const classify = (f, ctx) => {
 // must not be carried into whatever commits next.
 let reproAttempt = 0
 const REPRO_AREA = 'touchstone-repro'
+// A reproducer command can span several lines (a python3 -c script, a
+// heredoc), and a newline spliced into the fence would split one line into
+// fragments the runner executes on their own, outside the worktree and the
+// log. So it travels base64-encoded and is decoded inside the line; an empty
+// decode prints nothing, which reads as unmeasured rather than as a pass.
 const reproLineFor = (it, run) =>
-  `${logDirFor(run, REPRO_AREA)} && mkdir -p "$d" && { ${bashCommandFor(it.reproducer)} >|"$d/${it.id}.log" 2>&1; e=$?; ` +
+  `${logDirFor(run, REPRO_AREA)} && mkdir -p "$d" && ` +
+  `c="$(printf %s ${base64Of(it.reproducer.command)} | base64 --decode)" && [ -n "$c" ] && ` +
+  `{ (cd ${shQuote(wt.path)} && bash -c "$c") >|"$d/${it.id}.log" 2>&1; e=$?; ` +
   `if grep -aqxE '[[:space:]]*${REPRODUCED_MARKER}[[:space:]]*' "$d/${it.id}.log"; then m=1; else m=0; fi; ` +
-  `printf 'TOUCHSTONE_REPRO %s %s %s %s\\n' ${it.id} "$e" "$m" "$d/${it.id}.log"; }`
+  `r="$(printf 'TOUCHSTONE_REPRO %s %s %s %s' ${it.id} "$e" "$m" "$d/${it.id}.log")"; ${rowTo(false)}; }`
 // The diff goes to a file rather than a pipe, so its own exit decides which
 // block is printed: a git failure (a bad range) prints a failed line, which
 // leaves the hunks unknown without voiding the reproducer rows.
@@ -181,11 +188,14 @@ const hunksLineFor = (run, range) =>
   `else grep -aE '^(\\+\\+\\+ |@@ )' "$d/diff.log" >|"$d/hunks.log"; ` +
   `printf 'TOUCHSTONE_HUNKS_BEGIN %s\\n' ${run}; cat "$d/hunks.log"; ` +
   `printf 'TOUCHSTONE_HUNKS_END %s %s\\n' ${run} "$(grep -c '' "$d/hunks.log")"; fi; }`
+// The before line starts the rows file, so every reproducer line appends.
 const reproLinesFor = (runnable, run, diffRange) => [
-  statusLineFor(run, { area: REPRO_AREA, name: 'before', tag: 'TOUCHSTONE_REPRO_BEFORE' }),
+  `${logDirFor(run, REPRO_AREA)} && mkdir -p "$d" && : >|"$d/rows" && ${porcelainTo('before')} && ` +
+    `{ ${stateOf('before')}; printf 'TOUCHSTONE_REPRO_BEFORE %s %s\\n' ${run} "$s"; }`,
   ...runnable.map(it => reproLineFor(it, run)),
   ...(diffRange ? [hunksLineFor(run, diffRange)] : []),
-  statusLineFor(run, { area: REPRO_AREA, tag: 'TOUCHSTONE_REPRO_END', withPath: true }),
+  `${logDirFor(run, REPRO_AREA)} && mkdir -p "$d" && ${porcelainTo('status')} && ${rowsSumTo} && ` +
+    `{ ${stateOf('status')}; printf 'TOUCHSTONE_REPRO_END %s %s %s %s\\n' ${run} "$s" "$k" "$d/status.log"; }`,
 ]
 const executeAtHead = async (items, label, diffRange) => {
   const runnable = items.filter(it => it.reproducer?.command)
@@ -199,7 +209,8 @@ const executeAtHead = async (items, label, diffRange) => {
   // than empty, and nothing seen dirty.
   if (parsed.reason) {
     log(`${label}: unmeasured (${parsed.reason})`)
-    return { runs: new Map(), hunks: null, dirty: false, porcelain: '', preexisting: !runnable.length }
+    return { runs: new Map(), hunks: null, dirty: false, porcelain: '', preexisting: !runnable.length,
+      unmeasured: parsed.reason }
   }
   if (parsed.diffExit !== undefined) {
     log(`${label}: git diff exited ${parsed.diffExit}, so this range's hunks are unknown`)
@@ -216,7 +227,22 @@ const executeAtHead = async (items, label, diffRange) => {
     // staged changes in place, with no reset/stash/restore -- gets a halt
     // blaming "a reproducer execution" for dirt that predates it.
     preexisting: !runnable.length || parsed.before,
+    unmeasured: null,
   }
+}
+
+// A settled finding's re-check gets the retry a candidate gets: an unmeasured
+// call has no rows at all, and regressedOf reads a missing row as regressed,
+// so one copy slip would otherwise reopen every settled finding and, at the
+// mutation head, blame the gate's commits for undoing them. Still unmeasured
+// after the retry, the result carries both reasons for unmeasuredSettledHalt.
+// A missing row inside a measured call keeps its meaning there.
+const executeSettled = async (items, label) => {
+  const first = await executeAtHead(items, label)
+  if (first.dirty || !first.unmeasured) return first
+  const second = await executeAtHead(items, `${label}:retry`)
+  if (second.dirty || !second.unmeasured) return second
+  return { ...second, reasons: [first.unmeasured, second.unmeasured] }
 }
 
 // A reproducer run that leaves the tree dirty halts outright: a check that
@@ -350,6 +376,20 @@ const deadLensHalt = (at, dead, extra) => {
     checks: checksPayload(), ...extra, note,
   })
 }
+
+// Same shape and TDZ reasoning as notExecutedHalt. The settled findings are
+// carried in unresolved_findings with their last measured run, so the record
+// keeps them and a re-run checks them again; nothing was reopened.
+const unmeasuredSettledHalt = (at, items, exec, extra) => halted(at, {
+  plan: plan.plan, implemented: impl.summary, gates: gatesPayload(),
+  checks: checksPayload(), ...extra,
+  note: `The re-check of ${items.length} settled finding(s) could not be ` +
+    `measured, even after a retry (first run ${exec.reasons[0]}; second run ` +
+    `${exec.reasons[1]}). This is a measurement failure, not a regression: ` +
+    `no fix was shown undone, and each is carried below with its last measured ` +
+    `run so a re-run checks it again.\n` +
+    items.map(f => `- ${f.id}: ${f.title}`).join('\n'),
+})
 
 let settled = []
 // A carried finding whose reproducer nobody ran (notExecutedHalt recorded it)
@@ -618,9 +658,16 @@ while ((open.length || blockingChecksOpen()) && round < MAX_REVIEW_ROUNDS && !ou
   const execOld = await executeAtHead(open, `reproduce:fix:${round}`, roundRange)
   if (execOld?.dirty) { sFix.close(); return await dirtyReproducerHalt('Fix', execOld) }
   const execSettled = settledBefore.length
-    ? await executeAtHead(settledBefore, `reproduce:settled:${round}`)
+    ? await executeSettled(settledBefore, `reproduce:settled:${round}`)
     : null
   if (execSettled?.dirty) { sFix.close(); return await dirtyReproducerHalt('Fix', execSettled) }
+  if (execSettled?.reasons) {
+    sFix.close()
+    return await unmeasuredSettledHalt('Fix', settledBefore, execSettled, {
+      unresolved_findings: [...open, ...settledBefore], notes, fix_rounds: round,
+      fix_round_output: fixRoundSpend,
+    })
+  }
   const tail = tailReviewable
     ? await reviewOf(roundRange, `review:fix:${round}`, [LENS.correctness], knownForRound())
     : { raised: [], dead: [] }
@@ -635,7 +682,7 @@ while ((open.length || blockingChecksOpen()) && round < MAX_REVIEW_ROUNDS && !ou
   for (const f of open) {
     const row = execOld?.runs?.get(f.id)
     const outcome = outcomeOf(row)
-    if (outcome === 'passed') { settled.push(f); continue }
+    if (outcome === 'passed') { settled.push({ ...f, reproducer_run: reproducerRunOf(row, round) }); continue }
     if (outcome === 'errored') erroredOpen++
     stillOpen.push({ ...f, reproducer_run: latestRun(f, reproducerRunOf(row, round)) })
   }
