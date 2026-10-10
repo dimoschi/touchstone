@@ -131,7 +131,7 @@ def repo_root(path):
 
 
 def _ref_exists(root, ref):
-    return ref in git(root, "for-each-ref", "--format=%(refname)", ref).out.split()
+    return git(root, "cat-file", "-e", ref).code == 0
 
 
 def default_base(root):
@@ -291,7 +291,7 @@ def _reattach(root, marker):
     if branch is None:
         _refuse_fallback(root, marker)
     _refuse_merged(root, branch)
-    path = canonical(root, branch.partition("/")[2])
+    path = canonical(root, branch.partition("/")[2].replace("/", "-"))
     if os.path.lexists(path):
         raise Refusal("occupied", f"branch {branch} has no worktree, but {path} is already occupied")
     _add_worktree(root, path, branch)

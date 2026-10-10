@@ -794,3 +794,16 @@ def test_a_failing_gh_is_not_believed_even_when_it_prints_a_merge(world, capsys)
     code, out = run(world, capsys, "--existing")
     assert code == 0
     assert out["worktree"] == path
+
+
+def test_default_base_ignores_other_remotes_heads(world):
+    git(world.repo, "update-ref", "refs/remotes/zz/dev", "HEAD")
+    git(world.repo, "symbolic-ref", "refs/remotes/zz/HEAD", "refs/remotes/zz/dev")
+    assert pd.default_base(world.repo) == "main"
+
+
+def test_a_reattached_branch_with_a_slash_in_its_slug_gets_one_flat_directory(world, capsys):
+    git(world.repo, "branch", "feat/gh-163-x/y")
+    code, out = run(world, capsys, "--existing")
+    assert code == 0
+    assert out["worktree"] == wt_path(world, "gh-163-x-y")
