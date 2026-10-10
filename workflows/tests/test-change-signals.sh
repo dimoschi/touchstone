@@ -150,11 +150,9 @@ async function scenarioSignalsAreInEveryHaltAfterTheImplementerReturned() {
   const preReviewFix = {
     discovery: { file: '/repo/AGENTS.md',
       sections: [{ heading: '## Checks', fence: 'bash scripts/run-tests.sh' }], detail: 'stub' },
-    checkRuns: (attempt) => ({ results: [attempt === 2
+    checkRuns: (attempt) => attempt >= 3 ? { output: 'all passed' } : ({ results: [attempt === 2
       ? checkRow('check:1', 'bash scripts/run-tests.sh', 1, 'FAILURE')
-      : attempt === 1 ? checkRow('check:1', 'bash scripts/run-tests.sh', 0, 'ok')
-      : { id: 'check:1', command: 'timeout 10 bash scripts/run-tests.sh', exit_code: 0,
-          output: 'TOUCHSTONE_CHECK_EXIT check:1 0\nok' }], dirty: false }),
+      : checkRow('check:1', 'bash scripts/run-tests.sh', 0, 'ok')], dirty: false }),
   }
   const halts = {
     'a pre-review fixer that stops on an unsupported language': { ...preReviewFix,
@@ -164,8 +162,7 @@ async function scenarioSignalsAreInEveryHaltAfterTheImplementerReturned() {
     'a plan file under .touchstone': { planLeak: LEAK },
     'a check that could not be measured': {
       discovery: { file: '/repo/AGENTS.md', sections: [{ heading: '## Checks', fence: 'make run' }], detail: 'stub' },
-      checkRuns: () => ({ results: [{ id: 'check:1', command: 'timeout 10 make run', exit_code: 0,
-        output: 'TOUCHSTONE_CHECK_EXIT check:1 0\nok' }], dirty: false }),
+      checkRuns: (attempt, prompt) => ({ output: attempt === 1 ? runnerOutput(prompt, [0]) : 'all passed' }),
     },
     'a run budget refusal during the checks': { args: { runBudget: 1000 }, spendAllAfter: 'signals' },
     'an implementer over its ceiling': { args: { stageBudgets: { implement: 1000 } }, budgetPerAgentCall: 5000 },

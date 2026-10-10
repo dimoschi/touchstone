@@ -270,6 +270,13 @@ This never touches the separate unrecognised-value fallback (an invalid `complex
 string still defaults straight to `involved`), which is not a judgement about difficulty
 at all, so there is nothing to demote it against.
 
+### A failed dispatch
+
+Any throw that reaches the run's top-level `catch` other than a budget refusal, such as an
+agent that exhausted its structured-output retries, ends as a halt at the current phase.
+Its note names the error, and the payload carries the same state as a budget halt, so the
+invoking session always has a record to write.
+
 ### The run budget
 
 `dispatch()` is the one function that ever calls the runtime's own `agent()`; a static
@@ -459,57 +466,82 @@ and after every fix round. `## Checks` must therefore list only read-only, deter
 commands, never one that mutates the repo or depends on state a later run cannot
 repeat.
 
-The runner is handed each check's exact Bash invocation
-(`` o=$(mktemp); bash -c 'cd <worktree> && <command>' >"$o" 2>&1; echo "TOUCHSTONE_CHECK_EXIT <id> $?"; tail -c 8192 "$o"; rm -f "$o" ``)
-and must report `command` back as it ran it. The full invocation, its inner
-`bash -c '...'`, and the bare declared command are all accepted, because runners
-have reported each of the three in the same run; a row reporting anything else
-(an added `timeout`, a changed flag) is
-not measured, and an unmeasured row is never read as a pass or as evidence of
-the repo's own environment. The `cd` target is quoted only when it needs to be:
-a worktree path made only of letters, digits and `/ . _ - + : @ % = ,` is
-spliced in bare, so the ordinary invocation has no nested quoting for the
-runner to copy. A path (or a declared check's own command) carrying any other
-character is still single-quoted the old way. This matters because the match
-is exact and the runner has to reproduce it byte for byte: on the pipeline
-0.21.0 run that #116 is about, the runner miscopied the nested `'\''` escaping
-on every row, and no check was measured for the rest of that run.
+A batch of checks is run by lines the script builds, never by a model copying a
+command or relaying output (`checkLineFor` and `endLineFor` in `30-triage-plan-checks.js.part`). The
+`checks:run:N` agent is given one fenced line per check, plus an end line, and runs each
+as its own foreground Bash call. A check's line is self-contained:
 
-A row's exit code is read only from its own `TOUCHSTONE_CHECK_EXIT <id> <code>`
-line in `output`, never from the `exit_code` field a model fills in: that field
-stays in the schema so a model has somewhere to answer, but `classifyResults`
-never reads it, which is what let a still-running or merely summarised check
-read as a pass at `exit_code: 0` before #120. The echo sits outside the
-`bash -c` string and after `;`, not `&&`, so it runs and reports the real exit
-code even when the check itself calls `exit N` or its own command chain ends
-nonzero. The check's output goes to a temp file, so the exit line is printed
-first and followed only by the last 8192 bytes of the log. The Bash tool shows a
-large output as a short preview of its start (this repo's own fix-loop suite
-prints about 56KB), so an exit line printed last was out of the runner's sight,
-and relaying a whole long log verbatim is what runners had already failed at.
-The runner also reports that line on its own in `exit_line`, since runners have dropped it from `output` while relaying the rest; the script reads `exit_line` followed by `output` as one text. Only its first non-empty line is read, and it must be a well-formed
-line naming the check's own id. A later line that looks like one is the check's
-own output. No exit line at all, one that is not first, one naming a different
-id, or a malformed one all come back as their own reason (`no exit line`, `exit
-line not first`, `exit line names <other id>`, `malformed exit line`) and the
-row is unmeasured, the same as a command mismatch, never red and never a pass. The runner is told to run each
-invocation alone in the foreground, one at a time and in order, never in the
-background or in parallel, and never to write the exit line itself; a call
-that does not return inside its own timeout is reported with whatever it
-printed and no exit line, which is also unmeasured rather than assumed to
-still be running.
+```
+d="$(git -C <worktree> rev-parse --path-format=absolute --git-path touchstone-checks/<run> 2>/dev/null)" && mkdir -p "$d" && { bash -c 'cd <worktree> && <command>' >|"$d/<id>.log" 2>&1; printf 'TOUCHSTONE_CHECK %s %s %s\n' <id> "$?" "$d/<id>.log"; }
+```
 
-An unmeasured check is kept apart from red rather than merged into it, and gets one
-retry: after any check run that follows a commit, `runChecks()` runs the checks that
-came back unmeasured a second time, at the same head, before anything else happens.
-A row still unmeasured after that halts the run (`unmeasuredChecksHalt`, at Implement
-for the two pre-review sites and at Fix for the fix loop) rather than reaching a
-fixer -- a fixer cannot change what a runner echoes back, and #116 is three fix
-rounds spent finding that out the slow way. The halt names each check, its expected
-invocation, and the specific reason each of the two attempts could not be measured.
-On a non-blocking (`existingBranch`) run nothing here ever halts; an unmeasured check
-is only reported under `checks.unmeasured`, the same as a red one is reported under
+The check's whole output, stdout and stderr, goes to
+`touchstone-checks/<run>/<id>.log` under the worktree's own git dir, so a log is never
+part of the tree, cannot dirty it, and is removed with the worktree. `<run>` is the plan
+id and the attempt number (`<planId>-<n>`): the retry of a batch writes new logs and
+leaves the first attempt's as they were. A later run with the same plan in the same
+worktree reuses those directories and overwrites them; every redirect is `>|`, so a
+shell with `noclobber` set still writes the log instead of failing the check. The `printf` sits after `;` rather than `&&`,
+so the exit code is read from `$?` and printed even when the check failed or called
+`exit N` itself. The only thing the shell prints per check is `TOUCHSTONE_CHECK <id>
+<exit> <log path>`, which is also why a long suite (this repo's own prints minutes of
+output) no longer has to fit the Bash tool's inline preview. The end line runs `git
+status --porcelain` once, after the last check, into `status.log` in the same
+directory and prints `TOUCHSTONE_CHECKS_END <run> clean|dirty`. Only stdout decides
+dirty: git's stderr goes to `status.err` beside it (and a `rev-parse` warning is
+dropped), because a warning on a healthy tree, such as an unreadable excludes file,
+would otherwise read as a dirty tree or as an unexpected line. Every line is a
+separate call because one call per batch would sit close to the 600000 ms Bash cap: this
+repo's checks took 526 s in sequence on one machine, so a slower machine or a growing
+suite crosses it. The agent still joins one short line per call, but the parser holds
+every id, exit and log path to what the script expects, so a misjoined batch reads as
+unmeasured, never as a pass. No line
+contains `exit`: the agent's shell persists, and one would end it. The `cd` target is
+quoted only when it needs to be: a worktree path made only of letters, digits and `/ . _
+- + : @ % = ,` is spliced in bare, and a path or declared command carrying any other
+character is single-quoted, with a quote inside it written `'\''`.
+
+The agent returns `output` and nothing else: the lines it saw printed, verbatim and in
+order. `parseCheckRun` (a pure function in `10-schemas.js.part`, in the style of
+`parseDiffstat`) accepts that only if every discovered id appears exactly once and in
+order, each exit is an integer, each log path is absolute and ends in
+`/touchstone-checks/<run>/<id>.log` for this run and id, all rows share one directory,
+and the end line names this run
+and is both last and unique. Anything else makes the whole batch unmeasured, not just
+the row at fault, with the first reason found (`no output`, `no end line`, `end line is
+not last`, `end line repeated`, `malformed end line`, `end line names run X, not Y`,
+`unexpected line ...`, `malformed check line`, `<id> reported twice`, `unexpected id
+<id>`, `<id> reported where <id> was expected`, `exit of <id> is not an integer`, `log
+path of <id> is not under this run`, `no line for <id>`, `log path of <id> is not in the
+run directory`). A reply that is wrong
+anywhere is not trusted anywhere, and an unmeasured batch is never read as a pass or as
+evidence about the repo's own environment. `classifyResults` then reads exit 0 as green
+and any other exit as red, 2 and 4 included, as AGENTS.md says they are not passes.
+
+A red check reaches a fixer (`checks:fix`, `fix:N`) as `Check <id> (<command>) exited
+<n>. Full output: <log path>`, never as its output. The prompt says the log sits under
+the worktree's git directory, outside the worktree, which makes it the one path a fixer
+may Read that does not start with the worktree path, and to read it from the end, where
+a check prints its verdict.
+
+An unmeasured batch gets one retry, whole: `runChecks()` runs the batch a second time at
+the same head, under a new run, before anything else happens. A batch still unmeasured
+after that halts the run (`unmeasuredChecksHalt`, at Implement for the two pre-review
+sites and at Fix for the fix loop) rather than reaching a fixer -- a fixer cannot change
+what a runner printed, and #116 is three fix rounds spent finding that out the slow way.
+The halt names each check and the reason each of the two attempts could not be
+measured. The baseline before Implement is the same retry, and an unmeasured baseline
+halts at Implement before anything is implemented, saying the baseline could not be
+established: with nothing known about the base commit, every check red afterwards
+would read as the run's own doing and reach a fixer (#143). A baseline whose end line
+says `dirty` halts there too, naming the `status.log` path rather than copying what it
+holds. On a non-blocking (`existingBranch`) run nothing here ever halts; an unmeasured
+check is only reported under `checks.unmeasured`, the same as a red one is reported under
 `checks.red` without blocking.
+
+Advisory checks (`## Advisory checks`) use the same runner, once and with no retry. A red
+one becomes a note carrying `exit <n>` and its `log`; the PR prompt tells the agent to
+read that log and quote what the check reported, and never to put the path in the PR.
 
 ### Measuring the diff: `size`, lens count, and the ratio halt
 

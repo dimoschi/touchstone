@@ -227,7 +227,7 @@ if (blockingChecksOpen() && !sChecksPost.over()) {
     `or open a PR.\n` +
     `${NATIVE_TOOLS(wt.path)} ${GENERATED_FILES}\n` +
     `Task: ${brief(task)}\n` +
-    redChecks.map(renderCheck).join('\n\n') + `\n` +
+    renderChecks(redChecks) + `\n` +
     `Return head_sha: the full 40-character SHA of HEAD after your last ` +
     `commit, or of the unchanged HEAD if you committed nothing. Return ` +
     `scored=true if crap-commit.sh printed that it scored this round's ` +

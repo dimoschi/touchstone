@@ -24,7 +24,7 @@ WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
 
 # The JS prelude every scenario file shares: imports, run(), makeAgent(), the
-# checkInvocation/defaultFinding/reproduceResponse helpers, and the three
+# runnerOutput/defaultFinding/reproduceResponse helpers, and the three
 # cross-group scenario-builder helpers (convergedWithSuspect, lateFinding,
 # overlapsWithExecutor). Verbatim from the pre-split test-fix-loop-join.sh.
 JS_PRELUDE="$(cat <<'JS_PRELUDE_EOF'
@@ -118,30 +118,42 @@ function planEndCommand(id) {
   return `printf '\\nEND OF PLAN %s\\n' ${id} >> ${STUB_WT_PATH}/.touchstone/plan.md`
 }
 
-// The exact Bash invocation deliver-pipeline.js's own invocationFor builds
-// for a check, id included since the trailing echo names it. A checkRuns
-// stub uses this so a scenario testing the happy path does not have to
-// duplicate the string, and a scenario testing the command-mismatch path can
-// diverge from it on purpose. Mirrors the production shQuote's bare-vs-quoted
-// split so the ~50 scenarios that use this for an unrelated behaviour (the
-// fix-loop join, not quoting) keep matching STUB_WT_PATH, which is itself
-// bare; scenario EM below asserts the literal production output directly
-// instead of trusting this copy.
-function shQuote(s) {
-  const str = String(s)
-  return /^[A-Za-z0-9/._+:@%=,-]+$/.test(str) ? str : `'${str.replace(/'/g, `'\\''`)}'`
+// What a checks:run runner prints. The prompt carries one self-contained line
+// per check and an end line; the ids and the run are read back out of it here,
+// never predicted by a scenario, so a stub answers whatever the script asked.
+// The log paths sit where a real runner puts them, under the worktree's git dir.
+function checkIdsOf(prompt) {
+  return [...prompt.matchAll(/printf 'TOUCHSTONE_CHECK %s %s %s\\n' (\S+) "\$\?"/g)].map(m => m[1])
 }
-const CHECK_EXIT_MARKER = 'TOUCHSTONE_CHECK_EXIT'
-function checkInvocation(id, command, path = STUB_WT_PATH) {
-  return `o=$(mktemp); bash -c ${shQuote(`cd ${shQuote(path)} && ${command}`)} >"$o" 2>&1; ` +
-    `echo "${CHECK_EXIT_MARKER} ${id} $?"; tail -c 8192 "$o"; rm -f "$o"`
+function runIdOf(prompt) {
+  return (/printf 'TOUCHSTONE_CHECKS_END %s %s\\n' (\S+) "\$s"/.exec(prompt) ?? [])[1] ?? ''
 }
-// A checkRuns stub's row for the common case: the command matches what was
-// declared, and the output carries the one well-formed exit line a row now
-// needs to be measured at all, rather than retried and then halted on.
+function runnerLogOf(run, id, wtPath = STUB_WT_PATH) {
+  return `${wtPath}/.git/touchstone-checks/${run}/${id}.log`
+}
+// The one line of the prompt that runs `id`.
+function runnerLineOf(prompt, id) {
+  return prompt.split('\n').find(l => l.includes(`printf 'TOUCHSTONE_CHECK %s %s %s\\n' ${id} `)) ?? ''
+}
+// Well-formed runner output for the prompt's own checks: exits[i] is the i-th
+// check's exit code (0 when absent).
+function runnerOutput(prompt, exits = [], state = 'clean') {
+  const run = runIdOf(prompt)
+  return [...checkIdsOf(prompt).map((id, i) =>
+    `TOUCHSTONE_CHECK ${id} ${exits[i] ?? 0} ${runnerLogOf(run, id)}`),
+  `TOUCHSTONE_CHECKS_END ${run} ${state}`].join('\n')
+}
+// The lines inside the prompt's one fence, run for real, one bash per line as
+// the agent runs them. stdout is what the agent would return.
+function runRunnerLines(prompt) {
+  const fence = /```bash\n([\s\S]*?)\n```/.exec(prompt)
+  return (fence ? fence[1].split('\n') : [])
+    .map(line => spawnSync('bash', ['-c', line], { encoding: 'utf8' }).stdout).join('')
+}
+// A checkRuns stub's row, in the old shape. The stub turns it into what a
+// runner would print for that check: only its exit code is read.
 function checkRow(id, command, exit, output) {
-  return { id, command: checkInvocation(id, command), exit_code: exit,
-    output: `${CHECK_EXIT_MARKER} ${id} ${exit}\n${output}` }
+  return { id, command, exit_code: exit, output }
 }
 
 // Every finding literal in this file predates category and reproducer; both
@@ -226,6 +238,11 @@ function makeAgent(scenario, captured) {
     const label = opts.label
     captured.calls.push({ label, prompt, schema: opts.schema, model: opts.model, effort: opts.effort,
       phase: opts.phase })
+    // scenario.throwOn names labels whose dispatch throws, the way agent()
+    // does when a subagent exhausts its structured-output retries.
+    if ((scenario.throwOn ?? []).includes(label)) {
+      throw new Error(`StructuredOutput retry cap (5) exceeded for ${label}`)
+    }
 
     // Replaces the old separate ticket/plugin:version/gate:opt-in dispatches
     // (gh-118): one call, before any worktree exists, answers all three.
@@ -451,9 +468,21 @@ function makeAgent(scenario, captured) {
     if (base === 'reproduce:mutation:fresh') {
       return reproduceResponse(prompt, scenario, (id) => exitFor(scenario, id, 'mutation', retry))
     }
+    // scenario.checkRuns(attempt, prompt) answers with { output } (raw, what the
+    // agent returned) or null, or in the old { results, dirty } shape, which is
+    // printed as a runner would: one line per check of the prompt that has a
+    // row with an integer exit_code, then the end line. Without checkRuns every
+    // check exits 0.
     if (label.startsWith('checks:run:')) {
       const attempt = Number(label.slice('checks:run:'.length))
-      return (scenario.checkRuns ?? (() => ({ results: [] })))(attempt)
+      const reply = scenario.checkRuns ? scenario.checkRuns(attempt, prompt) : undefined
+      if (reply === null || typeof reply?.output === 'string') return reply
+      const exits = checkIdsOf(prompt).map(id =>
+        reply?.results ? reply.results.find(r => r.id === id)?.exit_code : 0)
+      const run = runIdOf(prompt)
+      return { output: [...checkIdsOf(prompt).flatMap((id, i) => Number.isInteger(exits[i])
+        ? [`TOUCHSTONE_CHECK ${id} ${exits[i]} ${runnerLogOf(run, id)}`] : []),
+      `TOUCHSTONE_CHECKS_END ${run} ${reply?.dirty === true ? 'dirty' : 'clean'}`].join('\n') }
     }
     if (label === 'checks:fix') {
       return scenario.checksFixResult ??
