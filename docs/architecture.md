@@ -270,6 +270,13 @@ This never touches the separate unrecognised-value fallback (an invalid `complex
 string still defaults straight to `involved`), which is not a judgement about difficulty
 at all, so there is nothing to demote it against.
 
+### A failed dispatch
+
+Any throw that reaches the run's top-level `catch` other than a budget refusal, such as an
+agent that exhausted its structured-output retries, ends as a halt at the current phase.
+Its note names the error, and the payload carries the same state as a budget halt, so the
+invoking session always has a record to write.
+
 ### The run budget
 
 `dispatch()` is the one function that ever calls the runtime's own `agent()`; a static
@@ -482,8 +489,11 @@ directory and prints `TOUCHSTONE_CHECKS_END <run> clean|dirty`. Only stdout deci
 dirty: git's stderr goes to `status.err` beside it (and a `rev-parse` warning is
 dropped), because a warning on a healthy tree, such as an unreadable excludes file,
 would otherwise read as a dirty tree or as an unexpected line. Every line is a
-separate call because one call running the whole batch would exceed the 600000 ms Bash
-cap on a repo like this one, whose checks take about nine minutes in sequence. No line
+separate call because one call per batch would sit close to the 600000 ms Bash cap: this
+repo's checks took 526 s in sequence on one machine, so a slower machine or a growing
+suite crosses it. The agent still joins one short line per call, but the parser holds
+every id, exit and log path to what the script expects, so a misjoined batch reads as
+unmeasured, never as a pass. No line
 contains `exit`: the agent's shell persists, and one would end it. The `cd` target is
 quoted only when it needs to be: a worktree path made only of letters, digits and `/ . _
 - + : @ % = ,` is spliced in bare, and a path or declared command carrying any other

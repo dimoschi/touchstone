@@ -238,6 +238,11 @@ function makeAgent(scenario, captured) {
     const label = opts.label
     captured.calls.push({ label, prompt, schema: opts.schema, model: opts.model, effort: opts.effort,
       phase: opts.phase })
+    // scenario.throwOn names labels whose dispatch throws, the way agent()
+    // does when a subagent exhausts its structured-output retries.
+    if ((scenario.throwOn ?? []).includes(label)) {
+      throw new Error(`StructuredOutput retry cap (5) exceeded for ${label}`)
+    }
 
     // Replaces the old separate ticket/plugin:version/gate:opt-in dispatches
     // (gh-118): one call, before any worktree exists, answers all three.

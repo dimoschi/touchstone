@@ -384,5 +384,13 @@ return result
         `. ${prNote()}`,
     })
   }
-  throw e
+  // Any other throw (an agent out of structured-output retries, a stall the
+  // host gave up on) still ends as a halt with a payload, so the invoking
+  // session has a record to write rather than a crash with nothing in it.
+  closeOpenStages()
+  return await halted(currentPhase ?? 'Setup', {
+    ...budgetHaltState(),
+    note: `The run stopped on an error in ${currentPhase ?? 'Setup'}: ` +
+      `${e?.message ?? String(e)}. ${prNote()}`,
+  })
 }
