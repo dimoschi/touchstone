@@ -298,7 +298,8 @@ async function scenarioFH() {
     prResult: { opened: true, url: 'https://example.invalid/pr/23', note: 'stub ready' },
     initialReview: {
       correctness: [{ title: 'Never demonstrated', file: 'a.js', claim: 'c', evidence: 'e' }],
-      advocate: [{ category: 'docs', title: 'A style nit', file: 'b.js', claim: 'cosmetic', evidence: 'e2' }],
+      advocate: [{ category: 'docs', title: 'A style nit', file: 'b.js', claim: 'cosmetic', evidence: 'e2',
+        reproducer: undefined }],
     },
     initialExit: () => undefined,
   })

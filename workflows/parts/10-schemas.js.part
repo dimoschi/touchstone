@@ -590,8 +590,9 @@ const GATE = {
     unsupported_language: { type: 'boolean' },
   },
 }
-// Closed set a finding's category must come from. Only the four in
-// BLOCKING_CATEGORIES can hold a run; the rest still reach the PR, as a note.
+// Closed set a finding's category must come from. A category does not decide
+// whether a finding can hold a run, its reproducer does; the four in
+// BLOCKING_CATEGORIES only name the note reason a finding without one gets.
 const CATEGORIES = ['wrong-result', 'crash', 'gate-bypass', 'unmet-criterion',
                      'docs', 'wording', 'design', 'scope', 'other']
 // Read only by the script -- classify() below -- never by a prompt: a
@@ -650,8 +651,8 @@ const FINDINGS = {
           // An id copied from reviewOf's `known` list, never invented. Each
           // call site states what a reference there means.
           duplicate_of: { type: 'string' },
-          // Only a blocking-category finding needs one; classify() below
-          // treats an incomplete one the same as none at all.
+          // A finding of any category needs one to hold the run; classify()
+          // below treats an incomplete one the same as none at all.
           reproducer: REPRODUCER,
           // unmet-criterion only: copied verbatim from the ticket text, so
           // the script can check it is actually there rather than trusting

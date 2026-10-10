@@ -454,9 +454,9 @@ const result = {
   size,
   signals,
   reviewers: reviewerCount,
-  // Raised but never blocking: wrong category, no reproducer, an unmet
-  // criterion whose quote was not found, out of range, or a residual of a
-  // fix already verified. Separate from unresolved_findings, which is
+  // Raised but never blocking: no reproducer, one that did not reproduce, an
+  // unmet criterion whose quote was not found, out of range, or a residual
+  // of a fix already verified. Separate from unresolved_findings, which is
   // reserved for what actually held the run.
   notes,
   reviewed_through: reportedHead(),

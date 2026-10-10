@@ -378,14 +378,17 @@ The implementer never gets the plan as prompt text. `brief()` clamps to `briefCh
 ### What can hold a run: `classify()` and reproducers
 
 A lens can raise up to `MAX_FINDINGS_PER_LENS` findings, and every one carries a
-`category` from a closed enum. Only `BLOCKING_CATEGORIES` (`wrong-result`, `crash`,
-`gate-bypass`, `unmet-criterion`) can stop the run, and only when the finding also
-carries a complete `reproducer`: one command, run from the worktree root, that exits 0
-when the code is correct. `classify(f, ctx)` is the pure function that turns a lens's
-fields into a candidate (blocking, pending execution) or a note (reaching the PR body,
+`category` from a closed enum. The category does not decide whether a finding can stop
+the run: its `reproducer` does, one command run from the worktree root that exits 0 when
+the code is correct. A finding in any category with a complete reproducer is a
+candidate, and only a reproducer that is then executed and reproduces opens it.
+`BLOCKING_CATEGORIES` (`wrong-result`, `crash`, `gate-bypass`, `unmet-criterion`) only
+picks the note `reason` for a finding with no complete reproducer: `no-reproducer` for
+those four, `category` for the rest. `classify(f, ctx)` is the pure function that turns
+a lens's fields into a candidate (pending execution) or a note (reaching the PR body,
 never the run), in this order: a content-identical or referenced re-report of something
 already tracked drops; a reference to a *settled* finding becomes a `residual` note
-instead; a non-blocking category, a missing reproducer, an `unmet-criterion` quote that
+instead; a missing or incomplete reproducer, an `unmet-criterion` quote that
 is not a verbatim substring of the ticket text, or (from the first re-review on) a line
 span outside what the preceding fix or mutation range actually touched, each becomes a
 note with its own `reason`. What survives is a candidate, and `executeAtHead()` is what

@@ -8,7 +8,7 @@ export const meta = {
     { title: 'Plan', detail: 'planner produces a concise plan + acceptance criteria + risk areas; the whole plan is written to an untracked file in the worktree, which the implementer must read to its last line' },
     { title: 'Implement', detail: 'one implementer, TDD via crap-controlled-changes, many small signed commits' },
     { title: 'Draft PR', detail: 'push the branch and open a draft PR, or adopt the branch\'s open PR only when its head is an ancestor of the branch, converting a ready one back to a draft, so the work is visible and any later halt has somewhere durable to be reported' },
-    { title: 'Review', detail: 'a measured diffstat (code churn, with comments, tests and docs counted apart) decides the reviewer lenses: correctness and devil\'s advocate normally, plus requirements coverage on a large or wide change, none on a one-liner; support code (tests, docs, comments) far outweighing the actual change halts here before any lens runs. Only a wrong-result, crash, gate-bypass or unmet-criterion finding with a demonstrated reproducer can hold the run; everything else reaches the PR as a note. Runs again on any commits a later phase adds, and from the first re-review on a finding also has to fall inside what that range actually changed' },
+    { title: 'Review', detail: 'a measured diffstat (code churn, with comments, tests and docs counted apart) decides the reviewer lenses: correctness and devil\'s advocate normally, plus requirements coverage on a large or wide change, none on a one-liner; support code (tests, docs, comments) far outweighing the actual change halts here before any lens runs. A finding of any category can hold the run, but only with a reproducer that demonstrates it (unmet-criterion also needs a verbatim ticket quote); everything else reaches the PR as a note. Runs again on any commits a later phase adds, and from the first re-review on a finding also has to fall inside what that range actually changed' },
     { title: 'Fix', detail: 'fix confirmed findings, bounded rounds; a finding is fixed when its own reproducer exits 0, never by a model\'s judgement of the diff' },
     { title: 'Mutation', detail: 'pre-PR mutation gate; kill survivors with tests, never weaken code. Its own commits are reviewed before the PR' },
     { title: 'PR', detail: 'push, fill in the PR against the repo template, and mark the draft ready for review, only when every gate is green' },
@@ -29,7 +29,7 @@ export const meta = {
 // against the manifest in scripts/check-version-bump.sh, so drift is a
 // gate's job rather than something this script verifies about itself.
 const PLUGIN_NAME = 'touchstone'
-const PIPELINE_VERSION = '0.36.1'
+const PIPELINE_VERSION = '0.37.0'
 
 // Boundaries. Wall-clock deadlines are not expressible here (no Date.now, by
 // design); the bounds are rounds, counts, and token budget instead.
@@ -989,8 +989,9 @@ const GATE = {
     unsupported_language: { type: 'boolean' },
   },
 }
-// Closed set a finding's category must come from. Only the four in
-// BLOCKING_CATEGORIES can hold a run; the rest still reach the PR, as a note.
+// Closed set a finding's category must come from. A category does not decide
+// whether a finding can hold a run, its reproducer does; the four in
+// BLOCKING_CATEGORIES only name the note reason a finding without one gets.
 const CATEGORIES = ['wrong-result', 'crash', 'gate-bypass', 'unmet-criterion',
                      'docs', 'wording', 'design', 'scope', 'other']
 // Read only by the script -- classify() below -- never by a prompt: a
@@ -1049,8 +1050,8 @@ const FINDINGS = {
           // An id copied from reviewOf's `known` list, never invented. Each
           // call site states what a reference there means.
           duplicate_of: { type: 'string' },
-          // Only a blocking-category finding needs one; classify() below
-          // treats an incomplete one the same as none at all.
+          // A finding of any category needs one to hold the run; classify()
+          // below treats an incomplete one the same as none at all.
           reproducer: REPRODUCER,
           // unmet-criterion only: copied verbatim from the ticket text, so
           // the script can check it is actually there rather than trusting
@@ -1777,8 +1778,8 @@ const decisionsSpec = () => settledDecisions
     `taken" section, verbatim; decided, not under review):\n${settledDecisions}\n` +
     `Behaviour a settled decision specifies is not a defect: do not report it ` +
     `as wrong-result, crash, gate-bypass or unmet-criterion. Disagreeing with ` +
-    `a decision is at most a design or scope note, which never blocks. Do not ` +
-    `critique the rest of the ticket's reasoning.\n`
+    `a decision is at most a design or scope note, with no reproducer, which ` +
+    `never blocks. Do not critique the rest of the ticket's reasoning.\n`
   : ''
 
 const treeAgent = (prompt, { omitBase = false, ...opts }) =>
@@ -3354,10 +3355,10 @@ const reviewOf = async (range, tag, picked, known = [], knownCharge = '') => {
       `Return at most ${MAX_FINDINGS_PER_LENS} findings, most serious first. An ` +
       `empty list is the expected result for a correct change. Every finding ` +
       `carries a category: wrong-result, crash, gate-bypass, unmet-criterion, ` +
-      `docs, wording, design, scope, or other. Only wrong-result, crash, ` +
-      `gate-bypass and unmet-criterion can hold this run, and only when they ` +
-      `also carry a reproducer (unmet-criterion additionally needs criterion_quote). ` +
-      `Everything else is still worth raising and reaches the pull request as a ` +
+      `docs, wording, design, scope, or other. A finding of any category can ` +
+      `hold this run, but only by carrying a reproducer that demonstrates it ` +
+      `(unmet-criterion additionally needs criterion_quote). One without a ` +
+      `reproducer is still worth raising and reaches the pull request as a ` +
       `note for a human to judge, but it never blocks. ${REPRODUCER_CONTRACT}` +
       (known.length
         ? `\nThe findings below were already reported earlier this run, each ` +
@@ -3489,8 +3490,7 @@ const criterionQuoteFound = (f) => {
 // finding: used only to rank collapseDuplicates()'s survivor, never to
 // decide anything classify() itself decides.
 const looksBlocking = (f) =>
-  BLOCKING_CATEGORIES.has(f?.category) &&
-  (f.category === 'unmet-criterion' ? criterionQuoteFound(f) : hasCompleteReproducer(f))
+  !!f && hasCompleteReproducer(f) && (f.category !== 'unmet-criterion' || criterionQuoteFound(f))
 // A lens is told to use absolute paths (treeAgent's own rule) but hands
 // classify() its own file field, which hunks (keyed on the repo-relative
 // "+++ b/<path>" git prints) never matches unless normalized the same way: an
@@ -3551,11 +3551,9 @@ const classify = (f, ctx) => {
     // under (a bad reproducer, an earlier out-of-range round, the wrong
     // category) does not mean the defect itself is gone.
   }
-  if (!BLOCKING_CATEGORIES.has(f.category)) {
-    return { note: { ...f, reason: 'category', round: ctx.round } }
-  }
   if (!hasCompleteReproducer(f)) {
-    return { note: { ...f, reason: 'no-reproducer', round: ctx.round } }
+    const reason = BLOCKING_CATEGORIES.has(f.category) ? 'no-reproducer' : 'category'
+    return { note: { ...f, reason, round: ctx.round } }
   }
   // The quote proves the criterion exists; the reproducer is what shows the
   // change misses it. Without the second, the only way to decide "unmet" is a
@@ -3681,7 +3679,7 @@ const dirtyReproducerHalt = async (phaseName, exec, extraOpen = []) => halted(ph
 })
 
 // Every note is a finding the run does not block on: raised, but not
-// demonstrated, not blocking-category, not in range, or a residual of a fix
+// demonstrated, without a reproducer, not in range, or a residual of a fix
 // already verified. Separate from unresolved_findings, which stays reserved
 // for what actually holds the run.
 let notes = [...carriedNotes]
@@ -4693,9 +4691,9 @@ const result = {
   size,
   signals,
   reviewers: reviewerCount,
-  // Raised but never blocking: wrong category, no reproducer, an unmet
-  // criterion whose quote was not found, out of range, or a residual of a
-  // fix already verified. Separate from unresolved_findings, which is
+  // Raised but never blocking: no reproducer, one that did not reproduce, an
+  // unmet criterion whose quote was not found, out of range, or a residual
+  // of a fix already verified. Separate from unresolved_findings, which is
   // reserved for what actually held the run.
   notes,
   reviewed_through: reportedHead(),
