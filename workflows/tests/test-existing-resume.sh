@@ -473,7 +473,7 @@ async function scenarioR9() {
     ['an already merged branch', { halt_reason: 'merged' }],
     ['an occupied directory', { halt_reason: 'occupied' }],
     ['another ticket\'s branch', { halt_reason: 'wrong-ticket' }],
-    ['no branch found', {}],
+    ['no branch found', { halt_reason: 'not-found' }],
   ]) {
     kept(name, (await run(resumed(prior, { existingBranchResult: worktreeHalt(halt) }))).result, 'Worktree')
   }

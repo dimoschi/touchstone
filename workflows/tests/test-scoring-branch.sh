@@ -436,8 +436,9 @@ async function scenarioBC() {
     p.includes('Never stash, reset, or discard'), true)
   // 'occupied' describes this agent's own step 8 halt, so a field it can see
   // is a field it may fill, and the run would then print the other mode's note.
-  check('this agent is not handed halt_reason at all',
-    captured.calls.find(c => c.label === 'branch')?.schema?.properties?.halt_reason, undefined)
+  check('this agent is handed only its own halt reason, never the existing mode\'s',
+    captured.calls.find(c => c.label === 'branch')?.schema?.properties?.halt_reason?.enum,
+    ['none', 'base-unresolved', 'fetch-failed', 'remote-exists', 'remote-check-failed', 'path-exists', 'dirty'])
 }
 
 // Scenario BD -- the script cannot resolve a fork point itself (no filesystem

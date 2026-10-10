@@ -9,8 +9,11 @@ skips the token ceilings, the halt latches, and the gates, which are the reason 
 workflow exists.
 
 ```
-Workflow({ name: 'touchstone:deliver-pipeline', args: { task: "...", ticket: "...", branchType: "..." } })
+Workflow({ name: 'touchstone:deliver-pipeline', args: { task: "...", ticket: "...", branchType: "...", prepared: <prepare-delivery.sh's JSON> } })
 ```
+
+Run `prepare-delivery.sh` first (see Prepare the worktree, below) and pass what it printed
+as `prepared`.
 
 ## Arguments
 
@@ -24,16 +27,21 @@ the fabricated link.
   `perf`, `build`, or `ci`. Pass as `branchType`. Defaults to `feat`.
 - `--existing` — optional. Pass `existingBranch: true`. Use it when the work
   continues a branch this ticket already has: review feedback, or scope added
-  to a ticket whose PR is already open. The workflow looks up that branch by
-  ticket marker, whatever the invoking checkout happens to be on and skipping
-  fetch and pull entirely: first among every worktree
+  to a ticket whose PR is already open. `prepare-delivery.sh` looks up that
+  branch by ticket marker, whatever the invoking checkout happens to be on,
+  never pulling (it fetches only the base, to read the base's manifest): first among every worktree
   (`git worktree list --porcelain`), then, only if none matches, a branch with
   no worktree of its own (its directory was removed by hand -- sometimes
   because its PR merged and the tree was cleaned up, sometimes because it was
-  cut loose mid-flight). Either match is checked for a merged PR before it is
-  touched: a merged one halts instead of being reused, since that work is
-  done, not a tree to keep implementing into; otherwise the workflow
-  re-attaches a worktree to it rather than cutting a new branch.
+  cut loose mid-flight). A matched worktree is used where it is, inside
+  `.claude/worktrees/` or not. Either match is checked for a merged PR before
+  it is touched: when the branch's latest PR (its open one, else its
+  highest-numbered) merged, the run halts instead of reusing it, since that
+  work is done, not a tree to keep implementing into; otherwise a worktree is
+  re-attached to it rather than a new branch cut. When nothing carries the
+  marker and the checkout the script was pointed at is on a feature branch
+  (not detached, not the base), that branch is used as it is, unrenamed: it
+  predates the naming convention.
   **`--ticket` is still required.** Without this flag the workflow cuts a
   fresh branch and worktree off the base, which would strand follow-up work
   away from the PR it belongs to.
@@ -46,6 +54,39 @@ the fabricated link.
   with.
 
 **If `--ticket` is absent, stop and tell the user. Do not invoke the workflow.**
+
+## Prepare the worktree
+
+Before invoking the workflow, cut or find the ticket's worktree with the script this
+plugin ships:
+
+1. Read the ticket's title: `gh issue view <number> --json title -q .title` for a GitHub
+   issue, the Atlassian tools for a Jira key. Derive the slug from it: lowercase,
+   hyphen-separated, at most 6 words, letters and digits only. With `--existing` the slug
+   is not used to find anything, but the script still requires one.
+2. Run it with the toplevel of the checkout you are running in (`git rev-parse --show-toplevel`),
+   not the main checkout's path: the script finds the main checkout from it, and with
+   `--existing` it falls back to that checkout's own branch. Redirect its output to a file
+   and read that file:
+
+   ```
+   ${CLAUDE_PLUGIN_ROOT}/skills/crap-controlled-changes/prepare-delivery.sh <absolute repo path> --ticket <ref> --type <type> --slug <slug> [--existing] [--base <ref>] [--prior-head <sha>]
+   ```
+
+   Pass `--type` as `branchType` would be (`feat` by default), `--existing` when the
+   user passed it, `--base` when you pass `base`, and `--prior-head` with the same
+   `reviewed_through` you pass in `priorRun` (or `reviewedThrough`), so the resume check
+   runs against the head you hand the workflow.
+3. On exit 0, pass the printed JSON unchanged as `prepared`. On any other exit it printed
+   `{"error", "reason"}`: **report both verbatim and stop.** Do not invoke the workflow,
+   do not retry with another slug, and do not create or delete a branch or worktree to
+   get past it. A name already on origin (`remote-branch-exists`) is another run's
+   branch, and reusing it attaches this run to that branch's pull request.
+
+The workflow validates every field of `prepared` and halts at Worktree naming the first
+that fails, so never edit it. Without `prepared` the workflow falls back to agents that
+do the same steps less reliably; that path exists for callers who invoke the workflow
+directly, not for this command.
 
 ## Re-running with a plan you already have
 
@@ -132,14 +173,16 @@ downstream metric would inherit it.
 
 ## If the workflow refuses
 
-It halts on purpose: a detached HEAD, a base ref that will not resolve, a dirty
-checkout in the worktree `--existing` resolves to, `--existing` finding no
-worktree or branch for the ticket and the current checkout not on a feature
-branch either, `--existing` matching more than one worktree or branch for the
-ticket, `--existing` matching a worktree or a branch whose pull request
-already merged, `--existing` matching only a branch whose canonical worktree
-directory is already occupied by something else, `--existing` falling back
-to a checkout that carries a different ticket's marker, a missing ticket.
+`prepare-delivery.sh` refuses these before the run starts, and the workflow halts on
+a `prepared` argument that fails validation. Both stop on purpose: a base ref that
+will not resolve, a branch name already taken locally or on origin, an occupied
+worktree path, a dirty checkout in the worktree `--existing` resolves to,
+`--existing` finding no worktree or branch for the ticket while the checkout is
+detached or on the base branch, `--existing` matching more than one worktree or
+branch for the ticket, `--existing` matching a branch whose latest pull request
+merged, `--existing` matching only a branch whose canonical worktree directory is
+already occupied by something else, `--existing` finding only a checkout that
+carries a different ticket's marker, a missing ticket.
 **Report the halt and stop.** Do not copy
 `deliver-pipeline.js` elsewhere and edit out the phase that blocked you, and do not
 edit the original. A gate that gets neutered whenever it is inconvenient is not a
@@ -151,7 +194,7 @@ around once.
 
 ## Before invoking
 
-Nothing to confirm. Invoke the workflow.
+Nothing to confirm beyond running `prepare-delivery.sh`. Invoke the workflow.
 
 **A missing marker is not a reason to stop.** The markers control enforcement, not
 measurement, so the run is worth making either way:

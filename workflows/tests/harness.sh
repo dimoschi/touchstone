@@ -351,15 +351,22 @@ function makeAgent(scenario, captured) {
     // scenario.discoveryFails need no change beyond the label they attach to.
     const checksSourceFor = () => scenario.discoveryFails ? null :
       (scenario.discovery ?? { file: '', sections: [], detail: 'stub: no repo checks' })
-    if (label === 'branch') {
-      return { checks_source: checksSourceFor(),
-        ...(scenario.branchResult ?? { created: true, branch: 'feat/gh-21-stub', base: 'main',
-          path: '/tmp/stub-worktree', ticket: '21', detail: 'stub' }) }
+    // Scenarios written before halt_reason was required on both branch schemas
+    // say success with created:true alone; that reads as halt_reason 'none'. A
+    // ':retry' label is the script's one re-ask after a self-contradicting
+    // reply, answered by scenario.branchRetryResult/existingBranchRetryResult
+    // when set and otherwise the same as the first ask.
+    const branchReply = (r) => ({ checks_source: checksSourceFor(), dirty: false,
+      ...(r.halt_reason === undefined && r.created === true ? { halt_reason: 'none' } : {}), ...r })
+    const stubWorktree = { created: true, halt_reason: 'none', branch: 'feat/gh-21-stub', base: 'main',
+      path: '/tmp/stub-worktree', ticket: '21', detail: 'stub' }
+    if (label === 'branch' || label === 'branch:retry') {
+      const retried = label === 'branch:retry' && scenario.branchRetryResult !== undefined
+      return branchReply(retried ? scenario.branchRetryResult : (scenario.branchResult ?? stubWorktree))
     }
-    if (label === 'branch:existing') {
-      return { checks_source: checksSourceFor(),
-        ...(scenario.existingBranchResult ?? { created: true, branch: 'feat/gh-21-stub', base: 'main',
-          path: '/tmp/stub-worktree', ticket: '21', detail: 'stub' }) }
+    if (label === 'branch:existing' || label === 'branch:existing:retry') {
+      const retried = label === 'branch:existing:retry' && scenario.existingBranchRetryResult !== undefined
+      return branchReply(retried ? scenario.existingBranchRetryResult : (scenario.existingBranchResult ?? stubWorktree))
     }
     if (label === 'triage') {
       // scope: 'inline' skips the Plan phase, which this test has no reason

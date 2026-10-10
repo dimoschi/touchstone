@@ -629,6 +629,8 @@ async function scenarioAB() {
   console.log('\n== scenario AB: record_file sanitizes a ticket arg carrying a leading #')
   const { result } = await run({
     args: { openPr: true, ticket: '#216' },
+    branchResult: { created: true, halt_reason: 'none', branch: 'feat/gh-216-stub', base: 'main',
+      path: '/tmp/stub-worktree', ticket: '#216', detail: 'stub' },
     prResult: { opened: true, url: 'https://example.invalid/pr/23', note: 'stub ready' },
     initialReview: { correctness: [], advocate: [] },
     verify: () => undefined,
