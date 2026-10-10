@@ -56,11 +56,13 @@ async function scenarioSetupExitStops() {
   for (const [exit, trailer] of [[127, '-'], [2, 2]]) {
     const { result, captured } = await run(gated({ args: { maxGateAttempts: 3 }, mutationResult: green(),
       mutationVerify: () => ({ exit, trailer }) }))
-    const log = mutationVerifyOutput(promptOf(captured, 'mutation-verify:1'), exit, MUT_HEAD).split(' ').pop()
+    const lastVerify = exit === 127 ? 'mutation-verify:1:retry' : 'mutation-verify:1'
+    const log = mutationVerifyOutput(promptOf(captured, lastVerify), exit, MUT_HEAD).split(' ').pop()
     const note = result.note ?? ''
     check(`exit ${exit}: halted at Mutation after exactly one attempt`,
       [result.halted_at, captured.calls.filter(c => /^mutation:\d+$/.test(c.label)).length], ['Mutation', 1])
-    check(`exit ${exit}: not retried as unmeasured`, callCount(captured, 'mutation-verify:1:retry'), 0)
+    check(`exit ${exit}: asked once more only when the script was not found`,
+      callCount(captured, 'mutation-verify:1:retry'), exit === 127 ? 1 : 0)
     check(`exit ${exit}: the note names the exit and the log`, note.includes(`exited ${exit}`) && note.includes(log), true)
     check(`exit ${exit}: it is a setup note, not survivors or unmeasured`,
       [/could not run/.test(note), /[Ss]urviving|has not recorded/.test(note), /could not be measured/.test(note)],
@@ -304,6 +306,8 @@ async function scenarioRealVerifyNotTheGate() {
       const { result, captured } = await run(gated({ args: { maxGateAttempts: 3 }, branchResult: branchAt(dir),
         mutationResult: green(), mutationVerify: realVerify(outs) }))
       check('no gate on PATH: exit 127, no trailer', VERIFY_ROW.exec(outs[0]?.trim() ?? '')?.slice(2, 4), ['127', '-'])
+      check('a 127 verdict is asked once more, in case the relay left the bare name',
+        [outs.length, callCount(captured, 'mutation-verify:1:retry')], [2, 1])
       check('a setup halt at Mutation after exactly one attempt',
         [result.halted_at, attemptsOf(captured), /exited 127/.test(result.note ?? '')], ['Mutation', 1, true])
     })
@@ -357,7 +361,23 @@ async function scenarioRealUnreviewed() {
   }
 }
 
-const SCENARIOS = [scenarioVerifyLine, scenarioClaimedGreenButRed, scenarioSetupExitStops, scenarioHookAllowsLines, scenarioClaimedRedButGreen,
+// The verdict line reads the real gate's last line; if mutation-check.sh ever
+// changes it, this fails rather than every verdict silently going unmeasured.
+async function scenarioRealGateTrailer() {
+  console.log('\n== scenario GU: the real mutation-check.sh --verify ends with the trailer the verdict line reads')
+  // This repo's own worktree: --verify only reads its ledger, and here it reaches
+  // the trap that prints the trailer (a scratch repo with no base exits 2 first).
+  const repo = path.resolve(path.dirname(SCRIPT_PATH), '..')
+  const gate = path.join(repo, 'skills', 'crap-controlled-changes', 'mutation-check.sh')
+  const run = spawnSync('bash', ['-c', 'bash "$0" "$1" --verify 2>&1', gate, repo], { encoding: 'utf8' })
+  const last = run.stdout.trim().split('\n').pop()
+  const m = /^mutation-check: EXIT=([0-9]+) /.exec(last ?? '')
+  check('--verify exits 0 or 5 here', [0, 5].includes(run.status), true)
+  check('the last line is the trailer', Boolean(m), true)
+  check('and its number is the exit code', Number(m?.[1]), run.status)
+}
+
+const SCENARIOS = [scenarioRealGateTrailer, scenarioVerifyLine, scenarioClaimedGreenButRed, scenarioSetupExitStops, scenarioHookAllowsLines, scenarioClaimedRedButGreen,
   scenarioHeadFromShell, scenarioNullAgentStillMeasured, scenarioUngatedSkips, scenarioParserRejects,
   scenarioUnparseableTwiceHalts, scenarioUnreviewedLine, scenarioUnreviewedHalts,
   scenarioUnreviewedUnparseable, scenarioNoReviewersNoCount, scenarioRealVerify, scenarioRealVerifyNotTheGate, scenarioRealUnreviewed]

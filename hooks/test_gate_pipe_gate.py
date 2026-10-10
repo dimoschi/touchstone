@@ -19,6 +19,11 @@ def test_pipes_a_gate_false_when_pipe_unrelated_to_gate():
     assert gate_pipe.pipes_a_gate("echo hi | grep hi && mutation-check.sh") is False
 
 
+def test_pipes_a_gate_false_for_or_and_semicolon_after_gate():
+    assert gate_pipe.pipes_a_gate("crap-check.sh || echo failed") is False
+    assert gate_pipe.pipes_a_gate("crap-check.sh; echo done") is False
+
+
 def test_pipes_a_gate_checks_each_segment_independently():
     assert gate_pipe.pipes_a_gate("echo hi | grep hi; crap-check.sh | cat") is True
 

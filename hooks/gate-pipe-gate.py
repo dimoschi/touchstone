@@ -43,7 +43,7 @@ def pipes_a_gate(cmd):
         if not any(gate in segment for gate in GATES):
             continue
         # `>|` is a redirect that overrides noclobber, not a pipe.
-        if '|' in segment.replace('>|', '>'):
+        if re.search(r'(?<!>)\|', segment):
             return True
     return False
 

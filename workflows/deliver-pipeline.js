@@ -4137,8 +4137,15 @@ const measureVerdict = async (label) => {
     { label, schema: VERDICT_RUN, model: 'haiku', effort: 'low' })
   return parseMutationVerify(out?.output, run)
 }
+// 127 most often means the relay left the bare script name in place, which a
+// second relay can get right; any other setup exit is the gate's own answer.
+const SCRIPT_NOT_FOUND = 127
 const verifyMutation = async (label) => {
   const first = await measureVerdict(label)
+  if (!first.reason && first.exit === SCRIPT_NOT_FOUND) {
+    log(`${label}: mutation-check.sh was not found (exit 127), retrying once`)
+    return await measureVerdict(`${label}:retry`)
+  }
   if (!first.reason) return first
   log(`${label}: unmeasured (${first.reason}), retrying once`)
   const second = await measureVerdict(`${label}:retry`)
