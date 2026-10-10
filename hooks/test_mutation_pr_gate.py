@@ -97,6 +97,24 @@ def test_trigger_gh_pr_ready_undo_still_allowed_after_a_push(tmp_path):
     assert gate.trigger(f"git -C {repo} push && gh pr ready 5 --undo", repo) is None
 
 
+def test_trigger_each_ready_is_judged_on_its_own_words(tmp_path):
+    repo = _repo(tmp_path)
+    hit = (repo.resolve(), None)
+    assert gate.trigger("gh pr ready 5 --undo\ngh pr ready 5", repo) == hit
+    assert gate.trigger("gh pr ready 5 --undo `gh pr ready 6`", repo) == hit
+    assert gate.trigger("echo x\ngh pr ready 5", repo) == hit
+    assert gate.trigger("gh pr ready 5 --undo\ngh pr ready 6 --undo", repo) is None
+
+
+def test_trigger_create_and_push_start_after_a_newline_or_backtick(tmp_path):
+    repo = _repo(tmp_path)
+    assert gate.trigger("echo x\ngh pr create --title x", repo) == (repo.resolve(), None)
+    assert gate.trigger("echo `gh pr create --title x`", repo) == (repo.resolve(), None)
+    assert gate.trigger("gh pr create --title x\necho --draft", repo) == (repo.resolve(), None)
+    assert gate.trigger("echo x\ngit push origin main", repo) == (repo.resolve(), "main")
+    assert gate.trigger("git push origin feature\necho main:main", repo) is None
+
+
 def test_undoes_returns_a_bool():
     assert gate.undoes(" 5") is False
     assert gate.undoes(" 5 --undo") is True

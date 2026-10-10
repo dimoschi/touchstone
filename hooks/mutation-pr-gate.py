@@ -62,15 +62,19 @@ MUTATION_CHECK = Path(__file__).resolve().parent.parent / \
 # because a command can contain both. Treating "a draft create is present" as
 # grounds to skip let `gh pr create --draft && gh pr ready 7` through with no
 # check at all -- the exemption became the bypass.
-GH_PR_READY = re.compile(r'(?:^|[;&|(]\s*)gh\s+pr\s+ready\b')
+# A command starts at the beginning, after a separator, or after a newline or
+# backtick: without the last two, `x\ngh pr ready 5` or a ready inside `...`
+# was never seen at all.
+COMMAND_START = r'(?:^|[;&|(\n`]\s*)'
+GH_PR_READY = re.compile(COMMAND_START + r'gh\s+pr\s+ready\b')
 # `gh pr ready --undo` converts a PR back to a draft: it withdraws a review
 # request, so it is the one ready form that is not gated. Only that command's
 # own words count: a newline or `#` ends it as surely as `;` does, or
 # `gh pr ready 5 # --undo` would pass as an undo.
-READY_COMMAND_END = re.compile(r'[;&|)\n#]')
+READY_COMMAND_END = re.compile(r'[;&|)\n`#]')
 # strconv.ParseBool's true spellings, which is what pflag gives a bool flag.
 PFLAG_TRUE = {'1', 't', 'T', 'true', 'TRUE', 'True'}
-GH_PR_CREATE = re.compile(r'(?:^|[;&|(]\s*)gh\s+pr\s+create\b')
+GH_PR_CREATE = re.compile(COMMAND_START + r'gh\s+pr\s+create\b')
 # A draft is not a request to review. Opening one is how work in progress is
 # made visible -- pushed, discoverable, and reportable if a run stops early --
 # and gating that would force the work to stay invisible until it is finished,
@@ -79,10 +83,10 @@ GH_PR_CREATE = re.compile(r'(?:^|[;&|(]\s*)gh\s+pr\s+create\b')
 # `(?=\s|$)` not `\b`: a word boundary matches inside `--draft-mode`, so any
 # future flag merely starting with "--draft" would have silently exempted a
 # real create.
-GH_PR_DRAFT = re.compile(r'(?:^|[;&|(]\s*)gh\s+pr\s+create\b[^;&|]*\s--draft(?=\s|$)')
+GH_PR_DRAFT = re.compile(COMMAND_START + r'gh\s+pr\s+create\b[^;&|\n`]*\s--draft(?=\s|$)')
 GIT_MERGE = re.compile(
-    r'(?:^|[;&|(]\s*)git\s+merge\s+(?:-\S+\s+)*(?P<branch>[A-Za-z0-9][\w./-]*)')
-GIT_PUSH = re.compile(r'(?:^|[;&|(]\s*)git\s+push\b(?P<rest>[^;&|]*)')
+    COMMAND_START + r'git\s+merge\s+(?:-\S+\s+)*(?P<branch>[A-Za-z0-9][\w./-]*)')
+GIT_PUSH = re.compile(COMMAND_START + r'git\s+push\b(?P<rest>[^;&|\n`]*)')
 DIAG_LINES = 60
 
 

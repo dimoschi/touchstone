@@ -133,7 +133,16 @@ async function scenarioConversionFails() {
       (notPushed.result.note ?? '').includes('commits the gates have not passed')], [true, false])
   const pushUnread = await run(mutationRed(withPr({ number: 42, isDraft: false },
     { prUndo: () => ({ exit: 1, isDraft: 'false' }), prPush: () => ({ output: 'pushed' }) })))
-  check('an unparseable push is not a push', (pushUnread.result.note ?? '').includes('holding no commit from this run'), true)
+  check('an unparseable push result is retried once', callCount(pushUnread.captured, 'pr:push:retry'), 1)
+  check('then reads as unknown, not as not pushed or pushed',
+    [/whether this run's push reached it is unknown/.test(pushUnread.result.note ?? ''),
+      (pushUnread.result.note ?? '').includes('holding no commit from this run'),
+      (pushUnread.result.note ?? '').includes('commits the gates have not passed')], [true, false, false])
+  const pushRetried = await run(mutationRed(withPr({ number: 42, isDraft: false },
+    { prUndo: () => ({ exit: 1, isDraft: 'false' }), prPush: (prompt) => prompt.includes('[touchstone: pr:push:retry]')
+      ? undefined : { output: 'pushed' } })))
+  check('a retry that parses decides it',
+    (pushRetried.result.note ?? '').includes('with commits the gates have not passed'), true)
   const atReview = await run(withPr({ number: 42, isDraft: false }, { prUndo: () => ({ exit: 1, isDraft: 'false' }), sizeUnmeasured: true }))
   check('a Review halt reads as ready too', [atReview.result.halted_at, (atReview.result.note ?? '').includes(READY_NOTE)],
     ['Review', true])
@@ -190,6 +199,10 @@ async function scenarioStateParser() {
   check('twice unparseable: no draft-pr, no conversion, no push',
     [callCount(twice.captured, 'draft-pr'), callCount(twice.captured, 'pr:undo'), callCount(twice.captured, 'pr:push')], [0, 0, 0])
   check('it is logged with both reasons', twice.captured.logs.some(l => /^pr:state: unmeasured/.test(l) && l.includes('malformed PR line')), true)
+  const atPr = await run(openPr({ prState: () => ({ output: 'garbage' }) }))
+  check('an unmeasured PR state halts before the PR phase opens one',
+    [atPr.result.halted_at, callCount(atPr.captured, 'pr'), /could not be read/.test(atPr.result.note ?? ''),
+      (atPr.result.note ?? '').includes('malformed PR line')], ['PR', 0, true, true])
   const ghDown = await run({ prState: () => ({ ghExit: 4 }), draftPr: { opened: true, number: 23, url: 'u', detail: 'must not open' } })
   check('gh failing twice opens nothing and says why',
     [callCount(ghDown.captured, 'draft-pr'), ghDown.captured.logs.some(l => /^pr:state: unmeasured/.test(l) && l.includes('gh exited 4'))],

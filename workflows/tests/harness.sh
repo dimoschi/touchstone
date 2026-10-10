@@ -437,7 +437,7 @@ function makeAgent(scenario, captured) {
     }
     // Pushing an adopted PR's branch: exit 0 unless scenario.prPush(prompt)
     // returns { exit }, { output }, or null.
-    if (label === 'pr:push') {
+    if (label === 'pr:push' || label === 'pr:push:retry') {
       const custom = scenario.prPush ? scenario.prPush(prompt) : undefined
       if (custom === null || typeof custom?.output === 'string') return custom
       return { output: prPushOutput(prompt, custom?.exit ?? 0) }

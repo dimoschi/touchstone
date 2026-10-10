@@ -259,7 +259,7 @@ const dispatch = async (prompt, opts) => {
 // { url, number, draft, stateUnknown, readyWhy, pushed }. draft is true only
 // when the run read it as a draft; stateUnknown when the undo left nothing it
 // could read; readyWhy says why it is not a draft; pushed whether this run's
-// push to an adopted PR succeeded. Read by prNote() and halted(), which are
+// push to an adopted PR succeeded, null when its result could not be read. Read by prNote() and halted(), which are
 // defined before the phase that sets it.
 let draftPr = null
 
@@ -321,8 +321,9 @@ let pipelineVersion = { executed: PIPELINE_VERSION, base_branch: null, mismatch:
 const prNote = () => {
   if (!draftPr) return `No PR was opened, because the draft could not be opened earlier in this run`
   if (draftPr.draft) return `The PR was left as a draft`
-  const holds = draftPr.pushed
-    ? `with commits the gates have not passed` : `holding no commit from this run`
+  const holds = draftPr.pushed === true ? `with commits the gates have not passed`
+    : draftPr.pushed === false ? `holding no commit from this run`
+    : `and whether this run's push reached it is unknown`
   return draftPr.stateUnknown
     ? `PR #${draftPr.number} was ready for review when this run adopted it, and its state is ` +
       `unknown after converting it to a draft was tried, ${holds}: ${draftPr.readyWhy}`

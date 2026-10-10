@@ -354,6 +354,18 @@ const countUnreviewed = async () => {
 let pr = null
 if (args?.openPr !== false && !outOfBudget()) {
   enterPhase('PR')
+  // Opening a PR here would put one beside whatever the branch already has,
+  // which the run never read: a merged or closed PR of the same name gets a sibling.
+  if (prState.reasons) {
+    return await halted('PR', {
+      plan: plan.plan, implemented: impl.summary, gates: gatesPayload(),
+      mutation, unresolved_findings: open, notes,
+      note: `Every gate is green, but whether branch ${wt.branch} already has a PR could not ` +
+        `be read earlier in this run (first: ${prState.reasons[0]}; second: ` +
+        `${prState.reasons[1]}), so the run did not open one beside a PR it never saw. Check ` +
+        `gh pr list --head ${wt.branch} --state all, then open or update the PR yourself.`,
+    })
+  }
   if (reviewerCount) {
     const unreviewed = await countUnreviewed()
     if (unreviewed.reasons || unreviewed.count > 0) {

@@ -259,7 +259,7 @@ const dispatch = async (prompt, opts) => {
 // { url, number, draft, stateUnknown, readyWhy, pushed }. draft is true only
 // when the run read it as a draft; stateUnknown when the undo left nothing it
 // could read; readyWhy says why it is not a draft; pushed whether this run's
-// push to an adopted PR succeeded. Read by prNote() and halted(), which are
+// push to an adopted PR succeeded, null when its result could not be read. Read by prNote() and halted(), which are
 // defined before the phase that sets it.
 let draftPr = null
 
@@ -321,8 +321,9 @@ let pipelineVersion = { executed: PIPELINE_VERSION, base_branch: null, mismatch:
 const prNote = () => {
   if (!draftPr) return `No PR was opened, because the draft could not be opened earlier in this run`
   if (draftPr.draft) return `The PR was left as a draft`
-  const holds = draftPr.pushed
-    ? `with commits the gates have not passed` : `holding no commit from this run`
+  const holds = draftPr.pushed === true ? `with commits the gates have not passed`
+    : draftPr.pushed === false ? `holding no commit from this run`
+    : `and whether this run's push reached it is unknown`
   return draftPr.stateUnknown
     ? `PR #${draftPr.number} was ready for review when this run adopted it, and its state is ` +
       `unknown after converting it to a draft was tried, ${holds}: ${draftPr.readyWhy}`
@@ -3071,7 +3072,7 @@ if (prState.reasons) {
       `bring the branch up to that head, then re-run.`,
   })
 } else {
-  draftPr = { url: null, number: prState.number, draft: prState.draft, stateUnknown: false, pushed: false }
+  draftPr = { url: null, number: prState.number, draft: prState.draft, stateUnknown: false, pushed: null }
   log(`PR #${prState.number} carries this run, adopted ${prState.draft ? 'as a draft' : 'ready for review'}`)
   // A ready PR would otherwise hold commits no gate has passed while it reads
   // as finished. Converted before the push, so it never does.
@@ -3090,11 +3091,14 @@ if (prState.reasons) {
       : `gh pr ready ${prState.number} --undo exited ${undo.exit} and the PR still reads as ready (${undo.log})`
     log(draftPr.draft ? `PR #${prState.number} converted to a draft` : `PR #${prState.number}: ${draftPr.readyWhy}`)
   }
-  const pushRun = prRunFor('pr-push')
-  const pushed = parsePush(await relayLine('pr:push', prPushLineFor(pushRun)), wt.branch, pushRun)
-  draftPr.pushed = !pushed.reason && pushed.exit === 0
-  if (!draftPr.pushed) {
-    log(`pr:push: ${pushed.reason ?? `git push exited ${pushed.exit} (${pushed.log})`}; ` +
+  const pushed = await readTwice('pr:push', async (label) => {
+    const run = prRunFor('pr-push')
+    return parsePush(await relayLine(label, prPushLineFor(run)), wt.branch, run)
+  })
+  // null when the result could not be read: the push may or may not have landed.
+  draftPr.pushed = pushed.reasons ? null : pushed.exit === 0
+  if (draftPr.pushed !== true) {
+    log(`pr:push: ${pushed.reasons ? `result unknown (${pushed.reasons.join('; ')})` : `git push exited ${pushed.exit} (${pushed.log})`}; ` +
         `continuing, the PR phase pushes again`)
   }
 }
@@ -4589,6 +4593,18 @@ const countUnreviewed = async () => {
 let pr = null
 if (args?.openPr !== false && !outOfBudget()) {
   enterPhase('PR')
+  // Opening a PR here would put one beside whatever the branch already has,
+  // which the run never read: a merged or closed PR of the same name gets a sibling.
+  if (prState.reasons) {
+    return await halted('PR', {
+      plan: plan.plan, implemented: impl.summary, gates: gatesPayload(),
+      mutation, unresolved_findings: open, notes,
+      note: `Every gate is green, but whether branch ${wt.branch} already has a PR could not ` +
+        `be read earlier in this run (first: ${prState.reasons[0]}; second: ` +
+        `${prState.reasons[1]}), so the run did not open one beside a PR it never saw. Check ` +
+        `gh pr list --head ${wt.branch} --state all, then open or update the PR yourself.`,
+    })
+  }
   if (reviewerCount) {
     const unreviewed = await countUnreviewed()
     if (unreviewed.reasons || unreviewed.count > 0) {

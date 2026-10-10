@@ -592,6 +592,8 @@ checks the state first, then the ancestry:
 
 Unparseable twice, or `gh` failing twice (`pr:state:retry`), the run opens and adopts nothing and
 goes on without a PR: not knowing is no reason to open one next to a PR the run must not touch.
+If it then gets as far as the PR phase, it halts there before `pr` is dispatched, with both
+reasons, rather than opening a PR beside one it never read.
 
 **A ready PR.** An adopted PR that is ready for review is converted back to a draft before the
 push, by a `pr:undo` line that runs `gh pr ready <n> --undo` (log under
@@ -599,20 +601,24 @@ push, by a `pr:undo` line that runs `gh pr ready <n> --undo` (log under
 `TOUCHSTONE_PR_UNDO <n> <exit> <true|false|none> <log>`. The re-read decides, not the exit:
 `true` is a draft, `false` is still ready, and `none` (the re-read failed) or a line unparseable
 twice leaves the state unknown. `mutation-pr-gate.py` lets `gh pr ready --undo` through, since it
-withdraws a review request rather than making one. Only that command's own words count (a `;`,
-`&`, `|`, `)`, newline or `#` ends it), and the last `--undo`/`--undo=<v>` wins, as in pflag, so
-`gh pr ready 5 # --undo` and `gh pr ready 5 --undo --undo=false` are still gated.
+withdraws a review request rather than making one. Every `gh pr ready` in the command is judged
+on its own: a command starts at the beginning or after `;`, `&`, `|`, `(`, a newline or a backtick,
+and ends at `;`, `&`, `|`, `)`, a newline, a backtick or `#`. Only that command's own words count,
+and the last `--undo`/`--undo=<v>` wins, as in pflag, so `gh pr ready 5 # --undo`,
+`gh pr ready 5 --undo --undo=false`, and `gh pr ready 5 --undo` followed by a plain
+`gh pr ready 5` on the next line are all still gated.
 
 **The push.** `pr:push` runs `git -C <worktree> push -u origin <branch>` and prints
-`TOUCHSTONE_PUSH <branch> <exit> <log>`. A failed push is logged and is not fatal; the PR phase
-pushes again.
+`TOUCHSTONE_PUSH <branch> <exit> <log>`, retried once (`pr:push:retry`) when it does not parse. A
+failed push is logged and is not fatal; the PR phase pushes again.
 
 **What a halt says.** `draftPr` records what the run read: `draft`, `stateUnknown`, why it is not
 a draft (`readyWhy`), and whether this run's push succeeded (`pushed`). `prNote()` builds its
 sentence from those fields: "The PR was left as a draft", "No PR was opened ...", "PR #<n> read as
 ready for review, ...", or "PR #<n> was ready for review when this run adopted it, and its state is
 unknown after converting it to a draft was tried, ...". It says "with commits the gates have not
-passed" only when the push succeeded, and "holding no commit from this run" otherwise. While the
+passed" only when the push succeeded, "holding no commit from this run" when it failed, and that
+whether the push reached it is unknown when its result could not be read. While the
 PR is not a draft, `halted()` appends that sentence to every halt note that does not already carry
 it, so a halt at any phase after the push says so.
 

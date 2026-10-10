@@ -573,7 +573,7 @@ if (prState.reasons) {
       `bring the branch up to that head, then re-run.`,
   })
 } else {
-  draftPr = { url: null, number: prState.number, draft: prState.draft, stateUnknown: false, pushed: false }
+  draftPr = { url: null, number: prState.number, draft: prState.draft, stateUnknown: false, pushed: null }
   log(`PR #${prState.number} carries this run, adopted ${prState.draft ? 'as a draft' : 'ready for review'}`)
   // A ready PR would otherwise hold commits no gate has passed while it reads
   // as finished. Converted before the push, so it never does.
@@ -592,11 +592,14 @@ if (prState.reasons) {
       : `gh pr ready ${prState.number} --undo exited ${undo.exit} and the PR still reads as ready (${undo.log})`
     log(draftPr.draft ? `PR #${prState.number} converted to a draft` : `PR #${prState.number}: ${draftPr.readyWhy}`)
   }
-  const pushRun = prRunFor('pr-push')
-  const pushed = parsePush(await relayLine('pr:push', prPushLineFor(pushRun)), wt.branch, pushRun)
-  draftPr.pushed = !pushed.reason && pushed.exit === 0
-  if (!draftPr.pushed) {
-    log(`pr:push: ${pushed.reason ?? `git push exited ${pushed.exit} (${pushed.log})`}; ` +
+  const pushed = await readTwice('pr:push', async (label) => {
+    const run = prRunFor('pr-push')
+    return parsePush(await relayLine(label, prPushLineFor(run)), wt.branch, run)
+  })
+  // null when the result could not be read: the push may or may not have landed.
+  draftPr.pushed = pushed.reasons ? null : pushed.exit === 0
+  if (draftPr.pushed !== true) {
+    log(`pr:push: ${pushed.reasons ? `result unknown (${pushed.reasons.join('; ')})` : `git push exited ${pushed.exit} (${pushed.log})`}; ` +
         `continuing, the PR phase pushes again`)
   }
 }
