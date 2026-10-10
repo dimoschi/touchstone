@@ -7,7 +7,7 @@ export const meta = {
     { title: 'Triage', detail: 'one cheap agent checks the premise, sizes the job and judges its difficulty; a disproved premise halts, small work skips Plan, and the difficulty sets every later phase\'s reasoning effort' },
     { title: 'Plan', detail: 'planner produces a concise plan + acceptance criteria + risk areas; the whole plan is written to an untracked file in the worktree, which the implementer must read to its last line' },
     { title: 'Implement', detail: 'one implementer, TDD via crap-controlled-changes, many small signed commits' },
-    { title: 'Draft PR', detail: 'push the branch and open a draft PR, so the work is visible and any later halt has somewhere durable to be reported' },
+    { title: 'Draft PR', detail: 'push the branch and open a draft PR, or adopt the branch\'s open PR only when its head is an ancestor of the branch, converting a ready one back to a draft, so the work is visible and any later halt has somewhere durable to be reported' },
     { title: 'Review', detail: 'a measured diffstat (code churn, with comments, tests and docs counted apart) decides the reviewer lenses: correctness and devil\'s advocate normally, plus requirements coverage on a large or wide change, none on a one-liner; support code (tests, docs, comments) far outweighing the actual change halts here before any lens runs. Only a wrong-result, crash, gate-bypass or unmet-criterion finding with a demonstrated reproducer can hold the run; everything else reaches the PR as a note. Runs again on any commits a later phase adds, and from the first re-review on a finding also has to fall inside what that range actually changed' },
     { title: 'Fix', detail: 'fix confirmed findings, bounded rounds; a finding is fixed when its own reproducer exits 0, never by a model\'s judgement of the diff' },
     { title: 'Mutation', detail: 'pre-PR mutation gate; kill survivors with tests, never weaken code. Its own commits are reviewed before the PR' },
@@ -29,7 +29,7 @@ export const meta = {
 // against the manifest in scripts/check-version-bump.sh, so drift is a
 // gate's job rather than something this script verifies about itself.
 const PLUGIN_NAME = 'touchstone'
-const PIPELINE_VERSION = '0.34.0'
+const PIPELINE_VERSION = '0.36.0'
 
 // Boundaries. Wall-clock deadlines are not expressible here (no Date.now, by
 // design); the bounds are rounds, counts, and token budget instead.
@@ -255,12 +255,13 @@ const dispatch = async (prompt, opts) => {
   return await agent(prompt, opts)
 }
 
-// Set once the draft PR exists; read by halted() so a stop has somewhere
-// durable to be reported. Declared here because halted() is defined before the
-// phase that opens it.
+// Set once the run has a PR, opened or adopted (Draft PR phase, part 40):
+// { url, number, draft, readyWhy }. draft is the state the run last read, and
+// readyWhy says why a ready PR could not be made a draft. Read by prNote() and
+// halted(), which are defined before the phase that sets it.
 let draftPr = null
 
-// Set once the diffstat probe (Draft PR phase, part 40) has measured the
+// Set once the diffstat line (Review phase, part 40) has measured the
 // real diff; null on every halt before that, and read unconditionally by
 // halted() below so every halt from Review onward carries it without each
 // call site having to pass it through `extra` by hand.
@@ -311,12 +312,16 @@ let carriedNotes = recordHead ? carry(args.priorRun.notes) : []
 // compare.
 let pipelineVersion = { executed: PIPELINE_VERSION, base_branch: null, mismatch: null }
 
-// Opening the draft is allowed to fail without ending the run, so a note that
-// states either outcome flatly is wrong half the time. Every halt note that
-// mentions the PR reads this instead of asserting one.
-const prNote = () => draftPr
+// Opening the draft is allowed to fail without ending the run, and an adopted
+// PR that was already ready may not convert back, so a note that states one
+// outcome flatly is wrong some of the time. Every halt note that mentions the
+// PR reads this instead of asserting one.
+const prNote = () => !draftPr
+  ? `No PR was opened, because the draft could not be opened earlier in this run`
+  : draftPr.draft
   ? `The PR was left as a draft`
-  : `No PR was opened, because the draft could not be opened earlier in this run`
+  : `PR #${draftPr.number} read as ready for review, with commits the gates have not ` +
+    `passed: it was ready when this run adopted it, and ${draftPr.readyWhy}`
 
 // A halt is a result, not an absence of one, and the run record is where it
 // survives the session. It used to be posted as a comment on the draft PR too.
@@ -343,8 +348,14 @@ const halted = async (at, extra) => {
     ...(split ? { scope_split: split } : {}),
     ...extra,
   }
+  // A ready PR holding ungated commits is the one PR state a reviewer cannot
+  // see from GitHub, so every halt says so, not only the notes that mention the PR.
+  if (draftPr && !draftPr.draft && typeof payload.note === 'string' && !payload.note.includes(prNote())) {
+    payload.note = `${payload.note} ${prNote()}.`
+  }
   if (draftPr?.number) {
-    log(`halt at ${at}: draft PR ${draftPr.url} left as it is; the reason is in ` +
+    log(`halt at ${at}: PR #${draftPr.number} left as it is ` +
+        `(${draftPr.draft ? 'a draft' : 'ready for review'}); the reason is in ` +
         `this run's result and record`)
   }
   return payload
@@ -689,8 +700,9 @@ const parseReproRun = (output, ids, run, withHunks) => {
   return { rows, before: before[2] === 'dirty', dirty: end.dirty, statusLog: end.path, hunkLines, diffExit }
 }
 
-// What a gate verdict relay returns (mutation-verify, pr-unreviewed in
-// 60-mutation-pr.js.part): the one line its script-built command printed.
+// What a one-line relay returns (mutation-verify, pr-unreviewed in
+// 60-mutation-pr.js.part; pr:state, pr:undo, pr:push and diffstat in
+// 40-implement-draft-review.js.part): what its script-built command printed.
 const VERDICT_RUN = {
   type: 'object', additionalProperties: false, required: ['output'],
   properties: { output: { type: 'string' } },
@@ -740,6 +752,56 @@ const parseUnreviewed = (output, from) => {
   if (!/^\d+$/.test(count)) return { reason: 'count is not an integer' }
   if (!COMMIT_TOKEN.test(head)) return { reason: 'head is not a commit id' }
   return { count: Number(count), head }
+}
+// The branch's PR as gh reported it, and whether its head is an ancestor of
+// the branch head, which the shell decides (prStateLine in part 40). No PR,
+// or gh failing, prints none in every field.
+const PR_STATE_LINE = /^TOUCHSTONE_PR (\S+) (\S+) (\S+) (\S+) (\S+) (\S+)$/
+const PR_STATES = ['OPEN', 'CLOSED', 'MERGED']
+const parsePrState = (output, branch) => {
+  const { line, reason } = oneLineOf(output)
+  if (reason) return { reason }
+  const m = PR_STATE_LINE.exec(line)
+  if (!m) return { reason: 'malformed PR line' }
+  const [, b, number, state, isDraft, head, ancestor] = m
+  if (b !== branch) return { reason: `PR line names branch ${b}, not ${branch}` }
+  if (number === 'none') {
+    return [state, isDraft, head, ancestor].join(' ') === 'none none none 0'
+      ? { number: null } : { reason: 'PR line says none but carries PR fields' }
+  }
+  if (!/^[1-9]\d*$/.test(number)) return { reason: 'PR number is not an integer' }
+  if (!PR_STATES.includes(state)) return { reason: `unknown PR state ${state}` }
+  if (isDraft !== 'true' && isDraft !== 'false') return { reason: 'isDraft is not true or false' }
+  if (!COMMIT_TOKEN.test(head)) return { reason: 'PR head is not a commit id' }
+  if (ancestor !== '0' && ancestor !== '1') return { reason: 'ancestor is not 0 or 1' }
+  return { number: Number(number), state, draft: isDraft === 'true', head, ancestor: ancestor === '1' }
+}
+const underPrRun = (p, run, name) => p.startsWith('/') && p.endsWith(`/touchstone-pr/${run}/${name}`)
+// isDraft is what gh reported after the undo, none when it reported nothing.
+const PR_UNDO_LINE = /^TOUCHSTONE_PR_UNDO (\S+) (\S+) (\S+) (.+)$/
+const parsePrUndo = (output, number, run) => {
+  const { line, reason } = oneLineOf(output)
+  if (reason) return { reason }
+  const m = PR_UNDO_LINE.exec(line)
+  if (!m) return { reason: 'malformed undo line' }
+  const [, n, exit, isDraft, log] = m
+  if (n !== String(number)) return { reason: `undo line names PR ${n}, not ${number}` }
+  if (!/^\d+$/.test(exit)) return { reason: 'exit is not an integer' }
+  if (!['true', 'false', 'none'].includes(isDraft)) return { reason: 'isDraft is not true, false or none' }
+  if (!underPrRun(log, run, 'pr-undo.log')) return { reason: 'log path is not under this run' }
+  return { exit: Number(exit), draft: isDraft === 'true', log }
+}
+const PUSH_LINE = /^TOUCHSTONE_PUSH (\S+) (\S+) (.+)$/
+const parsePush = (output, branch, run) => {
+  const { line, reason } = oneLineOf(output)
+  if (reason) return { reason }
+  const m = PUSH_LINE.exec(line)
+  if (!m) return { reason: 'malformed push line' }
+  const [, b, exit, log] = m
+  if (b !== branch) return { reason: `push line names branch ${b}, not ${branch}` }
+  if (!/^\d+$/.test(exit)) return { reason: 'exit is not an integer' }
+  if (!underPrRun(log, run, 'push.log')) return { reason: 'log path is not under this run' }
+  return { exit: Number(exit), log }
 }
 // The only heading that is a check list. Only trailing whitespace is
 // ignored: '## checks', '### Checks', '##Checks', '## Checks ##' and
@@ -2787,69 +2849,70 @@ if (implLeak) return implLeak
 // downstream of here.
 const DRAFT = {
   type: 'object', additionalProperties: false,
-  required: ['opened', 'detail', 'diffstat'],
+  required: ['opened', 'detail'],
   properties: {
     opened: { type: 'boolean' },
     url: { type: 'string' },
     number: { type: 'integer' },
     detail: { type: 'string' },
-    diffstat: { type: 'string' },
   },
 }
-// The exact command the diffstat probe runs, and its retry (below) rerun
-// verbatim: a numstat pass for added/removed per file, then an awk pass
-// counting, per file, added lines whose trimmed text opens a comment: "//"
-// or "/*" anywhere, a bare "*" only when it opens a block-comment
+// The diffstat line: a numstat pass for added/removed per file, then an awk
+// pass counting, per file, added lines whose trimmed text opens a comment:
+// "//" or "/*" anywhere, a bare "*" only when it opens a block-comment
 // continuation or close ("* foo", "*/", not "*p = v", a Go/C pointer
 // write), and "#" unless it is "#!" (a shebang) or "#[" (a PHP 8 attribute,
 // e.g. #[ORM\Column]) -- sizeOf needs that count per file, not one grand
 // total, since only a code file's own comment lines subtract from its own
-// added count. Three markers bound the two sections so parseDiffstat can
-// tell a well-formed response from a truncated or off-range one: the begin
-// line names this exact range, the middle line separates numstat from
-// comment counts, and the end line is the last thing printed.
-const diffstatCommandFor = (range) =>
-  `echo TOUCHSTONE_DIFFSTAT ${range}; ` +
-  `git -C ${wt.path} diff --numstat --no-renames ${range}; ` +
-  `echo TOUCHSTONE_COMMENT_LINES; ` +
-  `git -C ${wt.path} diff --unified=0 --no-color --no-renames ${range} | awk '` +
+// added count. Both passes write to a log under the worktree's git dir, and
+// only then does the line print it between a begin line naming this exact
+// range and an end line carrying the log's line count and numstat's exit,
+// both from the shell: a relay that drops or adds a row, or a git diff that
+// failed and printed nothing, which would otherwise read as an empty diff
+// and skip review, no longer parses.
+const diffstatLineFor = (range, run) =>
+  `${logDirFor(run, 'touchstone-diffstat')} && mkdir -p "$d" && ` +
+  `{ git -C ${shQuote(wt.path)} diff --numstat --no-renames ${range} >|"$d/diffstat.log" 2>|"$d/diffstat.err"; g=$?; ` +
+  `echo TOUCHSTONE_COMMENT_LINES >>"$d/diffstat.log"; ` +
+  `git -C ${shQuote(wt.path)} diff --unified=0 --no-color --no-renames ${range} 2>>"$d/diffstat.err" | awk '` +
   `/^\\+\\+\\+ /{ f=$0; sub(/^\\+\\+\\+ (b\\/)?/, "", f); cur=f; next } ` +
   `/^\\+/{ if (cur=="") next; line=$0; sub(/^\\+/, "", line); t=line; ` +
   `sub(/^[ \\t]+/, "", t); if ((t ~ /^(\\/\\/|\\/\\*)/) || ` +
   `(t ~ /^\\*($|[ \\t\\/])/) || (t ~ /^#/ && t !~ /^#!/ && ` +
   `t !~ /^#\\[/)) cnt[cur]++ } ` +
-  `END{ for (k in cnt) print cnt[k] "\\t" k }'; ` +
-  `echo TOUCHSTONE_DIFFSTAT_END`
+  `END{ for (k in cnt) print cnt[k] "\\t" k }' >>"$d/diffstat.log"; ` +
+  `printf 'TOUCHSTONE_DIFFSTAT %s\\n' ${range}; cat "$d/diffstat.log"; ` +
+  `printf 'TOUCHSTONE_DIFFSTAT_END %s %s\\n' "$(grep -c '' "$d/diffstat.log")" "$g"; }`
 
-// Pure: reads only the shape of the probe's own output, never a model's
+// Pure: reads only the shape of the line's own output, never a model's
 // account of it. The begin line, naming this exact range, must be the first
-// non-empty line -- a diffstat whose begin line names a different range was
-// run against the wrong commits and must not be trusted -- and the end line
-// must be the last. A numstat row failing NUMSTAT_ROW, a missing
-// TOUCHSTONE_COMMENT_LINES marker, or a malformed comment-count row all
-// count as unmeasured, the same as either marker missing: anything this
-// strict about the shape either parses cleanly or is not trusted at all.
+// line -- a diffstat whose begin line names a different range was run against
+// the wrong commits and must not be trusted -- and the end line the last,
+// with a count equal to the lines between them and a numstat exit of 0. A
+// numstat row failing NUMSTAT_ROW, a missing TOUCHSTONE_COMMENT_LINES marker,
+// or a malformed comment-count row all count as unmeasured, the same as either
+// marker missing: anything this strict about the shape either parses cleanly
+// or is not trusted at all.
 const NUMSTAT_ROW = /^(\d+|-)\t(\d+|-)\t(.+)$/
+const DIFFSTAT_END_LINE = /^TOUCHSTONE_DIFFSTAT_END (\d+) (\d+)$/
 const parseDiffstat = (output, range) => {
-  const lines = String(output ?? '').split(/\r?\n/).map(l => l.replace(/\r$/, ''))
-  while (lines.length && lines[0].trim() === '') lines.shift()
-  while (lines.length && lines[lines.length - 1].trim() === '') lines.pop()
+  const lines = runnerLinesOf(output)
   if (lines.length < 2) return null
   if (lines[0] !== `TOUCHSTONE_DIFFSTAT ${range}`) return null
-  if (lines[lines.length - 1] !== 'TOUCHSTONE_DIFFSTAT_END') return null
+  const end = DIFFSTAT_END_LINE.exec(lines[lines.length - 1])
+  if (!end) return null
   const body = lines.slice(1, -1)
+  if (Number(end[1]) !== body.length || end[2] !== '0') return null
   const markerIdx = body.indexOf('TOUCHSTONE_COMMENT_LINES')
   if (markerIdx === -1) return null
   const files = []
   for (const line of body.slice(0, markerIdx)) {
-    if (line.trim() === '') continue
     const m = NUMSTAT_ROW.exec(line)
     if (!m) return null
     files.push({ added: m[1] === '-' ? 0 : Number(m[1]), removed: m[2] === '-' ? 0 : Number(m[2]), path: m[3] })
   }
   const comments = new Map()
   for (const line of body.slice(markerIdx + 1)) {
-    if (line.trim() === '') continue
     const m = /^(\d+)\t(.+)$/.exec(line)
     if (!m) return null
     comments.set(m[2], Number(m[1]))
@@ -2904,74 +2967,142 @@ const lensKeysFor = (size) =>
   : ['correctness', 'advocate']
 
 enterPhase('Draft PR')
-const draft = await treeAgent(
-  `Make sure this branch has a pull request to hang the run's progress on, ` +
-  `then STOP.\n` +
-  `Task: ${brief(task)}\nWhat has been implemented so far: ${impl.summary}\n` +
-  `FIRST check whether one already exists: gh pr view ${wt.branch} ` +
-  `--json number,url,isDraft,state. A branch resumed with --existing normally ` +
-  `has one, and opening a second is not possible anyway. If an open PR is ` +
-  `already there, adopt it: return its number and url with opened=true, say so ` +
-  `in detail, and change nothing about it. In particular do not re-draft a PR ` +
-  `that is already marked ready for review -- someone did that deliberately.\n` +
-  `Only if there is none: git push -u origin ${wt.branch}, then gh pr create --draft` +
-  (baseOverride ? ` --base ${wt.base}` : '') + `. Push the branch either ` +
-  `way, so the commits are on the remote rather than on one machine.\n` +
-  `The body is a short statement of intent, not a report: two or three ` +
-  `sentences on what this branch sets out to do and why, from the ticket. Do ` +
-  `not describe the diff, do not claim it is finished, and do not list what ` +
-  `you verified -- review has not run yet and the gates are not the subject. ` +
-  `Open it as a draft and leave it a draft: something later in this run marks ` +
-  `it ready, and only once every gate is green.\n` +
-  `This exists so the work is visible even if the run stops early, so a ` +
-  `failure to open it is worth reporting but is never fatal: if push or ` +
-  `gh fails, return opened=false with the error in detail and stop. Do not ` +
-  `retry in a loop, do not open a non-draft PR instead, and do not merge.\n` +
-  `Return the PR url and number for the PR this branch now has, whether you ` +
-  `opened it or adopted one that was already there.\n` +
-  `Separately, measure the diff: run exactly this and put all of its output ` +
-  `verbatim in diffstat, unsummarised: neither this measurement nor the PR ` +
-  `it goes with reads what the commits changed as well as running the exact ` +
-  `command does.\n${diffstatCommandFor(firstReviewRange)}`,
-  { label: 'draft-pr', phase: 'Draft PR', schema: DRAFT, model: 'haiku',
-    effort: 'low' })
-// number, not opened: the PR phase addresses the draft by number to update and
-// ready it, and a url with no number is not enough for that.
-if (draft?.number) {
-  draftPr = { url: draft.url, number: draft.number }
-  log(`PR #${draft.number} carries this run: ${draft.url ?? '(no url)'}`)
+// Whether the branch already has a PR is read from a line the shell prints,
+// never from a model's account: a run once adopted an unrelated PR because its
+// branch had the same name. gh has no -C, so it runs in a subshell cd'd into
+// the worktree; the ancestry is git's, against the PR head gh reported, and a
+// head this clone does not have is not an ancestor either.
+const prStateLine =
+  `p="$(cd ${shQuote(wt.path)} && gh pr view ${shQuote(wt.branch)} --json number,state,isDraft,headRefOid ` +
+  `--jq '"\\(.number) \\(.state) \\(.isDraft) \\(.headRefOid)"' 2>/dev/null)" || p=''; ` +
+  `read -r n s r h <<<"$p"; ` +
+  `if [ -n "$h" ] && git -C ${shQuote(wt.path)} merge-base --is-ancestor "$h" HEAD 2>/dev/null; then a=1; else a=0; fi; ` +
+  `printf 'TOUCHSTONE_PR %s %s %s %s %s %s\\n' ${shQuote(wt.branch)} "\${n:-none}" "\${s:-none}" "\${r:-none}" "\${h:-none}" "$a"`
+let prLineAttempt = 0
+const prRunFor = (what) => `${planId}-${what}-${++prLineAttempt}`
+const relayLine = async (label, line) =>
+  (await treeAgent(runnerPrompt(label, [line]),
+    { label, phase: 'Draft PR', schema: VERDICT_RUN, model: 'haiku', effort: 'low' }))?.output
+// One retry on a reply that does not parse, the same as every other line.
+const readTwice = async (label, measure) => {
+  const first = await measure(label)
+  if (!first.reason) return first
+  log(`${label}: unmeasured (${first.reason}), retrying once`)
+  const second = await measure(`${label}:retry`)
+  if (!second.reason) return second
+  return { reasons: [first.reason, second.reason] }
+}
+// Converting back to a draft is verified by re-reading isDraft, not by the
+// undo's exit: the run reports the state gh shows afterwards.
+const prUndoLineFor = (n, run) =>
+  `${logDirFor(run, 'touchstone-pr')} && mkdir -p "$d" && ` +
+  `{ (cd ${shQuote(wt.path)} && gh pr ready ${n} --undo) >|"$d/pr-undo.log" 2>&1; e=$?; ` +
+  `r="$(cd ${shQuote(wt.path)} && gh pr view ${n} --json isDraft --jq .isDraft 2>/dev/null)"; ` +
+  `printf 'TOUCHSTONE_PR_UNDO %s %s %s %s\\n' ${n} "$e" "\${r:-none}" "$d/pr-undo.log"; }`
+const prPushLineFor = (run) =>
+  `${logDirFor(run, 'touchstone-pr')} && mkdir -p "$d" && ` +
+  `{ git -C ${shQuote(wt.path)} push -u origin ${shQuote(wt.branch)} >|"$d/push.log" 2>&1; e=$?; ` +
+  `printf 'TOUCHSTONE_PUSH %s %s %s\\n' ${shQuote(wt.branch)} "$e" "$d/push.log"; }`
+const draftPayload = () => ({ plan: plan.plan, implemented: impl.summary, gates: gatesPayload(), checks: checksPayload() })
+
+const prState = await readTwice('pr:state', async (label) => parsePrState(await relayLine(label, prStateLine), wt.branch))
+if (prState.reasons) {
+  // Not knowing is not a reason to open one: a PR may exist that this run
+  // must not touch. The draft is never fatal, so the run goes on without it.
+  log(`pr:state: unmeasured (first: ${prState.reasons[0]}; second: ${prState.reasons[1]}); ` +
+      `nothing was opened or adopted, so a halt from here on is only visible in this session`)
+} else if (prState.number === null) {
+  const draft = await treeAgent(
+    `Open a draft pull request for this branch to hang the run's progress on, ` +
+    `then STOP. No PR exists for it yet.\n` +
+    `Task: ${brief(task)}\nWhat has been implemented so far: ${impl.summary}\n` +
+    `git push -u origin ${wt.branch}, then gh pr create --draft` +
+    (baseOverride ? ` --base ${wt.base}` : '') + `.\n` +
+    `The body is a short statement of intent, not a report: two or three ` +
+    `sentences on what this branch sets out to do and why, from the ticket. Do ` +
+    `not describe the diff, do not claim it is finished, and do not list what ` +
+    `you verified -- review has not run yet and the gates are not the subject. ` +
+    `Open it as a draft and leave it a draft: something later in this run marks ` +
+    `it ready, and only once every gate is green.\n` +
+    `This exists so the work is visible even if the run stops early, so a ` +
+    `failure to open it is worth reporting but is never fatal: if push or ` +
+    `gh fails, return opened=false with the error in detail and stop. Do not ` +
+    `retry in a loop, do not open a non-draft PR instead, and do not merge.\n` +
+    `Return the url and number of the PR you opened.`,
+    { label: 'draft-pr', phase: 'Draft PR', schema: DRAFT, model: 'haiku',
+      effort: 'low' })
+  // number, not opened: the PR phase addresses the draft by number to update and
+  // ready it, and a url with no number is not enough for that.
+  if (draft?.number) {
+    draftPr = { url: draft.url, number: draft.number, draft: true }
+    log(`PR #${draft.number} carries this run: ${draft.url ?? '(no url)'}`)
+  } else {
+    log(`draft PR not opened (${draft?.detail ?? 'no detail'}); continuing. ` +
+        `A halt from here on is only visible in this session`)
+  }
+} else if (!prState.ancestor) {
+  return await halted('Draft PR', { ...draftPayload(),
+    note: `PR #${prState.number} for branch ${wt.branch} has head ${prState.head}, which is ` +
+      `not an ancestor of this branch's head, so it is not this branch's history: an ` +
+      `unrelated PR under the same branch name, or one pushed to since this branch was ` +
+      `cut. The run did not adopt it and pushed nothing. Pick another branch name or ` +
+      `bring the branch up to that head, then re-run.`,
+  })
+} else if (prState.state !== 'OPEN') {
+  return await halted('Draft PR', { ...draftPayload(),
+    note: `PR #${prState.number} for branch ${wt.branch} is ${prState.state.toLowerCase()}, so ` +
+      `this run cannot carry its work on it. The run pushed nothing. Pick another branch ` +
+      `name, or reopen the PR, then re-run.`,
+  })
 } else {
-  log(`draft PR not opened (${draft?.detail ?? 'no detail'}); continuing. ` +
-      `A halt from here on is only visible in this session`)
+  draftPr = { url: null, number: prState.number, draft: prState.draft }
+  log(`PR #${prState.number} carries this run, adopted ${prState.draft ? 'as a draft' : 'ready for review'}`)
+  // A ready PR would otherwise hold commits no gate has passed while it reads
+  // as finished. Converted before the push, so it never does.
+  if (!prState.draft) {
+    const undo = await readTwice('pr:undo', async (label) => {
+      const run = prRunFor('pr-undo')
+      return parsePrUndo(await relayLine(label, prUndoLineFor(prState.number, run)), prState.number, run)
+    })
+    draftPr.draft = !undo.reasons && undo.draft
+    draftPr.readyWhy = undo.reasons
+      ? `converting it to a draft could not be verified: ${undo.reasons.join('; ')}`
+      : undo.draft ? null
+      : `gh pr ready ${prState.number} --undo exited ${undo.exit} and the PR still reads as ready (${undo.log})`
+    log(draftPr.draft ? `PR #${prState.number} converted to a draft` : `PR #${prState.number}: ${draftPr.readyWhy}`)
+  }
+  const pushRun = prRunFor('pr-push')
+  const pushed = parsePush(await relayLine('pr:push', prPushLineFor(pushRun)), wt.branch, pushRun)
+  if (pushed.reason || pushed.exit !== 0) {
+    log(`pr:push: ${pushed.reason ?? `git push exited ${pushed.exit} (${pushed.log})`}; ` +
+        `continuing, the PR phase pushes again`)
+  }
 }
 
 enterPhase('Review')
 const sReview = stage('review')
 
-// A malformed or off-range diffstat gets one retry, at the same range, via a
-// dedicated call rather than re-running draft-pr's whole job again. Still
-// unmeasured after that halts here: this is a measurement problem, not a
-// code problem, the same principle unmeasuredChecksHalt and notExecutedHalt
-// apply elsewhere in this file.
-let sizeParsed = parseDiffstat(draft?.diffstat, firstReviewRange)
-if (!sizeParsed) {
-  const SIZE_PROBE = {
-    type: 'object', additionalProperties: false, required: ['diffstat'],
-    properties: { diffstat: { type: 'string' } },
-  }
-  const retried = await treeAgent(
-    `Run exactly this and put all of its output verbatim in diffstat, ` +
-    `unsummarised, then STOP.\n${diffstatCommandFor(firstReviewRange)}`,
-    { label: 'size', schema: SIZE_PROBE, model: 'haiku', effort: 'low' })
-  sizeParsed = parseDiffstat(retried?.diffstat, firstReviewRange)
+// Unmeasured gets one retry, at the same range. Still unmeasured after that
+// halts here: this is a measurement problem, not a code problem, the same
+// principle unmeasuredChecksHalt and notExecutedHalt apply elsewhere in this
+// file.
+let diffstatAttempt = 0
+const measureDiffstat = async (label) => {
+  const run = `${planId}-diffstat-${++diffstatAttempt}`
+  const out = await treeAgent(runnerPrompt(label, [diffstatLineFor(firstReviewRange, run)]),
+    { label, schema: VERDICT_RUN, model: 'haiku', effort: 'low' })
+  return parseDiffstat(out?.output, firstReviewRange)
 }
+let sizeParsed = await measureDiffstat('diffstat')
+if (!sizeParsed) sizeParsed = await measureDiffstat('diffstat:retry')
 if (!sizeParsed) {
   sReview.close()
   return await halted('Review', {
     plan: plan.plan, implemented: impl.summary, gates: gatesPayload(), checks: checksPayload(),
     note: `The diff could not be measured, even after a retry: the diffstat ` +
-      `probe's output did not have the shape parseDiffstat requires (the ` +
-      `begin/end markers naming ${firstReviewRange}, or a well-formed ` +
+      `line's output did not have the shape parseDiffstat requires (the ` +
+      `begin/end markers naming ${firstReviewRange}, a line count matching ` +
+      `the rows between them, a numstat exit of 0, or a well-formed ` +
       `numstat/comment-count row). This is a measurement problem, not a ` +
       `code problem; re-run.`,
   })
@@ -4260,22 +4391,22 @@ if (!mutation.green) {
       ? `The mutation run does not fit the 600000 ms Bash ceiling, which for ` +
         `this repo is expected rather than a fault. Run the command in detail ` +
         `in your own terminal, then re-run this workflow: --verify will find ` +
-        `the ledger green and the gate will cost milliseconds. ${prNote()}, ` +
-        `and mutation-pr-gate.py would block marking it ready anyway.`
+        `the ledger green and the gate will cost milliseconds. ${prNote()}. ` +
+        `mutation-pr-gate.py blocks gh pr ready until --verify reads green.`
       : mutation.verdict_unmeasured
       ? `The mutation gate's verdict could not be measured: the line that runs ` +
         `mutation-check.sh ${wt.path} --verify did not print what the script ` +
         `asked for, even after a retry (first: ${mutation.verdict_reasons[0]}; ` +
         `second: ${mutation.verdict_reasons[1]}). This halt is about ` +
-        `measurement, not about mutants. ${prNote()}, and ` +
-        `mutation-pr-gate.py would block marking it ready until --verify reads green.`
+        `measurement, not about mutants. ${prNote()}. ` +
+        `mutation-pr-gate.py blocks gh pr ready until --verify reads green.`
       : mutation.verify_setup
       ? `mutation-check.sh ${wt.path} --verify could not run: it exited ` +
         `${mutation.verify.exit} (${mutation.verify.log}), which is neither green ` +
         `(0) nor a missing or stale ledger (${VERIFY_UNRECORDED}). 127 means the ` +
         `script was not found and 2 is a setup failure. No further mutation ` +
-        `attempt was made. ${prNote()}, and mutation-pr-gate.py would block ` +
-        `marking it ready until --verify reads green.`
+        `attempt was made. ${prNote()}. ` +
+        `mutation-pr-gate.py blocks gh pr ready until --verify reads green.`
       : `Mutation gate still red after ${MAX_GATE_ATTEMPTS} attempt(s)` +
         (mutation.verify
           ? `: mutation-check.sh --verify exited ${mutation.verify.exit} ` +
@@ -4283,7 +4414,7 @@ if (!mutation.green) {
             `for this head, either because mutants survived or because no run ` +
             `was recorded`
           : '') +
-        `. ${prNote()}, and mutation-pr-gate.py would block marking it ready. ` +
+        `. ${prNote()}. mutation-pr-gate.py blocks gh pr ready until --verify reads green. ` +
         `Kill surviving mutants with tests, or approve a provably equivalent ` +
         `mutant with mutation-check.sh ${wt.path} --accept.`,
   })
@@ -4485,7 +4616,7 @@ if (args?.openPr !== false && !outOfBudget()) {
     `Chain the push into the same command line as the gh call, e.g. ` +
     `git -C ${wt.path} push ... && gh pr ...; do not run them as two calls.\n` +
     (draftPr?.number
-      ? `A draft PR already exists for this branch: #${draftPr.number}. Do NOT ` +
+      ? `A ${draftPr.draft ? 'draft ' : ''}PR already exists for this branch: #${draftPr.number}. Do NOT ` +
         `open a second one. Push the branch, update that PR's title and body to ` +
         `describe the finished change, then mark it ready for review with ` +
         `gh pr ready ${draftPr.number}. Marking it ready is the last thing you ` +

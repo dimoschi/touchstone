@@ -58,6 +58,24 @@ def test_trigger_gh_pr_ready(tmp_path):
     assert branch is None
 
 
+def test_trigger_gh_pr_ready_undo_is_exempt(tmp_path):
+    repo = _repo(tmp_path)
+    assert gate.trigger("gh pr ready 7 --undo", repo) is None
+    assert gate.trigger(f"(cd {repo} && gh pr ready 7 --undo) >|log 2>&1; e=$?", repo) is None
+
+
+def test_trigger_gh_pr_ready_undo_then_ready_is_gated(tmp_path):
+    repo = _repo(tmp_path)
+    assert gate.trigger("gh pr ready 7 --undo; gh pr ready 7", repo) == (repo.resolve(), None)
+    assert gate.trigger("gh pr ready 7 && gh pr ready 8 --undo", repo) == (repo.resolve(), None)
+
+
+def test_trigger_gh_pr_ready_undo_must_be_its_own_flag(tmp_path):
+    repo = _repo(tmp_path)
+    assert gate.trigger("gh pr ready 7 --undone", repo) == (repo.resolve(), None)
+    assert gate.trigger("gh pr ready 7; echo --undo", repo) == (repo.resolve(), None)
+
+
 def test_trigger_gh_pr_create_non_draft(tmp_path):
     repo = _repo(tmp_path)
     hit_repo, branch = gate.trigger("gh pr create --title x", repo)

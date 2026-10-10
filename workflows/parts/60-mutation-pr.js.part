@@ -176,22 +176,22 @@ if (!mutation.green) {
       ? `The mutation run does not fit the 600000 ms Bash ceiling, which for ` +
         `this repo is expected rather than a fault. Run the command in detail ` +
         `in your own terminal, then re-run this workflow: --verify will find ` +
-        `the ledger green and the gate will cost milliseconds. ${prNote()}, ` +
-        `and mutation-pr-gate.py would block marking it ready anyway.`
+        `the ledger green and the gate will cost milliseconds. ${prNote()}. ` +
+        `mutation-pr-gate.py blocks gh pr ready until --verify reads green.`
       : mutation.verdict_unmeasured
       ? `The mutation gate's verdict could not be measured: the line that runs ` +
         `mutation-check.sh ${wt.path} --verify did not print what the script ` +
         `asked for, even after a retry (first: ${mutation.verdict_reasons[0]}; ` +
         `second: ${mutation.verdict_reasons[1]}). This halt is about ` +
-        `measurement, not about mutants. ${prNote()}, and ` +
-        `mutation-pr-gate.py would block marking it ready until --verify reads green.`
+        `measurement, not about mutants. ${prNote()}. ` +
+        `mutation-pr-gate.py blocks gh pr ready until --verify reads green.`
       : mutation.verify_setup
       ? `mutation-check.sh ${wt.path} --verify could not run: it exited ` +
         `${mutation.verify.exit} (${mutation.verify.log}), which is neither green ` +
         `(0) nor a missing or stale ledger (${VERIFY_UNRECORDED}). 127 means the ` +
         `script was not found and 2 is a setup failure. No further mutation ` +
-        `attempt was made. ${prNote()}, and mutation-pr-gate.py would block ` +
-        `marking it ready until --verify reads green.`
+        `attempt was made. ${prNote()}. ` +
+        `mutation-pr-gate.py blocks gh pr ready until --verify reads green.`
       : `Mutation gate still red after ${MAX_GATE_ATTEMPTS} attempt(s)` +
         (mutation.verify
           ? `: mutation-check.sh --verify exited ${mutation.verify.exit} ` +
@@ -199,7 +199,7 @@ if (!mutation.green) {
             `for this head, either because mutants survived or because no run ` +
             `was recorded`
           : '') +
-        `. ${prNote()}, and mutation-pr-gate.py would block marking it ready. ` +
+        `. ${prNote()}. mutation-pr-gate.py blocks gh pr ready until --verify reads green. ` +
         `Kill surviving mutants with tests, or approve a provably equivalent ` +
         `mutant with mutation-check.sh ${wt.path} --accept.`,
   })
@@ -401,7 +401,7 @@ if (args?.openPr !== false && !outOfBudget()) {
     `Chain the push into the same command line as the gh call, e.g. ` +
     `git -C ${wt.path} push ... && gh pr ...; do not run them as two calls.\n` +
     (draftPr?.number
-      ? `A draft PR already exists for this branch: #${draftPr.number}. Do NOT ` +
+      ? `A ${draftPr.draft ? 'draft ' : ''}PR already exists for this branch: #${draftPr.number}. Do NOT ` +
         `open a second one. Push the branch, update that PR's title and body to ` +
         `describe the finished change, then mark it ready for review with ` +
         `gh pr ready ${draftPr.number}. Marking it ready is the last thing you ` +

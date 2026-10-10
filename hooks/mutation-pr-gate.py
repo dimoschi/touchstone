@@ -19,7 +19,7 @@ ready`, which is one *route* to a base branch, not the condition that
 matters. It now fires on three routes -- kept as one file, not renamed,
 because hooks.json references it by this exact path:
 
-  - `gh pr create` (except `--draft`) / `gh pr ready`
+  - `gh pr create` (except `--draft`) / `gh pr ready` (except `--undo`)
   - `git merge <branch>` while HEAD is a base branch
   - `git push` whose destination refspec names a base branch, or whose HEAD is one
 
@@ -63,6 +63,10 @@ MUTATION_CHECK = Path(__file__).resolve().parent.parent / \
 # grounds to skip let `gh pr create --draft && gh pr ready 7` through with no
 # check at all -- the exemption became the bypass.
 GH_PR_READY = re.compile(r'(?:^|[;&|(]\s*)gh\s+pr\s+ready\b')
+# `gh pr ready --undo` converts a PR back to a draft: it withdraws a review
+# request, so it is the one ready form that is not gated. Read from the end of
+# a ready match to the end of that command only.
+GH_PR_READY_UNDO = re.compile(r'[^;&|)]*\s--undo(?=[\s;&|)]|$)')
 GH_PR_CREATE = re.compile(r'(?:^|[;&|(]\s*)gh\s+pr\s+create\b')
 # A draft is not a request to review. Opening one is how work in progress is
 # made visible -- pushed, discoverable, and reportable if a run stops early --
@@ -163,13 +167,21 @@ def push_hit(repo, m):
     return None
 
 
+def ready_route(cmd):
+    """The first `gh pr ready` in `cmd` that asks for review, or None."""
+    for m in GH_PR_READY.finditer(cmd):
+        if not GH_PR_READY_UNDO.match(cmd, m.end()):
+            return m
+    return None
+
+
 def trigger(cmd, cwd):
     """Return (repo, branch_arg) if cmd should be gated, else None.
 
     branch_arg is None for "verify current HEAD" (mutation-check.sh's own
     default); otherwise it names the branch to verify explicitly.
     """
-    m = GH_PR_READY.search(cmd)
+    m = ready_route(cmd)
     if m:
         repo = gh_route_repo(cmd, m, cwd)
         return (repo, None) if repo else None

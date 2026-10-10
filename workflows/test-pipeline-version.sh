@@ -144,7 +144,7 @@ function baseArgs(overrides) {
 // args.reviewers: 0 always slices the lens list to nothing, but it still has
 // to parse cleanly or Review halts on a measurement problem before any of
 // these scenarios reach Draft PR/PR at all.
-const DEFAULT_DIFFSTAT_BODY = '5\t0\ta.js\nTOUCHSTONE_COMMENT_LINES\nTOUCHSTONE_DIFFSTAT_END'
+const DEFAULT_DIFFSTAT_BODY = '5\t0\ta.js\nTOUCHSTONE_COMMENT_LINES\nTOUCHSTONE_DIFFSTAT_END 2 0'
 
 // What the mutation verdict line prints: exit 0 when the last mutation answer
 // said green, else 5 (no green run recorded), with the gate's matching
@@ -213,12 +213,18 @@ function makeAgent(scenario, captured) {
           commit_range: 'base00000000000000000000000000000000000000..impl0000000000000000000000000000000000000',
           scored: true }) }
     }
+    // No PR exists yet, so draft-pr opens #1.
+    if (label === 'pr:state') {
+      const branch = (/printf 'TOUCHSTONE_PR %s %s %s %s %s %s\\n' (\S+) /.exec(prompt) ?? [])[1] ?? ''
+      return { output: `TOUCHSTONE_PR ${branch} none none none none 0` }
+    }
     if (label === 'draft-pr') {
       captured.draftPrCalled = true
-      const range = scenario.implementer?.commit_range ??
-        'base00000000000000000000000000000000000000..impl0000000000000000000000000000000000000'
-      return scenario.draftPr ?? { opened: true, url: 'https://example.test/pr/1', number: 1, detail: 'stub',
-        diffstat: `TOUCHSTONE_DIFFSTAT ${range}\n${DEFAULT_DIFFSTAT_BODY}` }
+      return scenario.draftPr ?? { opened: true, url: 'https://example.test/pr/1', number: 1, detail: 'stub' }
+    }
+    if (label === 'diffstat' || label === 'diffstat:retry') {
+      const range = (/printf 'TOUCHSTONE_DIFFSTAT %s\\n' (\S+);/.exec(prompt) ?? [])[1] ?? ''
+      return { output: `TOUCHSTONE_DIFFSTAT ${range}\n${DEFAULT_DIFFSTAT_BODY}` }
     }
     // The change-signals probe: nothing in this suite is about the signals, so
     // it gets a well-formed record for the range it asked about.
