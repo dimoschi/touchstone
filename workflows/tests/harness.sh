@@ -171,12 +171,13 @@ function unreviewedFromOf(prompt) {
 }
 const PR_HEAD = 'cafe000000000000000000000000000000000042'
 function prBranchOf(prompt) {
-  return (/printf 'TOUCHSTONE_PR %s %s %s %s %s %s\\n' (\S+) /.exec(prompt) ?? [])[1] ?? ''
+  return (/printf 'TOUCHSTONE_PR %s %s %s %s %s %s %s\\n' (\S+) /.exec(prompt) ?? [])[1] ?? ''
 }
 function prStateOutput(prompt, pr) {
   const branch = prBranchOf(prompt)
-  if (!pr) return `TOUCHSTONE_PR ${branch} none none none none 0`
-  return `TOUCHSTONE_PR ${branch} ${pr.number ?? 42} ${pr.state ?? 'OPEN'} ${pr.isDraft ?? true} ` +
+  if (!pr) return `TOUCHSTONE_PR ${branch} 0 none none none none 0`
+  if (pr.ghExit) return `TOUCHSTONE_PR ${branch} ${pr.ghExit} none none none none 0`
+  return `TOUCHSTONE_PR ${branch} 0 ${pr.number ?? 42} ${pr.state ?? 'OPEN'} ${pr.isDraft ?? true} ` +
     `${pr.head ?? PR_HEAD} ${pr.ancestor ?? 1}`
 }
 function prRunOf(prompt, marker) {

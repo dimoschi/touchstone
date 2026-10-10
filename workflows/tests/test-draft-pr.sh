@@ -25,11 +25,12 @@ async function scenarioStateLine() {
   const { captured } = await run({})
   const call = captured.calls.find(c => c.label === 'pr:state')
   check('the fence is the one PR line', fenceOf(call?.prompt ?? ''), [
-    `p="$(cd /tmp/stub-worktree && gh pr view ${BRANCH} --json number,state,isDraft,headRefOid ` +
-    `--jq '"\\(.number) \\(.state) \\(.isDraft) \\(.headRefOid)"' 2>/dev/null)" || p=''; ` +
+    `p="$(cd /tmp/stub-worktree && gh pr list --head ${BRANCH} --state all --json number,state,isDraft,headRefOid --limit 20 ` +
+    `--jq 'sort_by(-.number) | (map(select(.state == "OPEN")) + .)[0] // empty | ` +
+    `"\\(.number) \\(.state) \\(.isDraft) \\(.headRefOid)"' 2>/dev/null)"; g=$?; ` +
     `read -r n s r h <<<"$p"; ` +
     `if [ -n "$h" ] && git -C /tmp/stub-worktree merge-base --is-ancestor "$h" HEAD 2>/dev/null; then a=1; else a=0; fi; ` +
-    `printf 'TOUCHSTONE_PR %s %s %s %s %s %s\\n' ${BRANCH} "\${n:-none}" "\${s:-none}" "\${r:-none}" "\${h:-none}" "$a"`])
+    `printf 'TOUCHSTONE_PR %s %s %s %s %s %s %s\\n' ${BRANCH} "$g" "\${n:-none}" "\${s:-none}" "\${r:-none}" "\${h:-none}" "$a"`])
   check('the schema asks for output and nothing else', JSON.stringify(call?.schema), OUTPUT_ONLY)
   check('it is a haiku call at low effort', [call?.model, call?.effort], ['haiku', 'low'])
   check('it runs after Implement and before draft-pr',
@@ -61,14 +62,11 @@ async function scenarioUnrelatedPrHalts() {
   const note = result.note ?? ''
   check('the note names the PR, its head and the branch',
     [note.includes('#142'), note.includes(head), note.includes(BRANCH)], [true, true, true])
-  check('it says the PR was not adopted', /not adopt/.test(note), true)
+  check('it says the PR was not adopted, as an unrelated PR under the same name',
+    [/not adopt/.test(note), /unrelated PR under the same branch name/.test(note)], [true, true])
   check('nothing ran against it: no draft-pr, conversion, push or review',
     [callCount(captured, 'draft-pr'), callCount(captured, 'pr:undo'), callCount(captured, 'pr:push'),
       captured.calls.some(c => c.label.startsWith('review:'))], [0, 0, 0, false])
-  for (const state of ['MERGED', 'CLOSED']) {
-    const both = await run(withPr({ number: 142, head, ancestor: 0, state }))
-    check(`${state} and unrelated: still the unrelated halt`, /not adopt/.test(both.result.note ?? ''), true)
-  }
 }
 
 async function scenarioRelatedDraftAdopted() {
@@ -121,8 +119,21 @@ async function scenarioConversionFails() {
   check('the push still ran', callCount(failed.captured, 'pr:push'), 1)
   const garbled = await run(mutationRed(withPr({ number: 42, isDraft: false }, { prUndo: () => ({ output: 'done' }) })))
   check('an unparseable conversion is retried once', callCount(garbled.captured, 'pr:undo:retry'), 1)
-  check('then reads as ready, unverified', [(garbled.result.note ?? '').includes(READY_NOTE),
-    /could not be verified/.test(garbled.result.note ?? '')], [true, true])
+  check('then reads as state unknown, unverified, never as read ready',
+    [/state is unknown after/.test(garbled.result.note ?? ''), /could not be verified/.test(garbled.result.note ?? ''),
+      (garbled.result.note ?? '').includes('read as ready')], [true, true, false])
+  const unknown = await run(mutationRed(withPr({ number: 42, isDraft: false }, { prUndo: () => ({ exit: 1, isDraft: 'none' }) })))
+  check('a re-read that printed nothing is state unknown, not ready',
+    [/state is unknown after/.test(unknown.result.note ?? ''), (unknown.result.note ?? '').includes('read as ready'),
+      /still reads as ready/.test(unknown.result.note ?? '')], [true, false, false])
+  const notPushed = await run(mutationRed(withPr({ number: 42, isDraft: false },
+    { prUndo: () => ({ exit: 1, isDraft: 'false' }), prPush: () => ({ exit: 1 }) })))
+  check('a failed push: ready, holding no commit from this run',
+    [(notPushed.result.note ?? '').includes('PR #42 read as ready for review, holding no commit from this run'),
+      (notPushed.result.note ?? '').includes('commits the gates have not passed')], [true, false])
+  const pushUnread = await run(mutationRed(withPr({ number: 42, isDraft: false },
+    { prUndo: () => ({ exit: 1, isDraft: 'false' }), prPush: () => ({ output: 'pushed' }) })))
+  check('an unparseable push is not a push', (pushUnread.result.note ?? '').includes('holding no commit from this run'), true)
   const atReview = await run(withPr({ number: 42, isDraft: false }, { prUndo: () => ({ exit: 1, isDraft: 'false' }), sizeUnmeasured: true }))
   check('a Review halt reads as ready too', [atReview.result.halted_at, (atReview.result.note ?? '').includes(READY_NOTE)],
     ['Review', true])
@@ -133,31 +144,36 @@ async function scenarioConversionFails() {
 
 async function scenarioMergedHalts() {
   console.log('\n== scenario DP7: a merged or closed PR for the branch halts; nothing is pushed to it')
-  for (const state of ['MERGED', 'CLOSED']) {
-    const { result, captured } = await run(withPr({ number: 42, state }))
-    check(`${state}: halted at Draft PR`, result.halted_at, 'Draft PR')
-    check(`${state}: the note names the PR and its state`,
-      [(result.note ?? '').includes('#42'), (result.note ?? '').includes(state.toLowerCase())], [true, true])
-    check(`${state}: no draft-pr, conversion or push`,
+  for (const [state, ancestor] of [['MERGED', 1], ['MERGED', 0], ['CLOSED', 1], ['CLOSED', 0]]) {
+    const { result, captured } = await run(withPr({ number: 42, state, ancestor }))
+    const note = result.note ?? ''
+    check(`${state}, ancestor ${ancestor}: halted at Draft PR`, result.halted_at, 'Draft PR')
+    check(`${state}, ancestor ${ancestor}: the note names the PR and its state, not an unrelated PR`,
+      [note.includes('#42'), note.includes(`is ${state.toLowerCase()}`), /unrelated/.test(note)], [true, true, false])
+    check(`${state}, ancestor ${ancestor}: reopening is advised only for a closed PR`, /reopen/.test(note), state === 'CLOSED')
+    check(`${state}, ancestor ${ancestor}: no draft-pr, conversion or push`,
       [callCount(captured, 'draft-pr'), callCount(captured, 'pr:undo'), callCount(captured, 'pr:push')], [0, 0, 0])
   }
 }
 
 async function scenarioStateParser() {
   console.log('\n== scenario DP8: a PR line that is not exactly the line is retried once; unparseable twice opens and adopts nothing')
-  const good = `TOUCHSTONE_PR ${BRANCH} 42 OPEN true ${PR_HEAD} 1`
+  const good = `TOUCHSTONE_PR ${BRANCH} 0 42 OPEN true ${PR_HEAD} 1`
   const bad = {
     'no output': '',
     'two lines': `${good}\n${good}`,
     'another branch': good.replace(BRANCH, 'feat/gh-142-other'),
     'a non-integer number': good.replace(' 42 ', ' #42 '),
+    'a gh exit that is not an integer': good.replace(` ${BRANCH} 0 `, ` ${BRANCH} x `),
+    'gh failing': `TOUCHSTONE_PR ${BRANCH} 1 none none none none 0`,
+    'gh failing with PR fields': good.replace(` ${BRANCH} 0 `, ` ${BRANCH} 1 `),
     'an unknown state': good.replace(' OPEN ', ' DRAFT '),
     'isDraft not a boolean': good.replace(' true ', ' yes '),
     'a 7-char head': good.replace(PR_HEAD, PR_HEAD.slice(0, 7)),
     'ancestor not 0 or 1': good.replace(/ 1$/, ' 2'),
-    'none with PR fields': `TOUCHSTONE_PR ${BRANCH} none OPEN true ${PR_HEAD} 1`,
+    'none with PR fields': `TOUCHSTONE_PR ${BRANCH} 0 none OPEN true ${PR_HEAD} 1`,
     'a prefixed line': `ok: ${good}`,
-    'a missing field': `TOUCHSTONE_PR ${BRANCH} 42 OPEN true ${PR_HEAD}`,
+    'a missing field': `TOUCHSTONE_PR ${BRANCH} 0 42 OPEN true ${PR_HEAD}`,
   }
   for (const [name, output] of Object.entries(bad)) {
     const { result, captured } = await run(openPr({ prState: (retry) => retry ? { number: 42 } : { output } }))
@@ -167,13 +183,17 @@ async function scenarioStateParser() {
   }
   const ok = await run({ prState: () => ({ output: good }) })
   check('a well-formed line is not retried', callCount(ok.captured, 'pr:state:retry'), 0)
-  const none = await run({ prState: () => ({ output: `TOUCHSTONE_PR ${BRANCH} none none none none 0` }) })
+  const none = await run({ prState: () => ({ output: `TOUCHSTONE_PR ${BRANCH} 0 none none none none 0` }) })
   check('none is accepted as no PR', [callCount(none.captured, 'pr:state:retry'), callCount(none.captured, 'draft-pr')], [0, 1])
   const twice = await run(mutationRed({ prState: () => ({ output: 'garbage' }),
     draftPr: { opened: true, number: 23, url: 'u', detail: 'must not open' } }))
   check('twice unparseable: no draft-pr, no conversion, no push',
     [callCount(twice.captured, 'draft-pr'), callCount(twice.captured, 'pr:undo'), callCount(twice.captured, 'pr:push')], [0, 0, 0])
   check('it is logged with both reasons', twice.captured.logs.some(l => /^pr:state: unmeasured/.test(l) && l.includes('malformed PR line')), true)
+  const ghDown = await run({ prState: () => ({ ghExit: 4 }), draftPr: { opened: true, number: 23, url: 'u', detail: 'must not open' } })
+  check('gh failing twice opens nothing and says why',
+    [callCount(ghDown.captured, 'draft-pr'), ghDown.captured.logs.some(l => /^pr:state: unmeasured/.test(l) && l.includes('gh exited 4'))],
+    [0, true])
   check('the run goes on, and its halt says no PR was opened',
     [twice.result.halted_at, (twice.result.note ?? '').includes('No PR was opened')], ['Mutation', true])
 }
@@ -227,20 +247,21 @@ const scratchRepo = () => {
 }
 const branchAt = (dir) => ({ created: true, branch: BRANCH, base: 'main', path: dir,
   ticket: '21', detail: 'stub', dirty: false })
-// A fake gh on PATH: it records its cwd and arguments, answers the PR query
-// from FAKE_GH_PR (none: exit 1), isDraft from FAKE_GH_ISDRAFT, and exits
-// FAKE_GH_UNDO_EXIT for pr ready.
+// A fake gh on PATH: it records its cwd and arguments. pr list applies the
+// line's own --jq to FAKE_GH_JSON with the real jq, or fails with
+// FAKE_GH_LIST_EXIT; pr view prints FAKE_GH_ISDRAFT or fails with
+// FAKE_GH_VIEW_EXIT; pr ready exits FAKE_GH_UNDO_EXIT.
 const withFakeGh = async (env, fn) => {
   const bin = fs.mkdtempSync(path.join(os.tmpdir(), 'fake-gh-'))
   const log = path.join(bin, 'calls.log')
   fs.writeFileSync(path.join(bin, 'gh'), [
     '#!/usr/bin/env bash',
     'printf \'%s|%s\\n\' "$PWD" "$*" >> "$FAKE_GH_LOG"',
+    'q=""; prev=""; for x in "$@"; do [ "$prev" = --jq ] && q="$x"; prev="$x"; done',
     'case "$1 $2" in',
-    '  "pr view") case "$*" in',
-    '    *headRefOid*) [ -n "${FAKE_GH_PR:-}" ] || { echo "no pull requests found" >&2; exit 1; }; printf \'%s\\n\' "$FAKE_GH_PR" ;;',
-    '    *isDraft*) printf \'%s\\n\' "${FAKE_GH_ISDRAFT:-false}" ;;',
-    '  esac ;;',
+    '  "pr list") [ "${FAKE_GH_LIST_EXIT:-0}" = 0 ] || { echo "HTTP 401: Bad credentials" >&2; exit "$FAKE_GH_LIST_EXIT"; }',
+    '    printf \'%s\' "${FAKE_GH_JSON:-[]}" | jq -r "$q" ;;',
+    '  "pr view") [ "${FAKE_GH_VIEW_EXIT:-0}" = 0 ] || exit "$FAKE_GH_VIEW_EXIT"; printf \'%s\\n\' "${FAKE_GH_ISDRAFT:-false}" ;;',
     '  "pr ready") exit "${FAKE_GH_UNDO_EXIT:-0}" ;;',
     'esac', ''].join('\n'), { mode: 0o755 })
   const saved = { ...process.env }
@@ -254,6 +275,8 @@ const withFakeGh = async (env, fn) => {
     fs.rmSync(bin, { recursive: true, force: true })
   }
 }
+const prsJson = (...prs) => JSON.stringify(prs.map(([number, state, isDraft, headRefOid]) =>
+  ({ number, state, isDraft, headRefOid })))
 const real = (outs) => (...a) => {
   const prompt = a.find(x => typeof x === 'string' && x.includes('```bash'))
   const output = runRunnerLines(prompt)
@@ -277,11 +300,11 @@ async function scenarioRealLines() {
     git('remote', 'add', 'origin', remote)
     const lines = () => ({ states: [], undos: [], pushes: [] })
 
-    await withFakeGh({ FAKE_GH_PR: `42 OPEN true ${prHead}` }, async (calls) => {
+    await withFakeGh({ FAKE_GH_JSON: prsJson([42, 'OPEN', true, prHead]) }, async (calls) => {
       const o = lines()
       const { result, captured } = await run(openPr({ branchResult: branchAt(dir),
         prState: real(o.states), prUndo: real(o.undos), prPush: real(o.pushes) }))
-      check('an ancestor head prints 1', o.states[0], `TOUCHSTONE_PR ${BRANCH} 42 OPEN true ${prHead} 1`)
+      check('an ancestor head prints 1', o.states[0], `TOUCHSTONE_PR ${BRANCH} 0 42 OPEN true ${prHead} 1`)
       check('gh ran in the worktree', fs.realpathSync(calls()[0]?.split('|')[0] ?? '/'), fs.realpathSync(dir))
       check('the draft is adopted and pushed', [promptOf(captured, 'pr').includes('#42'), o.pushes[0]?.split(' ').slice(0, 3).join(' ')],
         [true, `TOUCHSTONE_PUSH ${BRANCH} 0`])
@@ -291,20 +314,38 @@ async function scenarioRealLines() {
       check('the run completes', result.halted_at, undefined)
     })
     for (const [name, head] of [['a head on another branch', unrelated], ['a head this clone does not have', 'dead000000000000000000000000000000000142']]) {
-      await withFakeGh({ FAKE_GH_PR: `142 OPEN true ${head}` }, async () => {
+      await withFakeGh({ FAKE_GH_JSON: prsJson([142, 'OPEN', true, head]) }, async () => {
         const o = lines()
         const { result, captured } = await run({ branchResult: branchAt(dir), prState: real(o.states) })
-        check(`${name}: prints 0`, o.states[0], `TOUCHSTONE_PR ${BRANCH} 142 OPEN true ${head} 0`)
+        check(`${name}: prints 0`, o.states[0], `TOUCHSTONE_PR ${BRANCH} 0 142 OPEN true ${head} 0`)
         check(`${name}: halts at Draft PR without adopting`, [result.halted_at, callCount(captured, 'pr:push')], ['Draft PR', 0])
       })
     }
     await withFakeGh({}, async () => {
       const o = lines()
       const { captured } = await run({ branchResult: branchAt(dir), prState: real(o.states) })
-      check('gh failing prints none', o.states[0], `TOUCHSTONE_PR ${BRANCH} none none none none 0`)
+      check('no PR for the branch: gh exits 0 and the line prints none', o.states[0], `TOUCHSTONE_PR ${BRANCH} 0 none none none none 0`)
       check('and draft-pr opens one', callCount(captured, 'draft-pr'), 1)
     })
-    await withFakeGh({ FAKE_GH_PR: `42 OPEN false ${prHead}`, FAKE_GH_ISDRAFT: 'true' }, async (calls) => {
+    await withFakeGh({ FAKE_GH_LIST_EXIT: '4' }, async () => {
+      const o = lines()
+      const { captured } = await run({ branchResult: branchAt(dir), prState: real(o.states) })
+      check('gh failing prints its exit, not a PR verdict', o.states[0], `TOUCHSTONE_PR ${BRANCH} 4 none none none none 0`)
+      check('so nothing is opened, adopted or pushed',
+        [callCount(captured, 'pr:state:retry'), callCount(captured, 'draft-pr'), callCount(captured, 'pr:push')], [1, 0, 0])
+    })
+    await withFakeGh({ FAKE_GH_JSON: prsJson([50, 'CLOSED', false, unrelated], [42, 'OPEN', true, prHead], [30, 'MERGED', false, base]) }, async () => {
+      const o = lines()
+      await run({ branchResult: branchAt(dir), prState: real(o.states) })
+      check('several PRs: the open one is picked', o.states[0], `TOUCHSTONE_PR ${BRANCH} 0 42 OPEN true ${prHead} 1`)
+    })
+    await withFakeGh({ FAKE_GH_JSON: prsJson([30, 'CLOSED', false, unrelated], [61, 'MERGED', false, prHead]) }, async () => {
+      const o = lines()
+      const { result } = await run({ branchResult: branchAt(dir), prState: real(o.states) })
+      check('none open: the most recent is picked, with its real state', o.states[0], `TOUCHSTONE_PR ${BRANCH} 0 61 MERGED false ${prHead} 1`)
+      check('and the run halts as merged', [result.halted_at, /is merged/.test(result.note ?? '')], ['Draft PR', true])
+    })
+    await withFakeGh({ FAKE_GH_JSON: prsJson([42, 'OPEN', false, prHead]), FAKE_GH_ISDRAFT: 'true' }, async (calls) => {
       const o = lines()
       const { result } = await run(mutationRed({ branchResult: branchAt(dir),
         prState: real(o.states), prUndo: real(o.undos), prPush: real(o.pushes) }))
@@ -313,13 +354,21 @@ async function scenarioRealLines() {
       check('gh pr ready --undo ran', calls().some(c => c.endsWith('|pr ready 42 --undo')), true)
       check('the halt says draft', (result.note ?? '').includes('The PR was left as a draft'), true)
     })
-    await withFakeGh({ FAKE_GH_PR: `42 OPEN false ${prHead}`, FAKE_GH_ISDRAFT: 'false', FAKE_GH_UNDO_EXIT: '1' }, async () => {
+    await withFakeGh({ FAKE_GH_JSON: prsJson([42, 'OPEN', false, prHead]), FAKE_GH_ISDRAFT: 'false', FAKE_GH_UNDO_EXIT: '1' }, async () => {
       const o = lines()
       const { result } = await run(mutationRed({ branchResult: branchAt(dir),
         prState: real(o.states), prUndo: real(o.undos), prPush: real(o.pushes) }))
       check('a failed conversion prints exit 1 and isDraft false',
         o.undos[0]?.split(' ').slice(0, 4).join(' '), 'TOUCHSTONE_PR_UNDO 42 1 false')
       check('the halt says ready with ungated commits', (result.note ?? '').includes(`PR #42 ${READY_NOTE}`), true)
+    })
+    await withFakeGh({ FAKE_GH_JSON: prsJson([42, 'OPEN', false, prHead]), FAKE_GH_VIEW_EXIT: '1', FAKE_GH_UNDO_EXIT: '1' }, async () => {
+      const o = lines()
+      const { result } = await run(mutationRed({ branchResult: branchAt(dir),
+        prState: real(o.states), prUndo: real(o.undos), prPush: real(o.pushes) }))
+      check('a re-read that fails prints none', o.undos[0]?.split(' ').slice(0, 4).join(' '), 'TOUCHSTONE_PR_UNDO 42 1 none')
+      check('the halt says the state is unknown, not that it reads as ready',
+        [/state is unknown after/.test(result.note ?? ''), (result.note ?? '').includes('read as ready')], [true, false])
     })
     const ds = await run({ branchResult: branchAt(dir), implRange: `${base}..${git('rev-parse', 'HEAD')}` })
     const printed = runRunnerLines(promptOf(ds.captured, 'diffstat')).trim().split('\n')

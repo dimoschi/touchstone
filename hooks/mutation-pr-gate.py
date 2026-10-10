@@ -64,9 +64,12 @@ MUTATION_CHECK = Path(__file__).resolve().parent.parent / \
 # check at all -- the exemption became the bypass.
 GH_PR_READY = re.compile(r'(?:^|[;&|(]\s*)gh\s+pr\s+ready\b')
 # `gh pr ready --undo` converts a PR back to a draft: it withdraws a review
-# request, so it is the one ready form that is not gated. Read from the end of
-# a ready match to the end of that command only.
-GH_PR_READY_UNDO = re.compile(r'[^;&|)]*\s--undo(?=[\s;&|)]|$)')
+# request, so it is the one ready form that is not gated. Only that command's
+# own words count: a newline or `#` ends it as surely as `;` does, or
+# `gh pr ready 5 # --undo` would pass as an undo.
+READY_COMMAND_END = re.compile(r'[;&|)\n#]')
+# strconv.ParseBool's true spellings, which is what pflag gives a bool flag.
+PFLAG_TRUE = {'1', 't', 'T', 'true', 'TRUE', 'True'}
 GH_PR_CREATE = re.compile(r'(?:^|[;&|(]\s*)gh\s+pr\s+create\b')
 # A draft is not a request to review. Opening one is how work in progress is
 # made visible -- pushed, discoverable, and reportable if a run stops early --
@@ -167,10 +170,25 @@ def push_hit(repo, m):
     return None
 
 
+def undoes(rest):
+    """True when the `gh pr ready` arguments at the start of `rest` leave --undo set.
+
+    pflag lets the last occurrence of a flag win, so `--undo --undo=false` is
+    a real ready.
+    """
+    undo = False
+    for token in READY_COMMAND_END.split(rest, maxsplit=1)[0].split():
+        if token == '--undo':
+            undo = True
+        elif token.startswith('--undo='):
+            undo = token[len('--undo='):] in PFLAG_TRUE
+    return undo
+
+
 def ready_route(cmd):
     """The first `gh pr ready` in `cmd` that asks for review, or None."""
     for m in GH_PR_READY.finditer(cmd):
-        if not GH_PR_READY_UNDO.match(cmd, m.end()):
+        if not undoes(cmd[m.end():]):
             return m
     return None
 

@@ -163,8 +163,8 @@ function makeAgent(scenario, captured) {
     // The PR-state line finds no PR, so draft-pr is asked to open one.
     if (label === 'pr:state') {
       captured.draftPrCalled = true
-      const branch = (/printf 'TOUCHSTONE_PR %s %s %s %s %s %s\\n' (\S+) /.exec(prompt) ?? [])[1] ?? ''
-      return { output: `TOUCHSTONE_PR ${branch} none none none none 0` }
+      const branch = (/printf 'TOUCHSTONE_PR %s %s %s %s %s %s %s\\n' (\S+) /.exec(prompt) ?? [])[1] ?? ''
+      return { output: `TOUCHSTONE_PR ${branch} 0 none none none none 0` }
     }
     if (label === 'draft-pr') {
       // Default has no number, so draftPr stays null and prNote() reports that

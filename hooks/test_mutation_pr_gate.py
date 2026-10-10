@@ -76,6 +76,27 @@ def test_trigger_gh_pr_ready_undo_must_be_its_own_flag(tmp_path):
     assert gate.trigger("gh pr ready 7; echo --undo", repo) == (repo.resolve(), None)
 
 
+def test_trigger_gh_pr_ready_undo_stops_at_a_comment_or_newline(tmp_path):
+    repo = _repo(tmp_path)
+    assert gate.trigger("gh pr ready 5 # --undo", repo) == (repo.resolve(), None)
+    assert gate.trigger("gh pr ready 5\necho --undo", repo) == (repo.resolve(), None)
+
+
+def test_trigger_gh_pr_ready_undo_last_value_wins(tmp_path):
+    repo = _repo(tmp_path)
+    assert gate.trigger("gh pr ready 5 --undo --undo=false", repo) == (repo.resolve(), None)
+    assert gate.trigger("gh pr ready 5 --undo=false", repo) == (repo.resolve(), None)
+    assert gate.trigger("gh pr ready 5 --undo=0", repo) == (repo.resolve(), None)
+    assert gate.trigger("gh pr ready 5 --undo=false --undo", repo) is None
+    assert gate.trigger("gh pr ready 5 --undo=true", repo) is None
+
+
+def test_trigger_gh_pr_ready_undo_still_allowed_after_a_push(tmp_path):
+    repo = _repo(tmp_path, branch="feature")
+    assert gate.trigger("gh pr ready 5 --undo", repo) is None
+    assert gate.trigger(f"git -C {repo} push && gh pr ready 5 --undo", repo) is None
+
+
 def test_trigger_gh_pr_create_non_draft(tmp_path):
     repo = _repo(tmp_path)
     hit_repo, branch = gate.trigger("gh pr create --title x", repo)

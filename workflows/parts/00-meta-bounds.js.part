@@ -256,9 +256,11 @@ const dispatch = async (prompt, opts) => {
 }
 
 // Set once the run has a PR, opened or adopted (Draft PR phase, part 40):
-// { url, number, draft, readyWhy }. draft is the state the run last read, and
-// readyWhy says why a ready PR could not be made a draft. Read by prNote() and
-// halted(), which are defined before the phase that sets it.
+// { url, number, draft, stateUnknown, readyWhy, pushed }. draft is true only
+// when the run read it as a draft; stateUnknown when the undo left nothing it
+// could read; readyWhy says why it is not a draft; pushed whether this run's
+// push to an adopted PR succeeded. Read by prNote() and halted(), which are
+// defined before the phase that sets it.
 let draftPr = null
 
 // Set once the diffstat line (Review phase, part 40) has measured the
@@ -316,12 +318,17 @@ let pipelineVersion = { executed: PIPELINE_VERSION, base_branch: null, mismatch:
 // PR that was already ready may not convert back, so a note that states one
 // outcome flatly is wrong some of the time. Every halt note that mentions the
 // PR reads this instead of asserting one.
-const prNote = () => !draftPr
-  ? `No PR was opened, because the draft could not be opened earlier in this run`
-  : draftPr.draft
-  ? `The PR was left as a draft`
-  : `PR #${draftPr.number} read as ready for review, with commits the gates have not ` +
-    `passed: it was ready when this run adopted it, and ${draftPr.readyWhy}`
+const prNote = () => {
+  if (!draftPr) return `No PR was opened, because the draft could not be opened earlier in this run`
+  if (draftPr.draft) return `The PR was left as a draft`
+  const holds = draftPr.pushed
+    ? `with commits the gates have not passed` : `holding no commit from this run`
+  return draftPr.stateUnknown
+    ? `PR #${draftPr.number} was ready for review when this run adopted it, and its state is ` +
+      `unknown after converting it to a draft was tried, ${holds}: ${draftPr.readyWhy}`
+    : `PR #${draftPr.number} read as ready for review, ${holds}: it was ready when this run ` +
+      `adopted it, and ${draftPr.readyWhy}`
+}
 
 // A halt is a result, not an absence of one, and the run record is where it
 // survives the session. It used to be posted as a comment on the draft PR too.
@@ -355,7 +362,7 @@ const halted = async (at, extra) => {
   }
   if (draftPr?.number) {
     log(`halt at ${at}: PR #${draftPr.number} left as it is ` +
-        `(${draftPr.draft ? 'a draft' : 'ready for review'}); the reason is in ` +
+        `(${draftPr.draft ? 'a draft' : draftPr.stateUnknown ? 'state unknown' : 'ready for review'}); the reason is in ` +
         `this run's result and record`)
   }
   return payload

@@ -483,14 +483,19 @@ enterPhase('Draft PR')
 // Whether the branch already has a PR is read from a line the shell prints,
 // never from a model's account: a run once adopted an unrelated PR because its
 // branch had the same name. gh has no -C, so it runs in a subshell cd'd into
-// the worktree; the ancestry is git's, against the PR head gh reported, and a
-// head this clone does not have is not an ancestor either.
+// the worktree. gh pr list exits 0 with nothing when there is no PR, so its
+// exit separates "none" from "could not ask". Of several PRs for the branch the
+// open one is taken, else the highest-numbered, with its own state. The
+// ancestry is git's, against the PR head gh reported, and a head this clone
+// does not have is not an ancestor either.
 const prStateLine =
-  `p="$(cd ${shQuote(wt.path)} && gh pr view ${shQuote(wt.branch)} --json number,state,isDraft,headRefOid ` +
-  `--jq '"\\(.number) \\(.state) \\(.isDraft) \\(.headRefOid)"' 2>/dev/null)" || p=''; ` +
+  `p="$(cd ${shQuote(wt.path)} && gh pr list --head ${shQuote(wt.branch)} --state all ` +
+  `--json number,state,isDraft,headRefOid --limit 20 ` +
+  `--jq 'sort_by(-.number) | (map(select(.state == "OPEN")) + .)[0] // empty | ` +
+  `"\\(.number) \\(.state) \\(.isDraft) \\(.headRefOid)"' 2>/dev/null)"; g=$?; ` +
   `read -r n s r h <<<"$p"; ` +
   `if [ -n "$h" ] && git -C ${shQuote(wt.path)} merge-base --is-ancestor "$h" HEAD 2>/dev/null; then a=1; else a=0; fi; ` +
-  `printf 'TOUCHSTONE_PR %s %s %s %s %s %s\\n' ${shQuote(wt.branch)} "\${n:-none}" "\${s:-none}" "\${r:-none}" "\${h:-none}" "$a"`
+  `printf 'TOUCHSTONE_PR %s %s %s %s %s %s %s\\n' ${shQuote(wt.branch)} "$g" "\${n:-none}" "\${s:-none}" "\${r:-none}" "\${h:-none}" "$a"`
 let prLineAttempt = 0
 const prRunFor = (what) => `${planId}-${what}-${++prLineAttempt}`
 const relayLine = async (label, line) =>
@@ -553,6 +558,12 @@ if (prState.reasons) {
     log(`draft PR not opened (${draft?.detail ?? 'no detail'}); continuing. ` +
         `A halt from here on is only visible in this session`)
   }
+} else if (prState.state !== 'OPEN') {
+  return await halted('Draft PR', { ...draftPayload(),
+    note: `PR #${prState.number} for branch ${wt.branch} is ${prState.state.toLowerCase()}, so ` +
+      `this run cannot carry its work on it. The run pushed nothing. Pick another branch ` +
+      `name` + (prState.state === 'CLOSED' ? `, or reopen the PR` : '') + `, then re-run.`,
+  })
 } else if (!prState.ancestor) {
   return await halted('Draft PR', { ...draftPayload(),
     note: `PR #${prState.number} for branch ${wt.branch} has head ${prState.head}, which is ` +
@@ -561,14 +572,8 @@ if (prState.reasons) {
       `cut. The run did not adopt it and pushed nothing. Pick another branch name or ` +
       `bring the branch up to that head, then re-run.`,
   })
-} else if (prState.state !== 'OPEN') {
-  return await halted('Draft PR', { ...draftPayload(),
-    note: `PR #${prState.number} for branch ${wt.branch} is ${prState.state.toLowerCase()}, so ` +
-      `this run cannot carry its work on it. The run pushed nothing. Pick another branch ` +
-      `name, or reopen the PR, then re-run.`,
-  })
 } else {
-  draftPr = { url: null, number: prState.number, draft: prState.draft }
+  draftPr = { url: null, number: prState.number, draft: prState.draft, stateUnknown: false, pushed: false }
   log(`PR #${prState.number} carries this run, adopted ${prState.draft ? 'as a draft' : 'ready for review'}`)
   // A ready PR would otherwise hold commits no gate has passed while it reads
   // as finished. Converted before the push, so it never does.
@@ -578,15 +583,19 @@ if (prState.reasons) {
       return parsePrUndo(await relayLine(label, prUndoLineFor(prState.number, run)), prState.number, run)
     })
     draftPr.draft = !undo.reasons && undo.draft
+    draftPr.stateUnknown = Boolean(undo.reasons) || undo.isDraft === 'none'
     draftPr.readyWhy = undo.reasons
       ? `converting it to a draft could not be verified: ${undo.reasons.join('; ')}`
       : undo.draft ? null
+      : undo.isDraft === 'none'
+      ? `gh pr ready ${prState.number} --undo exited ${undo.exit} and re-reading isDraft printed nothing (${undo.log})`
       : `gh pr ready ${prState.number} --undo exited ${undo.exit} and the PR still reads as ready (${undo.log})`
     log(draftPr.draft ? `PR #${prState.number} converted to a draft` : `PR #${prState.number}: ${draftPr.readyWhy}`)
   }
   const pushRun = prRunFor('pr-push')
   const pushed = parsePush(await relayLine('pr:push', prPushLineFor(pushRun)), wt.branch, pushRun)
-  if (pushed.reason || pushed.exit !== 0) {
+  draftPr.pushed = !pushed.reason && pushed.exit === 0
+  if (!draftPr.pushed) {
     log(`pr:push: ${pushed.reason ?? `git push exited ${pushed.exit} (${pushed.log})`}; ` +
         `continuing, the PR phase pushes again`)
   }

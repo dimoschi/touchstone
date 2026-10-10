@@ -362,18 +362,22 @@ const parseUnreviewed = (output, from) => {
   if (!COMMIT_TOKEN.test(head)) return { reason: 'head is not a commit id' }
   return { count: Number(count), head }
 }
-// The branch's PR as gh reported it, and whether its head is an ancestor of
-// the branch head, which the shell decides (prStateLine in part 40). No PR,
-// or gh failing, prints none in every field.
-const PR_STATE_LINE = /^TOUCHSTONE_PR (\S+) (\S+) (\S+) (\S+) (\S+) (\S+)$/
+// The branch's PR as gh reported it, gh's exit, and whether the PR head is an
+// ancestor of the branch head, which the shell decides (prStateLine in part
+// 40). No PR prints none in every field with gh exit 0; a gh that failed is
+// unmeasured, never "no PR", since a run that opened a draft on bad
+// credentials would push onto a PR it never read.
+const PR_STATE_LINE = /^TOUCHSTONE_PR (\S+) (\S+) (\S+) (\S+) (\S+) (\S+) (\S+)$/
 const PR_STATES = ['OPEN', 'CLOSED', 'MERGED']
 const parsePrState = (output, branch) => {
   const { line, reason } = oneLineOf(output)
   if (reason) return { reason }
   const m = PR_STATE_LINE.exec(line)
   if (!m) return { reason: 'malformed PR line' }
-  const [, b, number, state, isDraft, head, ancestor] = m
+  const [, b, ghExit, number, state, isDraft, head, ancestor] = m
   if (b !== branch) return { reason: `PR line names branch ${b}, not ${branch}` }
+  if (!/^\d+$/.test(ghExit)) return { reason: 'gh exit is not an integer' }
+  if (ghExit !== '0') return { reason: `gh exited ${ghExit}` }
   if (number === 'none') {
     return [state, isDraft, head, ancestor].join(' ') === 'none none none 0'
       ? { number: null } : { reason: 'PR line says none but carries PR fields' }
@@ -398,7 +402,7 @@ const parsePrUndo = (output, number, run) => {
   if (!/^\d+$/.test(exit)) return { reason: 'exit is not an integer' }
   if (!['true', 'false', 'none'].includes(isDraft)) return { reason: 'isDraft is not true, false or none' }
   if (!underPrRun(log, run, 'pr-undo.log')) return { reason: 'log path is not under this run' }
-  return { exit: Number(exit), draft: isDraft === 'true', log }
+  return { exit: Number(exit), draft: isDraft === 'true', isDraft, log }
 }
 const PUSH_LINE = /^TOUCHSTONE_PUSH (\S+) (\S+) (.+)$/
 const parsePush = (output, branch, run) => {

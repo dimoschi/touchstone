@@ -569,42 +569,52 @@ decision there is read from a line the script builds and the shell prints
 **Which PR.** A `pr:state` agent runs one line:
 
 ```
-p="$(cd <worktree> && gh pr view <branch> --json number,state,isDraft,headRefOid --jq '"\(.number) \(.state) \(.isDraft) \(.headRefOid)"' 2>/dev/null)" || p=''; read -r n s r h <<<"$p"; if [ -n "$h" ] && git -C <worktree> merge-base --is-ancestor "$h" HEAD 2>/dev/null; then a=1; else a=0; fi; printf 'TOUCHSTONE_PR %s %s %s %s %s %s\n' <branch> "${n:-none}" "${s:-none}" "${r:-none}" "${h:-none}" "$a"
+p="$(cd <worktree> && gh pr list --head <branch> --state all --json number,state,isDraft,headRefOid --limit 20 --jq 'sort_by(-.number) | (map(select(.state == "OPEN")) + .)[0] // empty | "\(.number) \(.state) \(.isDraft) \(.headRefOid)"' 2>/dev/null)"; g=$?; read -r n s r h <<<"$p"; if [ -n "$h" ] && git -C <worktree> merge-base --is-ancestor "$h" HEAD 2>/dev/null; then a=1; else a=0; fi; printf 'TOUCHSTONE_PR %s %s %s %s %s %s %s\n' <branch> "$g" "${n:-none}" "${s:-none}" "${r:-none}" "${h:-none}" "$a"
 ```
 
-`gh` has no `-C`, so it runs in a subshell inside the worktree. No PR, or `gh` failing, prints
-`none none none none 0`. The ancestry is git's: a PR head this clone does not have is not an
-ancestor either. `parsePrState` accepts exactly one line naming this branch, then either all
-`none` with ancestor `0`, or an integer number, a state of `OPEN`, `CLOSED` or `MERGED`, `true` or
-`false`, a 40-hex head and `0` or `1`. The script decides:
+`gh` has no `-C`, so it runs in a subshell inside the worktree. `gh pr list` exits 0 and prints
+nothing when the branch has no PR, so the line prints `0 none none none none 0`; a `gh` that
+fails (bad credentials, no network) prints its own exit instead, and `parsePrState` reads any
+nonzero exit as unmeasured, never as "no PR". Of several PRs for the branch the open one is
+taken, else the highest-numbered, with its real state. The ancestry is git's: a PR head this
+clone does not have is not an ancestor either. `parsePrState` accepts exactly one line naming
+this branch with gh exit 0, then either all `none` with ancestor `0`, or an integer number, a
+state of `OPEN`, `CLOSED` or `MERGED`, `true` or `false`, a 40-hex head and `0` or `1`. The script
+checks the state first, then the ancestry:
 
 | Line | Run |
 |---|---|
 | no PR | the `draft-pr` agent pushes and opens a draft (its prompt only creates; it never adopts) |
-| a PR whose head is not an ancestor of the branch head | halt at Draft PR naming the PR, its head and the branch; nothing is adopted or pushed |
-| a merged or closed PR that is an ancestor | halt at Draft PR naming the PR and its state |
+| a merged PR | halt at Draft PR: the PR is merged; pick another branch name |
+| a closed PR | halt at Draft PR: the PR is closed; pick another branch name or reopen it |
+| an open PR whose head is not an ancestor of the branch head | halt at Draft PR naming the PR, its head and the branch, as an unrelated PR under the same name; nothing is adopted or pushed |
 | an open PR that is an ancestor | adopted, with the number from the line, then pushed by a `pr:push` line |
 
-Unparseable twice (`pr:state:retry`), the run opens and adopts nothing and goes on without a PR:
-not knowing is no reason to open one next to a PR the run must not touch.
+Unparseable twice, or `gh` failing twice (`pr:state:retry`), the run opens and adopts nothing and
+goes on without a PR: not knowing is no reason to open one next to a PR the run must not touch.
 
 **A ready PR.** An adopted PR that is ready for review is converted back to a draft before the
 push, by a `pr:undo` line that runs `gh pr ready <n> --undo` (log under
 `<git dir>/touchstone-pr/<run>/pr-undo.log`), re-reads `isDraft` and prints
-`TOUCHSTONE_PR_UNDO <n> <exit> <true|false|none> <log>`. The re-read decides, not the exit.
-`mutation-pr-gate.py` lets `--undo` through, since it withdraws a review request rather than
-making one. A conversion that fails, or whose line is unparseable twice, keeps the PR as it is
-and records why.
+`TOUCHSTONE_PR_UNDO <n> <exit> <true|false|none> <log>`. The re-read decides, not the exit:
+`true` is a draft, `false` is still ready, and `none` (the re-read failed) or a line unparseable
+twice leaves the state unknown. `mutation-pr-gate.py` lets `gh pr ready --undo` through, since it
+withdraws a review request rather than making one. Only that command's own words count (a `;`,
+`&`, `|`, `)`, newline or `#` ends it), and the last `--undo`/`--undo=<v>` wins, as in pflag, so
+`gh pr ready 5 # --undo` and `gh pr ready 5 --undo --undo=false` are still gated.
 
 **The push.** `pr:push` runs `git -C <worktree> push -u origin <branch>` and prints
 `TOUCHSTONE_PUSH <branch> <exit> <log>`. A failed push is logged and is not fatal; the PR phase
 pushes again.
 
-**What a halt says.** `draftPr` records the state the run last read (`draft`) and, for a PR it
-could not convert, why (`readyWhy`). `prNote()` builds its sentence from those fields: "The PR was
-left as a draft", "No PR was opened ...", or "PR #<n> read as ready for review, with commits the
-gates have not passed: ...". While the PR reads as ready, `halted()` appends that sentence to every
-halt note that does not already carry it, so a halt at any phase after the push says so.
+**What a halt says.** `draftPr` records what the run read: `draft`, `stateUnknown`, why it is not
+a draft (`readyWhy`), and whether this run's push succeeded (`pushed`). `prNote()` builds its
+sentence from those fields: "The PR was left as a draft", "No PR was opened ...", "PR #<n> read as
+ready for review, ...", or "PR #<n> was ready for review when this run adopted it, and its state is
+unknown after converting it to a draft was tried, ...". It says "with commits the gates have not
+passed" only when the push succeeded, and "holding no commit from this run" otherwise. While the
+PR is not a draft, `halted()` appends that sentence to every halt note that does not already carry
+it, so a halt at any phase after the push says so.
 
 ### Check discovery
 
