@@ -349,9 +349,9 @@ async function scenarioR7() {
     tail.includes(`Commit range: ${P}..${FIX_HEAD}\n`), true)
   check('the run reports one reviewer', result.reviewers, 1)
   check('the head it reports is the fix round\'s, which that review read up to', result.reviewed_through, FIX_HEAD)
-  const pr = captured.calls.find(c => c.label === 'pr')?.prompt ?? ''
+  const count = captured.calls.find(c => c.label === 'pr-unreviewed')?.prompt ?? ''
   check('the PR phase still guards against unreviewed commits',
-    pr.includes(`git rev-list --count ${FIX_HEAD}..HEAD`), true)
+    count.includes(`rev-list --count ${FIX_HEAD}.."$h"`), true)
 
   const optOut = await run(resumed(prior, { ...base, args: { openPr: true, reviewers: 0 } }))
   check('args.reviewers: 0 switches the floor off', callCount(optOut.captured, 'review:fix:1:correctness'), 0)

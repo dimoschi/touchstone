@@ -488,7 +488,7 @@ const endLineFor = (run) =>
   `{ ${stateOf('status')}; printf 'TOUCHSTONE_CHECKS_END %s %s %s\\n' ${run} "$s" "$k"; }`
 // The instructions every runner call gets around its fenced lines: checks:run
 // and reproduce:* alike.
-const runnerPrompt = (label, lines) =>
+const runnerPrompt = (label, lines, note = '') =>
   `[touchstone: ${label}]\n` +
   `Run each line between the fence lines below as its own Bash call, exactly ` +
   `as written, then STOP. Do not fix, edit, or investigate a failure; a later ` +
@@ -510,7 +510,7 @@ const runnerPrompt = (label, lines) =>
   `Return output: every line the calls printed, copied verbatim and in ` +
   `order, one per line, with no fence, comment or summary of your own. Never ` +
   `write, change or reorder a line yourself; a line you did not see printed ` +
-  `is not reported.\n` +
+  `is not reported.\n` + note +
   '```bash\n' + lines.join('\n') + '\n```'
 const executeChecks = async (checks = discoveredChecks) => {
   checkAttempt++

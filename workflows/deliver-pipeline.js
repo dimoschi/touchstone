@@ -29,7 +29,7 @@ export const meta = {
 // against the manifest in scripts/check-version-bump.sh, so drift is a
 // gate's job rather than something this script verifies about itself.
 const PLUGIN_NAME = 'touchstone'
-const PIPELINE_VERSION = '0.33.0'
+const PIPELINE_VERSION = '0.34.0'
 
 // Boundaries. Wall-clock deadlines are not expressible here (no Date.now, by
 // design); the bounds are rounds, counts, and token budget instead.
@@ -687,6 +687,50 @@ const parseReproRun = (output, ids, run, withHunks) => {
   if (stray) return { reason: `log path of ${stray.id} is not in the run directory` }
   if (!rowsSumMatches(rows, end.sum)) return { reason: ROWS_SUM_REASON }
   return { rows, before: before[2] === 'dirty', dirty: end.dirty, statusLog: end.path, hunkLines, diffExit }
+}
+
+// What a gate verdict relay returns (mutation-verify, pr-unreviewed in
+// 60-mutation-pr.js.part): the one line its script-built command printed.
+const VERDICT_RUN = {
+  type: 'object', additionalProperties: false, required: ['output'],
+  properties: { output: { type: 'string' } },
+}
+// Lowercase letters as well as hex digits, because the stubbed heads the
+// workflow suites use (mut000..., head000...) are not hex; what is rejected is
+// a revision expression, a quote or a second token.
+const COMMIT_TOKEN = /^[0-9a-z]+$/
+const oneLineOf = (output) => {
+  const lines = runnerLinesOf(output)
+  if (!lines.length) return { reason: 'no output' }
+  if (lines.length > 1) return { reason: `${lines.length} lines where one was expected` }
+  return { line: lines[0] }
+}
+const MUTATION_VERIFY_LINE = /^TOUCHSTONE_MUTATION_VERIFY (\S+) (\S+) (\S+) (.+)$/
+const parseMutationVerify = (output, run) => {
+  const { line, reason } = oneLineOf(output)
+  if (reason) return { reason }
+  const m = MUTATION_VERIFY_LINE.exec(line)
+  if (!m) return { reason: 'malformed verdict line' }
+  const [, r, exit, head, log] = m
+  if (r !== run) return { reason: `verdict line names run ${r}, not ${run}` }
+  if (!/^\d+$/.test(exit)) return { reason: 'exit is not an integer' }
+  if (!COMMIT_TOKEN.test(head)) return { reason: 'head is not a commit id' }
+  if (!log.startsWith('/') || !log.endsWith(`/touchstone-gates/${run}/mutation-verify.log`)) {
+    return { reason: 'log path is not under this run' }
+  }
+  return { exit: Number(exit), head, log }
+}
+const UNREVIEWED_LINE = /^TOUCHSTONE_UNREVIEWED (\S+) (\S+) (\S+)$/
+const parseUnreviewed = (output, from) => {
+  const { line, reason } = oneLineOf(output)
+  if (reason) return { reason }
+  const m = UNREVIEWED_LINE.exec(line)
+  if (!m) return { reason: 'malformed count line' }
+  const [, f, count, head] = m
+  if (f !== from) return { reason: `count line starts at ${f}, not ${from}` }
+  if (!/^\d+$/.test(count)) return { reason: 'count is not an integer' }
+  if (!COMMIT_TOKEN.test(head)) return { reason: 'head is not a commit id' }
+  return { count: Number(count), head }
 }
 // The only heading that is a check list. Only trailing whitespace is
 // ignored: '## checks', '### Checks', '##Checks', '## Checks ##' and
@@ -2183,7 +2227,7 @@ const endLineFor = (run) =>
   `{ ${stateOf('status')}; printf 'TOUCHSTONE_CHECKS_END %s %s %s\\n' ${run} "$s" "$k"; }`
 // The instructions every runner call gets around its fenced lines: checks:run
 // and reproduce:* alike.
-const runnerPrompt = (label, lines) =>
+const runnerPrompt = (label, lines, note = '') =>
   `[touchstone: ${label}]\n` +
   `Run each line between the fence lines below as its own Bash call, exactly ` +
   `as written, then STOP. Do not fix, edit, or investigate a failure; a later ` +
@@ -2205,7 +2249,7 @@ const runnerPrompt = (label, lines) =>
   `Return output: every line the calls printed, copied verbatim and in ` +
   `order, one per line, with no fence, comment or summary of your own. Never ` +
   `write, change or reorder a line yourself; a line you did not see printed ` +
-  `is not reported.\n` +
+  `is not reported.\n` + note +
   '```bash\n' + lines.join('\n') + '\n```'
 const executeChecks = async (checks = discoveredChecks) => {
   checkAttempt++
@@ -4058,13 +4102,46 @@ if (!mutationGated) {
         : `(the CRAP and dead-code gates are not hook-enforced here either, ` +
           `per the earlier probe)`))
 }
+// Whether the gate is green, and the head it left, are read from a line the
+// script builds and the shell prints, never from the mutation agent's own
+// account: green is mutation-check.sh --verify exiting 0, and the head is git's.
+// The line names mutation-check.sh without its directory, so the agent
+// running the line supplies the path, as the signals probe does.
+let verdictAttempt = 0
+const mutationVerifyLineFor = (run) =>
+  `${logDirFor(run, 'touchstone-gates')} && mkdir -p "$d" && ` +
+  `h="$(git -C ${shQuote(wt.path)} rev-parse HEAD 2>/dev/null)" && ` +
+  `{ mutation-check.sh ${shQuote(wt.path)} --verify >|"$d/mutation-verify.log" 2>&1; e=$?; ` +
+  `printf 'TOUCHSTONE_MUTATION_VERIFY %s %s %s %s\\n' ${run} "$e" "$h" "$d/mutation-verify.log"; }`
+const MUTATION_CHECK_PATH_NOTE =
+  `mutation-check.sh is named without its directory. It sits in the ` +
+  `crap-controlled-changes skill's directory, beside crap-check.sh: invoke ` +
+  `that skill to learn where that is, and replace that one word with its ` +
+  `absolute path. That is the only change you may make to the line.\n`
+const measureVerdict = async (label) => {
+  verdictAttempt++
+  const run = `${planId}-mutation-verify-${verdictAttempt}`
+  const out = await treeAgent(runnerPrompt(label, [mutationVerifyLineFor(run)], MUTATION_CHECK_PATH_NOTE),
+    { label, schema: VERDICT_RUN, model: 'haiku', effort: 'low' })
+  return parseMutationVerify(out?.output, run)
+}
+const verifyMutation = async (label) => {
+  const first = await measureVerdict(label)
+  if (!first.reason) return first
+  log(`${label}: unmeasured (${first.reason}), retrying once`)
+  const second = await measureVerdict(`${label}:retry`)
+  if (!second.reason) return second
+  return { reasons: [first.reason, second.reason] }
+}
 // needs_user_run breaks the loop instead of retrying: a run that cannot fit the
 // Bash ceiling returns the same answer every attempt, and each one costs the
-// ceiling in wall clock before saying so.
+// ceiling in wall clock before saying so. An unmeasured verdict breaks it too:
+// another mutation run cannot fix a relay that did not print its line.
 for (let attempt = 1; attempt <= MAX_GATE_ATTEMPTS && !mutation.green
      && !mutation.needs_user_run && !mutation.unsupported_language
+     && !mutation.verdict_unmeasured
      && !outOfBudget() && !sMut.over(); attempt++) {
-  mutation = await treeAgent(
+  const reported = await treeAgent(
     `Run mutation-check.sh ${wt.path} from the crap-controlled-changes skill in ` +
     `this repo. It mutates files in place and needs a clean working tree, so ` +
     `commit anything outstanding first. Never create, edit or delete .crap-gated, ` +
@@ -4120,20 +4197,24 @@ for (let attempt = 1; attempt <= MAX_GATE_ATTEMPTS && !mutation.green
     `Report the final state, and return head_sha: the full 40-character SHA of ` +
     `HEAD after your last commit, or of the unchanged HEAD if you committed ` +
     `nothing. ` +
-    `Anything you commit is reviewed before the PR opens, and that review is ` +
-    `keyed off this SHA.\n` +
+    `Anything you commit is reviewed before the PR opens.\n` +
     `Return scored=true if crap-commit.sh printed that it scored a commit you ` +
     `made this attempt, scored=false if you committed nothing or it printed ` +
     `nothing to score. Base this on what it printed, never on whether ` +
     `.crap-gated exists and never on your own judgement of the change. If it ` +
     `printed its own gate message, copy it verbatim into gate_note.`,
-    { label: `mutation:${attempt}`, schema: GATE, model: 'sonnet', effort: 'high' }) ?? mutation
-  if (mutation?.scored === true) {
+    { label: `mutation:${attempt}`, schema: GATE, model: 'sonnet', effort: 'high' })
+  if (reported?.scored === true) {
     scored = true
-    if (mutation?.gate_note) scoredNote = mutation.gate_note
-  } else if (mutation?.gate_note) {
-    unscoredNote = mutation.gate_note
+    if (reported?.gate_note) scoredNote = reported.gate_note
+  } else if (reported?.gate_note) {
+    unscoredNote = reported.gate_note
   }
+  const verdict = await verifyMutation(`mutation-verify:${attempt}`)
+  mutation = verdict.reasons
+    ? { ...(reported ?? mutation), green: false, verdict_unmeasured: true, verdict_reasons: verdict.reasons }
+    : { ...(reported ?? mutation), green: verdict.exit === 0, head_sha: verdict.head,
+        verify: { exit: verdict.exit, log: verdict.log } }
 }
 sMut.close()
 
@@ -4158,7 +4239,18 @@ if (!mutation.green) {
         `in your own terminal, then re-run this workflow: --verify will find ` +
         `the ledger green and the gate will cost milliseconds. ${prNote()}, ` +
         `and mutation-pr-gate.py would block marking it ready anyway.`
-      : `Mutation gate still red after ${MAX_GATE_ATTEMPTS} attempt(s). Surviving ` +
+      : mutation.verdict_unmeasured
+      ? `The mutation gate's verdict could not be measured: the line that runs ` +
+        `mutation-check.sh ${wt.path} --verify did not print what the script ` +
+        `asked for, even after a retry (first: ${mutation.verdict_reasons[0]}; ` +
+        `second: ${mutation.verdict_reasons[1]}). This halt is about ` +
+        `measurement, not about mutants. ${prNote()}, and ` +
+        `mutation-pr-gate.py would block marking it ready until --verify reads green.`
+      : `Mutation gate still red after ${MAX_GATE_ATTEMPTS} attempt(s): ` +
+        (mutation.verify
+          ? `mutation-check.sh --verify exited ${mutation.verify.exit} (${mutation.verify.log}). `
+          : '') +
+        `Surviving ` +
         `mutants are behaviour the tests cannot detect. ${prNote()}, and ` +
         `mutation-pr-gate.py would block marking it ready. Kill them ` +
         `with tests, or approve a provably equivalent mutant with ` +
@@ -4294,22 +4386,47 @@ const notesSection = notes.length
         `this note's claim, and never put that path in the PR.`
       : `- ${n.title}: ${n.claim}`).join('\n') + `\n`
   : ''
+// Every commit through reviewedThrough has been reviewed. Whether any came
+// after it is counted by git as revisions, never by comparing SHA strings,
+// which differ in abbreviation on an honest branch, and the shell prints the
+// count: the pr agent used to run and judge this itself.
+const unreviewedLine =
+  `h="$(git -C ${shQuote(wt.path)} rev-parse HEAD 2>/dev/null)" && ` +
+  `n="$(git -C ${shQuote(wt.path)} rev-list --count ${shQuote(reviewedThrough)}.."$h" 2>/dev/null)" && ` +
+  `printf 'TOUCHSTONE_UNREVIEWED %s %s %s\\n' ${shQuote(reviewedThrough)} "$n" "$h"`
+const countUnreviewed = async () => {
+  const measure = async (label) => parseUnreviewed((await treeAgent(runnerPrompt(label, [unreviewedLine]),
+    { label, schema: VERDICT_RUN, model: 'haiku', effort: 'low' }))?.output, reviewedThrough)
+  const first = await measure('pr-unreviewed')
+  if (!first.reason) return first
+  log(`pr-unreviewed: unmeasured (${first.reason}), retrying once`)
+  const second = await measure('pr-unreviewed:retry')
+  if (!second.reason) return second
+  return { reasons: [first.reason, second.reason] }
+}
 let pr = null
 if (args?.openPr !== false && !outOfBudget()) {
   enterPhase('PR')
+  if (reviewerCount) {
+    const unreviewed = await countUnreviewed()
+    if (unreviewed.reasons || unreviewed.count > 0) {
+      return await halted('PR', {
+        plan: plan.plan, implemented: impl.summary, gates: gatesPayload(),
+        mutation, unresolved_findings: open, notes,
+        note: unreviewed.reasons
+          ? `Whether commits exist past the reviewed head ${reviewedThrough} could ` +
+            `not be measured: the count line did not print what the script asked ` +
+            `for, even after a retry (first: ${unreviewed.reasons[0]}; second: ` +
+            `${unreviewed.reasons[1]}). The run stopped before the PR step. ${prNote()}.`
+          : `${unreviewed.count} commit(s) in ${reviewedThrough}..${unreviewed.head} ` +
+            `have not been reviewed, so the run stopped before the PR step. ${prNote()}. ` +
+            `Read them with git log --oneline ${reviewedThrough}..${unreviewed.head}.`,
+      })
+    }
+  }
   const sPr = stage('pr')
   pr = await treeAgent(
     `Open a pull request for the work on this branch.\n` +
-    (reviewerCount
-      ? `FIRST, run git rev-list --count ${reviewedThrough}..HEAD. Every commit ` +
-        `through ${reviewedThrough} has been adversarially reviewed. Compare as ` +
-        `revisions like this, never by string-matching SHAs, which differ in ` +
-        `abbreviation and would fail on an honest branch. If the count is not ` +
-        `0, commits exist that no reviewer has read: return opened=false, name ` +
-        `them with git log --oneline ${reviewedThrough}..HEAD, and do not push. ` +
-        `Do not review them yourself and do not judge them harmless; you are ` +
-        `the phase that opens PRs, not the one that vouches for them.\n`
-      : '') +
     `Task: ${brief(task)}\nWhat was implemented: ${impl.summary}\n` +
     `Commit range: ${impl.commit_range}. Read that diff rather than relying on ` +
     `the summary above; a PR body that describes the diff is worth more than ` +

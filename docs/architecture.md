@@ -496,6 +496,52 @@ note is only ever a note: whether a new finding is a *variant* of a fixed one is
 by the lens setting `duplicate_of`, which is a judgement no exit code can make, and the
 cost of that judgement being wrong is a line in the PR body rather than another round.
 
+### Gate verdicts: mutation and unreviewed commits
+
+Two decisions before the PR used to rest on a model's account and are now read from a
+line the script builds and the shell prints, the same way as the check and reproducer
+runners (`60-mutation-pr.js.part`, parsers in `10-schemas.js.part`).
+
+**Mutation.** After every `mutation:N` attempt, including one whose agent returned
+nothing, a `mutation-verify:N` agent (haiku, low effort, `runnerPrompt`) runs one line:
+
+```
+d="$(git -C <worktree> rev-parse --path-format=absolute --git-path touchstone-gates/<run> 2>/dev/null)" && mkdir -p "$d" && h="$(git -C <worktree> rev-parse HEAD 2>/dev/null)" && { mutation-check.sh <worktree> --verify >|"$d/mutation-verify.log" 2>&1; e=$?; printf 'TOUCHSTONE_MUTATION_VERIFY %s %s %s %s\n' <run> "$e" "$h" "$d/mutation-verify.log"; }
+```
+
+`<run>` is the plan id plus `mutation-verify-<n>`. The line names `mutation-check.sh`
+without its directory, so the agent is told to find it in the crap-controlled-changes
+skill's directory and replace that one word with its absolute path, the same way the
+signals probe resolves `change-signals.sh`. That substitution is the one step a model
+still does here. `parseMutationVerify` accepts exactly one line naming this run, an
+integer exit, a head token and an absolute log path ending in
+`/touchstone-gates/<run>/mutation-verify.log`. The script then sets `mutation.green` from
+exit 0 and `mutation.head_sha` from the shell's head, and keeps the agent's `detail`,
+`needs_user_run` and `unsupported_language` for the halt note. The agent's own `green`
+and `head_sha` are ignored, so the post-mutation review range, the plan-leak probe and
+the settled re-check all start from git's head. A red verdict's halt note carries the
+`--verify` exit and its log.
+
+A reply that does not parse is retried once as `mutation-verify:N:retry`. Still
+unparseable, the result is not green (`verdict_unmeasured`, with both reasons), no further
+mutation attempt runs (another run cannot fix a relay that did not print its line), and the
+Mutation halt says the gate's verdict could not be measured, which is a different claim
+from surviving mutants. A repo without `.mutation-gated` skips the gate as before and runs
+no verdict line.
+
+**Unreviewed commits.** When the run has a reviewer lens, a `pr-unreviewed` agent runs one
+line before `pr` is dispatched:
+
+```
+h="$(git -C <worktree> rev-parse HEAD 2>/dev/null)" && n="$(git -C <worktree> rev-list --count <reviewed>.."$h" 2>/dev/null)" && printf 'TOUCHSTONE_UNREVIEWED %s %s %s\n' <reviewed> "$n" "$h"
+```
+
+`parseUnreviewed` accepts exactly one line starting at the reviewed head the script asked
+about, an integer count and a head token. A count above 0 halts at PR without dispatching
+`pr`, naming the count and the range `<reviewed>..<head>`. Unparseable twice
+(`pr-unreviewed:retry`) halts at PR as unmeasured. The `pr` prompt no longer runs or judges
+this count.
+
 ### Check discovery
 
 Folded into the `branch`/`branch:existing` call's own last step (`checks_source` on

@@ -156,6 +156,18 @@ function runRunnerLines(prompt) {
   return (fence ? fence[1].split('\n') : [])
     .map(line => spawnSync('bash', ['-c', line], { encoding: 'utf8' }).stdout).join('')
 }
+// What the mutation verdict line prints, for the run its prompt names.
+function mutationVerifyRunOf(prompt) {
+  return (/printf 'TOUCHSTONE_MUTATION_VERIFY %s %s %s %s\\n' (\S+) /.exec(prompt) ?? [])[1] ?? ''
+}
+function mutationVerifyOutput(prompt, exit, head, wtPath = STUB_WT_PATH) {
+  const run = mutationVerifyRunOf(prompt)
+  return `TOUCHSTONE_MUTATION_VERIFY ${run} ${exit} ${head} ${wtPath}/.git/touchstone-gates/${run}/mutation-verify.log`
+}
+// The reviewed head the unreviewed-commit line counts from.
+function unreviewedFromOf(prompt) {
+  return (/printf 'TOUCHSTONE_UNREVIEWED %s %s %s\\n' (\S+) /.exec(prompt) ?? [])[1] ?? ''
+}
 // A checkRuns stub's row, in the old shape. The stub turns it into what a
 // runner would print for that check: only its exit code is read.
 function checkRow(id, command, exit, output) {
@@ -542,7 +554,32 @@ function makeAgent(scenario, captured) {
     }
     if (label.startsWith('mutation:')) {
       const attempt = Number(label.slice('mutation:'.length))
-      return (scenario.mutationResult ?? (() => ({ green: true, head_sha: REVIEWED_THROUGH, detail: 'stub', scored: true })))(attempt)
+      const reported = (scenario.mutationResult ?? (() => ({ green: true, head_sha: REVIEWED_THROUGH, detail: 'stub', scored: true })))(attempt)
+      captured.lastMutation = reported ?? captured.lastMutation
+      return reported
+    }
+    // The verdict line run after each mutation attempt. By default it agrees
+    // with the agent: exit 0 when its last answer said green, else 1, at the
+    // head it reported. scenario.mutationVerify(attempt, prompt, retry)
+    // returns { exit, head } to override either, { output } for a raw reply,
+    // or null for no answer.
+    const verifyAt = /^mutation-verify:(\d+)(:retry)?$/.exec(label)
+    if (verifyAt) {
+      const custom = scenario.mutationVerify
+        ? scenario.mutationVerify(Number(verifyAt[1]), prompt, Boolean(verifyAt[2])) : undefined
+      if (custom === null || typeof custom?.output === 'string') return custom
+      const last = captured.lastMutation
+      return { output: mutationVerifyOutput(prompt, custom?.exit ?? (last?.green ? 0 : 1),
+        custom?.head ?? (last?.head_sha || REVIEWED_THROUGH)) }
+    }
+    // The unreviewed-commit count before the PR. Count 0 at the reviewed head
+    // unless scenario.unreviewed(retry, prompt) returns { count, head },
+    // { output } for a raw reply, or null for no answer.
+    if (label === 'pr-unreviewed' || label === 'pr-unreviewed:retry') {
+      const custom = scenario.unreviewed ? scenario.unreviewed(label.endsWith(':retry'), prompt) : undefined
+      if (custom === null || typeof custom?.output === 'string') return custom
+      const from = unreviewedFromOf(prompt)
+      return { output: `TOUCHSTONE_UNREVIEWED ${from} ${custom?.count ?? 0} ${custom?.head ?? from}` }
     }
     if (label === 'staleness') {
       if (scenario.staleness === 'reject') throw new Error('staleness subagent failed')

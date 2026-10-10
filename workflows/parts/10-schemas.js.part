@@ -308,6 +308,50 @@ const parseReproRun = (output, ids, run, withHunks) => {
   if (!rowsSumMatches(rows, end.sum)) return { reason: ROWS_SUM_REASON }
   return { rows, before: before[2] === 'dirty', dirty: end.dirty, statusLog: end.path, hunkLines, diffExit }
 }
+
+// What a gate verdict relay returns (mutation-verify, pr-unreviewed in
+// 60-mutation-pr.js.part): the one line its script-built command printed.
+const VERDICT_RUN = {
+  type: 'object', additionalProperties: false, required: ['output'],
+  properties: { output: { type: 'string' } },
+}
+// Lowercase letters as well as hex digits, because the stubbed heads the
+// workflow suites use (mut000..., head000...) are not hex; what is rejected is
+// a revision expression, a quote or a second token.
+const COMMIT_TOKEN = /^[0-9a-z]+$/
+const oneLineOf = (output) => {
+  const lines = runnerLinesOf(output)
+  if (!lines.length) return { reason: 'no output' }
+  if (lines.length > 1) return { reason: `${lines.length} lines where one was expected` }
+  return { line: lines[0] }
+}
+const MUTATION_VERIFY_LINE = /^TOUCHSTONE_MUTATION_VERIFY (\S+) (\S+) (\S+) (.+)$/
+const parseMutationVerify = (output, run) => {
+  const { line, reason } = oneLineOf(output)
+  if (reason) return { reason }
+  const m = MUTATION_VERIFY_LINE.exec(line)
+  if (!m) return { reason: 'malformed verdict line' }
+  const [, r, exit, head, log] = m
+  if (r !== run) return { reason: `verdict line names run ${r}, not ${run}` }
+  if (!/^\d+$/.test(exit)) return { reason: 'exit is not an integer' }
+  if (!COMMIT_TOKEN.test(head)) return { reason: 'head is not a commit id' }
+  if (!log.startsWith('/') || !log.endsWith(`/touchstone-gates/${run}/mutation-verify.log`)) {
+    return { reason: 'log path is not under this run' }
+  }
+  return { exit: Number(exit), head, log }
+}
+const UNREVIEWED_LINE = /^TOUCHSTONE_UNREVIEWED (\S+) (\S+) (\S+)$/
+const parseUnreviewed = (output, from) => {
+  const { line, reason } = oneLineOf(output)
+  if (reason) return { reason }
+  const m = UNREVIEWED_LINE.exec(line)
+  if (!m) return { reason: 'malformed count line' }
+  const [, f, count, head] = m
+  if (f !== from) return { reason: `count line starts at ${f}, not ${from}` }
+  if (!/^\d+$/.test(count)) return { reason: 'count is not an integer' }
+  if (!COMMIT_TOKEN.test(head)) return { reason: 'head is not a commit id' }
+  return { count: Number(count), head }
+}
 // The only heading that is a check list. Only trailing whitespace is
 // ignored: '## checks', '### Checks', '##Checks', '## Checks ##' and
 // '## Commands' all name something else and must never match, because a

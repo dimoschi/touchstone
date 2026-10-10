@@ -55,7 +55,7 @@ check "the 'left as a draft' wording appears only in prNote" \
 check "no text claims the work cannot open a PR, which the draft already did" \
   "$(grep -Fc 'cannot open a PR' "$SCRIPT" || true)" 0
 check "every note that reports the PR's fate reads the helper" \
-  "$(grep -Fc '${prNote()}' "$SCRIPT" || true)" 7
+  "$(grep -Fc '${prNote()}' "$SCRIPT" || true)" 10
 
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
@@ -105,6 +105,14 @@ function baseArgs(overrides) {
 // `responses` lets a scenario answer one exact label without re-implementing
 // every default below it; a label not listed falls through to the defaults,
 // which is what makes each scenario only state the one call it cares about.
+// What the mutation verdict line prints: exit 0 when the last mutation answer
+// said green, else 1, at the head it reported.
+function mutationVerifyReply(prompt, last) {
+  const run = (/printf 'TOUCHSTONE_MUTATION_VERIFY %s %s %s %s\\n' (\S+) /.exec(prompt) ?? [])[1] ?? ''
+  return { output: `TOUCHSTONE_MUTATION_VERIFY ${run} ${last?.green ? 0 : 1} ` +
+    `${last?.head_sha || 'impl0000000000000000000000000000000000000'} /stub-worktree/.git/touchstone-gates/${run}/mutation-verify.log` }
+}
+
 function makeAgent(scenario, captured) {
   const responses = scenario.responses ?? {}
   return async (prompt, opts) => {
@@ -112,8 +120,10 @@ function makeAgent(scenario, captured) {
     captured.calls.push({ label, prompt })
 
     if (Object.prototype.hasOwnProperty.call(responses, label)) {
+      if (label.startsWith('mutation:')) captured.lastMutation = responses[label]
       return responses[label]
     }
+    if (/^mutation-verify:\d+(:retry)?$/.test(label)) return mutationVerifyReply(prompt, captured.lastMutation)
     // Replaces the old separate ticket/plugin:version/gate:opt-in dispatches
     // (gh-118): one call, before any worktree exists, answers all three.
     if (label === 'setup') {
