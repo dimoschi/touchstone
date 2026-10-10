@@ -464,19 +464,23 @@ let checkAttempt = 0
 // the -c script's source, not one argument -- so only the cd target and the
 // outer -c argument need quoting. There is no `exit` in any line: the agent's
 // shell persists, and one would end it. A line whose git or mkdir fails
-// prints nothing, which parseCheckRun reads as unmeasured.
+// prints nothing, which parseCheckRun reads as unmeasured. Every git call's
+// stderr stays out of what the agent relays: a warning git prints on a healthy
+// tree (an unreadable excludes or attributes file) would otherwise read as an
+// unexpected line, or as a dirty tree.
 const bashCommandFor = (c) => `bash -c ${shQuote(`cd ${shQuote(wt.path)} && ${c.command}`)}`
 const logDirFor = (run) =>
-  `d="$(git -C ${shQuote(wt.path)} rev-parse --path-format=absolute --git-path touchstone-checks/${run})"`
+  `d="$(git -C ${shQuote(wt.path)} rev-parse --path-format=absolute --git-path touchstone-checks/${run} 2>/dev/null)"`
 const checkLineFor = (c, run) =>
   `${logDirFor(run)} && mkdir -p "$d" && { ${bashCommandFor(c)} >"$d/${c.id}.log" 2>&1; ` +
   `printf 'TOUCHSTONE_CHECK %s %s %s\\n' ${c.id} "$?" "$d/${c.id}.log"; }`
 // The tree is looked at once, after the last check: a check that writes to it
 // (a ledger, a generated file) must be visible, not silently carried into
-// whatever commits next. The porcelain goes to a log beside the others; a
-// human reads it, so it is never relayed.
+// whatever commits next. The porcelain goes to a log beside the others and its
+// stderr to status.err; a human reads both, so neither is ever relayed. Only
+// stdout decides dirty.
 const endLineFor = (run) =>
-  `${logDirFor(run)} && mkdir -p "$d" && git -C ${shQuote(wt.path)} status --porcelain >"$d/status.log" 2>&1 && ` +
+  `${logDirFor(run)} && mkdir -p "$d" && git -C ${shQuote(wt.path)} status --porcelain >"$d/status.log" 2>"$d/status.err" && ` +
   `{ if [ -s "$d/status.log" ]; then s=dirty; else s=clean; fi; ` +
   `printf 'TOUCHSTONE_CHECKS_END %s %s\\n' ${run} "$s"; }`
 const executeChecks = async (checks = discoveredChecks) => {

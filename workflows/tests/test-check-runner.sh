@@ -26,15 +26,15 @@ async function scenarioPromptIsOneLinePerCheck() {
   const id = runIdOf(p)
   check('the run is the plan id and the attempt', /^[0-9a-f]{8}-1$/.test(id), true)
   const lineFor = (n, cmd) =>
-    `d="$(git -C /tmp/stub-worktree rev-parse --path-format=absolute --git-path touchstone-checks/${id})" && ` +
+    `d="$(git -C /tmp/stub-worktree rev-parse --path-format=absolute --git-path touchstone-checks/${id} 2>/dev/null)" && ` +
     `mkdir -p "$d" && { bash -c 'cd /tmp/stub-worktree && ${cmd}' >"$d/check:${n}.log" 2>&1; ` +
     `printf 'TOUCHSTONE_CHECK %s %s %s\\n' check:${n} "$?" "$d/check:${n}.log"; }`
   check('check:1 is one line that logs to the git dir and prints only its id, exit and log',
     runnerLineOf(p, 'check:1'), lineFor(1, 'make test'))
   check('a command with quotes is quoted once, in the same line',
     runnerLineOf(p, 'check:2'), lineFor(2, `bash scripts/echo.sh '\\''a # b'\\''`))
-  const endLine = `d="$(git -C /tmp/stub-worktree rev-parse --path-format=absolute --git-path touchstone-checks/${id})" && ` +
-    `mkdir -p "$d" && git -C /tmp/stub-worktree status --porcelain >"$d/status.log" 2>&1 && ` +
+  const endLine = `d="$(git -C /tmp/stub-worktree rev-parse --path-format=absolute --git-path touchstone-checks/${id} 2>/dev/null)" && ` +
+    `mkdir -p "$d" && git -C /tmp/stub-worktree status --porcelain >"$d/status.log" 2>"$d/status.err" && ` +
     `{ if [ -s "$d/status.log" ]; then s=dirty; else s=clean; fi; ` +
     `printf 'TOUCHSTONE_CHECKS_END %s %s\\n' ${id} "$s"; }`
   const fence = /```bash\n([\s\S]*?)\n```/.exec(p)?.[1].split('\n')
@@ -268,6 +268,66 @@ async function scenarioRealRunnerDirtyTree() {
   }
 }
 
+const readOrNull = (p) => { try { return fs.readFileSync(p, 'utf8') } catch { return null } }
+
+async function scenarioRealRunnerStatusWarning() {
+  console.log('\n== scenario RT: a git status warning on stderr does not make a clean tree read as dirty')
+  const dir = scratchRepo()
+  const noread = path.join(dir, '.git', 'noread')
+  try {
+    fs.writeFileSync(noread, '')
+    fs.chmodSync(noread, 0o000)
+    execFileSync('git', ['-C', dir, 'config', 'core.excludesFile', noread])
+    const probe = spawnSync('git', ['-C', dir, 'status', '--porcelain'], { encoding: 'utf8' })
+    check('the premise: git status warns on stderr and prints nothing on stdout',
+      [probe.stdout, probe.stderr.includes('unable to access')], ['', true])
+    const { outs, scenario } = realRun(dir, 'echo fine')
+    const { result, captured } = await run(scenario)
+    const id = runIdOf(promptOf(captured, 'checks:run:1'))
+    const lines = linesOf(outs[0])
+    check('the end line reads clean', lines.pop(), `TOUCHSTONE_CHECKS_END ${id} clean`)
+    const logDir = path.dirname(/^\S+ \S+ \S+ (\/.+)$/.exec(lines[0])[1])
+    check('the status log is empty', readOrNull(path.join(logDir, 'status.log')), '')
+    check('the warning is kept in status.err, where a human can read it',
+      (readOrNull(path.join(logDir, 'status.err')) ?? '').includes('unable to access'), true)
+    check('the baseline did not halt', [result.halted_at, callCount(captured, 'implementer')], [undefined, 1])
+  } finally {
+    try { fs.chmodSync(noread, 0o600) } catch {}
+    fs.rmSync(dir, { recursive: true, force: true })
+  }
+}
+
+async function scenarioRealRunnerRevParseWarning() {
+  console.log('\n== scenario RU: a git warning while resolving the log directory never reaches what the agent sees')
+  const dir = scratchRepo()
+  const shim = fs.mkdtempSync(path.join(os.tmpdir(), 'touchstone-gitshim-'))
+  try {
+    const realGit = spawnSync('sh', ['-c', 'command -v git'], { encoding: 'utf8' }).stdout.trim()
+    fs.writeFileSync(path.join(shim, 'git'),
+      `#!/bin/sh\ncase " $* " in *" rev-parse "*) echo 'warning: shim' >&2;; esac\nexec '${realGit}' "$@"\n`,
+      { mode: 0o755 })
+    const env = { ...process.env, PATH: `${shim}:${process.env.PATH}` }
+    const stderrs = []
+    const { scenario } = realRun(dir, 'echo fine', {
+      checkRuns: (attempt, prompt) => {
+        const lines = /```bash\n([\s\S]*?)\n```/.exec(prompt)[1].split('\n')
+        const ran = lines.map(line => spawnSync('bash', ['-c', line], { encoding: 'utf8', env }))
+        stderrs.push(ran.map(r => r.stderr).join(''))
+        return { output: ran.map(r => r.stdout).join('') }
+      },
+    })
+    const { result, captured } = await run(scenario)
+    check('the premise: the shim warns when git rev-parse runs',
+      spawnSync('git', ['-C', dir, 'rev-parse', '--git-dir'], { encoding: 'utf8', env }).stderr, 'warning: shim\n')
+    check('the lines printed nothing on stderr', stderrs[0], '')
+    check('the pipeline measured the run and did not halt',
+      [result.checks?.unmeasured?.length, result.halted_at, callCount(captured, 'implementer')], [0, undefined, 1])
+  } finally {
+    fs.rmSync(shim, { recursive: true, force: true })
+    fs.rmSync(dir, { recursive: true, force: true })
+  }
+}
+
 async function scenarioRealRunnerCwd() {
   console.log('\n== scenario RW: a check runs in the worktree even when its path needs quoting')
   const dir = scratchRepo()
@@ -302,7 +362,8 @@ async function scenarioRealRunnerLargeOutput() {
 const SCENARIOS = [scenarioPromptIsOneLinePerCheck, scenarioParserMeasures, scenarioParserTolerance,
   scenarioParserRejects, scenarioNullReplyIsUnmeasured, scenarioBaselineRetriesOnce,
   scenarioBaselineHaltsWhenStillUnmeasured, scenarioUnmeasuredAfterImplementHalts,
-  scenarioFixersGetLogPaths, scenarioRealRunner, scenarioRealRunnerDirtyTree, scenarioRealRunnerCwd,
+  scenarioFixersGetLogPaths, scenarioRealRunner, scenarioRealRunnerDirtyTree,
+  scenarioRealRunnerStatusWarning, scenarioRealRunnerRevParseWarning, scenarioRealRunnerCwd,
   scenarioRealRunnerLargeOutput]
 JS_EOF
 
