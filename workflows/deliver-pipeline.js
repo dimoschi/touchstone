@@ -475,7 +475,9 @@ const CHECK_END_LINE = /^TOUCHSTONE_CHECKS_END (\S+) (clean|dirty) (\d+)[ \t]+(\
 const utf8Bytes = (s) => {
   const out = []
   for (const ch of String(s)) {
-    const cp = ch.codePointAt(0)
+    let cp = ch.codePointAt(0)
+    // A lone surrogate is not text; encode it as U+FFFD, as every UTF-8 encoder does.
+    if (cp >= 0xd800 && cp <= 0xdfff) cp = 0xfffd
     if (cp < 0x80) out.push(cp)
     else if (cp < 0x800) out.push(0xc0 | cp >> 6, 0x80 | cp & 0x3f)
     else if (cp < 0x10000) out.push(0xe0 | cp >> 12, 0x80 | cp >> 6 & 0x3f, 0x80 | cp & 0x3f)
@@ -512,8 +514,9 @@ const base64Of = (s) => {
   return out
 }
 // Every row line also appends the row it printed to <run dir>/rows, and the
-// end line prints that file's cksum. A row a model invented, or one it copied
-// with a slip, was never written there, so the sums differ. The rows are the
+// end line prints that file's cksum. A row copied with a slip was never written
+// there, so the sums differ. It detects slips, not a model set on forging: one
+// with a Bash tool can compute a matching sum itself. The rows are the
 // lines the parser accepted, joined as the shell wrote them.
 const ROWS_SUM_REASON = 'rows checksum does not match what the runner wrote'
 const rowsSumMatches = (rows, sum) =>
@@ -3379,7 +3382,7 @@ const REPRO_AREA = 'touchstone-repro'
 // decode prints nothing, which reads as unmeasured rather than as a pass.
 const reproLineFor = (it, run) =>
   `${logDirFor(run, REPRO_AREA)} && mkdir -p "$d" && ` +
-  `c="$(printf %s ${base64Of(it.reproducer.command)} | base64 --decode)" && [ -n "$c" ] && ` +
+  `c="$(python3 -c 'import base64,sys;sys.stdout.write(base64.b64decode(sys.argv[1]).decode())' ${base64Of(it.reproducer.command)})" && [ -n "$c" ] && ` +
   `{ (cd ${shQuote(wt.path)} && bash -c "$c") >|"$d/${it.id}.log" 2>&1; e=$?; ` +
   `if grep -aqxE '[[:space:]]*${REPRODUCED_MARKER}[[:space:]]*' "$d/${it.id}.log"; then m=1; else m=0; fi; ` +
   `r="$(printf 'TOUCHSTONE_REPRO %s %s %s %s' ${it.id} "$e" "$m" "$d/${it.id}.log")"; ${rowTo(false)}; }`
@@ -3585,6 +3588,9 @@ const deadLensHalt = (at, dead, extra) => {
 // Same shape and TDZ reasoning as notExecutedHalt. The settled findings are
 // carried in unresolved_findings with their last measured run, so the record
 // keeps them and a re-run checks them again; nothing was reopened.
+// Marks a settled finding whose re-check could not be measured, so a resumed
+// run re-checks it instead of briefing a fixer on a fix already shown to hold.
+const awaitingRecheck = (f) => ({ ...f, awaiting_recheck: true })
 const unmeasuredSettledHalt = (at, items, exec, extra) => halted(at, {
   plan: plan.plan, implemented: impl.summary, gates: gatesPayload(),
   checks: checksPayload(), ...extra,
@@ -3608,8 +3614,10 @@ const unmeasured = (f) => f.reproducer_run?.outcome === 'not-executed'
 // a finding that was demonstrated into a note.
 const latestRun = (f, run) =>
   run.outcome === 'not-executed' && f.reproducer_run ? f.reproducer_run : run
+const carriedPassed = (f) => f.awaiting_recheck === true
+settled = carriedOpen.filter(carriedPassed).map(({ awaiting_recheck, ...f }) => f)
 let awaiting = carriedOpen.filter(unmeasured)
-let open = carriedOpen.filter(f => !unmeasured(f))
+let open = carriedOpen.filter(f => !unmeasured(f) && !carriedPassed(f))
 let round = 0
 widenBudgetHaltState(() => ({
   unresolved_findings: [...open, ...awaiting], notes, fix_rounds: round }))
@@ -3869,7 +3877,7 @@ while ((open.length || blockingChecksOpen()) && round < MAX_REVIEW_ROUNDS && !ou
   if (execSettled?.reasons) {
     sFix.close()
     return await unmeasuredSettledHalt('Fix', settledBefore, execSettled, {
-      unresolved_findings: [...open, ...settledBefore], notes, fix_rounds: round,
+      unresolved_findings: [...open, ...settledBefore.map(awaitingRecheck)], notes, fix_rounds: round,
       fix_round_output: fixRoundSpend,
     })
   }
@@ -4170,7 +4178,7 @@ if (mutHead && mutHead !== reviewedThrough && settled.length) {
   if (execSettledMut.dirty) return await dirtyReproducerHalt('Review', execSettledMut)
   if (execSettledMut.reasons) {
     return await unmeasuredSettledHalt('Review', settled, execSettledMut, {
-      mutation, unresolved_findings: [...open, ...settled], fix_rounds: round,
+      mutation, unresolved_findings: [...open, ...settled.map(awaitingRecheck)], fix_rounds: round,
       fix_round_output: fixRoundSpend, notes,
     })
   }

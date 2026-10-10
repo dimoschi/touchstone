@@ -489,8 +489,9 @@ reopen every settled finding and, at the mutation head, blame the gate's commits
 undoing them. Still unmeasured after the retry, the run halts (`unmeasuredSettledHalt`,
 at Fix or at Review) with a note saying the re-check could not be measured and that this
 is a measurement failure, not a regression. Nothing is reopened; each settled finding is
-carried in `unresolved_findings` with its last measured run, so a re-run checks it
-again. Nothing here waits for a lens to report the regression, so a `residual`
+carried in `unresolved_findings` with its last measured run and `awaiting_recheck: true`.
+A resumed run puts such a finding back among the settled ones, so the next settled
+re-check measures it again; it never reaches a fixer. Nothing here waits for a lens to report the regression, so a `residual`
 note is only ever a note: whether a new finding is a *variant* of a fixed one is decided
 by the lens setting `duplicate_of`, which is a judgement no exit code can make, and the
 cost of that judgement being wrong is a line in the PR body rather than another round.
@@ -554,8 +555,9 @@ with `>>`), and the end line prints `cksum < rows`: the POSIX CRC and the byte c
 `parseCheckRun` and `parseReproRun` recompute that cksum (`cksum` in `10-schemas.js.part`,
 the 32-bit POSIX CRC with the length appended, over the UTF-8 bytes) over the rows they accepted,
 joined with newlines as the shell wrote them, and a mismatch makes the call unmeasured
-(`rows checksum does not match what the runner wrote`). A row a model invented, or copied
-with a slip that still parses, was never written to `rows`, so it cannot pass. No line
+(`rows checksum does not match what the runner wrote`). A row copied with a slip that
+still parses was never written to `rows`, so it cannot pass. The sum guards against slips,
+not against a model set on forging: with a Bash tool it could compute a matching sum. No line
 contains `exit`: the agent's shell persists, and one would end it. The `cd` target is
 quoted only when it needs to be: a worktree path made only of letters, digits and `/ . _
 - + : @ % = ,` is spliced in bare, and a path or declared command carrying any other

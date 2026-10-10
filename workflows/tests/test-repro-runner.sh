@@ -24,7 +24,7 @@ async function scenarioPromptIsOneLinePerReproducer() {
   check('the run is the plan id, the label and a counter', /^[0-9a-f]{8}-reproduce-review-\d+$/.test(rid), true)
   const dir = `d="$(git -C /tmp/stub-worktree rev-parse --path-format=absolute --git-path touchstone-repro/${rid} 2>/dev/null)" && mkdir -p "$d"`
   const lineFor = (id, cmd) =>
-    `${dir} && c="$(printf %s ${Buffer.from(cmd).toString('base64')} | base64 --decode)" && [ -n "$c" ] && ` +
+    `${dir} && c="$(python3 -c 'import base64,sys;sys.stdout.write(base64.b64decode(sys.argv[1]).decode())' ${Buffer.from(cmd).toString('base64')})" && [ -n "$c" ] && ` +
     `{ (cd /tmp/stub-worktree && bash -c "$c") >|"$d/${id}.log" 2>&1; e=$?; ` +
     `if ${MARKER_GREP} "$d/${id}.log"; then m=1; else m=0; fi; ` +
     `r="$(printf 'TOUCHSTONE_REPRO %s %s %s %s' ${id} "$e" "$m" "$d/${id}.log")"; ` +
@@ -457,13 +457,15 @@ async function scenarioCksumMatchesPosix() {
 }
 
 async function scenarioBase64MatchesUtf8() {
-  console.log('\n== scenario PY: the script\'s base64 encodes the UTF-8 bytes, and base64 --decode gives the text back')
+  console.log('\n== scenario PY: the script\'s base64 encodes the UTF-8 bytes, and python3 decodes it back')
   for (const input of ['', 'a', 'ab', 'abc', "python3 -c 'print(1)'\nexit 3", 'Grüße — 日本語 🎉']) {
     const b64 = pure.base64Of(input)
     check(`base64 of ${JSON.stringify(input)}`, b64, Buffer.from(input, 'utf8').toString('base64'))
-    check(`it decodes back with base64 --decode`,
-      spawnSync('bash', ['-c', `printf %s ${b64} | base64 --decode`], { encoding: 'utf8' }).stdout, input)
+    check(`it decodes back with python3`,
+      spawnSync('python3', ['-c', 'import base64,sys;sys.stdout.write(base64.b64decode(sys.argv[1]).decode())', b64], { encoding: 'utf8' }).stdout, input)
   }
+  check('a lone surrogate is encoded as U+FFFD, as Buffer does',
+    pure.base64Of('a\ud800b'), Buffer.from('a\ud800b', 'utf8').toString('base64'))
 }
 
 async function scenarioRealMultiLine() {

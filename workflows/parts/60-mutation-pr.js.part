@@ -147,7 +147,7 @@ if (mutHead && mutHead !== reviewedThrough && settled.length) {
   if (execSettledMut.dirty) return await dirtyReproducerHalt('Review', execSettledMut)
   if (execSettledMut.reasons) {
     return await unmeasuredSettledHalt('Review', settled, execSettledMut, {
-      mutation, unresolved_findings: [...open, ...settled], fix_rounds: round,
+      mutation, unresolved_findings: [...open, ...settled.map(awaitingRecheck)], fix_rounds: round,
       fix_round_output: fixRoundSpend, notes,
     })
   }

@@ -95,7 +95,9 @@ const CHECK_END_LINE = /^TOUCHSTONE_CHECKS_END (\S+) (clean|dirty) (\d+)[ \t]+(\
 const utf8Bytes = (s) => {
   const out = []
   for (const ch of String(s)) {
-    const cp = ch.codePointAt(0)
+    let cp = ch.codePointAt(0)
+    // A lone surrogate is not text; encode it as U+FFFD, as every UTF-8 encoder does.
+    if (cp >= 0xd800 && cp <= 0xdfff) cp = 0xfffd
     if (cp < 0x80) out.push(cp)
     else if (cp < 0x800) out.push(0xc0 | cp >> 6, 0x80 | cp & 0x3f)
     else if (cp < 0x10000) out.push(0xe0 | cp >> 12, 0x80 | cp >> 6 & 0x3f, 0x80 | cp & 0x3f)
@@ -132,8 +134,9 @@ const base64Of = (s) => {
   return out
 }
 // Every row line also appends the row it printed to <run dir>/rows, and the
-// end line prints that file's cksum. A row a model invented, or one it copied
-// with a slip, was never written there, so the sums differ. The rows are the
+// end line prints that file's cksum. A row copied with a slip was never written
+// there, so the sums differ. It detects slips, not a model set on forging: one
+// with a Bash tool can compute a matching sum itself. The rows are the
 // lines the parser accepted, joined as the shell wrote them.
 const ROWS_SUM_REASON = 'rows checksum does not match what the runner wrote'
 const rowsSumMatches = (rows, sum) =>

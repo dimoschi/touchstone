@@ -607,7 +607,13 @@ async function scenarioR12() {
   check('a settled finding whose recheck row is dropped halts the setup run at Review',
     [settledDropped.result.halted_at, idsOf(settledDropped.result.unresolved_findings)], ['Review', ['f1']])
 
-  for (const [name, setup] of [['an open one', openDropped], ['a settled one', settledDropped]]) {
+  check('a settled finding whose re-check could not be measured is carried as awaiting a re-check',
+    (settledDropped.result.unresolved_findings ?? []).map(f => f.awaiting_recheck), [true])
+  const recheck = await run(resumed({ unresolved_findings: settledDropped.result.unresolved_findings,
+    notes: settledDropped.result.notes }, { ...small, verify: () => 2, outputFor: () => 'crashed, no marker' }))
+  check('a settled one: it never reaches a fixer', callCount(recheck.captured, 'fix:1'), 0)
+  check('a settled one: it is not run first as a candidate', callCount(recheck.captured, 'reproduce:carried'), 0)
+  for (const [name, setup] of [['an open one', openDropped]]) {
     const rec = setup.result
     const { result, captured } = await run(resumed({ unresolved_findings: rec.unresolved_findings, notes: rec.notes },
       { ...small, verify: () => 2, outputFor: () => 'crashed, no marker' }))
@@ -697,8 +703,25 @@ async function scenarioR13() {
   }
 }
 
+async function scenarioR14() {
+  console.log('\n== scenario R14: a carried finding whose last run passed waits for the settled re-check, never a fixer')
+  const passed = carriedFinding('f3', { awaiting_recheck: true,
+    reproducer_run: { outcome: 'passed', exit_code: 0, log: '/x/f3.log', round: 1 } })
+  const live = carriedFinding('f4', { reproducer_run: { outcome: 'reproduced', exit_code: 1, log: '/x/f4.log', round: 1 } })
+  const { result, captured } = await run(resumed({ unresolved_findings: [passed, live] }, {
+    initialReview: { correctness: [], advocate: [] },
+    fixHead: () => 'fix00000000000000000000000000000000000001' }))
+  const fixer = captured.calls.find(c => c.label === 'fix:1')?.prompt ?? ''
+  check('the fixer is briefed on the live finding', fixer.includes('Carried f4'), true)
+  check('the fixer is not briefed on the passed one', fixer.includes('Carried f3'), false)
+  const settledCheck = captured.calls.find(c => c.label === 'reproduce:settled:1')?.prompt ?? ''
+  check('the passed one is re-checked as settled', settledCheck.includes('f3'), true)
+  check('it is no longer marked as awaiting a re-check once it was re-checked',
+    (result.unresolved_findings ?? []).some(f => f.awaiting_recheck), false)
+}
+
 const SCENARIOS = [scenarioR1, scenarioR2, scenarioR3, scenarioR4, scenarioR5, scenarioR6, scenarioR7,
-  scenarioR8, scenarioR9, scenarioR10, scenarioR11, scenarioR12, scenarioR13]
+  scenarioR8, scenarioR9, scenarioR10, scenarioR11, scenarioR12, scenarioR13, scenarioR14]
 JS_EOF
 
 finish
