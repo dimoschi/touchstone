@@ -80,6 +80,17 @@ expect "gate named after ||"         ALLOW "grep -q x /tmp/f | wc -l || echo $MU
 expect "pipe with no gate in it"     ALLOW "git status --porcelain | wc -l"
 expect "gate quoted in a message"    ALLOW "git commit -m \"see mutation-check.sh | tail\""
 
+echo "grouping and heredocs are parsed, not split on"
+expect "brace group piped"           BLOCK "{ $MUT /r; } | tail"
+expect "subshell piped"              BLOCK "($MUT /r && true) | tail"
+expect "stderr pipe"                 BLOCK "$MUT /r |& tail"
+expect "group redirected to a file"  ALLOW "{ $MUT /r; } > /tmp/gate.log 2>&1; echo EXIT=\$?"
+expect "clobber redirect"            ALLOW "$MUT /r >|/tmp/gate.log 2>&1"
+expect "quoted pipe before the gate" ALLOW "echo \"a | b\" && $MUT /r"
+expect "quoted heredoc body"         ALLOW "cat > /tmp/f <<'EOF'
+run $MUT | tail
+EOF"
+
 echo "copilot bash payloads refuse the same pipelines"
 copilot_expect "copilot piped gate"         BLOCK "$MUT | tail -45"
 copilot_expect "copilot redirect instead"   ALLOW "$MUT > /tmp/gate.log 2>&1; echo EXIT=\$?"
