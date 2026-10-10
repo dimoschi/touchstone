@@ -855,10 +855,10 @@ const reviewOf = async (range, tag, picked, known = [], knownCharge = '') => {
       `Return at most ${MAX_FINDINGS_PER_LENS} findings, most serious first. An ` +
       `empty list is the expected result for a correct change. Every finding ` +
       `carries a category: wrong-result, crash, gate-bypass, unmet-criterion, ` +
-      `docs, wording, design, scope, or other. Only wrong-result, crash, ` +
-      `gate-bypass and unmet-criterion can hold this run, and only when they ` +
-      `also carry a reproducer (unmet-criterion additionally needs criterion_quote). ` +
-      `Everything else is still worth raising and reaches the pull request as a ` +
+      `docs, wording, design, scope, or other. A finding of any category can ` +
+      `hold this run, but only by carrying a reproducer that demonstrates it ` +
+      `(unmet-criterion additionally needs criterion_quote). One without a ` +
+      `reproducer is still worth raising and reaches the pull request as a ` +
       `note for a human to judge, but it never blocks. ${REPRODUCER_CONTRACT}` +
       (known.length
         ? `\nThe findings below were already reported earlier this run, each ` +

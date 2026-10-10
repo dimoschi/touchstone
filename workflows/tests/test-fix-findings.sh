@@ -161,24 +161,148 @@ async function scenarioCI() {
   check('fix_round_output carries that one round', result.fix_round_output?.length, 1)
 }
 
-// Scenario CP -- gh-106: a non-blocking category (docs) never becomes a
-// candidate at all, regardless of what its reproducer would report: the
-// script's rule fires before any reproducer for it is ever run.
+// Scenario CP -- with no initialExit, the harness default reproducer exits 1
+// with the marker, i.e. it reproduces.
 async function scenarioCP() {
-  console.log('\n== scenario CP: a docs-category finding is a note, never a candidate, and never reaches Fix')
+  console.log('\n== scenario CP: a non-blocking-category finding whose reproducer reproduces opens and reaches the fix loop')
+  for (const category of ['design', 'docs', 'wording', 'scope', 'other']) {
+    const { result, captured } = await run({
+      args: { maxReviewRounds: 1 },
+      initialReview: {
+        correctness: [{ category, title: 'Stale comment', file: 'a.js',
+          claim: 'comment names the wrong caller', evidence: 'a.js:3',
+          reproducer: { kind: 'command', command: 'true', expected: 'exit 0', actual: 'exit 1' } }],
+        advocate: [],
+      },
+      staleness: () => [],
+    })
+    check(`${category}: its reproducer was run`, callCount(captured, 'reproduce:review'), 1)
+    check(`${category}: a fix round was dispatched for it`, callCount(captured, 'fix:1'), 1)
+    check(`${category}: halted at Fix, rounds exhausted`, result.halted_at, 'Fix')
+    check(`${category}: it is reported as unresolved`,
+      result.unresolved_findings?.some(f => f.title === 'Stale comment' && f.category === category), true)
+    check(`${category}: it is not a note`,
+      result.notes?.some(n => n.title === 'Stale comment'), false)
+  }
+}
+
+async function scenarioCPA() {
+  console.log('\n== scenario CPA: a non-blocking-category finding whose reproducer exits 0 is a did-not-reproduce note')
   const { result, captured } = await run({
     initialReview: {
-      correctness: [{ category: 'docs', title: 'Stale comment', file: 'a.js',
-        claim: 'comment names the wrong caller', evidence: 'a.js:3',
-        reproducer: { kind: 'command', command: 'true', expected: 'exit 0', actual: 'exit 1' } }],
+      correctness: [{ category: 'design', title: 'Wrong abstraction', file: 'a.js',
+        claim: 'c', evidence: 'e' }],
+      advocate: [],
+    },
+    initialExit: () => 0,
+  })
+  check('halted_at is absent', result.halted_at, undefined)
+  check('its reproducer was run', callCount(captured, 'reproduce:review'), 1)
+  check('no fix round ran', callCount(captured, 'fix:1'), 0)
+  check('the finding is a note with reason did-not-reproduce',
+    result.notes?.some(n => n.reason === 'did-not-reproduce' && n.title === 'Wrong abstraction'), true)
+}
+
+async function scenarioCPB() {
+  console.log('\n== scenario CPB: a non-blocking-category finding with no complete reproducer is a category note and runs nothing')
+  const { result, captured } = await run({
+    initialReview: {
+      correctness: [
+        { category: 'design', title: 'No reproducer', file: 'a.js', claim: 'c', evidence: 'e',
+          reproducer: undefined },
+        { category: 'docs', title: 'Incomplete reproducer', file: 'b.js', claim: 'c2', evidence: 'e2',
+          reproducer: { kind: 'command', command: 'true', expected: 'exit 0', actual: '' } },
+      ],
       advocate: [],
     },
   })
   check('halted_at is absent', result.halted_at, undefined)
+  check('no reproducer was ever run for either', callCount(captured, 'reproduce:review'), 0)
   check('no fix round ran', callCount(captured, 'fix:1'), 0)
-  check('no reproducer was ever run for it', callCount(captured, 'reproduce:review'), 0)
-  check('the finding is a note with reason category',
-    result.notes?.some(n => n.reason === 'category' && n.title === 'Stale comment'), true)
+  check('the missing reproducer is a note with reason category',
+    result.notes?.some(n => n.reason === 'category' && n.title === 'No reproducer'), true)
+  check('the incomplete reproducer is a note with reason category',
+    result.notes?.some(n => n.reason === 'category' && n.title === 'Incomplete reproducer'), true)
+}
+
+async function scenarioCPC() {
+  console.log('\n== scenario CPC: a non-blocking-category finding whose reproducer errors is a reproducer-errored note')
+  const { result, captured } = await run({
+    initialReview: {
+      correctness: [{ category: 'design', title: 'Wrong abstraction', file: 'a.js',
+        claim: 'c', evidence: 'e' }],
+      advocate: [],
+    },
+    initialExit: () => 2,
+    outputFor: () => 'crashed, no marker',
+  })
+  check('halted_at is absent', result.halted_at, undefined)
+  check('its reproducer was run', callCount(captured, 'reproduce:review'), 1)
+  check('no fix round ran', callCount(captured, 'fix:1'), 0)
+  check('the finding is a note with reason reproducer-errored',
+    result.notes?.some(n => n.reason === 'reproducer-errored' && n.title === 'Wrong abstraction'), true)
+}
+
+// Scenario CPD -- tail reviews go through the same classifyBatch as the initial one.
+async function scenarioCPD() {
+  console.log('\n== scenario CPD: a non-blocking-category tail-review finding whose reproducer reproduces opens and halts')
+  const { result } = await run({
+    args: { maxReviewRounds: 1 },
+    initialReview: {
+      correctness: [{ title: 'Needs a fix', file: 'x.js', claim: 'c', evidence: 'e' }],
+      advocate: [],
+    },
+    verify: (id) => id === 'f1' ? true : undefined,
+    fixHead: () => 'fix00000000000000000000000000000000000001',
+    hunks: () => ['+++ b/x.js', '@@ -100,5 +100,5 @@'],
+    tailReview: [{ category: 'design', title: 'The fix leaks state', file: 'x.js', claim: 'c2',
+      evidence: 'e2', line_start: 102 }],
+    staleness: () => [],
+  })
+  check('halted at Fix (the design finding blocks)', result.halted_at, 'Fix')
+  check('the design finding is reported as unresolved',
+    result.unresolved_findings?.some(f => f.title === 'The fix leaks state'), true)
+}
+
+async function scenarioCPE() {
+  console.log('\n== scenario CPE: dedup keeps a reproducer-carrying design finding over a reproducer-less one')
+  const { result } = await run({
+    args: { maxReviewRounds: 1 },
+    initialReview: {
+      correctness: [{ category: 'docs', title: 'Comment is stale', file: 'src/p.js',
+        claim: 'the comment misdescribes the guard', evidence: 'p.js:12', reproducer: undefined }],
+      advocate: [{ category: 'design', title: 'Load can panic on a missing key', file: 'src/p.js',
+        claim: 'no guard before the dereference', evidence: 'p.js:12-14' }],
+    },
+    dedupGroups: [{ ids: ['f1', 'f2'], why: 'same spot' }],
+    staleness: () => [],
+  })
+  check('halted at Fix (the reproduced finding survived dedup)', result.halted_at, 'Fix')
+  check('the design finding with the reproducer is the one that opened',
+    result.unresolved_findings?.some(f => f.title === 'Load can panic on a missing key'), true)
+}
+
+// Scenario CPF -- a quote-only unmet-criterion finding is a note (DH), so
+// dedup must not rank it above one that carries a reproducer.
+async function scenarioCPF() {
+  console.log('\n== scenario CPF: dedup does not keep a quote-only unmet-criterion finding over one with a reproducer')
+  const { result } = await run({
+    args: { maxReviewRounds: 1 },
+    ticketResult: { found: true, summary: 'stub', comments: '',
+      description: 'Acceptance: the client must retry on a 503 with backoff.' },
+    initialReview: {
+      correctness: [{ category: 'unmet-criterion', title: 'Missing retry path', file: 'src/c.js',
+        claim: 'the retry path was never implemented', evidence: 'c.js:1',
+        criterion_quote: 'the client must retry on a 503 with backoff', reproducer: undefined }],
+      advocate: [{ category: 'design', title: 'No retry on a 503', file: 'src/c.js',
+        claim: 'a 503 fails the call at once', evidence: 'c.js:1-9' }],
+    },
+    dedupGroups: [{ ids: ['f1', 'f2'], why: 'same missing retry' }],
+    staleness: () => [],
+  })
+  check('halted at Fix (the finding with the reproducer survived dedup)', result.halted_at, 'Fix')
+  check('the design finding with the reproducer is the one that opened',
+    result.unresolved_findings?.some(f => f.title === 'No retry on a 503'), true)
 }
 
 // Scenario CQ -- gh-106: a blocking category with an incomplete reproducer
@@ -322,7 +446,8 @@ async function scenarioCW() {
     args: { openPr: true },
     prResult: { opened: true, url: 'https://example.invalid/pr/30', note: 'stub ready' },
     initialReview: {
-      correctness: [{ category: 'docs', title: 'Stale doc', file: 'a.js', claim: 'c', evidence: 'e' }],
+      correctness: [{ category: 'docs', title: 'Stale doc', file: 'a.js', claim: 'c', evidence: 'e',
+        reproducer: undefined }],
       advocate: [],
     },
     mutationGated: true,
@@ -576,7 +701,8 @@ async function scenarioDJ() {
   console.log('\n== scenario DJ: dirt found by the zero-reproducer mutation-hunk fetch is not blamed on a reproducer')
   const { result } = await run({
     initialReview: {
-      correctness: [{ category: 'docs', title: 'Stale doc', file: 'a.js', claim: 'c', evidence: 'e' }],
+      correctness: [{ category: 'docs', title: 'Stale doc', file: 'a.js', claim: 'c', evidence: 'e',
+        reproducer: undefined }],
       advocate: [],
     },
     mutationGated: true,
@@ -617,7 +743,7 @@ async function scenarioDK() {
   check('a third round settled the reopened fix', result.fix_rounds, 3)
 }
 
-const SCENARIOS = [scenarioCL, scenarioCM, scenarioCN, scenarioCO, scenarioCG, scenarioCH, scenarioCI, scenarioCP, scenarioCQ, scenarioCR, scenarioCS, scenarioCT, scenarioCU, scenarioCV, scenarioCW, scenarioCX, scenarioCY, scenarioCZ, scenarioDA, scenarioDB, scenarioDC, scenarioDD, scenarioDE, scenarioDF, scenarioDG, scenarioDH, scenarioDJ, scenarioDK]
+const SCENARIOS = [scenarioCL, scenarioCM, scenarioCN, scenarioCO, scenarioCG, scenarioCH, scenarioCI, scenarioCP, scenarioCPA, scenarioCPB, scenarioCPC, scenarioCPD, scenarioCPE, scenarioCPF, scenarioCQ, scenarioCR, scenarioCS, scenarioCT, scenarioCU, scenarioCV, scenarioCW, scenarioCX, scenarioCY, scenarioCZ, scenarioDA, scenarioDB, scenarioDC, scenarioDD, scenarioDE, scenarioDF, scenarioDG, scenarioDH, scenarioDJ, scenarioDK]
 JS_EOF
 
 finish
