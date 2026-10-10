@@ -547,7 +547,10 @@ const REPRO_ROW_LINE = /^TOUCHSTONE_REPRO (\S+) (\S+) (\S+) (.+)$/
 // to read the run directory from, and a dirty tree's halt has to name it.
 const REPRO_END_PREFIX = 'TOUCHSTONE_REPRO_END'
 const REPRO_END_LINE = /^TOUCHSTONE_REPRO_END (\S+) (clean|dirty) (.+)$/
+const HUNKS_PREFIX = 'TOUCHSTONE_HUNKS_'
 const HUNKS_BEGIN_PREFIX = 'TOUCHSTONE_HUNKS_BEGIN'
+const HUNKS_FAILED_PREFIX = 'TOUCHSTONE_HUNKS_FAILED'
+const HUNKS_FAILED_LINE = /^TOUCHSTONE_HUNKS_FAILED (\S+) (\d+)$/
 const HUNKS_BEGIN_LINE = /^TOUCHSTONE_HUNKS_BEGIN (\S+)$/
 const HUNKS_END_PREFIX = 'TOUCHSTONE_HUNKS_END'
 const HUNKS_END_LINE = /^TOUCHSTONE_HUNKS_END (\S+) (\S+)$/
@@ -569,8 +572,16 @@ const parseReproRow = (line, ids, rows, run) => {
   return { row: { id, exit: Number(exit), reproduced: marker === '1', log } }
 }
 // The block between the begin and end lines is the kept diff header lines,
-// and the end line's count, computed by the shell, has to match them.
+// and the end line's count, computed by the shell, has to match them. A failed
+// line in its place says git diff itself exited nonzero: the hunks are
+// unknown, and nothing else about the run is in doubt.
 const parseHunksBlock = (body, i, run) => {
+  if (i < body.length && body[i].startsWith(HUNKS_FAILED_PREFIX)) {
+    const failed = HUNKS_FAILED_LINE.exec(body[i])
+    if (!failed) return { reason: 'malformed hunks failed line' }
+    if (failed[1] !== run) return { reason: `hunks failed line names run ${failed[1]}, not ${run}` }
+    return { hunkLines: null, diffExit: Number(failed[2]), next: i + 1 }
+  }
   if (i >= body.length || !body[i].startsWith(HUNKS_BEGIN_PREFIX)) return { reason: 'no hunks block' }
   const begin = HUNKS_BEGIN_LINE.exec(body[i])
   if (!begin) return { reason: 'malformed hunks begin line' }
@@ -604,24 +615,25 @@ const parseReproRun = (output, ids, run, withHunks) => {
   const body = lines.slice(1, -1)
   const rows = []
   let i = 0
-  for (; i < body.length && !body[i].startsWith(HUNKS_BEGIN_PREFIX); i++) {
+  for (; i < body.length && !body[i].startsWith(HUNKS_PREFIX); i++) {
     const parsed = parseReproRow(body[i], ids, rows, run)
     if (parsed.reason) return parsed
     rows.push(parsed.row)
   }
   if (rows.length < ids.length) return { reason: `no line for ${ids[rows.length]}` }
   let hunkLines = null
+  let diffExit
   if (withHunks) {
     const block = parseHunksBlock(body, i, run)
     if (block.reason) return block
-    ;({ hunkLines, next: i } = block)
+    ;({ hunkLines, diffExit, next: i } = block)
   }
   if (i < body.length) return { reason: `unexpected line ${JSON.stringify(body[i].slice(0, 80))}` }
   const dir = dirOf(end.path)
   if (!underRun(end.path, run, 'status.log')) return { reason: 'status log is not in the run directory' }
   const stray = rows.find(r => dirOf(r.log) !== dir)
   if (stray) return { reason: `log path of ${stray.id} is not in the run directory` }
-  return { rows, before: before[2] === 'dirty', dirty: end.dirty, statusLog: end.path, hunkLines }
+  return { rows, before: before[2] === 'dirty', dirty: end.dirty, statusLog: end.path, hunkLines, diffExit }
 }
 // The only heading that is a check list. Only trailing whitespace is
 // ignored: '## checks', '### Checks', '##Checks', '## Checks ##' and
@@ -3316,15 +3328,16 @@ const reproLineFor = (it, run) =>
   `${logDirFor(run, REPRO_AREA)} && mkdir -p "$d" && { ${bashCommandFor(it.reproducer)} >|"$d/${it.id}.log" 2>&1; e=$?; ` +
   `if grep -aqxE '[[:space:]]*${REPRODUCED_MARKER}[[:space:]]*' "$d/${it.id}.log"; then m=1; else m=0; fi; ` +
   `printf 'TOUCHSTONE_REPRO %s %s %s %s\\n' ${it.id} "$e" "$m" "$d/${it.id}.log"; }`
-// The diff goes to a file rather than a pipe, so a git failure (a bad range)
-// prints nothing at all and the run reads as unmeasured, never as an empty
-// range.
+// The diff goes to a file rather than a pipe, so its own exit decides which
+// block is printed: a git failure (a bad range) prints a failed line, which
+// leaves the hunks unknown without voiding the reproducer rows.
 const hunksLineFor = (run, range) =>
   `${logDirFor(run, REPRO_AREA)} && mkdir -p "$d" && ` +
-  `git -C ${shQuote(wt.path)} diff --unified=0 --no-color ${shQuote(range)} >|"$d/diff.log" 2>|"$d/diff.err" && ` +
-  `{ grep -aE '^(\\+\\+\\+ |@@ )' "$d/diff.log" >|"$d/hunks.log"; ` +
+  `{ git -C ${shQuote(wt.path)} diff --unified=0 --no-color ${shQuote(range)} >|"$d/diff.log" 2>|"$d/diff.err"; g=$?; ` +
+  `if [ "$g" -ne 0 ]; then printf 'TOUCHSTONE_HUNKS_FAILED %s %s\\n' ${run} "$g"; ` +
+  `else grep -aE '^(\\+\\+\\+ |@@ )' "$d/diff.log" >|"$d/hunks.log"; ` +
   `printf 'TOUCHSTONE_HUNKS_BEGIN %s\\n' ${run}; cat "$d/hunks.log"; ` +
-  `printf 'TOUCHSTONE_HUNKS_END %s %s\\n' ${run} "$(grep -c '' "$d/hunks.log")"; }`
+  `printf 'TOUCHSTONE_HUNKS_END %s %s\\n' ${run} "$(grep -c '' "$d/hunks.log")"; fi; }`
 const reproLinesFor = (runnable, run, diffRange) => [
   statusLineFor(run, { area: REPRO_AREA, name: 'before', tag: 'TOUCHSTONE_REPRO_BEFORE' }),
   ...runnable.map(it => reproLineFor(it, run)),
@@ -3345,9 +3358,12 @@ const executeAtHead = async (items, label, diffRange) => {
     log(`${label}: unmeasured (${parsed.reason})`)
     return { runs: new Map(), hunks: null, dirty: false, porcelain: '', preexisting: !runnable.length }
   }
+  if (parsed.diffExit !== undefined) {
+    log(`${label}: git diff exited ${parsed.diffExit}, so this range's hunks are unknown`)
+  }
   return {
     runs: new Map(parsed.rows.map(r => [r.id, { exit_code: r.exit, reproduced: r.reproduced, log: r.log }])),
-    hunks: diffRange ? parseHunks(parsed.hunkLines) : null,
+    hunks: parsed.hunkLines ? parseHunks(parsed.hunkLines) : null,
     dirty: parsed.dirty,
     porcelain: parsed.statusLog,
     // True when nothing this call could have dirtied: either it ran no

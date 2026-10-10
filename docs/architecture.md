@@ -405,7 +405,9 @@ the script builds and run the same way as the check runner's below (`reproLinesF
 - When the call is given a range, one line writes `git diff --unified=0 --no-color
   <range>` to `diff.log`, keeps only the lines starting with `+++ ` or `@@ `, and prints
   them between `TOUCHSTONE_HUNKS_BEGIN <run>` and `TOUCHSTONE_HUNKS_END <run> <count>`,
-  the count computed by the shell. A git failure prints nothing.
+  the count computed by the shell. When `git diff` itself exits nonzero (a bad range),
+  the line prints `TOUCHSTONE_HUNKS_FAILED <run> <exit>` instead: the hunks are unknown
+  (`hunks: null`, classify()'s could-not-measure path) and the reproducer rows still count.
 - An end line writes the porcelain after into `status.log` and prints
   `TOUCHSTONE_REPRO_END <run> clean|dirty <status log path>`. It carries the path because
   the mutation-hunk fetch runs no reproducer, so no row would name the directory.
@@ -414,8 +416,9 @@ All of these sit in `touchstone-repro/<run>/` under the worktree's git dir, wher
 is the plan id, the label and a per-run counter. `parseReproRun` (pure, in
 `10-schemas.js.part`) accepts the reply only in that order: the before line first, one
 row per runnable id in order with an integer exit, a 0 or 1 marker flag and a log in this
-run's one directory, the hunks block when a range was asked for (its count equal to the
-lines between the markers, each a `+++ ` or `@@ ` line), and the end line last. Anything
+run's one directory, the hunks block or the failed line when a range was asked for (a
+block's count equal to the lines between the markers, each a `+++ ` or `@@ ` line), and
+the end line last. Anything
 else makes the whole call unmeasured, read exactly as a call that returned nothing: no
 rows, hunks unknown rather than empty, nothing seen dirty. The reason is logged as
 `<label>: unmeasured (<reason>)`.

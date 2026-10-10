@@ -171,15 +171,16 @@ const reproLineFor = (it, run) =>
   `${logDirFor(run, REPRO_AREA)} && mkdir -p "$d" && { ${bashCommandFor(it.reproducer)} >|"$d/${it.id}.log" 2>&1; e=$?; ` +
   `if grep -aqxE '[[:space:]]*${REPRODUCED_MARKER}[[:space:]]*' "$d/${it.id}.log"; then m=1; else m=0; fi; ` +
   `printf 'TOUCHSTONE_REPRO %s %s %s %s\\n' ${it.id} "$e" "$m" "$d/${it.id}.log"; }`
-// The diff goes to a file rather than a pipe, so a git failure (a bad range)
-// prints nothing at all and the run reads as unmeasured, never as an empty
-// range.
+// The diff goes to a file rather than a pipe, so its own exit decides which
+// block is printed: a git failure (a bad range) prints a failed line, which
+// leaves the hunks unknown without voiding the reproducer rows.
 const hunksLineFor = (run, range) =>
   `${logDirFor(run, REPRO_AREA)} && mkdir -p "$d" && ` +
-  `git -C ${shQuote(wt.path)} diff --unified=0 --no-color ${shQuote(range)} >|"$d/diff.log" 2>|"$d/diff.err" && ` +
-  `{ grep -aE '^(\\+\\+\\+ |@@ )' "$d/diff.log" >|"$d/hunks.log"; ` +
+  `{ git -C ${shQuote(wt.path)} diff --unified=0 --no-color ${shQuote(range)} >|"$d/diff.log" 2>|"$d/diff.err"; g=$?; ` +
+  `if [ "$g" -ne 0 ]; then printf 'TOUCHSTONE_HUNKS_FAILED %s %s\\n' ${run} "$g"; ` +
+  `else grep -aE '^(\\+\\+\\+ |@@ )' "$d/diff.log" >|"$d/hunks.log"; ` +
   `printf 'TOUCHSTONE_HUNKS_BEGIN %s\\n' ${run}; cat "$d/hunks.log"; ` +
-  `printf 'TOUCHSTONE_HUNKS_END %s %s\\n' ${run} "$(grep -c '' "$d/hunks.log")"; }`
+  `printf 'TOUCHSTONE_HUNKS_END %s %s\\n' ${run} "$(grep -c '' "$d/hunks.log")"; fi; }`
 const reproLinesFor = (runnable, run, diffRange) => [
   statusLineFor(run, { area: REPRO_AREA, name: 'before', tag: 'TOUCHSTONE_REPRO_BEFORE' }),
   ...runnable.map(it => reproLineFor(it, run)),
@@ -200,9 +201,12 @@ const executeAtHead = async (items, label, diffRange) => {
     log(`${label}: unmeasured (${parsed.reason})`)
     return { runs: new Map(), hunks: null, dirty: false, porcelain: '', preexisting: !runnable.length }
   }
+  if (parsed.diffExit !== undefined) {
+    log(`${label}: git diff exited ${parsed.diffExit}, so this range's hunks are unknown`)
+  }
   return {
     runs: new Map(parsed.rows.map(r => [r.id, { exit_code: r.exit, reproduced: r.reproduced, log: r.log }])),
-    hunks: diffRange ? parseHunks(parsed.hunkLines) : null,
+    hunks: parsed.hunkLines ? parseHunks(parsed.hunkLines) : null,
     dirty: parsed.dirty,
     porcelain: parsed.statusLog,
     // True when nothing this call could have dirtied: either it ran no

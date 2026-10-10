@@ -60,10 +60,12 @@ async function scenarioPromptWithRange() {
   check('before, the reproducer, the hunks line, then the end line', fence.length, 4)
   check('the hunks line', fence[2],
     `d="$(git -C /tmp/stub-worktree rev-parse --path-format=absolute --git-path touchstone-repro/${rid} 2>/dev/null)" && mkdir -p "$d" && ` +
-    `git -C /tmp/stub-worktree diff --unified=0 --no-color ${REVIEWED_THROUGH}..fix00000000000000000000000000000000000001 ` +
-    `>|"$d/diff.log" 2>|"$d/diff.err" && { grep -aE '^(\\+\\+\\+ |@@ )' "$d/diff.log" >|"$d/hunks.log"; ` +
+    `{ git -C /tmp/stub-worktree diff --unified=0 --no-color ${REVIEWED_THROUGH}..fix00000000000000000000000000000000000001 ` +
+    `>|"$d/diff.log" 2>|"$d/diff.err"; g=$?; ` +
+    `if [ "$g" -ne 0 ]; then printf 'TOUCHSTONE_HUNKS_FAILED %s %s\\n' ${rid} "$g"; ` +
+    `else grep -aE '^(\\+\\+\\+ |@@ )' "$d/diff.log" >|"$d/hunks.log"; ` +
     `printf 'TOUCHSTONE_HUNKS_BEGIN %s\\n' ${rid}; cat "$d/hunks.log"; ` +
-    `printf 'TOUCHSTONE_HUNKS_END %s %s\\n' ${rid} "$(grep -c '' "$d/hunks.log")"; }`)
+    `printf 'TOUCHSTONE_HUNKS_END %s %s\\n' ${rid} "$(grep -c '' "$d/hunks.log")"; fi; }`)
   check('each call has a run of its own',
     reproRunOf(promptOf(captured, 'reproduce:review')) !== rid, true)
 }
@@ -175,6 +177,12 @@ async function scenarioNullIsUnmeasured() {
 
 const HUNK_REJECTED = [
   ['no hunks block', (l) => [l[0], l[1], l[5]].join('\n'), 'no hunks block'],
+  ['a malformed failed line', (l) => [l[0], l[1], 'TOUCHSTONE_HUNKS_FAILED x', l[5]].join('\n'),
+    'malformed hunks failed line'],
+  ['a failed line naming another run', (l) => [l[0], l[1], 'TOUCHSTONE_HUNKS_FAILED other-run 128', l[5]].join('\n'),
+    'hunks failed line names run other-run, not '],
+  ['a failed line beside a block', (l) => [l[0], l[1], l[2].replace('BEGIN', 'FAILED') + ' 128', ...l.slice(2)].join('\n'),
+    'unexpected line "TOUCHSTONE_HUNKS_BEGIN'],
   ['a malformed begin line', (l) => [l[0], l[1], 'TOUCHSTONE_HUNKS_BEGIN', l[3], l[4], l[5]].join('\n'),
     'malformed hunks begin line'],
   ['a begin line naming another run', (l) => [l[0], l[1], 'TOUCHSTONE_HUNKS_BEGIN other-run', l[3], l[4], l[5]].join('\n'),
@@ -207,6 +215,26 @@ async function scenarioHunksRejected() {
     check(`${what}: the fresh finding is not dismissed as out of range`,
       result.unresolved_findings?.some(f => f.title === 'fresh'), true)
   }
+}
+
+async function scenarioHunksFailed() {
+  console.log('\n== scenario PI: a failed diff keeps the rows and leaves hunks unknown, not empty')
+  const { result, captured } = await run({
+    args: { maxReviewRounds: 1 },
+    initialReview: reviewOf(finding('one', 'a')),
+    fixHead: () => 'fix00000000000000000000000000000000000001',
+    reproRuns: (label, prompt) => label === 'reproduce:fix:1' ? { output: reproOutput(prompt,
+      [{ id: 'f1', exit: 0, output: '' }], { hunkLines: [] }).replace(/TOUCHSTONE_HUNKS_BEGIN (\S+)\nTOUCHSTONE_HUNKS_END \S+ 0/,
+      'TOUCHSTONE_HUNKS_FAILED $1 128') } : undefined,
+    tailReview: [finding('fresh', 'x', { file: 'x.js', line_start: 500 })],
+    staleness: () => [],
+  })
+  check('the failure is logged with git\'s exit',
+    captured.logs.includes('reproduce:fix:1: git diff exited 128, so this range\'s hunks are unknown'), true)
+  check('the call was not unmeasured', captured.logs.some(l => l.startsWith('reproduce:fix:1: unmeasured')), false)
+  check('the row counted: the open finding settled', result.unresolved_findings?.some(f => f.title === 'one'), false)
+  check('the fresh finding is not dismissed as out of range',
+    result.unresolved_findings?.some(f => f.title === 'fresh'), true)
 }
 
 async function scenarioFixerGetsLogPath() {
@@ -376,9 +404,40 @@ async function scenarioRealHunks() {
   }
 }
 
+async function scenarioRealBadRange() {
+  console.log('\n== scenario PV: a real range naming a nonexistent SHA prints a failed line; the rows still count and hunks are unknown')
+  const { dir, commit } = scratchRepo()
+  try {
+    const base = commit('impl.txt', 'one\n')
+    const implHead = commit('impl2.txt', 'x\n')
+    const { outs, reproRuns } = realOutputs(['reproduce:review', 'reproduce:fix:1', 'reproduce:fix:1:fresh'])
+    const { result, captured } = await run({
+      args: { maxReviewRounds: 1 },
+      branchResult: branchAt(dir),
+      implRange: `${base}..${implHead}`,
+      initialReview: reviewOf(finding('needs fix', `test -f fixed.txt || { echo ${REPRODUCED_MARKER}; exit 1; }`)),
+      fixHead: () => { commit('fixed.txt', 'fixed\n'); return 'f'.repeat(40) },
+      tailReview: [finding('fresh', `echo ${REPRODUCED_MARKER}; exit 1`, { file: 'elsewhere.txt', line_start: 9 })],
+      reproRuns, staleness: () => [],
+    })
+    const lines = outs['reproduce:fix:1'].split('\n').filter(Boolean)
+    const rid = lines[0].split(' ')[1]
+    check('the row is measured: exit 0 after the fix', lines[1].split(' ').slice(1, 3), ['f1', '0'])
+    check('the hunks line printed git\'s failure, decided by the shell', lines[2], `TOUCHSTONE_HUNKS_FAILED ${rid} 128`)
+    check('then the end line', lines[3].split(' ').slice(0, 3), ['TOUCHSTONE_REPRO_END', rid, 'clean'])
+    check('the call was not unmeasured', captured.logs.some(l => l.startsWith('reproduce:fix:1: unmeasured')), false)
+    check('the open finding settled on its measured row', result.unresolved_findings?.some(f => f.title === 'needs fix'), false)
+    check('hunks unknown: a fresh finding outside any hunk still opens',
+      result.unresolved_findings?.map(f => f.title), ['fresh'])
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true })
+  }
+}
+
 const SCENARIOS = [scenarioPromptIsOneLinePerReproducer, scenarioPromptWithRange, scenarioOutcomesFromTheShell,
   scenarioTolerance, scenarioRejects, scenarioNullIsUnmeasured, scenarioHunksRejected, scenarioFixerGetsLogPath,
-  scenarioRealOutcomes, scenarioRealDirty, scenarioRealDirtyBefore, scenarioRealHunks]
+  scenarioHunksFailed, scenarioRealOutcomes, scenarioRealDirty, scenarioRealDirtyBefore, scenarioRealHunks,
+  scenarioRealBadRange]
 JS_EOF
 
 finish
