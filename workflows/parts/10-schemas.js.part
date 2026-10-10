@@ -675,9 +675,8 @@ const FINDINGS = {
           // A finding of any category needs one to hold the run; classify()
           // below treats an incomplete one the same as none at all.
           reproducer: REPRODUCER,
-          // unmet-criterion only: copied verbatim from the ticket text, so
-          // the script can check it is actually there rather than trusting
-          // the claim.
+          // unmet-criterion only: the criterion, copied from the ticket text.
+          // Read by a human; classify() never looks at it.
           criterion_quote: { type: 'string' },
           // Asked for only when the plan has additions; reviewOf overwrites it
           // with what the script can stand behind.

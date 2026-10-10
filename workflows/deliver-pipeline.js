@@ -8,7 +8,7 @@ export const meta = {
     { title: 'Plan', detail: 'planner produces a concise plan + acceptance criteria + risk areas; the whole plan is written to an untracked file in the worktree, which the implementer must read to its last line' },
     { title: 'Implement', detail: 'one implementer, TDD via crap-controlled-changes, many small signed commits' },
     { title: 'Draft PR', detail: 'push the branch and open a draft PR, or adopt the branch\'s open PR only when its head is an ancestor of the branch, converting a ready one back to a draft, so the work is visible and any later halt has somewhere durable to be reported' },
-    { title: 'Review', detail: 'a measured diffstat (code churn, with comments, tests and docs counted apart) decides the reviewer lenses: correctness and devil\'s advocate normally, plus requirements coverage on a large or wide change, none on a one-liner; support code (tests, docs, comments) far outweighing the actual change halts here before any lens runs. A finding of any category can hold the run, but only with a reproducer that demonstrates it (unmet-criterion also needs a verbatim ticket quote); everything else reaches the PR as a note. Runs again on any commits a later phase adds, and from the first re-review on a finding also has to fall inside what that range actually changed' },
+    { title: 'Review', detail: 'a measured diffstat (code churn, with comments, tests and docs counted apart) decides the reviewer lenses: correctness and devil\'s advocate normally, plus requirements coverage on a large or wide change, none on a one-liner; support code (tests, docs, comments) far outweighing the actual change halts here before any lens runs. A finding of any category can hold the run, but only with a reproducer that demonstrates it; everything else reaches the PR as a note. Runs again on any commits a later phase adds, and from the first re-review on a finding also has to fall inside what that range actually changed' },
     { title: 'Fix', detail: 'fix confirmed findings, bounded rounds; a finding is fixed when its own reproducer exits 0, never by a model\'s judgement of the diff' },
     { title: 'Mutation', detail: 'pre-PR mutation gate; kill survivors with tests, never weaken code. Its own commits are reviewed before the PR' },
     { title: 'PR', detail: 'push, fill in the PR against the repo template, and mark the draft ready for review, only when every gate is green' },
@@ -1081,9 +1081,8 @@ const FINDINGS = {
           // A finding of any category needs one to hold the run; classify()
           // below treats an incomplete one the same as none at all.
           reproducer: REPRODUCER,
-          // unmet-criterion only: copied verbatim from the ticket text, so
-          // the script can check it is actually there rather than trusting
-          // the claim.
+          // unmet-criterion only: the criterion, copied from the ticket text.
+          // Read by a human; classify() never looks at it.
           criterion_quote: { type: 'string' },
           // Asked for only when the plan has additions; reviewOf overwrites it
           // with what the script can stand behind.
@@ -3400,9 +3399,9 @@ const LENS = {
       `implementation is complete, through one lens: hunt for acceptance ` +
       `criteria that are unmet, half-met, or untested. For an unmet criterion, ` +
       `set category to unmet-criterion and copy the criterion into ` +
-      `criterion_quote verbatim from the ticket text below, whitespace and ` +
-      `all: the script checks it is actually there, so a paraphrase does not ` +
-      `hold the run.`,
+      `criterion_quote verbatim from the ticket text below, so a reader can ` +
+      `tell which criterion it is. Holding the run takes a reproducer, as for ` +
+      `any other category.`,
   },
   advocate: {
     label: 'advocate',
@@ -3561,9 +3560,8 @@ const reviewOf = async (range, tag, picked, known = [], knownCharge = '') => {
       `empty list is the expected result for a correct change. Every finding ` +
       `carries a category: wrong-result, crash, gate-bypass, unmet-criterion, ` +
       `docs, wording, design, scope, or other. A finding of any category can ` +
-      `hold this run, but only by carrying a reproducer that demonstrates it ` +
-      `(unmet-criterion additionally needs criterion_quote). One without a ` +
-      `reproducer is still worth raising and reaches the pull request as a ` +
+      `hold this run, but only by carrying a reproducer that demonstrates it. ` +
+      `One without a reproducer is still worth raising and reaches the pull request as a ` +
       `note for a human to judge, but it never blocks. ${REPRODUCER_CONTRACT}` +
       (known.length
         ? `\nThe findings below were already reported earlier this run, each ` +
@@ -3676,7 +3674,6 @@ const collapseDuplicates = async (findings) => {
 // tail review on (never the initial review), is a per-file list of
 // new-side [start, end] ranges the preceding fix (or mutation) range
 // actually touched.
-const collapseWs = (s) => String(s ?? '').replace(/\s+/g, ' ').trim()
 // Shared between classify() and collapseDuplicates(): whether a finding
 // carries every field a reproducer needs, never just that the key is present.
 const hasCompleteReproducer = (f) => {
@@ -3684,18 +3681,10 @@ const hasCompleteReproducer = (f) => {
   return !!(r && typeof r === 'object' &&
     ['kind', 'command', 'expected', 'actual'].every(k => typeof r[k] === 'string' && r[k].length > 0))
 }
-// unmet-criterion's evidence is the quote, not a reproducer: verbatim and
-// long enough that a paraphrase cannot pass as a match.
-const criterionQuoteFound = (f) => {
-  const quote = collapseWs(f.criterion_quote)
-  const haystack = collapseWs(`${ticketDetail.description}\n${ticketDetail.comments}`)
-  return quote.length >= 20 && haystack.includes(quote)
-}
 // Mirrors classify()'s own gate, ahead of classify() ever seeing the
 // finding: used only to rank collapseDuplicates()'s survivor, never to
 // decide anything classify() itself decides.
-const looksBlocking = (f) =>
-  !!f && hasCompleteReproducer(f) && (f.category !== 'unmet-criterion' || criterionQuoteFound(f))
+const looksBlocking = (f) => !!f && hasCompleteReproducer(f)
 // A lens is told to use absolute paths (treeAgent's own rule) but hands
 // classify() its own file field, which hunks (keyed on the repo-relative
 // "+++ b/<path>" git prints) never matches unless normalized the same way: an
@@ -3759,12 +3748,6 @@ const classify = (f, ctx) => {
   if (!hasCompleteReproducer(f)) {
     const reason = BLOCKING_CATEGORIES.has(f.category) ? 'no-reproducer' : 'category'
     return { note: { ...f, reason, round: ctx.round } }
-  }
-  // The quote proves the criterion exists; the reproducer is what shows the
-  // change misses it. Without the second, the only way to decide "unmet" is a
-  // model reading the code, which is exactly what blocking must not rest on.
-  if (f.category === 'unmet-criterion' && !criterionQuoteFound(f)) {
-    return { note: { ...f, reason: 'quote-not-found', round: ctx.round } }
   }
   if (ctx.hunks && !overlapsHunk(f, ctx.hunks)) {
     return { note: { ...f, reason: 'out-of-range', round: ctx.round } }

@@ -433,8 +433,7 @@ those four, `category` for the rest. `classify(f, ctx)` is the pure function tha
 a lens's fields into a candidate (pending execution) or a note (reaching the PR body,
 never the run), in this order: a content-identical or referenced re-report of something
 already tracked drops; a reference to a *settled* finding becomes a `residual` note
-instead; a missing or incomplete reproducer, an `unmet-criterion` quote that
-is not a verbatim substring of the ticket text, or (from the first re-review on) a line
+instead; a missing or incomplete reproducer, or (from the first re-review on) a line
 span outside what the preceding fix or mutation range actually touched, each becomes a
 note with its own `reason`. What survives is a candidate, and `executeAtHead()` is what
 runs it: one haiku dispatch per batch, against the worktree's current HEAD, given lines
@@ -506,10 +505,11 @@ still `not-executed` after that halts the run (at Review for the initial review 
 post-mutation review, at Fix for a fix round's fresh candidates), naming each finding by
 id and title and saying the halt is about measurement, not the code (gh-113).
 
-`unmet-criterion` needs a reproducer too. The verbatim quote proves the criterion
-exists; only an executed command shows the change misses it, and the alternative, a
-model reading the code and declaring the criterion met, is the judgement blocking must
-not rest on.
+`unmet-criterion` is no different from the other categories: it needs a reproducer, and
+nothing else. Its `criterion_quote` field is for the reader of the note and is never
+checked, so a reworded quote costs the finding nothing. Only an executed command shows
+the change misses a criterion, and the alternative, a model reading the code and
+declaring the criterion met, is the judgement blocking must not rest on.
 
 An open finding carries its latest `reproducer_run` into every fix brief, replaced each
 round rather than accumulated. A round whose row the executor dropped is no run, so the

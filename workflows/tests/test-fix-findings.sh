@@ -351,11 +351,11 @@ async function scenarioCR() {
     result.unresolved_findings?.length, 1)
 }
 
-// Scenario CS -- gh-106: an unmet-criterion finding blocks only when its
-// quote is a verbatim substring of the ticket text; a reworded quote is a
-// note instead, never a silent pass for the reviewer's paraphrase.
+// Scenario CS -- the quote does not decide whether an unmet-criterion finding
+// with a reproducer that reproduces blocks, any more than its category does.
 async function scenarioCS() {
-  console.log('\n== scenario CS: an unmet-criterion finding blocks only when its quote is verbatim in the ticket text')
+  console.log('\n== scenario CS: an unmet-criterion finding with a reproducer opens whatever its quote says')
+  const reproducer = { kind: 'command', command: 'true', expected: 'exit 0', actual: 'exit 1' }
   const { result } = await run({
     ticketResult: { found: true, summary: 'stub', comments: '',
       description: 'Acceptance: the client must retry on a 503 with backoff.' },
@@ -363,21 +363,22 @@ async function scenarioCS() {
       correctness: [
         { category: 'unmet-criterion', title: 'Missing retry path', file: 'a.js',
           claim: 'the retry path was never implemented', evidence: 'a.js:1',
-          criterion_quote: 'the client must retry on a 503 with backoff',
-          reproducer: { kind: 'command', command: 'true', expected: 'exit 0', actual: 'exit 1' } },
+          criterion_quote: 'the client must retry on a 503 with backoff', reproducer },
         { category: 'unmet-criterion', title: 'Reworded criterion', file: 'b.js',
           claim: 'paraphrased, not verbatim', evidence: 'b.js:1',
-          criterion_quote: 'clients should retry on server errors eventually',
-          reproducer: { kind: 'command', command: 'true', expected: 'exit 0', actual: 'exit 1' } },
+          criterion_quote: 'clients should retry on server errors eventually', reproducer },
+        { category: 'unmet-criterion', title: 'Unquoted criterion', file: 'c.js',
+          claim: 'no quote given', evidence: 'c.js:1', reproducer },
       ],
       advocate: [],
     },
     initialExit: () => 1,
   })
-  check('the verbatim quote opens the finding',
-    result.unresolved_findings?.some(f => f.title === 'Missing retry path'), true)
-  check('the reworded quote is a note with reason quote-not-found',
-    result.notes?.some(n => n.title === 'Reworded criterion' && n.reason === 'quote-not-found'), true)
+  for (const title of ['Missing retry path', 'Reworded criterion', 'Unquoted criterion']) {
+    check(`${title}: opens the finding`,
+      result.unresolved_findings?.some(f => f.title === title), true)
+  }
+  check('none of them is a note', result.notes?.length ?? 0, 0)
 }
 
 // Scenario CT -- gh-106: the per-lens cap. The script slices to

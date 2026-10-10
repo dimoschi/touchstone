@@ -695,9 +695,9 @@ const LENS = {
       `implementation is complete, through one lens: hunt for acceptance ` +
       `criteria that are unmet, half-met, or untested. For an unmet criterion, ` +
       `set category to unmet-criterion and copy the criterion into ` +
-      `criterion_quote verbatim from the ticket text below, whitespace and ` +
-      `all: the script checks it is actually there, so a paraphrase does not ` +
-      `hold the run.`,
+      `criterion_quote verbatim from the ticket text below, so a reader can ` +
+      `tell which criterion it is. Holding the run takes a reproducer, as for ` +
+      `any other category.`,
   },
   advocate: {
     label: 'advocate',
@@ -856,9 +856,8 @@ const reviewOf = async (range, tag, picked, known = [], knownCharge = '') => {
       `empty list is the expected result for a correct change. Every finding ` +
       `carries a category: wrong-result, crash, gate-bypass, unmet-criterion, ` +
       `docs, wording, design, scope, or other. A finding of any category can ` +
-      `hold this run, but only by carrying a reproducer that demonstrates it ` +
-      `(unmet-criterion additionally needs criterion_quote). One without a ` +
-      `reproducer is still worth raising and reaches the pull request as a ` +
+      `hold this run, but only by carrying a reproducer that demonstrates it. ` +
+      `One without a reproducer is still worth raising and reaches the pull request as a ` +
       `note for a human to judge, but it never blocks. ${REPRODUCER_CONTRACT}` +
       (known.length
         ? `\nThe findings below were already reported earlier this run, each ` +

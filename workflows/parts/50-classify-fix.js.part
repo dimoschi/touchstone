@@ -54,7 +54,6 @@ const collapseDuplicates = async (findings) => {
 // tail review on (never the initial review), is a per-file list of
 // new-side [start, end] ranges the preceding fix (or mutation) range
 // actually touched.
-const collapseWs = (s) => String(s ?? '').replace(/\s+/g, ' ').trim()
 // Shared between classify() and collapseDuplicates(): whether a finding
 // carries every field a reproducer needs, never just that the key is present.
 const hasCompleteReproducer = (f) => {
@@ -62,18 +61,10 @@ const hasCompleteReproducer = (f) => {
   return !!(r && typeof r === 'object' &&
     ['kind', 'command', 'expected', 'actual'].every(k => typeof r[k] === 'string' && r[k].length > 0))
 }
-// unmet-criterion's evidence is the quote, not a reproducer: verbatim and
-// long enough that a paraphrase cannot pass as a match.
-const criterionQuoteFound = (f) => {
-  const quote = collapseWs(f.criterion_quote)
-  const haystack = collapseWs(`${ticketDetail.description}\n${ticketDetail.comments}`)
-  return quote.length >= 20 && haystack.includes(quote)
-}
 // Mirrors classify()'s own gate, ahead of classify() ever seeing the
 // finding: used only to rank collapseDuplicates()'s survivor, never to
 // decide anything classify() itself decides.
-const looksBlocking = (f) =>
-  !!f && hasCompleteReproducer(f) && (f.category !== 'unmet-criterion' || criterionQuoteFound(f))
+const looksBlocking = (f) => !!f && hasCompleteReproducer(f)
 // A lens is told to use absolute paths (treeAgent's own rule) but hands
 // classify() its own file field, which hunks (keyed on the repo-relative
 // "+++ b/<path>" git prints) never matches unless normalized the same way: an
@@ -137,12 +128,6 @@ const classify = (f, ctx) => {
   if (!hasCompleteReproducer(f)) {
     const reason = BLOCKING_CATEGORIES.has(f.category) ? 'no-reproducer' : 'category'
     return { note: { ...f, reason, round: ctx.round } }
-  }
-  // The quote proves the criterion exists; the reproducer is what shows the
-  // change misses it. Without the second, the only way to decide "unmet" is a
-  // model reading the code, which is exactly what blocking must not rest on.
-  if (f.category === 'unmet-criterion' && !criterionQuoteFound(f)) {
-    return { note: { ...f, reason: 'quote-not-found', round: ctx.round } }
   }
   if (ctx.hunks && !overlapsHunk(f, ctx.hunks)) {
     return { note: { ...f, reason: 'out-of-range', round: ctx.round } }
