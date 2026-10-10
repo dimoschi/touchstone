@@ -35,8 +35,12 @@ async function scenarioAdvisoryReportReachesThePr() {
   check('no checks-only fixer ran', callCount(captured, 'checks:fix'), 0)
   check('the PR prompt names the advisory command',
     prPrompt.includes(`Advisory check \`${ADVISORY}\` reported`), true)
-  check('the PR prompt carries what it reported', prPrompt.includes('this assertion cannot fail'), true)
-  check('its exit line is not part of the note', prPrompt.includes('TOUCHSTONE_CHECK_EXIT advisory:1'), false)
+  const advisoryRun = captured.calls.filter(c => c.label.startsWith('checks:run:')).pop()
+  const log = runnerLogOf(runIdOf(advisoryRun?.prompt ?? ''), 'advisory:1')
+  check('the PR prompt says it exited 1', prPrompt.includes('exit 1'), true)
+  check('the PR prompt carries the log path and tells the agent to read it',
+    prPrompt.includes(`Read ${log}`), true)
+  check('and to keep that path out of the PR', prPrompt.includes('never put that path in the PR'), true)
   check('the advisory command never ran as a blocking check',
     captured.calls.filter(c => c.label.startsWith('checks:run:'))
       .slice(0, -1).some(c => c.prompt.includes(ADVISORY)), false)

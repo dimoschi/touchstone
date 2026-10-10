@@ -335,16 +335,14 @@ planAdditions = Array.isArray(plan.additions) ? plan.additions : []
 const additionsLines = () =>
   planAdditions.map(a => `- ${a.item} (needed because: ${a.consequence})`).join('\n')
 
-// A row is only measured when the runner echoes `command` back exactly
-// (classifyResults below), so the string built here is also the string an
-// agent has to copy verbatim. A path made only of characters no shell ever
-// treats specially is left bare for that reason: on the pipeline 0.21.0 run
-// that #116 is about, the runner miscopied the nested `'\''` escaping on
-// every one of 8 rows, and no check was ever measured again. Quoting still
-// closes the quote, splices in a backslash-escaped literal quote, and
-// reopens it, for the one case that still needs it: a declared check's own
-// command (`pytest -k 'not slow'`) or a worktree path carrying a character a
-// bare word cannot hold as-is.
+// A path made only of characters no shell ever treats specially is left bare:
+// the check lines the runner executes carry the worktree path twice, and a
+// nested `'\''` is the one thing a model relaying a line has miscopied before
+// (on the pipeline 0.21.0 run that #116 is about, on every row). Quoting still
+// closes the quote, splices in a backslash-escaped literal quote, and reopens
+// it, for the one case that still needs it: a declared check's own command
+// (`pytest -k 'not slow'`) or a worktree path carrying a character a bare word
+// cannot hold as-is.
 const shQuote = (s) => {
   const str = String(s)
   return /^[A-Za-z0-9/._+:@%=,-]+$/.test(str) ? str : `'${str.replace(/'/g, `'\\''`)}'`
@@ -451,78 +449,79 @@ log(discoveredChecks.length
 // block: after #87 resuming is the normal path, not an edge case.
 const checksBlocking = !args?.existingBranch
 let checkAttempt = 0
-// The exact Bash invocation for a check, built once by the script and never
-// by the model: a fixer or a baseline that trusted a model-reported command
-// could be handed a result for something that only resembles what was asked
-// (an extra `timeout`, a different flag) and never know it ran the wrong
-// thing. c.command itself is spliced in unquoted -- it is the -c script's
-// source, not a single argument -- so only the cd target and the outer -c
-// argument need quoting. The outer argument always contains a space (`cd
-// ... && ...`), so it is quoted regardless; only the cd target can come out
-// bare. The echo sits outside the -c string and after `;`, not `&&`: a
-// check that calls `exit N` itself, or one whose command chain ends
-// nonzero, still leaves $? holding that value for the echo to read, and
-// `;` runs it regardless, where `&&` would have skipped it whenever the
-// check's own exit code was the one case this exists to capture.
-// The check's output goes to a temp file first so the exit line can be
-// printed before it, followed by only the output's last CHECK_TAIL_BYTES.
-// The Bash tool shows a large output only as a short preview of its start
-// (this repo's own fix-loop suite prints about 56KB), so an exit line at the
-// end was out of the runner's sight, and relaying the whole log verbatim is
-// the step runners have already failed at. A file rather than a pipe to
-// tail, because a pipe's status is tail's, and a piped gate is refused by a
-// hook here.
-const innerInvocationFor = (c) => `bash -c ${shQuote(`cd ${shQuote(wt.path)} && ${c.command}`)}`
-const invocationFor = (c) =>
-  `o=$(mktemp); ${innerInvocationFor(c)} >"$o" 2>&1; ` +
-  `echo "${CHECK_EXIT_MARKER} ${c.id} $?"; tail -c ${CHECK_TAIL_BYTES} "$o"; rm -f "$o"`
+// The runner is a list of shell lines the script builds and an agent runs as
+// given, so no check command and no check output is ever copied by a model:
+// a fixer or a baseline that trusted a model-reported command or exit code
+// could be handed a result for something that only resembles what was asked.
+// Each check's line runs it from the worktree and writes its combined output
+// to <git dir>/touchstone-checks/<run>/<id>.log, where `git rev-parse
+// --git-path` puts it under the worktree's own git dir: never in the tree, so
+// a log cannot dirty it, and gone with the worktree. Only then does it print
+// the one line the script parses, with the exit code read from $? straight
+// after the check, `;` rather than `&&` so a check that fails still gets its
+// line. The printed line is why a long suite's output no longer has to fit
+// the Bash tool's inline preview. c.command is spliced in unquoted -- it is
+// the -c script's source, not one argument -- so only the cd target and the
+// outer -c argument need quoting. There is no `exit` in any line: the agent's
+// shell persists, and one would end it. A line whose git or mkdir fails
+// prints nothing, which parseCheckRun reads as unmeasured.
+const bashCommandFor = (c) => `bash -c ${shQuote(`cd ${shQuote(wt.path)} && ${c.command}`)}`
+const logDirFor = (run) =>
+  `d="$(git -C ${shQuote(wt.path)} rev-parse --path-format=absolute --git-path touchstone-checks/${run})"`
+const checkLineFor = (c, run) =>
+  `${logDirFor(run)} && mkdir -p "$d" && { ${bashCommandFor(c)} >"$d/${c.id}.log" 2>&1; ` +
+  `printf 'TOUCHSTONE_CHECK %s %s %s\\n' ${c.id} "$?" "$d/${c.id}.log"; }`
+// The tree is looked at once, after the last check: a check that writes to it
+// (a ledger, a generated file) must be visible, not silently carried into
+// whatever commits next. The porcelain goes to a log beside the others; a
+// human reads it, so it is never relayed.
+const endLineFor = (run) =>
+  `${logDirFor(run)} && mkdir -p "$d" && git -C ${shQuote(wt.path)} status --porcelain >"$d/status.log" 2>&1 && ` +
+  `{ if [ -s "$d/status.log" ]; then s=dirty; else s=clean; fi; ` +
+  `printf 'TOUCHSTONE_CHECKS_END %s %s\\n' ${run} "$s"; }`
 const executeChecks = async (checks = discoveredChecks) => {
   checkAttempt++
-  return await treeAgent(
+  const run = `${planId}-${checkAttempt}`
+  const out = await treeAgent(
     `[touchstone: checks:run]\n` +
-    `Run each Bash invocation below exactly as given, then STOP. Do not fix, ` +
-    `edit, or investigate a failure; a later phase does that.\n` +
+    `Run each line between the fence lines below as its own Bash call, exactly ` +
+    `as written, then STOP. Do not fix, edit, or investigate a failure; a later ` +
+    `phase does that.\n` +
+    `Every line is complete and self-contained: it runs one check, writes that ` +
+    `check's output to a log file itself, and prints one line about it. Never ` +
+    `edit, merge, split, reorder or re-quote a line, and never add to one.\n` +
     `This one call is the exception to the rule above about never running ` +
-    `cd, and only in the bash -c form each invocation already takes: its cd ` +
+    `cd, and only in the bash -c form each line already takes: its cd ` +
     `runs inside a child shell, which does not move this session's own ` +
     `working directory. Never split one into a bare cd ${wt.path} && ` +
     `<command>, which does.\n` +
-    `Run the invocations one at a time, in the order given, each in the ` +
+    `Run the lines one at a time, in the order given, each in the ` +
     `foreground with a Bash timeout of 600000 ms: never with ` +
     `run_in_background, never several at once, and wait for each to return ` +
-    `before starting the next.\n` +
-    `Report each check's id, its exit code, and its combined stdout and ` +
-    `stderr verbatim -- do not summarise, truncate, or interpret what it ` +
-    `printed. Report command as the exact invocation you ran, copied back ` +
-    `verbatim: a row is only accepted when it matches what was asked. ` +
-    `Report exit_line as the first line the invocation printed, the ` +
-    `${CHECK_EXIT_MARKER} line, copied exactly. ` +
-    `Report the output exactly as printed, starting with its first line, ` +
-    `the ${CHECK_EXIT_MARKER} line: never write, add, move, or change that ` +
-    `line yourself. Each invocation already prints only the end of a long ` +
-    `log, so report all of what it printed. A call that does not return ` +
-    `within the timeout is reported with whatever it printed and no exit ` +
-    `line.\n` +
-    `Only once the last invocation has returned, run git -C ${wt.path} ` +
-    `status --porcelain and report whether it printed anything (dirty) and, ` +
-    `if so, its output (porcelain): a check that writes to the tree (a ` +
-    `ledger, a generated file) must be visible, not silently carried into ` +
-    `whatever commits next.\n` +
-    checks.map(c => `${c.id}: ${invocationFor(c)}`).join('\n'),
+    `before starting the next. A call that does not return within the ` +
+    `timeout printed nothing and is simply not reported.\n` +
+    `Return output: every line the calls printed, copied verbatim and in ` +
+    `order, one per line, with no fence, comment or summary of your own. Never ` +
+    `write, change or reorder a line yourself; a line you did not see printed ` +
+    `is not reported.\n` +
+    '```bash\n' +
+    [...checks.map(c => checkLineFor(c, run)), endLineFor(run)].join('\n') +
+    '\n```',
     { label: `checks:run:${checkAttempt}`, schema: CHECK_RUN, model: 'haiku', effort: 'low' })
+  return parseCheckRun(out?.output, checks, run)
 }
-const CHECK_HEAD_BYTES = 1024
-const CHECK_TAIL_BYTES = 8192
-// A cap stated only in a prompt is a request; a slice is a bound. Head and
-// tail both, since a gate prints the repo and branch it resolved first and
-// its verdict last.
+// reproducerRunOf's output cap: a cap stated only in a prompt is a request; a
+// slice is a bound. Head and tail both, since a gate prints the repo and
+// branch it resolved first and its verdict last.
+const OUTPUT_HEAD_BYTES = 1024
+const OUTPUT_TAIL_BYTES = 8192
 const truncateOutput = (s) => {
   const t = String(s ?? '')
-  if (t.length <= CHECK_HEAD_BYTES + CHECK_TAIL_BYTES) return t
-  const omitted = t.length - CHECK_HEAD_BYTES - CHECK_TAIL_BYTES
-  return t.slice(0, CHECK_HEAD_BYTES) +
+  if (t.length <= OUTPUT_HEAD_BYTES + OUTPUT_TAIL_BYTES) return t
+  const omitted = t.length - OUTPUT_HEAD_BYTES - OUTPUT_TAIL_BYTES
+  return t.slice(0, OUTPUT_HEAD_BYTES) +
     `\n[touchstone: truncated, ${omitted} bytes omitted]\n` +
-    t.slice(t.length - CHECK_TAIL_BYTES)
+    t.slice(t.length - OUTPUT_TAIL_BYTES)
 }
 // The one record kept of what a reproducer actually did at a given round.
 // outcomeOf reads row.output raw, before this ever truncates the copy that
@@ -530,95 +529,60 @@ const truncateOutput = (s) => {
 const reproducerRunOf = (row, round) =>
   ({ outcome: outcomeOf(row), exit_code: row?.exit_code ?? null,
      output: truncateOutput(row?.output), round })
-// Splits a run's raw results into a real red list (ran, command matched, a
-// well-formed first-line exit line naming this check that reads nonzero) and an
-// unmeasured one (nobody reported the id, reported it against a different
-// command, or reported it against the right command but without an exit
-// line classifyResults can trust). Unmeasured is never a pass, but it is also
-// never red: a row this phase cannot trust is not evidence either way, so it
-// stays apart from red and is handed to runChecks below to retry, not to a
-// fixer that cannot change what a runner echoes back. reason is plain text
-// for unmeasuredChecksHalt below to render per attempt; it is never the
-// mismatched-command message when the command actually matched, which is
-// what let a matched check's own summarised or still-running output read as
-// a command mismatch before this ticket.
-const classifyResults = (checks, results) => {
-  const byId = new Map((Array.isArray(results) ? results : [])
-    .filter(r => r?.id).map(r => [r.id, r]))
-  const red = []
-  const unmeasured = []
-  for (const c of checks) {
-    const row = byId.get(c.id)
-    const expected = invocationFor(c)
-    if (!row) {
-      unmeasured.push({ id: c.id, command: c.command, exit_code: null,
-        output: 'no result was reported for this check',
-        expected, reported: null, reason: 'no result reported' })
-      continue
-    }
-    // Runners have reported the full invocation, only its inner bash -c, and
-    // only the declared command, for the same run. Any of the three means the
-    // runner says it ran what was asked; anything else (an added timeout, a
-    // changed flag) is a runner admitting it ran something different.
-    if (![expected, innerInvocationFor(c), c.command].includes(row.command)) {
-      unmeasured.push({ id: c.id, command: c.command, exit_code: null,
-        output: `not measured: expected \`${expected}\`, got \`${row.command}\``,
-        expected, reported: row.command, reason: `reported \`${row.command}\`` })
-      continue
-    }
-    // Runners have dropped the exit line from output while relaying it, so
-    // exit_line alone can stand in for it. Only the output's copy was printed
-    // by the check's own shell, though: a model-filled exit_line never
-    // overrides a real one there, and the two disagreeing is unmeasured.
-    const fromOutput = exitLineOf(row.output, c.id)
-    const fromField = row.exit_line ? exitLineOf(row.exit_line, c.id) : null
-    const parsed = !fromField ? fromOutput
-      : fromField.reason ? fromField
-      : fromOutput.reason ? fromField
-      : fromField.exit !== fromOutput.exit ? { reason: 'exit_line disagrees with output' }
-      : fromOutput
-    if (parsed.reason) {
-      unmeasured.push({ id: c.id, command: c.command, exit_code: null,
-        output: `not measured: ${parsed.reason}`,
-        expected, reported: row.command, reason: parsed.reason })
-      continue
-    }
-    if (parsed.exit !== 0) {
-      red.push({ id: c.id, command: c.command, exit_code: parsed.exit,
-        output: truncateOutput(row.output) })
-    }
+// Splits a parsed run into a real red list (a check whose own line reads a
+// nonzero exit) and an unmeasured one. Unmeasured is never a pass, but it is
+// also never red: a reply this phase cannot trust is not evidence either way,
+// so it stays apart from red and is handed to runChecks below to retry, not to
+// a fixer that cannot change what a runner printed. A reason fails the whole
+// batch, since parseCheckRun accepts a reply only when every line of it is
+// right. parseCheckRun returns the rows in the order of checks, so they pair
+// up by position. reason is plain text for unmeasuredLines below.
+const classifyResults = (checks, parsed) => {
+  if (parsed.reason) {
+    return { red: [], unmeasured: checks.map(c =>
+      ({ id: c.id, command: c.command, exit_code: null, reason: parsed.reason })) }
   }
-  return { red, unmeasured }
+  return { unmeasured: [], red: checks.flatMap((c, i) => parsed.rows[i].exit !== 0
+    ? [{ id: c.id, command: c.command, exit_code: parsed.rows[i].exit, log: parsed.rows[i].log }]
+    : []) }
 }
-// Runs every discovered check once, then -- only for whatever came back
-// unmeasured -- runs those again exactly one more time, rather than
-// re-running minute-long suites the first pass already measured at this
-// head. A runner that miscopies once can copy correctly on a second try; one
-// that miscopies twice is not fixed by a code change, so nothing past this
-// point retries again -- it halts instead (unmeasuredChecksHalt).
-const runChecks = async () => {
-  if (!discoveredChecks.length) return { red: [], unmeasured: [] }
-  const first = await executeChecks(discoveredChecks)
-  const { red: red1, unmeasured: unmeasured1 } = classifyResults(discoveredChecks, first?.results)
-  if (!unmeasured1.length) return { red: red1, unmeasured: [] }
-  log(`checks: ${unmeasured1.length} check(s) unmeasured, retrying once: ` +
-      unmeasured1.map(c => c.id).join(', '))
-  const retryList = discoveredChecks.filter(c => unmeasured1.some(u => u.id === c.id))
-  const second = await executeChecks(retryList)
-  const { red: red2, unmeasured: unmeasured2 } = classifyResults(retryList, second?.results)
-  const firstReportedById = new Map(unmeasured1.map(u => [u.id, u.reported]))
-  const firstReasonById = new Map(unmeasured1.map(u => [u.id, u.reason]))
-  const unmeasured = unmeasured2.map(u =>
-    ({ ...u, reported: firstReportedById.get(u.id) ?? null, reported_again: u.reported,
-       reason: firstReasonById.get(u.id) ?? null, reason_again: u.reason }))
-  return { red: [...red1, ...red2], unmeasured }
+// Runs every check once and, only if the batch came back unmeasured, once
+// more: a runner that miscopies once can copy correctly on a second try, and a
+// run never re-measures what it already measured at this head. One that
+// miscopies twice is not fixed by a code change, so nothing past this point
+// retries again -- it halts instead (unmeasuredChecksHalt, or the baseline's
+// own halt). The retry is the whole batch under a new run, so the first
+// attempt's logs are kept as they were. dirty and statusLog describe the
+// attempt that was measured.
+const runChecks = async (checks = discoveredChecks) => {
+  if (!checks.length) return { red: [], unmeasured: [], dirty: false, statusLog: null }
+  const first = await executeChecks(checks)
+  if (!first.reason) return { ...classifyResults(checks, first), dirty: first.dirty, statusLog: first.statusLog }
+  log(`checks: the batch was unmeasured (${first.reason}), retrying once`)
+  const second = await executeChecks(checks)
+  if (!second.reason) return { ...classifyResults(checks, second), dirty: second.dirty, statusLog: second.statusLog }
+  return {
+    red: [], dirty: false, statusLog: null,
+    unmeasured: classifyResults(checks, second).unmeasured
+      .map(u => ({ ...u, reason: first.reason, reason_again: second.reason })),
+  }
 }
 
-const renderCheck = (c) => `Check ${c.id} (${c.command}) exited ${c.exit_code}:\n${c.output}`
+// A red check reaches a fixer as where its output is, never as the output: the
+// log is the whole of it, and a fixer reads what it needs from the end.
+const renderCheck = (c) => `Check ${c.id} (${c.command}) exited ${c.exit_code}. Full output: ${c.log}`
+const renderChecks = (checks) =>
+  `Each log below sits under the worktree's git directory, outside the ` +
+  `worktree: it is the one path you may Read that does not start with ` +
+  `${wt.path}/. Read it from the end, where a check prints its verdict; its ` +
+  `start only names the repo and branch it resolved.\n` +
+  checks.map(renderCheck).join('\n')
+const unmeasuredLines = (checks) => checks.map(c =>
+  `- ${c.id}: first run ${c.reason}; second run ${c.reason_again}.`).join('\n')
 
 // Reports a check the runner never measured, after runChecks already
 // retried it once. Never sent to a fixer: a fixer cannot change what a
-// runner echoes back, and three fix rounds were burned on exactly that
+// runner printed, and three fix rounds were burned on exactly that
 // before #116. plan, impl, gatesPayload and checksPayload are read here only
 // by closure -- this halts solely from a call site after impl exists (the
 // three sites below), never from above it, so none of open/notes/round/
@@ -629,13 +593,10 @@ const renderCheck = (c) => `Check ${c.id} (${c.command}) exited ${c.exit_code}:\
 const unmeasuredChecksHalt = (at, extra) => {
   const note = `${unmeasuredChecks.length} discovered check(s) could not be ` +
     `measured after a retry. This halt is about measurement, not the code: ` +
-    `the runner did not report them as asked, or they did not finish ` +
-    `within the 600000 ms Bash timeout, so no verdict exists either way, ` +
-    `and no fix round has been spent on them.\n` +
-    unmeasuredChecks.map(c =>
-      `- ${c.id}: expected \`${c.expected}\`; first run ${c.reason}; ` +
-      `second run ${c.reason_again}.`
-    ).join('\n')
+    `the runner did not print what the script asked for, or they did not ` +
+    `finish within the 600000 ms Bash timeout, so no verdict exists either ` +
+    `way, and no fix round has been spent on them.\n` +
+    unmeasuredLines(unmeasuredChecks)
   return halted(at, {
     plan: plan.plan, implemented: impl.summary, gates: gatesPayload(), checks: checksPayload(),
     ...extra, note,
@@ -645,25 +606,40 @@ const unmeasuredChecksHalt = (at, extra) => {
 // A check red before any work started is the repo's own environment, not
 // this run's doing, and there is no way to tell the two apart other than
 // measuring the base commit itself. Dropped, not merely downgraded, so it
-// can never re-enter a fixer prompt later. An unmeasured row is never part
-// of this: it is not evidence the repo's own environment is broken, only
-// that this run could not measure it, so it stays in discoveredChecks and
-// is tried again after Implement.
+// can never re-enter a fixer prompt later. A baseline that could not be
+// measured, even after runChecks' retry, is not part of this and does not go
+// on: with nothing known about the base, every check red after Implement would
+// read as the run's own doing and reach a fixer (#143), so the run halts here,
+// before anything is implemented.
 let droppedAtBaseline = []
 if (discoveredChecks.length && checksBlocking) {
-  const baseline = await executeChecks()
-  if (baseline?.dirty) {
+  const baseline = await runChecks()
+  if (baseline.unmeasured.length) {
+    sChecksPre.close()
+    return await halted('Implement', {
+      checks: { discovered: discoveredChecks.length, blocking: checksBlocking, red: [],
+        unmeasured: baseline.unmeasured,
+        detail: 'halted before any check ran against real implementation work' },
+      note: `The environmental baseline could not be established: ` +
+        `${baseline.unmeasured.length} discovered check(s) could not be ` +
+        `measured at the base commit, even after a retry, before any ` +
+        `implementation ran. This is about measurement, not the code, and no ` +
+        `verdict exists either way. Nothing was implemented.\n` +
+        unmeasuredLines(baseline.unmeasured),
+    })
+  }
+  if (baseline.dirty) {
     sChecksPre.close()
     return await halted('Implement', {
       checks: { discovered: discoveredChecks.length, blocking: checksBlocking, red: [],
         detail: 'halted before any check ran against real implementation work' },
       note: `A discovered check wrote to the working tree while establishing ` +
-        `the environmental baseline, before any implementation ran: ` +
-        `${baseline.porcelain || '(no detail returned)'}. Nothing was planned ` +
-        `or implemented. Find which check writes, then re-run.`,
+        `the environmental baseline, before any implementation ran. What git ` +
+        `status reported afterwards is in ${baseline.statusLog}. Nothing was ` +
+        `planned or implemented. Find which check writes, then re-run.`,
     })
   }
-  const { red: baseRed } = classifyResults(discoveredChecks, baseline?.results)
+  const baseRed = baseline.red
   if (baseRed.length) {
     const redIds = new Set(baseRed.map(c => c.id))
     droppedAtBaseline = baseRed

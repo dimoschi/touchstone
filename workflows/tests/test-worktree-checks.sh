@@ -411,8 +411,9 @@ async function scenarioBU() {
   check('the fix prompt carries the failing check\'s command',
     checksFix.includes('bash scripts/run-tests.sh'), true)
   check('the fix prompt carries its exit code', checksFix.includes('exited 1'), true)
-  check('the fix prompt carries its output verbatim',
-    checksFix.includes('FAILURE: workflows/ changed with no version bump'), true)
+  const redRun = runIdOf(captured.calls.find(c => c.label === 'checks:run:2')?.prompt ?? '')
+  check('the fix prompt carries the log of the run that saw it red',
+    checksFix.includes(`Full output: ${runnerLogOf(redRun, 'check:1')}`), true)
   check('the check was re-run after the pre-review fix landed', callCount(captured, 'checks:run:3'), 1)
   const checksFixIdx = captured.calls.findIndex(c => c.label === 'checks:fix')
   const reviewIdx = captured.calls.findIndex(c => c.label.startsWith('review:'))
@@ -470,24 +471,24 @@ async function scenarioCA() {
   const { result, captured } = await run({
     discovery: { file: '/repo/AGENTS.md',
       sections: [{ heading: '## Checks', fence: 'bash gen.sh' }], detail: 'stub' },
-    checkRuns: () => ({ results: [checkRow('check:1', 'bash gen.sh', 0, 'ok')],
-      dirty: true, porcelain: '?? generated.txt' }),
+    checkRuns: () => ({ results: [checkRow('check:1', 'bash gen.sh', 0, 'ok')], dirty: true }),
   })
   check('halted before any implementation ran', result.halted_at, 'Implement')
   check('the implementer never ran', callCount(captured, 'implementer'), 0)
-  check('the note names what the check wrote',
-    (result.note ?? '').includes('?? generated.txt'), true)
+  const baselineRun = runIdOf(captured.calls.find(c => c.label === 'checks:run:1')?.prompt ?? '')
+  check('the note names the status log, where what the check wrote is',
+    (result.note ?? '').includes(`${STUB_WT_PATH}/.git/touchstone-checks/${baselineRun}/status.log`), true)
   check('the note says it happened before implementation, not during it',
     (result.note ?? '').includes('before any implementation ran'), true)
   check('no check is reported red: the baseline itself was green',
     result.checks?.red?.length, 0)
 }
 
-// Scenario CB -- #116: asked to run several commands and report every byte of
-// their output, a cheap agent dropping a row is the expected failure, not a
-// rare one. A row nobody reported is not evidence either way -- runChecks
-// retries it once, and a check still unreported after that halts, since a
-// fixer cannot change what the runner echoes back.
+// Scenario CB -- #116: asked to run several commands and relay what they
+// printed, a cheap agent dropping a line is the expected failure, not a rare
+// one. A batch with a line missing is not evidence either way, for any of its
+// checks -- runChecks retries the batch once, and a batch still short after
+// that halts, since a fixer cannot change what the runner printed.
 async function scenarioCB() {
   console.log('\n== scenario CB: a check the runner never reports on halts after a retry, never reaches a fixer')
   const { result, captured } = await run({
@@ -507,15 +508,12 @@ async function scenarioCB() {
   check('no third attempt was made', callCount(captured, 'checks:run:4'), 0)
   check('the checks-only fixer never ran', callCount(captured, 'checks:fix'), 0)
   check('no fix round ever ran', callCount(captured, 'fix:1'), 0)
-  check('the unreported check is the one named', result.checks?.unmeasured?.[0]?.id, 'check:2')
-  check('its expected invocation is named',
-    (result.note ?? '').includes(checkInvocation('check:2', 'bash b.sh')), true)
-  check('it says no result was reported, on either attempt',
-    (result.note ?? '').includes('no result reported'), true)
+  check('the whole batch is unmeasured, the reported check included',
+    result.checks?.unmeasured?.map(c => c.id), ['check:1', 'check:2'])
+  check('it says which line was missing, on either attempt',
+    (result.note ?? '').includes('first run no line for check:2; second run no line for check:2'), true)
   check('the halt says it is about measurement, not the code',
     (result.note ?? '').includes('not the code'), true)
-  check('the reported green check is never in the unmeasured list',
-    (result.checks?.unmeasured ?? []).some(c => c.id === 'check:1'), false)
   check('no check is reported red', result.checks?.red?.length, 0)
 }
 
@@ -553,29 +551,6 @@ async function scenarioBX() {
   check('the check is reported as non-blocking', result.checks?.blocking, false)
   check('the check is still reported red, for visibility', result.checks?.red?.length, 1)
   check('the run reaches the PR phase', result.pr?.opened, true)
-}
-
-// Scenario BY -- #38: a cap stated only in a prompt is a request; this
-// proves the bound is a real slice. Both ends of a huge check's output must
-// survive, since a gate prints its resolved repo and branch first and its
-// verdict last, and only the middle is safe to drop.
-async function scenarioBY() {
-  console.log('\n== scenario BY: oversized check output is truncated with head and tail kept, middle marked')
-  const bigOutput = 'HEAD_MARKER' + 'x'.repeat(5000) + 'MIDDLE_MARKER_XYZ' + 'y'.repeat(15000) + 'TAIL_MARKER'
-  const { captured } = await run({
-    discovery: { file: '/repo/AGENTS.md',
-      sections: [{ heading: '## Checks', fence: 'bash scripts/run-tests.sh' }], detail: 'stub' },
-    checkRuns: (attempt) => attempt === 1
-      ? { results: [checkRow('check:1', 'bash scripts/run-tests.sh', 0, 'ok')], dirty: false }
-      : { results: [checkRow('check:1', 'bash scripts/run-tests.sh', 1, bigOutput)], dirty: false },
-  })
-  const checksFix = captured.calls.find(c => c.label === 'checks:fix')?.prompt ?? ''
-  check('the pre-review fix ran', checksFix.length > 0, true)
-  check('the head of the output survives', checksFix.includes('HEAD_MARKER'), true)
-  check('the tail of the output survives', checksFix.includes('TAIL_MARKER'), true)
-  check('the truncation marker is present', checksFix.includes('[touchstone: truncated,'), true)
-  check('the middle of the output does not reach the prompt',
-    checksFix.includes('MIDDLE_MARKER_XYZ'), false)
 }
 
 // Scenario BZ -- #38: redness is keyed on the check's own exit line. AGENTS.md
@@ -712,7 +687,7 @@ async function scenarioCK() {
     entry?.output, 100)
 }
 
-const SCENARIOS = [scenarioBH, scenarioBI, scenarioBJ, scenarioBK, scenarioBL, scenarioBM, scenarioBN, scenarioBO, scenarioBP, scenarioBQ, scenarioBR, scenarioBS, scenarioBT, scenarioAZ, scenarioBA, scenarioBU, scenarioBV, scenarioCA, scenarioCB, scenarioBW, scenarioBX, scenarioBY, scenarioBZ, scenarioCC, scenarioCD, scenarioCE, scenarioCJ, scenarioCK]
+const SCENARIOS = [scenarioBH, scenarioBI, scenarioBJ, scenarioBK, scenarioBL, scenarioBM, scenarioBN, scenarioBO, scenarioBP, scenarioBQ, scenarioBR, scenarioBS, scenarioBT, scenarioAZ, scenarioBA, scenarioBU, scenarioBV, scenarioCA, scenarioCB, scenarioBW, scenarioBX, scenarioBZ, scenarioCC, scenarioCD, scenarioCE, scenarioCJ, scenarioCK]
 JS_EOF
 
 finish

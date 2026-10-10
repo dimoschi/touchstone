@@ -224,14 +224,13 @@ async function scenarioDX() {
   })
   const runPrompt = captured.calls.find(c => c.label === 'checks:run:1')?.prompt ?? ''
   const expectedOrder = [
-    'check:1: ' + checkInvocation('check:1', 'bash scripts/run-tests.sh'),
-    'check:2: ' + checkInvocation('check:2', 'bash scripts/lint.sh'),
-    'check:3: ' + checkInvocation('check:3', "bash scripts/echo.sh 'a # b'"),
+    ['check:1', "bash -c 'cd /tmp/stub-worktree && bash scripts/run-tests.sh'"],
+    ['check:2', "bash -c 'cd /tmp/stub-worktree && bash scripts/lint.sh'"],
+    ['check:3', "bash -c 'cd /tmp/stub-worktree && bash scripts/echo.sh '\\''a # b'\\'''"],
   ]
   check('exactly three checks, each with the expected trimmed command',
-    expectedOrder.every(line => runPrompt.includes(line)), true)
-  check('the ordered command list is preserved',
-    expectedOrder.every((line, i) => i === 0 || runPrompt.indexOf(expectedOrder[i - 1]) < runPrompt.indexOf(line)), true)
+    expectedOrder.every(([id, inner]) => runnerLineOf(runPrompt, id).includes(inner)), true)
+  check('the ordered command list is preserved', checkIdsOf(runPrompt), ['check:1', 'check:2', 'check:3'])
   check('the full-line comment and blank lines produced no fourth check',
     runPrompt.includes('check:4'), false)
 }
@@ -302,44 +301,8 @@ async function scenarioEA() {
   check('no red check remains: both duplicate test entries passed', result.checks?.red?.length, 0)
   const secondRun = captured.calls.find(c => c.label === 'checks:run:2')?.prompt ?? ''
   check('the second run asks for both surviving duplicate ids separately',
-    secondRun.includes('check:1:') && secondRun.includes('check:3:'), true)
+    checkIdsOf(secondRun), ['check:1', 'check:3'])
   check('the run does not halt', result.halted_at, undefined)
-}
-
-// Scenario EB -- #109, #116: the script builds each check's exact Bash
-// invocation itself; a reported command that merely resembles it (an extra
-// `timeout`) is not measured, is never a pass, and is never dropped as the
-// repo's own environment at baseline. An unmeasured row gets one retry after
-// Implement; still mismatched on the retry, it halts rather than reaching a
-// fixer that cannot change what the runner echoes back. The mismatched row
-// still carries a valid exit line for its own (wrong) command, to prove the
-// command-mismatch check runs before the exit-line check, not after it.
-async function scenarioEB() {
-  console.log('\n== scenario EB: a mismatched reported command is never dropped at baseline, and halts after a retry rather than reaching a fixer')
-  const { result, captured } = await run({
-    discovery: { file: '/repo/AGENTS.md',
-      sections: [{ heading: '## Checks', fence: 'make run' }], detail: 'stub' },
-    checkRuns: () => ({ results: [{ id: 'check:1', command: 'timeout 10 make run', exit_code: 0,
-      output: 'TOUCHSTONE_CHECK_EXIT check:1 0\nok' }], dirty: false }),
-    initialReview: { correctness: [], advocate: [] },
-    verify: () => undefined,
-    staleness: () => [],
-  })
-  check('the check was not dropped at baseline: still discovered', result.checks?.discovered, 1)
-  check('the baseline detail does not claim anything was dropped',
-    (result.checks?.detail ?? '').includes('dropped'), false)
-  check('halted at Implement: measurement, not the code', result.halted_at, 'Implement')
-  check('the retry happened once', callCount(captured, 'checks:run:3'), 1)
-  check('no third attempt was made', callCount(captured, 'checks:run:4'), 0)
-  check('the checks-only fixer never ran', callCount(captured, 'checks:fix'), 0)
-  check('no fix round ever ran', callCount(captured, 'fix:1'), 0)
-  check('the mismatched check is the one named', result.checks?.unmeasured?.[0]?.id, 'check:1')
-  check('the note states the invocation that was expected',
-    (result.note ?? '').includes(checkInvocation('check:1', 'make run')), true)
-  check('the note carries the mismatched command actually reported',
-    (result.note ?? '').includes('timeout 10 make run'), true)
-  check('the halt says it is about measurement, not the code',
-    (result.note ?? '').includes('not the code'), true)
 }
 
 // Scenarios EC-EE -- #109: the three remaining zero-checks cases, each
@@ -381,36 +344,6 @@ async function scenarioEE() {
     captured.logs.some(l => l.includes('no repo-advertised checks found') && l.includes('no fence, or no command lines')), true)
 }
 
-// Scenario EF -- #109: invocationFor splices the worktree path and the
-// declared command into single quotes by plain interpolation. A quote in
-// either ends the outer -c string early, so the invocation the runner is
-// told to execute is not the command the repo declared. Proven by actually
-// running the built invocation, not by predicting its string: a worktree
-// path holding a space and a quote, and a declared command holding a quoted
-// '#', both have to survive into the real run untouched.
-async function scenarioEF() {
-  console.log('\n== scenario EF: #109 -- the built invocation actually runs the declared command, worktree-path quote and all')
-  const wtPath = fs.mkdtempSync(path.join(os.tmpdir(), "touchstone o'clock -"))
-  const declared = "echo 'a # b'"
-  try {
-    const { captured } = await run({
-      branchResult: { created: true, branch: 'feat/gh-21-stub', base: 'main',
-        path: wtPath, ticket: '21', detail: 'stub', dirty: false },
-      discovery: { file: '/repo/AGENTS.md',
-        sections: [{ heading: '## Checks', fence: declared }], detail: 'stub' },
-    })
-    const runPrompt = captured.calls.find(c => c.label === 'checks:run:1')?.prompt ?? ''
-    const line = runPrompt.split('\n').find(l => l.startsWith('check:1: '))
-    const invocation = line ? line.slice('check:1: '.length) : ''
-    const want = execFileSync('bash', ['-c', declared]).toString()
-    const got = invocation ? execFileSync('bash', ['-c', invocation]).toString() : `<no invocation: ${runPrompt}>`
-    check('the exit line comes first, then the declared command\'s output byte for byte',
-      got, `TOUCHSTONE_CHECK_EXIT check:1 0\n${want}`)
-  } finally {
-    fs.rmSync(wtPath, { recursive: true, force: true })
-  }
-}
-
 // Scenario EJ -- #109: "the verbatim contents between the opening and
 // closing markers" is ambiguous about whether the info string on the
 // opening marker line (` ```bash `) counts as content. The agent now
@@ -431,8 +364,8 @@ async function scenarioEJ() {
   check('exactly two checks discovered', result.checks?.discovered, 2)
   const runPrompt = captured.calls.find(c => c.label === 'checks:run:1')?.prompt ?? ''
   check('check:1 is make test, not the bash info string',
-    runPrompt.includes('check:1: ' + checkInvocation('check:1', 'make test')), true)
-  check('check:2 is make lint', runPrompt.includes('check:2: ' + checkInvocation('check:2', 'make lint')), true)
+    runnerLineOf(runPrompt, 'check:1').includes("&& make test'"), true)
+  check('check:2 is make lint', runnerLineOf(runPrompt, 'check:2').includes("&& make lint'"), true)
   check('there is no check:3', runPrompt.includes('check:3'), false)
 }
 
@@ -452,18 +385,17 @@ async function scenarioEK() {
     check(`exactly two checks discovered (${JSON.stringify(fence)})`, result.checks?.discovered, 2)
     const runPrompt = captured.calls.find(c => c.label === 'checks:run:1')?.prompt ?? ''
     check('check:1 is make test, not a marker line',
-      runPrompt.includes('check:1: ' + checkInvocation('check:1', 'make test')), true)
-    check('check:2 is make lint', runPrompt.includes('check:2: ' + checkInvocation('check:2', 'make lint')), true)
+      runnerLineOf(runPrompt, 'check:1').includes("&& make test'"), true)
+    check('check:2 is make lint', runnerLineOf(runPrompt, 'check:2').includes("&& make lint'"), true)
     check('there is no check:3', runPrompt.includes('check:3'), false)
   }
 }
 
-// Scenario EL -- every check invocation is `bash -c 'cd <worktree> && ...'`,
+// Scenario EL -- every check line runs `bash -c 'cd <worktree> && ...'`,
 // while treeAgent's own preamble tells every agent never to cd into the
 // worktree, not even as `cd <path> && <cmd>`. Without an explicit exception
-// the runner is told both to run the invocation exactly and never to run it,
-// and a runner that obeys the preamble reports a different command, which the
-// exact-match rule then counts as not measured.
+// the runner is told both to run the line exactly and never to run it, and a
+// runner that obeys the preamble rewrites the line.
 async function scenarioEL() {
   console.log('\n== scenario EL: the check runner is told its bash -c cd is the one exception to never-cd')
   const { captured } = await run({
@@ -476,49 +408,18 @@ async function scenarioEL() {
 }
 
 // Scenario EM -- #116: a worktree path made only of characters no shell
-// treats specially is spliced into the invocation bare, with no nested
-// quoting for the runner to copy. Asserted against a literal string, not
-// against this file's own (necessarily identical) shQuote copy: the point is
-// to prove what invocationFor actually outputs, not to restate its logic.
+// treats specially is spliced into the line bare, with no nested quoting for
+// the runner to copy. Asserted against a literal string, not against a copy of
+// the production quoting: the point is to prove what the line actually holds.
 async function scenarioEM() {
   console.log('\n== scenario EM: a bare-safe worktree path has no nested quoting to copy')
   const { captured } = await run({
     discovery: { file: '/repo/AGENTS.md', sections: [{ heading: '## Checks', fence: 'make test' }], detail: 'stub' },
   })
   const runPrompt = captured.calls.find(c => c.label === 'checks:run:1')?.prompt ?? ''
-  check('the invocation is exactly bash -c \'cd <path> && <command>\', no \\\'\\\' near the path, plus the exit echo',
-    runPrompt.includes(
-      'check:1: o=$(mktemp); bash -c \'cd /tmp/stub-worktree && make test\' >"$o" 2>&1; echo "TOUCHSTONE_CHECK_EXIT check:1 $?"; tail -c 8192 "$o"; rm -f "$o"'),
-    true)
-}
-
-// Scenario EN -- #116: a worktree path that does need quoting (a space, a
-// single quote) still lands the `cd` in the real directory when the built
-// invocation actually runs, not merely that a command indifferent to its cwd
-// still produces the right output (scenario EF).
-async function scenarioEN() {
-  console.log('\n== scenario EN: a worktree path needing quoting still cds to the real directory')
-  const wtPath = fs.mkdtempSync(path.join(os.tmpdir(), "touchstone o'clock -"))
-  const realPath = fs.realpathSync(wtPath)
-  try {
-    const { captured } = await run({
-      branchResult: { created: true, branch: 'feat/gh-21-stub', base: 'main',
-        path: wtPath, ticket: '21', detail: 'stub', dirty: false },
-      discovery: { file: '/repo/AGENTS.md',
-        sections: [{ heading: '## Checks', fence: 'pwd -P' }], detail: 'stub' },
-    })
-    const runPrompt = captured.calls.find(c => c.label === 'checks:run:1')?.prompt ?? ''
-    const line = runPrompt.split('\n').find(l => l.startsWith('check:1: '))
-    const invocation = line ? line.slice('check:1: '.length) : ''
-    check('this path is one the bare-word regex rejects, so it stays quoted',
-      /^[A-Za-z0-9/._+:@%=,-]+$/.test(wtPath), false)
-    const got = invocation
-      ? execFileSync('bash', ['-c', invocation]).toString().split('\n')[1]
-      : `<no invocation: ${runPrompt}>`
-    check('cd actually lands in the real worktree directory', got, realPath)
-  } finally {
-    fs.rmSync(wtPath, { recursive: true, force: true })
-  }
+  check('the worktree path is bare in both the git -C and the bash -c, no \\\'\\\' near it',
+    runnerLineOf(runPrompt, 'check:1').startsWith('d="$(git -C /tmp/stub-worktree rev-parse ') &&
+    runnerLineOf(runPrompt, 'check:1').includes("{ bash -c 'cd /tmp/stub-worktree && make test' >"), true)
 }
 
 // Scenario EO -- #116: existingBranch has no clean base tree to block on
@@ -566,61 +467,31 @@ async function scenarioEG() {
   check('no executor call overlapped another agent', overlapsWithExecutor(captured), [])
 }
 
-// Scenarios GA-GC -- the #118 run's runner reported the command in forms other
-// than the full invocation (the bare declared command at baseline, the inner
-// bash -c after Implement) and, on the later runs, dropped the exit line from
-// output. A row is measured when the command is one of the three forms the
-// script built and the exit line arrives in exit_line or as output's first
-// line; anything else stays unmeasured.
+// Scenarios GA-GB -- a check's exit code is the one its own line printed, so
+// every nonzero code is red, including 2, which a script reports for its own
+// setup problem.
 async function scenarioGA() {
-  console.log('\n== scenario GA: a row reporting the bare declared command, exit line first in output, is measured')
+  console.log('\n== scenario GA: a check that exited 1 is red')
   const { result } = await run({
     args: { existingBranch: true, openPr: true },
     discovery: { file: '/repo/AGENTS.md', sections: [{ heading: '## Checks', fence: 'make test' }], detail: 'stub' },
-    checkRuns: () => ({ results: [{ id: 'check:1', command: 'make test', exit_code: 0,
-      output: 'TOUCHSTONE_CHECK_EXIT check:1 1\nboom' }], dirty: false }),
+    checkRuns: () => ({ results: [checkRow('check:1', 'make test', 1, 'boom')], dirty: false }),
     prResult: { opened: true, url: 'https://example.invalid/pr/118ga', note: 'stub ready' },
   })
-  check('measured red from its exit line', result.checks?.red?.[0]?.exit_code, 1)
+  check('measured red', result.checks?.red?.[0]?.exit_code, 1)
   check('nothing unmeasured', result.checks?.unmeasured?.length, 0)
 }
 
 async function scenarioGB() {
-  console.log('\n== scenario GB: a row reporting the inner bash -c, exit line only in exit_line, is measured')
+  console.log('\n== scenario GB: a check that exited 2 is red, not unmeasured and not a pass')
   const { result } = await run({
     args: { existingBranch: true, openPr: true },
     discovery: { file: '/repo/AGENTS.md', sections: [{ heading: '## Checks', fence: 'make test' }], detail: 'stub' },
-    checkRuns: () => ({ results: [{ id: 'check:1', command: "bash -c 'cd /tmp/stub-worktree && make test'",
-      exit_code: 0, exit_line: 'TOUCHSTONE_CHECK_EXIT check:1 2', output: 'the tail of the log' }], dirty: false }),
+    checkRuns: () => ({ results: [checkRow('check:1', 'make test', 2, 'usage')], dirty: false }),
     prResult: { opened: true, url: 'https://example.invalid/pr/118gb', note: 'stub ready' },
   })
-  check('measured red from exit_line', result.checks?.red?.[0]?.exit_code, 2)
+  check('measured red', result.checks?.red?.[0]?.exit_code, 2)
   check('nothing unmeasured', result.checks?.unmeasured?.length, 0)
-}
-
-async function scenarioGC() {
-  console.log('\n== scenario GC: an exit_line naming another check is unmeasured')
-  const { result } = await run({
-    args: { existingBranch: true, openPr: true },
-    discovery: { file: '/repo/AGENTS.md', sections: [{ heading: '## Checks', fence: 'make test' }], detail: 'stub' },
-    checkRuns: () => ({ results: [{ id: 'check:1', command: 'make test', exit_code: 0,
-      exit_line: 'TOUCHSTONE_CHECK_EXIT check:2 0', output: 'TOUCHSTONE_CHECK_EXIT check:1 0' }], dirty: false }),
-    prResult: { opened: true, url: 'https://example.invalid/pr/118gc', note: 'stub ready' },
-  })
-  check('not red', result.checks?.red?.length, 0)
-  check('unmeasured, naming the other id', result.checks?.unmeasured?.[0]?.reason, 'exit line names check:2')
-}
-
-async function scenarioGD() {
-  console.log('\n== scenario GD: an exit_line disagreeing with the exit line in output is unmeasured, never a pass')
-  const { result } = await run({
-    args: { existingBranch: true, openPr: true },
-    discovery: { file: '/repo/AGENTS.md', sections: [{ heading: '## Checks', fence: 'make test' }], detail: 'stub' },
-    checkRuns: () => ({ results: [{ id: 'check:1', command: 'make test', exit_code: 0,
-      exit_line: 'TOUCHSTONE_CHECK_EXIT check:1 0', output: 'TOUCHSTONE_CHECK_EXIT check:1 1\nboom' }], dirty: false }),
-    prResult: { opened: true, url: 'https://example.invalid/pr/118gd', note: 'stub ready' },
-  })
-  check('not a pass: nothing red is not enough', result.checks?.unmeasured?.[0]?.reason, 'exit_line disagrees with output')
 }
 
 async function scenarioGE() {
@@ -634,7 +505,7 @@ async function scenarioGE() {
   check('found the reuse line', reuse !== '', true)
 }
 
-const SCENARIOS = [scenarioDL, scenarioDM, scenarioDN, scenarioDO, scenarioDP, scenarioDQ, scenarioDR, scenarioDS, scenarioDT, scenarioDU, scenarioDV, scenarioDW, scenarioDX, scenarioDY, scenarioDZ, scenarioEA, scenarioEB, scenarioEC, scenarioED, scenarioEE, scenarioEF, scenarioEJ, scenarioEK, scenarioEL, scenarioEM, scenarioEN, scenarioEO, scenarioEG, scenarioGA, scenarioGB, scenarioGC, scenarioGD, scenarioGE]
+const SCENARIOS = [scenarioDL, scenarioDM, scenarioDN, scenarioDO, scenarioDP, scenarioDQ, scenarioDR, scenarioDS, scenarioDT, scenarioDU, scenarioDV, scenarioDW, scenarioDX, scenarioDY, scenarioDZ, scenarioEA, scenarioEC, scenarioED, scenarioEE, scenarioEJ, scenarioEK, scenarioEL, scenarioEM, scenarioEO, scenarioEG, scenarioGA, scenarioGB, scenarioGE]
 JS_EOF
 
 finish

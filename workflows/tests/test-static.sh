@@ -173,4 +173,15 @@ check "architecture.md raises the budget whether it came from an estimate or the
 check "and no longer says the range was bigger than triage estimated" \
   "$(docHas "$ARCH_MD" 'more changed lines than triage estimated')" 0
 
+echo ""
+echo "== static: gh-163 -- the relayed check-row contract is gone, the runner's is in"
+check "no exit marker, exit-line parser, invocation builder or tail cap remains" \
+  "$(grep -cE 'CHECK_EXIT_MARKER|exitLineOf|invocationFor|CHECK_TAIL_BYTES' "$SCRIPT" || true)" 0
+check "CHECK_RUN asks for output and nothing else" \
+  "$(grep -A2 '^const CHECK_RUN = {' "$SCRIPT" | grep -Fc "required: ['output']" || true)" 1
+check "architecture.md describes the batch runner and its log directory" \
+  "$(docHas "$ARCH_MD" 'touchstone-checks/<run>/<id>.log')" 1
+check "and says an unmeasured baseline halts before Implement" \
+  "$(docHas "$ARCH_MD" 'the baseline could not be established')" 1
+
 finish

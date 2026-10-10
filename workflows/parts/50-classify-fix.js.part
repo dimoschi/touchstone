@@ -556,7 +556,7 @@ while ((open.length || blockingChecksOpen()) && round < MAX_REVIEW_ROUNDS && !ou
       ? `The repo's own checks below are failing. Each is a script the repo ` +
         `already runs and decides the same way every time, not a reviewer's ` +
         `opinion; make every one pass rather than silencing its output.\n` +
-        redChecks.map(renderCheck).join('\n\n')
+        renderChecks(redChecks)
       : ''),
     { label: `fix:${round}`, schema: FIXED, model: 'sonnet', effort: effortFor.implement })
   fixRoundSpend.push({ round, output: budget.spent() - fixSpendStart })

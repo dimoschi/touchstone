@@ -230,12 +230,10 @@ if (reviewerCount && mutHead && mutHead !== reviewedThrough && !outOfBudget()) {
 const { checks: advisoryChecks } = checksFrom(wt.checks_source, ADVISORY_CHECKS_HEADING, 'advisory')
 if (advisoryChecks.length && !outOfBudget()) {
   const advisory = await executeChecks(advisoryChecks)
-  const { red, unmeasured } = classifyResults(advisoryChecks, advisory?.results)
+  const { red, unmeasured } = classifyResults(advisoryChecks, advisory)
   for (const c of red) {
-    const report = String(c.output ?? '').split(/\r?\n/)
-      .filter(l => !l.trim().startsWith(`${CHECK_EXIT_MARKER} `)).join('\n').trim()
     notes.push({ category: 'advisory', reason: 'advisory', title: `Advisory check \`${c.command}\` reported`,
-      claim: report || `exit ${c.exit_code}, no output` })
+      claim: `exit ${c.exit_code}`, log: c.log })
   }
   if (unmeasured.length) {
     log(`advisory checks: ${unmeasured.map(c => c.id).join(', ')} not measured; nothing reported for them`)
@@ -253,7 +251,11 @@ const notesSection = notes.length
     `could open. Add a short "Notes" section near the end of the PR body ` +
     `listing each one's title and claim exactly as given below, with no ` +
     `other attribution:\n` +
-    notes.map(n => `- ${n.title}: ${n.claim}`).join('\n') + `\n`
+    notes.map(n => n.log
+      ? `- ${n.title}: ${n.claim}. Read ${n.log} (from its end: it sits under the ` +
+        `git directory, outside the worktree), quote what that check reported as ` +
+        `this note's claim, and never put that path in the PR.`
+      : `- ${n.title}: ${n.claim}`).join('\n') + `\n`
   : ''
 let pr = null
 if (args?.openPr !== false && !outOfBudget()) {
