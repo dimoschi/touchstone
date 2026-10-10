@@ -177,3 +177,81 @@ def test_pipes_a_gate_false_for_group_without_gate_piped():
 def test_pipes_a_gate_searches_each_heredoc_body_from_where_it_starts():
     cmd = "cat <<A <<B\nB\ncrap-check.sh | tail\nA\nB\n"
     assert gate_pipe.pipes_a_gate(cmd) is False
+
+
+def test_pipes_a_gate_true_for_multiline_loops_piped():
+    assert gate_pipe.pipes_a_gate("for r in a b\ndo\n  mutation-check.sh $r\ndone | tail") is True
+    assert gate_pipe.pipes_a_gate("while read r\ndo\n  mutation-check.sh $r\ndone | tail") is True
+
+
+def test_pipes_a_gate_true_for_multiline_if_piped():
+    cmd = "if true\nthen\n  echo a\nelif false\nthen\n  mutation-check.sh /r\nelse\n  echo b\nfi | tail"
+    assert gate_pipe.pipes_a_gate(cmd) is True
+
+
+def test_pipes_a_gate_true_for_case_piped():
+    cmd = "case $x in\n  a) mutation-check.sh /r;;\n  *) echo b;;\nesac | tail"
+    assert gate_pipe.pipes_a_gate(cmd) is True
+
+
+def test_pipes_a_gate_false_for_keyword_compound_redirected():
+    cmd = "for r in a b; do mutation-check.sh $r; done > /tmp/g.log; echo a | cat"
+    assert gate_pipe.pipes_a_gate(cmd) is False
+
+
+def test_pipes_a_gate_keywords_count_only_in_command_position():
+    assert gate_pipe.pipes_a_gate("echo if; crap-check.sh /r; fi | tail") is False
+    assert gate_pipe.pipes_a_gate("if true; then echo fi; crap-check.sh /r; fi | tail") is True
+
+
+def test_pipes_a_gate_reads_heredoc_fed_to_a_shell():
+    assert gate_pipe.pipes_a_gate("bash -s <<'EOF'\nmutation-check.sh /r | tail\nEOF") is True
+    assert gate_pipe.pipes_a_gate("bash <<EOF\nmutation-check.sh /r | tail\nEOF\n") is True
+    assert gate_pipe.pipes_a_gate("/bin/sh -e <<-X\n\tmutation-check.sh /r | tail\n\tX") is True
+    assert gate_pipe.pipes_a_gate("env zsh <<EOF\nmutation-check.sh /r | tail\nEOF") is True
+
+
+def test_pipes_a_gate_shell_heredoc_body_without_pipe_allowed():
+    assert gate_pipe.pipes_a_gate("bash <<'EOF'\nmutation-check.sh /r > /tmp/g\nEOF\necho a | cat") is False
+
+
+def test_pipes_a_gate_shell_only_counts_in_the_heredoc_command():
+    assert gate_pipe.pipes_a_gate("bash x.sh; cat <<'EOF'\nmutation-check.sh | tail\nEOF") is False
+    assert gate_pipe.pipes_a_gate("fish <<'EOF'\nmutation-check.sh | tail\nEOF") is False
+
+
+def test_pipes_a_gate_reads_substitution_in_unquoted_heredoc():
+    assert gate_pipe.pipes_a_gate("cat <<EOF\n$(mutation-check.sh /r | tail)\nEOF") is True
+    assert gate_pipe.pipes_a_gate("cat <<EOF\nx $(echo a) y $(mutation-check.sh /r | tail)\nEOF") is True
+
+
+def test_pipes_a_gate_ignores_substitution_in_quoted_heredoc():
+    assert gate_pipe.pipes_a_gate("cat <<'EOF'\n$(mutation-check.sh /r | tail)\nEOF") is False
+
+
+def test_pipes_a_gate_substitution_in_heredoc_ends_at_its_line():
+    assert gate_pipe.pipes_a_gate("cat <<EOF\n$(mutation-check.sh /r) | x\nEOF") is False
+
+
+def test_pipes_a_gate_arithmetic_shift_is_not_a_heredoc():
+    assert gate_pipe.pipes_a_gate("echo $((1 << 3))\ncrap-check.sh /r | tail") is True
+    assert gate_pipe.pipes_a_gate("(( x << (1 + 1) ))\ncrap-check.sh /r | tail") is True
+
+
+def test_pipes_a_gate_true_for_quoted_gate_path():
+    assert gate_pipe.pipes_a_gate('"$SKILL_DIR/crap-check.sh" /r | tail') is True
+    assert gate_pipe.pipes_a_gate("'/opt/s/crap-check.sh' | tail") is True
+    assert gate_pipe.pipes_a_gate('"mutation-check.sh" /r | tail') is True
+
+
+def test_pipes_a_gate_true_for_substitution_running_a_gate_piped():
+    assert gate_pipe.pipes_a_gate("echo $(crap-check.sh /r; true) | tail") is True
+
+
+def test_pipes_a_gate_false_for_gate_name_inside_a_longer_word():
+    assert gate_pipe.pipes_a_gate("cp crap-check.sh.bak /tmp/x | cat") is False
+
+
+def test_pipes_a_gate_false_for_gate_mentioned_inside_quoted_text():
+    assert gate_pipe.pipes_a_gate('echo "see crap-check.sh" | cat') is False
+    assert gate_pipe.pipes_a_gate('echo "crap-check.sh is a gate" | cat') is False

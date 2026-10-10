@@ -14,6 +14,15 @@ shell setting this hook cannot see), and each form guessed wrong is a silent fal
 green. Redirect to a file and read it instead; nothing is lost, since the file
 holds the whole output and the exit code survives.
 
+The command is read with a small tokenizer, not a shell parser. Quoted strings
+and heredoc bodies are data, except a quoted word ending in a gate's name, a
+heredoc fed to bash/sh/zsh, and `$(...)` in an unquoted heredoc body. Groups
+(`{}`, `()`, do/done, if/fi, case/esac) are tracked, so a pipe after a group
+that ran a gate is refused at any depth. Known limits: code run from inside a
+quoted string (`bash -c "..."`), shell functions, ANSI-C `$'...'` quoting and
+obfuscated gate names get past it, and a gate's name used as a search argument
+(`grep crap-check.sh f | wc`) is refused although harmless.
+
 Exit 2 blocks, with the replacement form on stderr. Tests: test-gate-pipe.sh.
 """
 
@@ -23,27 +32,35 @@ import sys
 
 GATES = ('crap-check.sh', 'crap-commit.sh', 'deadcode-check.sh', 'mutation-check.sh')
 
-# A quoted string or a heredoc body is data, not command line. An unquoted
-# heredoc body can expand `$(...)`, but reading it as commands refused files
-# that merely describe a piped gate.
+# Arithmetic comes first so the `<<` in `$((1 << 3))` is not read as a heredoc.
 DATA = re.compile(r"""
-    (?<!<)<<-?[ \t]*(?P<delim>(?:'[^']*'|"[^"]*"|[^\s;&|<>()])+)
-  | (?P<quoted>'[^']*'|"(?:\\.|[^"\\])*")
+    \$?\(\((?:[^()]|\([^()]*\))*\)\)
+  | (?<!<)<<-?[ \t]*(?P<delim>(?:'[^']*'|"[^"]*"|[^\s;&|<>()])+)
+  | '[^']*' | "(?:\\.|[^"\\])*"
   | \\.
   | .
 """, re.VERBOSE | re.DOTALL)
 
 # Redirections come first so `>|` and `&>` are never read as a pipe or a list.
+# A quoted string stays inside its word, so its `|` and `;` are not operators.
 TOKEN = re.compile(r"""
     &>>? | [<>]& | >\| | >> | <<?<? | >
   | \|\| | \|& | && | [|;&\n()]
-  | (?:\\.|[^\s|;&<>()\\])+
+  | (?:'[^']*'|"(?:\\.|[^"\\])*"|\\.|[^\s|;&<>()\\'"])+
 """, re.VERBOSE | re.DOTALL)
 
+# A word names a gate when it ends in the gate's file name, quoted or not, so a
+# quoted path runs the gate but a sentence that mentions one does not.
+GATE_WORD = re.compile(r'(?:^["\']?|/)(?:' + '|'.join(map(re.escape, GATES)) + r')["\']?$')
+SHELL = re.compile(r'(?:^|[\s/])(?:ba|z)?sh(?=\s|$)')
+SUBSTITUTION = re.compile(r'\$\((?:[^()]|\([^()]*\))*\)')
+QUOTE_CHARS = re.compile(r'[\'"\\]')
+
 PIPES = ('|', '|&')
-OPENS = ('(', '{')
-CLOSES = (')', '}')
 BREAKS = PIPES + ('||', '&&', ';', '&', '\n')
+CLOSERS = {'(': ')', '{': '}', 'do': 'done', 'if': 'fi', 'case': 'esac'}
+# Tokens after which the next word is in command position, where keywords count.
+STARTERS = BREAKS + ('(', ')', '{', 'do', 'if', 'then', 'elif', 'else')
 
 HELP = '''gate-pipe-gate: do not pipe a gate. `$?` after a pipeline is the last
 command's status, so the gate's verdict (0 green, 1 findings, 2 setup failure) is
@@ -57,34 +74,56 @@ Redirect and read the file instead:
 then Read /tmp/gate.log. The whole output is there and the exit code is real.'''
 
 
-def skip_heredoc_bodies(cmd, pos, delims):
-    """Return the position after the bodies of `delims`, which start at `pos`."""
-    for delim in delims:
-        end = re.compile(r'^\t*' + re.escape(delim) + '$', re.MULTILINE).search(cmd, pos)
-        pos = end.end() if end else len(cmd)
+def heredoc_body(cmd, pos, delim):
+    """The heredoc body starting at `pos` and ending at `delim`, and the position after it."""
+    end = re.compile(r'^\t*' + re.escape(delim) + '$', re.MULTILINE).search(cmd, pos)
+    if end:
+        return cmd[pos:end.start()], end.end()
+    return cmd[pos:], len(cmd)
+
+
+def body_commands(body, raw_delim, fed_to_shell):
+    """The parts of a heredoc body that run as commands."""
+    if fed_to_shell:
+        return [command_text(body)]
+    subs = () if QUOTE_CHARS.search(raw_delim) else SUBSTITUTION.findall(body)
+    return [command_text(sub) for sub in subs]
+
+
+def read_heredocs(cmd, pos, heredocs, kept):
+    """Append the commands in each pending heredoc body to `kept`; return the position after them."""
+    for raw_delim, fed_to_shell in heredocs:
+        body, pos = heredoc_body(cmd, pos, QUOTE_CHARS.sub('', raw_delim))
+        kept.extend(body_commands(body, raw_delim, fed_to_shell))
     return pos
 
 
+def feeds_shell(text):
+    """True if the simple command at the end of `text` runs bash, sh or zsh."""
+    return bool(SHELL.search(re.split(r'[;&|\n()]', text)[-1]))
+
+
 def command_text(cmd):
-    """`cmd` with quoted strings and heredoc bodies removed."""
-    kept, delims, pos = [], [], 0
+    """`cmd` with heredoc bodies reduced to the commands they run."""
+    kept, heredocs, pos = [], [], 0
     while pos < len(cmd):
         m = DATA.match(cmd, pos)
         pos = m.end()
         if m['delim']:
-            delims.append(re.sub(r'[\'"\\]', '', m['delim']))
-        elif m['quoted'] is None:
+            heredocs.append((m['delim'], feeds_shell(''.join(kept))))
+        else:
             kept.append(m.group())
         if m.group() == '\n':
-            pos = skip_heredoc_bodies(cmd, pos, delims)
-            delims = []
+            pos = read_heredocs(cmd, pos, heredocs, kept)
+            heredocs = []
     return ''.join(kept)
 
 
 class Group:
-    """A brace group, subshell or the top level, as the token walk sees it."""
+    """A compound command or the top level, as the token walk sees it."""
 
-    def __init__(self):
+    def __init__(self, closer):
+        self.closer = closer
         self.element_runs_gate = False
         self.runs_gate = False
 
@@ -93,25 +132,39 @@ class Group:
         self.runs_gate |= gate
 
 
-def step(stack, token):
-    if token in OPENS:
-        stack.append(Group())
-    elif token in CLOSES and len(stack) > 1:
-        inner = stack.pop()
-        stack[-1].ran(inner.runs_gate)
-    elif token in BREAKS:
-        stack[-1].element_runs_gate = False
-    else:
-        stack[-1].ran(any(gate in token for gate in GATES))
+class Walk:
+    """The open groups, and whether the next word is in command position."""
+
+    def __init__(self):
+        self.stack = [Group(None)]
+        self.at_start = True
+
+    def closes(self, token):
+        return token == self.stack[-1].closer and (token == ')' or self.at_start)
+
+    def opens(self, token):
+        return token == '(' or (self.at_start and token in CLOSERS)
+
+    def step(self, token):
+        if self.closes(token):
+            inner = self.stack.pop()
+            self.stack[-1].ran(inner.runs_gate)
+        elif self.opens(token):
+            self.stack.append(Group(CLOSERS[token]))
+        elif token in BREAKS:
+            self.stack[-1].element_runs_gate = False
+        else:
+            self.stack[-1].ran(bool(GATE_WORD.search(token)))
+        self.at_start = token in STARTERS
 
 
 def pipes_a_gate(cmd):
     """True if a pipe follows a pipeline element, at any group depth, that runs a gate."""
-    stack = [Group()]
+    walk = Walk()
     for token in TOKEN.findall(command_text(cmd)):
-        if token in PIPES and stack[-1].element_runs_gate:
+        if token in PIPES and walk.stack[-1].element_runs_gate:
             return True
-        step(stack, token)
+        walk.step(token)
     return False
 
 
