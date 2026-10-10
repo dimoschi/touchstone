@@ -143,8 +143,14 @@ if (mutHead && mutHead !== reviewedThrough) {
   if (leak) return leak
 }
 if (mutHead && mutHead !== reviewedThrough && settled.length) {
-  const execSettledMut = await executeAtHead(settled, 'reproduce:settled:mutation')
+  const execSettledMut = await executeSettled(settled, 'reproduce:settled:mutation')
   if (execSettledMut.dirty) return await dirtyReproducerHalt('Review', execSettledMut)
+  if (execSettledMut.reasons) {
+    return await unmeasuredSettledHalt('Review', settled, execSettledMut, {
+      mutation, unresolved_findings: [...open, ...settled.map(awaitingRecheck)], fix_rounds: round,
+      fix_round_output: fixRoundSpend, notes,
+    })
+  }
   const { regressed: undone, errored: erroredMut } = regressedOf(settled, execSettledMut, 'mutation')
   if (undone.length || erroredMut.length) {
     return await halted('Review', {

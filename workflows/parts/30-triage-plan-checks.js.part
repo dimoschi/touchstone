@@ -364,13 +364,7 @@ const fnv1a = (s) => {
 const contentDigest = (s) => {
   let h = 0x811c9dc5
   const add = (b) => { h ^= b; h = Math.imul(h, 0x01000193) }
-  for (const ch of s.replace(/[ \t\n\r]+/g, ' ').replace(/^ | $/g, '')) {
-    const cp = ch.codePointAt(0)
-    if (cp < 0x80) add(cp)
-    else if (cp < 0x800) { add(0xc0 | cp >> 6); add(0x80 | cp & 0x3f) }
-    else if (cp < 0x10000) { add(0xe0 | cp >> 12); add(0x80 | cp >> 6 & 0x3f); add(0x80 | cp & 0x3f) }
-    else { add(0xf0 | cp >> 18); add(0x80 | cp >> 12 & 0x3f); add(0x80 | cp >> 6 & 0x3f); add(0x80 | cp & 0x3f) }
-  }
+  utf8Bytes(s.replace(/[ \t\n\r]+/g, ' ').replace(/^ | $/g, '')).forEach(add)
   return (h >>> 0).toString(16).padStart(8, '0')
 }
 const planId = fnv1a(`${ticket}${plan.plan}`)
@@ -469,70 +463,67 @@ let checkAttempt = 0
 // tree (an unreadable excludes or attributes file) would otherwise read as an
 // unexpected line, or as a dirty tree.
 const bashCommandFor = (c) => `bash -c ${shQuote(`cd ${shQuote(wt.path)} && ${c.command}`)}`
-const logDirFor = (run) =>
-  `d="$(git -C ${shQuote(wt.path)} rev-parse --path-format=absolute --git-path touchstone-checks/${run} 2>/dev/null)"`
-const checkLineFor = (c, run) =>
-  `${logDirFor(run)} && mkdir -p "$d" && { ${bashCommandFor(c)} >|"$d/${c.id}.log" 2>&1; ` +
-  `printf 'TOUCHSTONE_CHECK %s %s %s\\n' ${c.id} "$?" "$d/${c.id}.log"; }`
+const logDirFor = (run, area = 'touchstone-checks') =>
+  `d="$(git -C ${shQuote(wt.path)} rev-parse --path-format=absolute --git-path ${area}/${run} 2>/dev/null)"`
+// The printed row is also written to the run's rows file (rowsSumMatches): the
+// first line of a batch starts the file, so a re-run in the same directory
+// never sums the previous run's rows.
+const rowTo = (first) =>
+  `printf '%s\\n' "$r" ${first ? '>|' : '>>'}"$d/rows"; printf '%s\\n' "$r"`
+const checkLineFor = (c, run, first) =>
+  `${logDirFor(run)} && mkdir -p "$d" && { ${bashCommandFor(c)} >|"$d/${c.id}.log" 2>&1; e=$?; ` +
+  `r="$(printf 'TOUCHSTONE_CHECK %s %s %s' ${c.id} "$e" "$d/${c.id}.log")"; ${rowTo(first)}; }`
 // The tree is looked at once, after the last check: a check that writes to it
 // (a ledger, a generated file) must be visible, not silently carried into
 // whatever commits next. The porcelain goes to a log beside the others and its
 // stderr to status.err; a human reads both, so neither is ever relayed. Only
-// stdout decides dirty.
+// stdout decides dirty. reproduce:* reuses these pieces for its before and end
+// lines. The end line also prints the rows file's cksum.
+const porcelainTo = (name) =>
+  `git -C ${shQuote(wt.path)} status --porcelain >|"$d/${name}.log" 2>|"$d/${name}.err"`
+const stateOf = (name) => `if [ -s "$d/${name}.log" ]; then s=dirty; else s=clean; fi`
+const rowsSumTo = `k="$(cksum < "$d/rows")"`
 const endLineFor = (run) =>
-  `${logDirFor(run)} && mkdir -p "$d" && git -C ${shQuote(wt.path)} status --porcelain >|"$d/status.log" 2>|"$d/status.err" && ` +
-  `{ if [ -s "$d/status.log" ]; then s=dirty; else s=clean; fi; ` +
-  `printf 'TOUCHSTONE_CHECKS_END %s %s\\n' ${run} "$s"; }`
+  `${logDirFor(run)} && mkdir -p "$d" && ${porcelainTo('status')} && ${rowsSumTo} && ` +
+  `{ ${stateOf('status')}; printf 'TOUCHSTONE_CHECKS_END %s %s %s\\n' ${run} "$s" "$k"; }`
+// The instructions every runner call gets around its fenced lines: checks:run
+// and reproduce:* alike.
+const runnerPrompt = (label, lines) =>
+  `[touchstone: ${label}]\n` +
+  `Run each line between the fence lines below as its own Bash call, exactly ` +
+  `as written, then STOP. Do not fix, edit, or investigate a failure; a later ` +
+  `phase does that.\n` +
+  `Every line is complete and self-contained: it runs one step, writes that ` +
+  `step's output to a log file itself, and prints only what the script reads ` +
+  `back. Never edit, merge, split, reorder or re-quote a line, and never add ` +
+  `to one.\n` +
+  `This one call is the exception to the rule above about never running ` +
+  `cd, and only in the form each line already takes: its cd runs inside a ` +
+  `child shell (bash -c, or a subshell in parentheses), which does not move ` +
+  `this session's own working directory. Never split one into a bare ` +
+  `cd ${wt.path} && <command>, which does.\n` +
+  `Run the lines one at a time, in the order given, each in the ` +
+  `foreground with a Bash timeout of 600000 ms: never with ` +
+  `run_in_background, never several at once, and wait for each to return ` +
+  `before starting the next. A call that does not return within the ` +
+  `timeout printed nothing and is simply not reported.\n` +
+  `Return output: every line the calls printed, copied verbatim and in ` +
+  `order, one per line, with no fence, comment or summary of your own. Never ` +
+  `write, change or reorder a line yourself; a line you did not see printed ` +
+  `is not reported.\n` +
+  '```bash\n' + lines.join('\n') + '\n```'
 const executeChecks = async (checks = discoveredChecks) => {
   checkAttempt++
   const run = `${planId}-${checkAttempt}`
   const out = await treeAgent(
-    `[touchstone: checks:run]\n` +
-    `Run each line between the fence lines below as its own Bash call, exactly ` +
-    `as written, then STOP. Do not fix, edit, or investigate a failure; a later ` +
-    `phase does that.\n` +
-    `Every line is complete and self-contained: it runs one check, writes that ` +
-    `check's output to a log file itself, and prints one line about it. Never ` +
-    `edit, merge, split, reorder or re-quote a line, and never add to one.\n` +
-    `This one call is the exception to the rule above about never running ` +
-    `cd, and only in the bash -c form each line already takes: its cd ` +
-    `runs inside a child shell, which does not move this session's own ` +
-    `working directory. Never split one into a bare cd ${wt.path} && ` +
-    `<command>, which does.\n` +
-    `Run the lines one at a time, in the order given, each in the ` +
-    `foreground with a Bash timeout of 600000 ms: never with ` +
-    `run_in_background, never several at once, and wait for each to return ` +
-    `before starting the next. A call that does not return within the ` +
-    `timeout printed nothing and is simply not reported.\n` +
-    `Return output: every line the calls printed, copied verbatim and in ` +
-    `order, one per line, with no fence, comment or summary of your own. Never ` +
-    `write, change or reorder a line yourself; a line you did not see printed ` +
-    `is not reported.\n` +
-    '```bash\n' +
-    [...checks.map(c => checkLineFor(c, run)), endLineFor(run)].join('\n') +
-    '\n```',
+    runnerPrompt('checks:run', [...checks.map((c, i) => checkLineFor(c, run, i === 0)), endLineFor(run)]),
     { label: `checks:run:${checkAttempt}`, schema: CHECK_RUN, model: 'haiku', effort: 'low' })
   return parseCheckRun(out?.output, checks, run)
 }
-// reproducerRunOf's output cap: a cap stated only in a prompt is a request; a
-// slice is a bound. Head and tail both, since a gate prints the repo and
-// branch it resolved first and its verdict last.
-const OUTPUT_HEAD_BYTES = 1024
-const OUTPUT_TAIL_BYTES = 8192
-const truncateOutput = (s) => {
-  const t = String(s ?? '')
-  if (t.length <= OUTPUT_HEAD_BYTES + OUTPUT_TAIL_BYTES) return t
-  const omitted = t.length - OUTPUT_HEAD_BYTES - OUTPUT_TAIL_BYTES
-  return t.slice(0, OUTPUT_HEAD_BYTES) +
-    `\n[touchstone: truncated, ${omitted} bytes omitted]\n` +
-    t.slice(t.length - OUTPUT_TAIL_BYTES)
-}
-// The one record kept of what a reproducer actually did at a given round.
-// outcomeOf reads row.output raw, before this ever truncates the copy that
-// gets stored, so truncation can never hide the marker from the decision.
+// The one record kept of what a reproducer actually did at a given round: the
+// log path, never its output, which a fixer reads from the log itself.
 const reproducerRunOf = (row, round) =>
-  ({ outcome: outcomeOf(row), exit_code: row?.exit_code ?? null,
-     output: truncateOutput(row?.output), round })
+  ({ outcome: outcomeOf(row), exit_code: row?.exit_code ?? null, log: row?.log ?? null, round })
 // Splits a parsed run into a real red list (a check whose own line reads a
 // nonzero exit) and an unmeasured one. Unmeasured is never a pass, but it is
 // also never red: a reply this phase cannot trust is not evidence either way,

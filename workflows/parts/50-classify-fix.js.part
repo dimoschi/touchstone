@@ -155,63 +155,94 @@ const classify = (f, ctx) => {
 
 // Replaces verifyOpen: whether a finding is fixed is decided by executing its
 // reproducer, never by a model's judgement of a diff. One haiku dispatch runs
-// every item's reproducer against the worktree's current HEAD; when
-// diffRange is given, the same call also fetches that range's own new-side
-// diff hunks, verbatim, for classify()'s out-of-range rule.
+// script-built lines against the worktree's current HEAD, the same way
+// checks:run does (runnerPrompt): a before line, one line per reproducer, the
+// range's new-side hunk headers when diffRange is given (for classify()'s
+// out-of-range rule), and an end line. Each reproducer's output goes to a log
+// under the worktree's git dir; the shell prints its exit code and whether
+// the log holds REPRODUCED_MARKER on a line of its own, so neither the exit
+// nor the marker is ever a model's copy. Porcelain before and after goes to
+// before.log and status.log beside it: dirt already there before anything
+// runs must never be blamed on a reproducer, and dirt a reproducer leaves
+// must not be carried into whatever commits next.
+let reproAttempt = 0
+const REPRO_AREA = 'touchstone-repro'
+// A reproducer command can span several lines (a python3 -c script, a
+// heredoc), and a newline spliced into the fence would split one line into
+// fragments the runner executes on their own, outside the worktree and the
+// log. So it travels base64-encoded and is decoded inside the line; an empty
+// decode prints nothing, which reads as unmeasured rather than as a pass.
+const reproLineFor = (it, run) =>
+  `${logDirFor(run, REPRO_AREA)} && mkdir -p "$d" && ` +
+  `c="$(python3 -c 'import base64,sys;sys.stdout.write(base64.b64decode(sys.argv[1]).decode())' ${base64Of(it.reproducer.command)})" && [ -n "$c" ] && ` +
+  `{ (cd ${shQuote(wt.path)} && bash -c "$c") >|"$d/${it.id}.log" 2>&1; e=$?; ` +
+  `if grep -aqxE '[[:space:]]*${REPRODUCED_MARKER}[[:space:]]*' "$d/${it.id}.log"; then m=1; else m=0; fi; ` +
+  `r="$(printf 'TOUCHSTONE_REPRO %s %s %s %s' ${it.id} "$e" "$m" "$d/${it.id}.log")"; ${rowTo(false)}; }`
+// The diff goes to a file rather than a pipe, so its own exit decides which
+// block is printed: a git failure (a bad range) prints a failed line, which
+// leaves the hunks unknown without voiding the reproducer rows.
+const hunksLineFor = (run, range) =>
+  `${logDirFor(run, REPRO_AREA)} && mkdir -p "$d" && ` +
+  `{ git -C ${shQuote(wt.path)} diff --unified=0 --no-color ${shQuote(range)} >|"$d/diff.log" 2>|"$d/diff.err"; g=$?; ` +
+  `if [ "$g" -ne 0 ]; then printf 'TOUCHSTONE_HUNKS_FAILED %s %s\\n' ${run} "$g"; ` +
+  `else grep -aE '^(\\+\\+\\+ |@@ )' "$d/diff.log" >|"$d/hunks.log"; ` +
+  `printf 'TOUCHSTONE_HUNKS_BEGIN %s\\n' ${run}; cat "$d/hunks.log"; ` +
+  `printf 'TOUCHSTONE_HUNKS_END %s %s\\n' ${run} "$(grep -c '' "$d/hunks.log")"; fi; }`
+// The before line starts the rows file, so every reproducer line appends.
+const reproLinesFor = (runnable, run, diffRange) => [
+  `${logDirFor(run, REPRO_AREA)} && mkdir -p "$d" && : >|"$d/rows" && ${porcelainTo('before')} && ` +
+    `{ ${stateOf('before')}; printf 'TOUCHSTONE_REPRO_BEFORE %s %s\\n' ${run} "$s"; }`,
+  ...runnable.map(it => reproLineFor(it, run)),
+  ...(diffRange ? [hunksLineFor(run, diffRange)] : []),
+  `${logDirFor(run, REPRO_AREA)} && mkdir -p "$d" && ${porcelainTo('status')} && ${rowsSumTo} && ` +
+    `{ ${stateOf('status')}; printf 'TOUCHSTONE_REPRO_END %s %s %s %s\\n' ${run} "$s" "$k" "$d/status.log"; }`,
+]
 const executeAtHead = async (items, label, diffRange) => {
   const runnable = items.filter(it => it.reproducer?.command)
-  const out = await treeAgent(
-    `First run git -C ${wt.path} status --porcelain and report its output in ` +
-    `porcelain_before, even when empty: dirt already there before anything ` +
-    `below runs must never be blamed on what runs next.\n` +
-    (runnable.length
-      ? `Run each reproducer below in this worktree, then STOP. Do not fix, ` +
-        `edit, or investigate a failure; a later phase does that.\n` +
-        `This one call is the exception to the rule above about never running ` +
-        `cd, and only in the bash -c form: run each command as ` +
-        `bash -c 'cd ${wt.path} && <command>'. Never a bare ` +
-        `cd ${wt.path} && <command>, which does move this session.\n` +
-        `Report each command's exit code verbatim, never your own judgement of ` +
-        `whether it passed. Report output as its combined stdout and stderr, ` +
-        `verbatim and complete -- do not summarise, truncate, or interpret ` +
-        `what it printed, since the script reads it.\n` +
-        runnable.map(it => `[${it.id}] ${it.reproducer.command}`).join('\n') + `\n`
-      : '') +
-    (diffRange
-      ? `Run git -C ${wt.path} diff --unified=0 --no-color ${diffRange} and return, ` +
-        `in diff_lines, every line of its output that starts with "+++ " or ` +
-        `"@@ ", verbatim and in order, with nothing else: no other line of the ` +
-        `diff, no summary, no comment of your own.\n`
-      : '') +
-    `Then run git -C ${wt.path} status --porcelain again and report whether it ` +
-    `printed anything (dirty) and, if so, its output (porcelain): a reproducer ` +
-    `that writes to the tree must be visible, not silently carried into ` +
-    `whatever commits next.`,
-    { label, schema: EXECUTE_RESULT, model: 'haiku', effort: 'low' })
-  // A Map, not the old [id, exit_code] pairs: outcomeOf needs each row's raw
-  // output too, to check the marker before truncateOutput ever runs on it.
-  const runs = new Map((Array.isArray(out?.results) ? out.results : [])
-    .filter(r => typeof r?.id === 'string')
-    .map(r => [stripBrackets(r.id), { exit_code: r.exit_code, output: r.output }]))
+  reproAttempt++
+  const run = `${planId}-${label.replace(/[^A-Za-z0-9._-]+/g, '-')}-${reproAttempt}`
+  const out = await treeAgent(runnerPrompt(label, reproLinesFor(runnable, run, diffRange)),
+    { label, schema: REPRO_RUN, model: 'haiku', effort: 'low' })
+  const parsed = parseReproRun(out?.output, runnable.map(it => it.id), run, Boolean(diffRange))
+  // An unmeasured run is read exactly as a call that returned nothing: no
+  // rows (so callers' not-executed handling applies), hunks unknown rather
+  // than empty, and nothing seen dirty.
+  if (parsed.reason) {
+    log(`${label}: unmeasured (${parsed.reason})`)
+    return { runs: new Map(), hunks: null, dirty: false, porcelain: '', preexisting: !runnable.length,
+      unmeasured: parsed.reason }
+  }
+  if (parsed.diffExit !== undefined) {
+    log(`${label}: git diff exited ${parsed.diffExit}, so this range's hunks are unknown`)
+  }
   return {
-    runs,
-    // null (not {}) when the fetch itself failed -- the executor returned
-    // nothing, failed schema, or omitted diff_lines -- so classify()'s
-    // ctx.hunks guard reads "could not measure" as unknown, never as "this
-    // range touched nothing", which would wrongly mark every fresh finding
-    // out-of-range.
-    hunks: diffRange && Array.isArray(out?.diff_lines) ? parseHunks(out.diff_lines) : null,
-    dirty: out?.dirty === true,
-    porcelain: out?.porcelain ?? '',
+    runs: new Map(parsed.rows.map(r => [r.id, { exit_code: r.exit, reproduced: r.reproduced, log: r.log }])),
+    hunks: parsed.hunkLines ? parseHunks(parsed.hunkLines) : null,
+    dirty: parsed.dirty,
+    porcelain: parsed.statusLog,
     // True when nothing this call could have dirtied: either it ran no
     // reproducer at all (the mutation-hunk fetch calls with an empty items
     // list), or the tree was already dirty before anything below ran. Without
     // this, a fixer whose crap-commit.sh was refused -- the wrapper leaves the
     // staged changes in place, with no reset/stash/restore -- gets a halt
     // blaming "a reproducer execution" for dirt that predates it.
-    preexisting: !runnable.length ||
-      (typeof out?.porcelain_before === 'string' && out.porcelain_before.trim() !== ''),
+    preexisting: !runnable.length || parsed.before,
+    unmeasured: null,
   }
+}
+
+// A settled finding's re-check gets the retry a candidate gets: an unmeasured
+// call has no rows at all, and regressedOf reads a missing row as regressed,
+// so one copy slip would otherwise reopen every settled finding and, at the
+// mutation head, blame the gate's commits for undoing them. Still unmeasured
+// after the retry, the result carries both reasons for unmeasuredSettledHalt.
+// A missing row inside a measured call keeps its meaning there.
+const executeSettled = async (items, label) => {
+  const first = await executeAtHead(items, label)
+  if (first.dirty || !first.unmeasured) return first
+  const second = await executeAtHead(items, `${label}:retry`)
+  if (second.dirty || !second.unmeasured) return second
+  return { ...second, reasons: [first.unmeasured, second.unmeasured] }
 }
 
 // A reproducer run that leaves the tree dirty halts outright: a check that
@@ -226,10 +257,10 @@ const dirtyReproducerHalt = async (phaseName, exec, extraOpen = []) => halted(ph
   unresolved_findings: [...open, ...extraOpen], notes, fix_rounds: round,
   note: exec.preexisting
     ? `The working tree was already dirty before this check ran, so nothing ` +
-      `it did caused it: ${exec.porcelain || '(no detail returned)'}. Find ` +
-      `what left it dirty earlier in this round, then re-run.`
-    : `A reproducer execution left the working tree dirty: ` +
-      `${exec.porcelain || '(no detail returned)'}. Nothing further ran; find ` +
+      `it did caused it. What git status reported afterwards is in ` +
+      `${exec.porcelain}. Find what left it dirty earlier in this round, then re-run.`
+    : `A reproducer execution left the working tree dirty. What git status ` +
+      `reported afterwards is in ${exec.porcelain}. Nothing further ran; find ` +
       `which reproducer writes to the tree, then re-run.`,
 })
 
@@ -346,6 +377,23 @@ const deadLensHalt = (at, dead, extra) => {
   })
 }
 
+// Same shape and TDZ reasoning as notExecutedHalt. The settled findings are
+// carried in unresolved_findings with their last measured run, so the record
+// keeps them and a re-run checks them again; nothing was reopened.
+// Marks a settled finding whose re-check could not be measured, so a resumed
+// run re-checks it instead of briefing a fixer on a fix already shown to hold.
+const awaitingRecheck = (f) => ({ ...f, awaiting_recheck: true })
+const unmeasuredSettledHalt = (at, items, exec, extra) => halted(at, {
+  plan: plan.plan, implemented: impl.summary, gates: gatesPayload(),
+  checks: checksPayload(), ...extra,
+  note: `The re-check of ${items.length} settled finding(s) could not be ` +
+    `measured, even after a retry (first run ${exec.reasons[0]}; second run ` +
+    `${exec.reasons[1]}). This is a measurement failure, not a regression: ` +
+    `no fix was shown undone, and each is carried below with its last measured ` +
+    `run so a re-run checks it again.\n` +
+    items.map(f => `- ${f.id}: ${f.title}`).join('\n'),
+})
+
 let settled = []
 // A carried finding whose reproducer nobody ran (notExecutedHalt recorded it)
 // is a candidate, not a verdict: held in open it would stay open through every
@@ -358,8 +406,10 @@ const unmeasured = (f) => f.reproducer_run?.outcome === 'not-executed'
 // a finding that was demonstrated into a note.
 const latestRun = (f, run) =>
   run.outcome === 'not-executed' && f.reproducer_run ? f.reproducer_run : run
+const carriedPassed = (f) => f.awaiting_recheck === true
+settled = carriedOpen.filter(carriedPassed).map(({ awaiting_recheck, ...f }) => f)
 let awaiting = carriedOpen.filter(unmeasured)
-let open = carriedOpen.filter(f => !unmeasured(f))
+let open = carriedOpen.filter(f => !unmeasured(f) && !carriedPassed(f))
 let round = 0
 widenBudgetHaltState(() => ({
   unresolved_findings: [...open, ...awaiting], notes, fix_rounds: round }))
@@ -549,7 +599,12 @@ while ((open.length || blockingChecksOpen()) && round < MAX_REVIEW_ROUNDS && !ou
             ? `\n  Its reproducer itself failed to run last round: exit ` +
               `${f.reproducer_run.exit_code}, no marker line. This is not a ` +
               `demonstration of the defect; find out why the command failed. ` +
-              `Output:\n${f.reproducer_run.output}`
+              (f.reproducer_run.log
+                ? `Its full output is in ${f.reproducer_run.log}, under the ` +
+                  `worktree's git directory, outside the worktree: you may Read ` +
+                  `it although it does not start with ${wt.path}/. Read it from ` +
+                  `the end.`
+                : '')
             : '')).join('\n') + `\n`
       : '') +
     (blockingChecksOpen()
@@ -608,9 +663,16 @@ while ((open.length || blockingChecksOpen()) && round < MAX_REVIEW_ROUNDS && !ou
   const execOld = await executeAtHead(open, `reproduce:fix:${round}`, roundRange)
   if (execOld?.dirty) { sFix.close(); return await dirtyReproducerHalt('Fix', execOld) }
   const execSettled = settledBefore.length
-    ? await executeAtHead(settledBefore, `reproduce:settled:${round}`)
+    ? await executeSettled(settledBefore, `reproduce:settled:${round}`)
     : null
   if (execSettled?.dirty) { sFix.close(); return await dirtyReproducerHalt('Fix', execSettled) }
+  if (execSettled?.reasons) {
+    sFix.close()
+    return await unmeasuredSettledHalt('Fix', settledBefore, execSettled, {
+      unresolved_findings: [...open, ...settledBefore.map(awaitingRecheck)], notes, fix_rounds: round,
+      fix_round_output: fixRoundSpend,
+    })
+  }
   const tail = tailReviewable
     ? await reviewOf(roundRange, `review:fix:${round}`, [LENS.correctness], knownForRound())
     : { raised: [], dead: [] }
@@ -625,7 +687,7 @@ while ((open.length || blockingChecksOpen()) && round < MAX_REVIEW_ROUNDS && !ou
   for (const f of open) {
     const row = execOld?.runs?.get(f.id)
     const outcome = outcomeOf(row)
-    if (outcome === 'passed') { settled.push(f); continue }
+    if (outcome === 'passed') { settled.push({ ...f, reproducer_run: reproducerRunOf(row, round) }); continue }
     if (outcome === 'errored') erroredOpen++
     stillOpen.push({ ...f, reproducer_run: latestRun(f, reproducerRunOf(row, round)) })
   }

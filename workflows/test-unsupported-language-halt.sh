@@ -63,6 +63,7 @@ trap 'rm -rf "$WORK"' EXIT
 cat > "$WORK/harness.mjs" <<'JS_EOF'
 import fs from 'node:fs'
 import vm from 'node:vm'
+import { execFileSync } from 'node:child_process'
 
 const SCRIPT_PATH = process.argv[2]
 const src = fs.readFileSync(SCRIPT_PATH, 'utf8')
@@ -192,9 +193,17 @@ function makeAgent(scenario, captured) {
     // open-vs-note for whatever candidates it raised; this file's one scenario
     // that reaches Review needs its finding to reproduce (nonzero, with the
     // gh-113 marker) so it is still open when the fixer halts on it.
+    // The reply is what the runner's lines print: the ids, the run and the log
+    // directory are read back out of the prompt.
     if (label === 'reproduce:review') {
-      const ids = [...prompt.matchAll(/\[(f\d+)\]/g)].map(m => m[1])
-      return { results: ids.map(id => ({ id, exit_code: 1, output: 'stub: still reproduces\nTOUCHSTONE_DEFECT_REPRODUCED' })), dirty: false }
+      const ids = [...prompt.matchAll(/printf 'TOUCHSTONE_REPRO %s %s %s %s' (\S+) /g)].map(m => m[1])
+      const run = (/printf 'TOUCHSTONE_REPRO_END %s %s %s %s\\n' (\S+) /.exec(prompt) ?? [])[1]
+      const dir = `/tmp/stub-worktree/.git/touchstone-repro/${run}`
+      const rows = ids.map(id => `TOUCHSTONE_REPRO ${id} 1 1 ${dir}/${id}.log`)
+      const sum = execFileSync('cksum', { input: rows.length ? `${rows.join('\n')}\n` : '', encoding: 'utf8' })
+        .trim().split(/\s+/).join(' ')
+      return { output: [`TOUCHSTONE_REPRO_BEFORE ${run} clean`, ...rows,
+        `TOUCHSTONE_REPRO_END ${run} clean ${sum} ${dir}/status.log`].join('\n') }
     }
     if (['ticket', 'plugin:version', 'gate:opt-in', 'checks:discover', 'run-record'].includes(label)) {
       throw new Error(`agent '${label}' should no longer be dispatched (folded into setup/branch, or dropped)`)

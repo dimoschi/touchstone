@@ -389,20 +389,59 @@ instead; a non-blocking category, a missing reproducer, an `unmet-criterion` quo
 is not a verbatim substring of the ticket text, or (from the first re-review on) a line
 span outside what the preceding fix or mutation range actually touched, each becomes a
 note with its own `reason`. What survives is a candidate, and `executeAtHead()` is what
-runs it: one haiku dispatch per batch, against the worktree's current HEAD, reporting
-each row's raw, combined stdout and stderr verbatim alongside its exit code.
+runs it: one haiku dispatch per batch, against the worktree's current HEAD, given lines
+the script builds and run the same way as the check runner's below (`reproLinesFor` in
+`50-classify-fix.js.part`, one foreground Bash call per line, `runnerPrompt` shared with
+`checks:run`). No model copies a command, an exit code, an output or a porcelain:
+
+- A before line empties the run's `rows` file, writes `git status --porcelain` to
+  `before.log` (stderr to `before.err`) and prints `TOUCHSTONE_REPRO_BEFORE <run>
+  clean|dirty`.
+- One line per reproducer decodes its command from base64 (`printf %s <b64> | base64
+  --decode`, refusing an empty result) and runs it as `(cd <worktree> && bash -c "$c")`
+  with all its output in `<id>.log`. The command travels encoded because a reproducer
+  can span several lines (a `python3 -c` script, a heredoc), and a newline spliced into
+  the fence would split one line into fragments the runner executes on their own,
+  outside the worktree and the log. The script encodes the UTF-8 bytes itself
+  (`base64Of`), since the Workflow runtime has no `Buffer`. The line then decides in the shell whether that log holds a line that is exactly
+  `REPRODUCED_MARKER` once surrounding whitespace (a CR included) is trimmed, and prints
+  `TOUCHSTONE_REPRO <id> <exit> <0|1> <log path>`, appending the same row to `rows`. A
+  marker inside a longer line, such as
+  a `set -x` echo, does not count, and a long output can never push the marker out of
+  view, since the grep reads the whole log.
+- When the call is given a range, one line writes `git diff --unified=0 --no-color
+  <range>` to `diff.log`, keeps only the lines starting with `+++ ` or `@@ `, and prints
+  them between `TOUCHSTONE_HUNKS_BEGIN <run>` and `TOUCHSTONE_HUNKS_END <run> <count>`,
+  the count computed by the shell. When `git diff` itself exits nonzero (a bad range),
+  the line prints `TOUCHSTONE_HUNKS_FAILED <run> <exit>` instead: the hunks are unknown
+  (`hunks: null`, classify()'s could-not-measure path) and the reproducer rows still count.
+- An end line writes the porcelain after into `status.log` and prints
+  `TOUCHSTONE_REPRO_END <run> clean|dirty <crc> <bytes> <status log path>`, where
+  `<crc> <bytes>` is `cksum < rows`. It carries the path because the mutation-hunk fetch
+  runs no reproducer, so no row would name the directory.
+
+All of these sit in `touchstone-repro/<run>/` under the worktree's git dir, where `<run>`
+is the plan id, the label and a per-run counter. `parseReproRun` (pure, in
+`10-schemas.js.part`) accepts the reply only in that order: the before line first, one
+row per runnable id in order with an integer exit, a 0 or 1 marker flag and a log in this
+run's one directory, the hunks block or the failed line when a range was asked for (a
+block's count equal to the lines between the markers, each a `+++ ` or `@@ ` line), and
+the end line last, whose cksum must equal the one the script computes over the rows it
+accepted (see the rows checksum under check discovery). Anything
+else makes the whole call unmeasured, read exactly as a call that returned nothing: no
+rows, hunks unknown rather than empty, nothing seen dirty. The reason is logged as
+`<label>: unmeasured (<reason>)`.
 
 `outcomeOf(row)` is what turns that row into a disposition, and it is the only place
 that does: no row is `not-executed`; exit 0 is `passed`, marker or not; 126 or 127 is
-`could-not-run`; any other nonzero is `reproduced` only when the row's raw output (read
-before `truncateOutput` ever runs on it) carries `REPRODUCED_MARKER` on a line of its
-own, and `errored` otherwise. A command that fails for its own reasons -- a missing
+`could-not-run`; any other nonzero is `reproduced` only when the shell's marker flag is
+1, and `errored` otherwise. A command that fails for its own reasons -- a missing
 environment variable, a wrong path, a syntax error -- exits nonzero same as a real
 demonstration, and used to read the same way; a reproducer now has to prove it observed
 the defect, not merely that it did not exit 0. `disposeCandidates()` opens a candidate
 only on `reproduced`; `passed`, `could-not-run` and `errored` become a note with its own
 reason (`did-not-reproduce`, `reproducer-could-not-run`, `reproducer-errored`) and its
-`reproducer_run` (the outcome, the exit code, and the truncated output) attached so the
+`reproducer_run` (the outcome, the exit code, and the log path) attached so the
 note keeps what actually happened.
 
 `not-executed` is neither: a missing row is even less evidence than an errored one, so
@@ -411,7 +450,10 @@ become a note either -- the same rule #116 applies to a discovered check the run
 never measured. `executeAndDispose()` retries whatever comes back `not-executed` exactly
 once, at the same head, as its own `executeAtHead()` call restricted to just those
 candidates and labelled with the original label plus `:retry` -- run alone in the
-worktree like every such call, so a dirty result there halts the same way. Whatever is
+worktree like every such call, so a dirty result there halts the same way. Since one
+missing or extra row makes the whole call unmeasured, the retry normally covers every
+candidate of the first call. A dirty result halts with a note naming the `status.log`
+that holds the porcelain, not a copy of it. Whatever is
 still `not-executed` after that halts the run (at Review for the initial review and the
 post-mutation review, at Fix for a fix round's fresh candidates), naming each finding by
 id and title and saying the halt is about measurement, not the code (gh-113).
@@ -428,8 +470,9 @@ happened: `not-executed` in a record therefore only ever names a candidate no ro
 back for, which is what a resumed `--existing` run measures again before anything else.
 Exit 0 settles it regardless of the marker; nonzero with
 the marker keeps it open as `reproduced`; nonzero without it keeps it open as `errored`,
-and the brief says the reproducer itself failed to run, with its exit code and output, so
-the fixer is not sent chasing a defect nobody demonstrated.
+and the brief says the reproducer itself failed to run, with its exit code and the path
+of its log (outside the worktree, read from the end), never the output itself, so the
+fixer is not sent chasing a defect nobody demonstrated.
 
 A settled finding is re-run at every head the code moves to after it settled: in every
 later fix round (`reproduce:settled:<round>`) and at the mutation gate's head
@@ -439,7 +482,16 @@ later fix round (`reproduce:settled:<round>`) and at the mutation gate's head
 re-measure is not the same claim as one whose reproducer ran clean and still shows the
 defect. Reopened findings get the next round if one is left; at the mutation head, where
 no round follows, the run halts at Review with a note that counts undone and errored
-fixes separately. Nothing here waits for a lens to report the regression, so a `residual`
+fixes separately. A missing row inside a measured call still counts as regressed, but an
+unmeasured call has no rows at all, so `executeSettled()` retries it once
+(`<label>:retry`) before `regressedOf()` sees it: without that, one copy slip would
+reopen every settled finding and, at the mutation head, blame the gate's commits for
+undoing them. Still unmeasured after the retry, the run halts (`unmeasuredSettledHalt`,
+at Fix or at Review) with a note saying the re-check could not be measured and that this
+is a measurement failure, not a regression. Nothing is reopened; each settled finding is
+carried in `unresolved_findings` with its last measured run and `awaiting_recheck: true`.
+A resumed run puts such a finding back among the settled ones, so the next settled
+re-check measures it again; it never reaches a fixer. Nothing here waits for a lens to report the regression, so a `residual`
 note is only ever a note: whether a new finding is a *variant* of a fixed one is decided
 by the lens setting `duplicate_of`, which is a judgement no exit code can make, and the
 cost of that judgement being wrong is a line in the PR body rather than another round.
@@ -472,7 +524,7 @@ command or relaying output (`checkLineFor` and `endLineFor` in `30-triage-plan-c
 as its own foreground Bash call. A check's line is self-contained:
 
 ```
-d="$(git -C <worktree> rev-parse --path-format=absolute --git-path touchstone-checks/<run> 2>/dev/null)" && mkdir -p "$d" && { bash -c 'cd <worktree> && <command>' >|"$d/<id>.log" 2>&1; printf 'TOUCHSTONE_CHECK %s %s %s\n' <id> "$?" "$d/<id>.log"; }
+d="$(git -C <worktree> rev-parse --path-format=absolute --git-path touchstone-checks/<run> 2>/dev/null)" && mkdir -p "$d" && { bash -c 'cd <worktree> && <command>' >|"$d/<id>.log" 2>&1; e=$?; r="$(printf 'TOUCHSTONE_CHECK %s %s %s' <id> "$e" "$d/<id>.log")"; printf '%s\n' "$r" >>"$d/rows"; printf '%s\n' "$r"; }
 ```
 
 The check's whole output, stdout and stderr, goes to
@@ -481,13 +533,13 @@ part of the tree, cannot dirty it, and is removed with the worktree. `<run>` is 
 id and the attempt number (`<planId>-<n>`): the retry of a batch writes new logs and
 leaves the first attempt's as they were. A later run with the same plan in the same
 worktree reuses those directories and overwrites them; every redirect is `>|`, so a
-shell with `noclobber` set still writes the log instead of failing the check. The `printf` sits after `;` rather than `&&`,
-so the exit code is read from `$?` and printed even when the check failed or called
-`exit N` itself. The only thing the shell prints per check is `TOUCHSTONE_CHECK <id>
+shell with `noclobber` set still writes the log instead of failing the check. The exit
+code is read from `$?` after `;` rather than `&&`, so it is printed even when the check
+failed or called `exit N` itself. The only thing the shell prints per check is `TOUCHSTONE_CHECK <id>
 <exit> <log path>`, which is also why a long suite (this repo's own prints minutes of
 output) no longer has to fit the Bash tool's inline preview. The end line runs `git
 status --porcelain` once, after the last check, into `status.log` in the same
-directory and prints `TOUCHSTONE_CHECKS_END <run> clean|dirty`. Only stdout decides
+directory and prints `TOUCHSTONE_CHECKS_END <run> clean|dirty <crc> <bytes>`. Only stdout decides
 dirty: git's stderr goes to `status.err` beside it (and a `rev-parse` warning is
 dropped), because a warning on a healthy tree, such as an unreadable excludes file,
 would otherwise read as a dirty tree or as an unexpected line. Every line is a
@@ -495,7 +547,17 @@ separate call because one call per batch would sit close to the 600000 ms Bash c
 repo's checks took 526 s in sequence on one machine, so a slower machine or a growing
 suite crosses it. The agent still joins one short line per call, but the parser holds
 every id, exit and log path to what the script expects, so a misjoined batch reads as
-unmeasured, never as a pass. No line
+unmeasured, never as a pass.
+
+Every row line also writes the exact row it printed to `rows` in the run directory (the
+first line of a batch with `>|`, so a re-run in the same directory starts over; the rest
+with `>>`), and the end line prints `cksum < rows`: the POSIX CRC and the byte count.
+`parseCheckRun` and `parseReproRun` recompute that cksum (`cksum` in `10-schemas.js.part`,
+the 32-bit POSIX CRC with the length appended, over the UTF-8 bytes) over the rows they accepted,
+joined with newlines as the shell wrote them, and a mismatch makes the call unmeasured
+(`rows checksum does not match what the runner wrote`). A row copied with a slip that
+still parses was never written to `rows`, so it cannot pass. The sum guards against slips,
+not against a model set on forging: with a Bash tool it could compute a matching sum. No line
 contains `exit`: the agent's shell persists, and one would end it. The `cd` target is
 quoted only when it needs to be: a worktree path made only of letters, digits and `/ . _
 - + : @ % = ,` is spliced in bare, and a path or declared command carrying any other
@@ -506,14 +568,14 @@ order. `parseCheckRun` (a pure function in `10-schemas.js.part`, in the style of
 `parseDiffstat`) accepts that only if every discovered id appears exactly once and in
 order, each exit is an integer, each log path is absolute and ends in
 `/touchstone-checks/<run>/<id>.log` for this run and id, all rows share one directory,
-and the end line names this run
-and is both last and unique. Anything else makes the whole batch unmeasured, not just
+the end line names this run
+and is both last and unique, and its cksum matches the rows. Anything else makes the whole batch unmeasured, not just
 the row at fault, with the first reason found (`no output`, `no end line`, `end line is
 not last`, `end line repeated`, `malformed end line`, `end line names run X, not Y`,
 `unexpected line ...`, `malformed check line`, `<id> reported twice`, `unexpected id
 <id>`, `<id> reported where <id> was expected`, `exit of <id> is not an integer`, `log
 path of <id> is not under this run`, `no line for <id>`, `log path of <id> is not in the
-run directory`). A reply that is wrong
+run directory`, `rows checksum does not match what the runner wrote`). A reply that is wrong
 anywhere is not trusted anywhere, and an unmeasured batch is never read as a pass or as
 evidence about the repo's own environment. `classifyResults` then reads exit 0 as green
 and any other exit as red, 2 and 4 included, as AGENTS.md says they are not passes.

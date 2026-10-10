@@ -27,16 +27,17 @@ async function scenarioPromptIsOneLinePerCheck() {
   check('the run is the plan id and the attempt', /^[0-9a-f]{8}-1$/.test(id), true)
   const lineFor = (n, cmd) =>
     `d="$(git -C /tmp/stub-worktree rev-parse --path-format=absolute --git-path touchstone-checks/${id} 2>/dev/null)" && ` +
-    `mkdir -p "$d" && { bash -c 'cd /tmp/stub-worktree && ${cmd}' >|"$d/check:${n}.log" 2>&1; ` +
-    `printf 'TOUCHSTONE_CHECK %s %s %s\\n' check:${n} "$?" "$d/check:${n}.log"; }`
+    `mkdir -p "$d" && { bash -c 'cd /tmp/stub-worktree && ${cmd}' >|"$d/check:${n}.log" 2>&1; e=$?; ` +
+    `r="$(printf 'TOUCHSTONE_CHECK %s %s %s' check:${n} "$e" "$d/check:${n}.log")"; ` +
+    `printf '%s\\n' "$r" ${n === 1 ? '>|' : '>>'}"$d/rows"; printf '%s\\n' "$r"; }`
   check('check:1 is one line that logs to the git dir and prints only its id, exit and log',
     runnerLineOf(p, 'check:1'), lineFor(1, 'make test'))
   check('a command with quotes is quoted once, in the same line',
     runnerLineOf(p, 'check:2'), lineFor(2, `bash scripts/echo.sh '\\''a # b'\\''`))
   const endLine = `d="$(git -C /tmp/stub-worktree rev-parse --path-format=absolute --git-path touchstone-checks/${id} 2>/dev/null)" && ` +
     `mkdir -p "$d" && git -C /tmp/stub-worktree status --porcelain >|"$d/status.log" 2>|"$d/status.err" && ` +
-    `{ if [ -s "$d/status.log" ]; then s=dirty; else s=clean; fi; ` +
-    `printf 'TOUCHSTONE_CHECKS_END %s %s\\n' ${id} "$s"; }`
+    `k="$(cksum < "$d/rows")" && { if [ -s "$d/status.log" ]; then s=dirty; else s=clean; fi; ` +
+    `printf 'TOUCHSTONE_CHECKS_END %s %s %s\\n' ${id} "$s" "$k"; }`
   const fence = /```bash\n([\s\S]*?)\n```/.exec(p)?.[1].split('\n')
   check('the fence is the two check lines, then the end line, and nothing else',
     fence, [lineFor(1, 'make test'), lineFor(2, `bash scripts/echo.sh '\\''a # b'\\''`), endLine])
@@ -85,7 +86,7 @@ const REJECTED = [
   ['an end line that is not last', (l) => [l[0], l[2], l[1]].join('\n'), 'end line is not last'],
   ['two end lines', (l) => [...l, l[2]].join('\n'), 'end line repeated'],
   ['a malformed end line', (l) => [l[0], l[1], 'TOUCHSTONE_CHECKS_END'].join('\n'), 'malformed end line'],
-  ['an end line naming another run', (l) => [l[0], l[1], 'TOUCHSTONE_CHECKS_END other-run clean'].join('\n'),
+  ['an end line naming another run', (l) => [l[0], l[1], l[2].replace(/^(\S+) \S+/, '$1 other-run')].join('\n'),
     'end line names run other-run, not '],
   ['a check with no line', (l) => [l[0], l[2]].join('\n'), 'no line for check:2'],
   ['a check reported twice', (l) => [l[0], l[0], l[1], l[2]].join('\n'), 'check:1 reported twice'],
@@ -236,7 +237,7 @@ async function scenarioRealRunner() {
     check('the baseline printed a line per check and the end line, nothing else', first.length, 3)
     check('check:1 printed its own exit 0', Boolean(m1), true)
     check('check:2 printed the exit 3 its command chose', Boolean(m2), true)
-    check('the end line reads clean: the logs are not in the tree', first[2], `TOUCHSTONE_CHECKS_END ${id} clean`)
+    check('the end line reads clean: the logs are not in the tree', first[2].split(' ').slice(0, 3).join(' '), `TOUCHSTONE_CHECKS_END ${id} clean`)
     check('check:1\'s log holds its output', fs.readFileSync(m1?.[1] ?? '/nonexistent', 'utf8'), 'fine\n')
     check('check:2\'s log holds its output', fs.readFileSync(m2?.[1] ?? '/nonexistent', 'utf8'), 'boom\n')
     check('the logs sit under the worktree\'s git dir, in this run\'s directory',
@@ -261,7 +262,7 @@ async function scenarioRealRunnerDirtyTree() {
     const { outs, scenario } = realRun(dir, 'echo x > stray.txt')
     const { result, captured } = await run(scenario)
     const id = runIdOf(promptOf(captured, 'checks:run:1'))
-    check('the end line reads dirty', linesOf(outs[0]).pop(), `TOUCHSTONE_CHECKS_END ${id} dirty`)
+    check('the end line reads dirty', linesOf(outs[0]).pop().split(' ').slice(0, 3).join(' '), `TOUCHSTONE_CHECKS_END ${id} dirty`)
     const statusLog = path.join(path.dirname(/^\S+ \S+ \S+ (\/.+)$/.exec(linesOf(outs[0])[0])[1]), 'status.log')
     check('the status log holds the porcelain', fs.readFileSync(statusLog, 'utf8'), '?? stray.txt\n')
     check('halted before Implement', [result.halted_at, callCount(captured, 'implementer')], ['Implement', 0])
@@ -288,7 +289,7 @@ async function scenarioRealRunnerStatusWarning() {
     const { result, captured } = await run(scenario)
     const id = runIdOf(promptOf(captured, 'checks:run:1'))
     const lines = linesOf(outs[0])
-    check('the end line reads clean', lines.pop(), `TOUCHSTONE_CHECKS_END ${id} clean`)
+    check('the end line reads clean', lines.pop().split(' ').slice(0, 3).join(' '), `TOUCHSTONE_CHECKS_END ${id} clean`)
     const logDir = path.dirname(/^\S+ \S+ \S+ (\/.+)$/.exec(lines[0])[1])
     check('the status log is empty', readOrNull(path.join(logDir, 'status.log')), '')
     check('the warning is kept in status.err, where a human can read it',
@@ -382,12 +383,33 @@ async function scenarioRealRunnerNoclobber() {
   }
 }
 
+async function scenarioRealRunnerInventedRow() {
+  console.log('\n== scenario RY: a reply with a check row the runner never wrote is unmeasured, even when it looks right')
+  const dir = scratchRepo()
+  try {
+    const { scenario } = realRun(dir, 'echo fine\necho boom; exit 3')
+    scenario.checkRuns = (attempt, prompt) => {
+      const lines = /```bash\n([\s\S]*?)\n```/.exec(prompt)[1].split('\n')
+      const ran = [lines[0], lines[2]].map(line => spawnSync('bash', ['-c', line], { encoding: 'utf8' }).stdout.trim())
+      const invented = ran[0].replace('check:1 0 ', 'check:2 0 ').replace(/check:1\.log$/, 'check:2.log')
+      return { output: [ran[0], invented, ran[1]].join('\n') }
+    }
+    const { result } = await run(scenario)
+    check('the baseline is unmeasured on the checksum, on both attempts',
+      result.checks?.unmeasured?.map(u => [u.reason, u.reason_again].map(r => r.startsWith('rows checksum does not match'))),
+      [[true, true], [true, true]])
+    check('halted before Implement', result.halted_at, 'Implement')
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true })
+  }
+}
+
 const SCENARIOS = [scenarioPromptIsOneLinePerCheck, scenarioParserMeasures, scenarioParserTolerance,
   scenarioParserRejects, scenarioNullReplyIsUnmeasured, scenarioBaselineRetriesOnce,
   scenarioBaselineHaltsWhenStillUnmeasured, scenarioUnmeasuredAfterImplementHalts,
   scenarioFixersGetLogPaths, scenarioRealRunner, scenarioRealRunnerDirtyTree, scenarioRealRunnerNoclobber,
   scenarioRealRunnerStatusWarning, scenarioRealRunnerRevParseWarning, scenarioRealRunnerCwd,
-  scenarioRealRunnerLargeOutput]
+  scenarioRealRunnerLargeOutput, scenarioRealRunnerInventedRow]
 JS_EOF
 
 finish

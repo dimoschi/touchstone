@@ -59,41 +59,9 @@ async function scenarioFA() {
   check('the finding is a note with reason reproducer-errored', note?.reason, 'reproducer-errored')
   check('the note keeps the outcome', note?.reproducer_run?.outcome, 'errored')
   check('the note keeps the exit code', note?.reproducer_run?.exit_code, 1)
-  check('the note keeps the real output', /ValueError: boom/.test(note?.reproducer_run?.output ?? ''), true)
+  check('the note\'s log holds the real output',
+    /ValueError: boom/.test(fs.readFileSync(note?.reproducer_run?.log ?? '/nonexistent', 'utf8')), true)
   check('no fix round ran', callCount(captured, 'fix:1'), 0)
-}
-
-async function scenarioFB() {
-  console.log('\n== scenario FB: the marker is matched against the raw output before truncation, even when truncation would otherwise have hidden it')
-  const bigOutput = 'A'.repeat(2000) + `\n${REPRODUCED_MARKER}\n` + 'B'.repeat(10000)
-  const { result } = await run({
-    initialReview: {
-      correctness: [{ title: 'Oversized reproduction', file: 'a.js', claim: 'c', evidence: 'e' }],
-      advocate: [],
-    },
-    initialExit: () => 1,
-    outputFor: () => bigOutput,
-  })
-  check('it opens: the marker was seen before truncation', result.unresolved_findings?.length, 1)
-  const stored = result.unresolved_findings?.[0]?.reproducer_run?.output ?? ''
-  check('the stored output shows the truncation marker', /\[touchstone: truncated,/.test(stored), true)
-  check('the marker line itself fell in the omitted middle and is gone from the stored copy',
-    stored.includes(REPRODUCED_MARKER), false)
-}
-
-async function scenarioFC() {
-  console.log('\n== scenario FC: a marker embedded inside a longer line does not count, and the result is reproducer-errored')
-  const { result } = await run({
-    initialReview: {
-      correctness: [{ title: 'Fooled by a substring marker', file: 'a.js', claim: 'c', evidence: 'e' }],
-      advocate: [],
-    },
-    initialExit: () => 1,
-    outputFor: () => `+ echo ${REPRODUCED_MARKER}\nsome other trailing text`,
-  })
-  check('nothing opens', result.unresolved_findings?.length ?? 0, 0)
-  check('the finding is a note with reason reproducer-errored',
-    result.notes?.find(n => n.title === 'Fooled by a substring marker')?.reason, 'reproducer-errored')
 }
 
 async function scenarioFD() {
@@ -129,12 +97,14 @@ async function scenarioFD() {
   check('f2 stays open as reproduced', f2?.reproducer_run?.outcome, 'reproduced')
   check('f3 stays open as errored', f3?.reproducer_run?.outcome, 'errored')
   check('f3 carries its crash exit code', f3?.reproducer_run?.exit_code, 1)
-  check('f3 carries its crash output', /RuntimeError/.test(f3?.reproducer_run?.output ?? ''), true)
+  check('f3\'s log holds its crash output',
+    /RuntimeError/.test(fs.readFileSync(f3?.reproducer_run?.log ?? '/nonexistent', 'utf8')), true)
   const fixBrief2 = captured.calls.find(c => c.label === 'fix:2')?.prompt ?? ''
   check('the next fix brief says the reproducer itself failed to run',
     fixBrief2.includes('reproducer itself failed to run'), true)
   check('the next fix brief shows the crash exit code', fixBrief2.includes('exit 1'), true)
-  check('the next fix brief shows the crash output', fixBrief2.includes('RuntimeError'), true)
+  check('the next fix brief carries the path of round 1\'s crash log',
+    /Its full output is in \/\S*reproduce-fix-1-\d+\/f3\.log,/.test(fixBrief2), true)
 }
 
 async function scenarioFE() {
@@ -267,8 +237,8 @@ async function scenarioFG() {
     check('before a fix: nothing opens', before.result.unresolved_findings?.length ?? 0, 0)
     const note = before.result.notes?.find(n => n.title === 'Quote breaks the built invocation')
     check('before a fix: it is a reproducer-errored note', note?.reason, 'reproducer-errored')
-    check('before a fix: the note carries the real crash output',
-      /ERR_INVALID_ARG_TYPE/.test(note?.reproducer_run?.output ?? ''), true)
+    check('before a fix: the note\'s log holds the real crash output',
+      /ERR_INVALID_ARG_TYPE/.test(fs.readFileSync(note?.reproducer_run?.log ?? '/nonexistent', 'utf8')), true)
     check('before a fix: no fix round ran', callCount(before.captured, 'fix:1'), 0)
 
     // After a fix: round 0 happens to run with the variable set, so the
@@ -304,8 +274,9 @@ async function scenarioFG() {
     const fixBrief2 = after.captured.calls.find(c => c.label === 'fix:2')?.prompt ?? ''
     check('after a fix: the next fix brief says the reproducer itself failed to run',
       fixBrief2.includes('reproducer itself failed to run'), true)
-    check('after a fix: the fix brief carries the real crash output',
-      fixBrief2.includes('ERR_INVALID_ARG_TYPE'), true)
+    const crashLog = (/Its full output is in (\/\S+\.log),/.exec(fixBrief2) ?? [])[1] ?? '/nonexistent'
+    check('after a fix: the fix brief carries the log of the real crash',
+      /ERR_INVALID_ARG_TYPE/.test(fs.readFileSync(crashLog, 'utf8')), true)
     check('after a fix: it settles once the reproducer exits 0, run as recorded (variable still unset)',
       after.result.halted_at, undefined)
     check('after a fix: no third round was needed', callCount(after.captured, 'fix:3'), 0)
@@ -349,8 +320,8 @@ async function scenarioFH() {
 }
 
 // Scenario FI -- gh-113: a candidate the executor drops on its first call but
-// measures on the retry opens exactly as if the first call had reported it,
-// and only the dropped candidate's id reaches the retry prompt.
+// measures on the retry opens exactly as if the first call had reported it. A
+// dropped row makes the whole first call unmeasured, so every candidate reruns.
 async function scenarioFI() {
   console.log('\n== scenario FI: gh-113 -- a candidate the executor drops once opens once the retry returns a row')
   const { result, captured } = await run({
@@ -369,7 +340,7 @@ async function scenarioFI() {
   })
   check('the retry ran exactly once', callCount(captured, 'reproduce:review:retry'), 1)
   const retryPrompt = captured.calls.find(c => c.label === 'reproduce:review:retry')?.prompt ?? ''
-  check('only the dropped candidate reruns', idsIn(retryPrompt), ['f1'])
+  check('both candidates rerun: one dropped row leaves the whole first call unmeasured', idsIn(retryPrompt), ['f1', 'f2'])
   check('the retried finding opened (a fix round ran on it)', callCount(captured, 'fix:1'), 1)
   check('nothing settled as a note instead', result.notes?.length ?? 0, 0)
   check('no executor call overlapped another agent', overlapsWithExecutor(captured), [])
@@ -434,13 +405,12 @@ async function scenarioFK() {
     result.notes?.filter(n => n.reason === 'residual').length, 1)
 }
 
-// Scenarios FL-FN -- gh-113: a dirty retry must not throw away what the
-// first call (clean, at the same head) already measured. Each covers one of
-// executeAndDispose's three callers: the retry here only ever covers the
-// notExecuted subset, so the other candidates' verdicts from the first call
-// have to reach the halt.
+// Scenarios FL-FN -- gh-113: a dirty retry must not lose a candidate. Each
+// covers one of executeAndDispose's three callers. A dropped row leaves the
+// whole first call unmeasured, so every candidate reruns and the dirty halt
+// carries all of them unresolved, none decided on the first call.
 async function scenarioFL() {
-  console.log('\n== scenario FL: gh-113 -- a dirty retry at the initial review still carries the first call\'s reproduced finding and note')
+  console.log('\n== scenario FL: gh-113 -- a dirty retry at the initial review carries every candidate unresolved')
   const { result } = await run({
     initialReview: {
       correctness: [
@@ -454,16 +424,16 @@ async function scenarioFL() {
     dirtyAt: 'reproduce:review:retry',
   })
   check('halted at Review', result.halted_at, 'Review')
-  check('the dirty halt still carries the finding the first call reproduced',
+  check('the dirty halt carries the reproducing candidate',
     result.unresolved_findings?.some(f => f.title === 'Reproduced on the first call'), true)
   check('the dirty halt carries the candidate the dirty retry ran',
     result.unresolved_findings?.some(f => f.title === 'Dropped on the first call'), true)
-  check('the dirty halt still carries the first call\'s did-not-reproduce note',
-    result.notes?.some(n => n.title === 'Passed on the first call' && n.reason === 'did-not-reproduce'), true)
+  check('the passing candidate is carried unresolved, not decided on an unmeasured call',
+    result.unresolved_findings?.some(f => f.title === 'Passed on the first call'), true)
 }
 
 async function scenarioFM() {
-  console.log('\n== scenario FM: gh-113 -- a dirty retry on a fresh fix-round candidate still carries the first call\'s reproduced finding and note')
+  console.log('\n== scenario FM: gh-113 -- a dirty retry on a fresh fix-round candidate carries every candidate unresolved')
   const { result } = await run({
     args: { maxReviewRounds: 3 },
     initialReview: {
@@ -484,17 +454,17 @@ async function scenarioFM() {
   check('halted at Fix', result.halted_at, 'Fix')
   check('the original finding stays open',
     result.unresolved_findings?.some(f => f.title === 'Off-by-one in parser'), true)
-  check('the dirty halt still carries the fresh finding the first call reproduced',
+  check('the dirty halt carries the reproducing fresh candidate',
     result.unresolved_findings?.some(f => f.title === 'Reproduced in the fix'), true)
   check('the dirty halt carries the candidate the dirty retry ran',
     result.unresolved_findings?.some(f => f.title === 'Dropped in the fix'), true)
-  check('the dirty halt still carries the first call\'s did-not-reproduce note',
-    result.notes?.some(n => n.title === 'Passed in the fix' && n.reason === 'did-not-reproduce'), true)
+  check('the passing candidate is carried unresolved, not decided on an unmeasured call',
+    result.unresolved_findings?.some(f => f.title === 'Passed in the fix'), true)
   check('fix_rounds is 1', result.fix_rounds, 1)
 }
 
 async function scenarioFN() {
-  console.log('\n== scenario FN: gh-113 -- a dirty retry on a fresh post-mutation candidate still carries the first call\'s reproduced finding and note')
+  console.log('\n== scenario FN: gh-113 -- a dirty retry on a fresh post-mutation candidate carries every candidate unresolved')
   const { result } = await run({
     initialReview: { correctness: [], advocate: [] },
     mutationGated: true,
@@ -509,15 +479,15 @@ async function scenarioFN() {
     dirtyAt: 'reproduce:mutation:fresh:retry',
   })
   check('halted at Review', result.halted_at, 'Review')
-  check('the dirty halt still carries the finding the first call reproduced',
+  check('the dirty halt carries the reproducing candidate',
     result.unresolved_findings?.some(f => f.title === 'Reproduced post-mutation'), true)
   check('the dirty halt carries the candidate the dirty retry ran',
     result.unresolved_findings?.some(f => f.title === 'Dropped post-mutation'), true)
-  check('the dirty halt still carries the first call\'s did-not-reproduce note',
-    result.notes?.some(n => n.title === 'Passed post-mutation' && n.reason === 'did-not-reproduce'), true)
+  check('the passing candidate is carried unresolved, not decided on an unmeasured call',
+    result.unresolved_findings?.some(f => f.title === 'Passed post-mutation'), true)
 }
 
-const SCENARIOS = [scenarioEH, scenarioEI, scenarioFA, scenarioFB, scenarioFC, scenarioFD, scenarioFE, scenarioFF, scenarioFG, scenarioFH, scenarioFI, scenarioFJ, scenarioFK, scenarioFL, scenarioFM, scenarioFN]
+const SCENARIOS = [scenarioEH, scenarioEI, scenarioFA, scenarioFD, scenarioFE, scenarioFF, scenarioFG, scenarioFH, scenarioFI, scenarioFJ, scenarioFK, scenarioFL, scenarioFM, scenarioFN]
 JS_EOF
 
 finish

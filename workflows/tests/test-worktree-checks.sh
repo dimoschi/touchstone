@@ -655,7 +655,7 @@ async function scenarioCJ() {
   check('the range is not an empty self-comparison',
     reproduce1.includes(`${REVIEWED_THROUGH}..${REVIEWED_THROUGH}`), false)
   check('it diffs the bare commit against the working tree instead',
-    reproduce1.includes(`--no-color ${REVIEWED_THROUGH} and return`), true)
+    reproduce1.includes(`--no-color ${REVIEWED_THROUGH} >|`), true)
 }
 
 // Scenario CK -- the per-round figure is this ticket's measurement
