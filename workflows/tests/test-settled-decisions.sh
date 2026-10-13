@@ -36,12 +36,18 @@ async function scenarioSettledDecisionsInitialLenses() {
     check(`${label} prompt marks it as settled`, p.includes('Settled decisions'), true)
     check(`${label} prompt states behaviour it specifies is not a defect`,
       p.includes('not a defect'), true)
-    check(`${label} prompt states disagreement is at most a non-blocking note`,
-      p.includes('design or scope note'), true)
+    check(`${label} prompt states a finding never carries a reproducer contradicting a decision`,
+      p.includes('never carry a reproducer'), true)
+    check(`${label} prompt states disagreement is a note with no reproducer`,
+      p.includes('a note with no reproducer'), true)
+    check(`${label} prompt no longer lists categories not to use`,
+      p.includes('gate-bypass or unmet-criterion'), false)
     check(`${label} prompt lacks the problem section`, p.includes(PROBLEM_MARKER), false)
     check(`${label} prompt lacks the later section`, p.includes(AFTER_MARKER), false)
     check(`${label} prompt lacks the comments`, p.includes(COMMENT_MARKER), false)
   }
+  check('the advocate charge exempts a settled decision from the reproducer instruction',
+    advocate.includes('not a disagreement with a settled decision'), true)
   check('requirements prompt still carries the full ticket (problem section)',
     requirements.includes(PROBLEM_MARKER), true)
   check('requirements prompt still carries the full ticket (later section)',
@@ -68,6 +74,58 @@ async function scenarioSettledDecisionsTailAndMutation() {
   const mutation = captured.calls.find(c => c.label === 'review:mutation:correctness')?.prompt ?? ''
   check('the post-mutation review ran', mutation.length > 0, true)
   check('the post-mutation review carries the settled decision', mutation.includes(DECISION_MARKER), true)
+}
+
+// Scenario B2 -- the fixer is sent to undo what a finding names, so it gets the
+// settled decisions too and reports a conflict instead of reverting one.
+async function scenarioFixerSeesSettledDecisions() {
+  console.log('\n== scenario: the fixer sees the settled decisions and reports a conflict instead of reverting one')
+  const { captured } = await run(convergedWithSuspect({
+    ticketResult: { found: true, summary: 'stub', comments: '', description: DESCRIPTION_WITH_DECISIONS },
+    tailReview: [],
+    postMutationReview: [],
+  }))
+  const fix = captured.calls.find(c => c.label === 'fix:1')?.prompt ?? ''
+  check('the fix round ran', fix.length > 0, true)
+  check('the fixer prompt carries the settled decision', fix.includes(DECISION_MARKER), true)
+  check('the fixer prompt marks it as settled', fix.includes('Settled decisions'), true)
+  check('the fixer is told to report a conflict in note',
+    fix.includes('report the conflict in note'), true)
+  check('the fixer prompt no longer judges a reproducer-less finding by its criterion',
+    fix.includes('judged by the criterion it names'), false)
+}
+
+// The fixer reports a conflict only in note, and the loop otherwise reads that
+// field on the unsupported_language path alone, so a run that halts at Fix on
+// the finding must carry what the fixer said.
+async function scenarioFixerNoteReachesFixHalt() {
+  console.log('\n== scenario: a fixer note reaches the Fix halt when the finding stays open')
+  const { result } = await run({
+    args: { maxReviewRounds: 2 }, diffstatFiles: bigDiffstat,
+    ticketResult: { found: true, summary: 'stub', comments: '', description: DESCRIPTION_WITH_DECISIONS },
+    initialReview: {
+      correctness: [],
+      advocate: [{ category: 'design', title: 'No retries', file: 'src/p.js',
+        claim: 'retries should be enabled', evidence: 'e' }],
+    },
+    tailReview: [],
+  })
+  check('the run halted at Fix', result.halted_at, 'Fix')
+  check('the halt note carries the first fixer note', result.note.includes('stub fix round 1'), true)
+  check('the halt note carries the second fixer note', result.note.includes('stub fix round 2'), true)
+}
+
+async function scenarioFixerWithoutDecisions() {
+  console.log('\n== scenario: a ticket with no settled decisions gets no settled-decisions block in the fixer prompt')
+  const { captured } = await run(convergedWithSuspect({
+    ticketResult: { found: true, summary: 'stub', comments: '',
+      description: `### The problem\n${PROBLEM_MARKER}\n` },
+    tailReview: [],
+    postMutationReview: [],
+  }))
+  const fix = captured.calls.find(c => c.label === 'fix:1')?.prompt ?? ''
+  check('the fix round ran', fix.length > 0, true)
+  check('the fixer prompt has no settled-decisions block', fix.includes('Settled decisions'), false)
 }
 
 // Scenario C -- no such section at all: lenses get no settled-decisions
@@ -170,6 +228,9 @@ async function scenarioFencedCommentNotAHeading() {
 const SCENARIOS = [
   scenarioSettledDecisionsInitialLenses,
   scenarioSettledDecisionsTailAndMutation,
+  scenarioFixerSeesSettledDecisions,
+  scenarioFixerNoteReachesFixHalt,
+  scenarioFixerWithoutDecisions,
   scenarioNoSection,
   scenarioEmptyOrPlaceholder,
   scenarioPhraseInParagraphNotSelected,

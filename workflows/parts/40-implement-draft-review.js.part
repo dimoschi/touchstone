@@ -695,9 +695,9 @@ const LENS = {
       `implementation is complete, through one lens: hunt for acceptance ` +
       `criteria that are unmet, half-met, or untested. For an unmet criterion, ` +
       `set category to unmet-criterion and copy the criterion into ` +
-      `criterion_quote verbatim from the ticket text below, whitespace and ` +
-      `all: the script checks it is actually there, so a paraphrase does not ` +
-      `hold the run.`,
+      `criterion_quote verbatim from the ticket text below, so a reader can ` +
+      `tell which criterion it is. Holding the run takes a reproducer, as for ` +
+      `any other category.`,
   },
   advocate: {
     label: 'advocate',
@@ -716,7 +716,9 @@ const LENS = {
       `a finding however strongly you hold it, and a preference between two ` +
       `working designs is never one. Put that same demonstration in reproducer ` +
       `too: the command from evidence, run from the worktree root, with its ` +
-      `expected and actual output.\n` +
+      `expected and actual output. That is for a gap in the code, not a ` +
+      `disagreement with a settled decision: a disagreement with a settled ` +
+      `decision is a note, with no reproducer.\n` +
       `You are deliberately shown only the ticket's settled decisions, if it ` +
       `has any, never the rest of its text; triage owns the rest of its ` +
       `claims. Absence of evidence in the repo is not evidence of absence, so ` +
@@ -855,10 +857,9 @@ const reviewOf = async (range, tag, picked, known = [], knownCharge = '') => {
       `Return at most ${MAX_FINDINGS_PER_LENS} findings, most serious first. An ` +
       `empty list is the expected result for a correct change. Every finding ` +
       `carries a category: wrong-result, crash, gate-bypass, unmet-criterion, ` +
-      `docs, wording, design, scope, or other. Only wrong-result, crash, ` +
-      `gate-bypass and unmet-criterion can hold this run, and only when they ` +
-      `also carry a reproducer (unmet-criterion additionally needs criterion_quote). ` +
-      `Everything else is still worth raising and reaches the pull request as a ` +
+      `docs, wording, design, scope, or other. A finding of any category can ` +
+      `hold this run, but only by carrying a reproducer that demonstrates it. ` +
+      `One without a reproducer is still worth raising and reaches the pull request as a ` +
       `note for a human to judge, but it never blocks. ${REPRODUCER_CONTRACT}` +
       (known.length
         ? `\nThe findings below were already reported earlier this run, each ` +

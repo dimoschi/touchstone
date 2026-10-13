@@ -54,7 +54,6 @@ const collapseDuplicates = async (findings) => {
 // tail review on (never the initial review), is a per-file list of
 // new-side [start, end] ranges the preceding fix (or mutation) range
 // actually touched.
-const collapseWs = (s) => String(s ?? '').replace(/\s+/g, ' ').trim()
 // Shared between classify() and collapseDuplicates(): whether a finding
 // carries every field a reproducer needs, never just that the key is present.
 const hasCompleteReproducer = (f) => {
@@ -62,19 +61,10 @@ const hasCompleteReproducer = (f) => {
   return !!(r && typeof r === 'object' &&
     ['kind', 'command', 'expected', 'actual'].every(k => typeof r[k] === 'string' && r[k].length > 0))
 }
-// unmet-criterion's evidence is the quote, not a reproducer: verbatim and
-// long enough that a paraphrase cannot pass as a match.
-const criterionQuoteFound = (f) => {
-  const quote = collapseWs(f.criterion_quote)
-  const haystack = collapseWs(`${ticketDetail.description}\n${ticketDetail.comments}`)
-  return quote.length >= 20 && haystack.includes(quote)
-}
 // Mirrors classify()'s own gate, ahead of classify() ever seeing the
 // finding: used only to rank collapseDuplicates()'s survivor, never to
 // decide anything classify() itself decides.
-const looksBlocking = (f) =>
-  BLOCKING_CATEGORIES.has(f?.category) &&
-  (f.category === 'unmet-criterion' ? criterionQuoteFound(f) : hasCompleteReproducer(f))
+const looksBlocking = (f) => !!f && hasCompleteReproducer(f)
 // A lens is told to use absolute paths (treeAgent's own rule) but hands
 // classify() its own file field, which hunks (keyed on the repo-relative
 // "+++ b/<path>" git prints) never matches unless normalized the same way: an
@@ -135,17 +125,9 @@ const classify = (f, ctx) => {
     // under (a bad reproducer, an earlier out-of-range round, the wrong
     // category) does not mean the defect itself is gone.
   }
-  if (!BLOCKING_CATEGORIES.has(f.category)) {
-    return { note: { ...f, reason: 'category', round: ctx.round } }
-  }
   if (!hasCompleteReproducer(f)) {
-    return { note: { ...f, reason: 'no-reproducer', round: ctx.round } }
-  }
-  // The quote proves the criterion exists; the reproducer is what shows the
-  // change misses it. Without the second, the only way to decide "unmet" is a
-  // model reading the code, which is exactly what blocking must not rest on.
-  if (f.category === 'unmet-criterion' && !criterionQuoteFound(f)) {
-    return { note: { ...f, reason: 'quote-not-found', round: ctx.round } }
+    const reason = BLOCKING_CATEGORIES.has(f.category) ? 'no-reproducer' : 'category'
+    return { note: { ...f, reason, round: ctx.round } }
   }
   if (ctx.hunks && !overlapsHunk(f, ctx.hunks)) {
     return { note: { ...f, reason: 'out-of-range', round: ctx.round } }
@@ -265,7 +247,7 @@ const dirtyReproducerHalt = async (phaseName, exec, extraOpen = []) => halted(ph
 })
 
 // Every note is a finding the run does not block on: raised, but not
-// demonstrated, not blocking-category, not in range, or a residual of a fix
+// demonstrated, without a reproducer, not in range, or a residual of a fix
 // already verified. Separate from unresolved_findings, which stays reserved
 // for what actually holds the run.
 let notes = [...carriedNotes]
@@ -546,6 +528,7 @@ const regressedOf = (items, exec, round) => {
   return { regressed, errored }
 }
 
+const fixerNotes = []
 while ((open.length || blockingChecksOpen()) && round < MAX_REVIEW_ROUNDS && !outOfBudget() && !sFix.over()) {
   round++
   enterPhase('Fix')
@@ -569,6 +552,7 @@ while ((open.length || blockingChecksOpen()) && round < MAX_REVIEW_ROUNDS && !ou
     `unsupported_language=true when you do, and put the three options in note. ` +
     `Do not push or open a PR.\n` +
     `${NATIVE_TOOLS(wt.path)} ${GENERATED_FILES}\n` +
+    decisionsSpec() +
     `Task: ${brief(task)}\n` +
     `Each finding names the place it was raised against. Work from there. ` +
     `Read git diff ${impl.commit_range} only when that place cannot tell you ` +
@@ -591,8 +575,9 @@ while ((open.length || blockingChecksOpen()) && round < MAX_REVIEW_ROUNDS && !ou
       ? `Findings, each at the location its reviewer already read; open that ` +
         `location directly rather than re-reading the whole commit range for ` +
         `context. Where a reproduce command is shown, check it exits 0 before ` +
-        `you consider that one fixed; an unmet-criterion finding with none is ` +
-        `judged by the criterion it names instead.\n` +
+        `you consider that one fixed. If fixing a finding would change ` +
+        `behaviour a settled decision specifies, do not change it: report the ` +
+        `conflict in note.\n` +
         open.map(f => `- ${f.title} (${locusOf(f)}): ${f.claim}` +
           (f.reproducer?.command ? ` [reproduce: ${f.reproducer.command}]` : '') +
           (f.reproducer_run?.outcome === 'errored'
@@ -615,6 +600,7 @@ while ((open.length || blockingChecksOpen()) && round < MAX_REVIEW_ROUNDS && !ou
       : ''),
     { label: `fix:${round}`, schema: FIXED, model: 'sonnet', effort: effortFor.implement })
   fixRoundSpend.push({ round, output: budget.spent() - fixSpendStart })
+  if (fixed?.note?.trim()) fixerNotes.push(`round ${round}: ${fixed.note.trim()}`)
   // Folded before the halt check below, not after: a fixer that committed part
   // of the work and only then hit the refusal still has a gate result, and the
   // halt is the only place left to report it.
@@ -817,6 +803,10 @@ if (open.length || blockingChecksOpen()) {
           (staleCount
             ? ` ${staleCount} of them have code that changed since they were ` +
               `recorded; re-check those against HEAD before acting on them.`
+            : '') +
+          (fixerNotes.length
+            ? ` The fixer's own notes, which is where it reports a finding that ` +
+              `conflicts with a settled decision: ${fixerNotes.join('; ')}.`
             : ''),
   })
 }
