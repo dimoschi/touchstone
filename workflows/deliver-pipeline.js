@@ -1971,17 +1971,19 @@ const settledDecisionsOf = (description) => {
 }
 const settledDecisions = ticketDetail.found ? settledDecisionsOf(ticketDetail.description) : ''
 
-// Handed to every review lens (reviewOf), never to Triage or Plan, which get
-// the whole ticket via ticketSpec() instead. Framed as settled rather than as
-// more ticket text to weigh, so a lens does not file the specified behaviour
-// as the defect it was told to hunt for.
+// Handed to every review lens (reviewOf) and to the fixer, never to Triage or
+// Plan, which get the whole ticket via ticketSpec() instead. Framed as settled
+// rather than as more ticket text to weigh, so a lens does not file the
+// specified behaviour as the defect it was told to hunt for, and the fixer does
+// not revert it.
 const decisionsSpec = () => settledDecisions
   ? `Settled decisions (the ticket's "Constraints, or decisions already ` +
     `taken" section, verbatim; decided, not under review):\n${settledDecisions}\n` +
-    `Behaviour a settled decision specifies is not a defect: do not report it ` +
-    `as wrong-result, crash, gate-bypass or unmet-criterion. Disagreeing with ` +
-    `a decision is at most a design or scope note, with no reproducer, which ` +
-    `never blocks. Do not critique the rest of the ticket's reasoning.\n`
+    `Behaviour a settled decision specifies is not a defect. A finding with a ` +
+    `reproducer holds the run whatever its category, so a finding must never ` +
+    `carry a reproducer that asserts behaviour contradicting a settled ` +
+    `decision. Disagreeing with a decision is a note with no reproducer. Do ` +
+    `not critique the rest of the ticket's reasoning.\n`
   : ''
 
 const treeAgent = (prompt, { omitBase = false, ...opts }) =>
@@ -3420,7 +3422,9 @@ const LENS = {
       `a finding however strongly you hold it, and a preference between two ` +
       `working designs is never one. Put that same demonstration in reproducer ` +
       `too: the command from evidence, run from the worktree root, with its ` +
-      `expected and actual output.\n` +
+      `expected and actual output. That is for a gap in the code, not a ` +
+      `disagreement with a settled decision: a disagreement with a settled ` +
+      `decision is a note, with no reproducer.\n` +
       `You are deliberately shown only the ticket's settled decisions, if it ` +
       `has any, never the rest of its text; triage owns the rest of its ` +
       `claims. Absence of evidence in the repo is not evidence of absence, so ` +
@@ -4171,6 +4175,7 @@ while ((open.length || blockingChecksOpen()) && round < MAX_REVIEW_ROUNDS && !ou
     `unsupported_language=true when you do, and put the three options in note. ` +
     `Do not push or open a PR.\n` +
     `${NATIVE_TOOLS(wt.path)} ${GENERATED_FILES}\n` +
+    decisionsSpec() +
     `Task: ${brief(task)}\n` +
     `Each finding names the place it was raised against. Work from there. ` +
     `Read git diff ${impl.commit_range} only when that place cannot tell you ` +
@@ -4193,8 +4198,9 @@ while ((open.length || blockingChecksOpen()) && round < MAX_REVIEW_ROUNDS && !ou
       ? `Findings, each at the location its reviewer already read; open that ` +
         `location directly rather than re-reading the whole commit range for ` +
         `context. Where a reproduce command is shown, check it exits 0 before ` +
-        `you consider that one fixed; an unmet-criterion finding with none is ` +
-        `judged by the criterion it names instead.\n` +
+        `you consider that one fixed. If fixing a finding would change ` +
+        `behaviour a settled decision specifies, do not change it: report the ` +
+        `conflict in note.\n` +
         open.map(f => `- ${f.title} (${locusOf(f)}): ${f.claim}` +
           (f.reproducer?.command ? ` [reproduce: ${f.reproducer.command}]` : '') +
           (f.reproducer_run?.outcome === 'errored'

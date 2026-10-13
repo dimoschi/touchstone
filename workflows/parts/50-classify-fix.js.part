@@ -551,6 +551,7 @@ while ((open.length || blockingChecksOpen()) && round < MAX_REVIEW_ROUNDS && !ou
     `unsupported_language=true when you do, and put the three options in note. ` +
     `Do not push or open a PR.\n` +
     `${NATIVE_TOOLS(wt.path)} ${GENERATED_FILES}\n` +
+    decisionsSpec() +
     `Task: ${brief(task)}\n` +
     `Each finding names the place it was raised against. Work from there. ` +
     `Read git diff ${impl.commit_range} only when that place cannot tell you ` +
@@ -573,8 +574,9 @@ while ((open.length || blockingChecksOpen()) && round < MAX_REVIEW_ROUNDS && !ou
       ? `Findings, each at the location its reviewer already read; open that ` +
         `location directly rather than re-reading the whole commit range for ` +
         `context. Where a reproduce command is shown, check it exits 0 before ` +
-        `you consider that one fixed; an unmet-criterion finding with none is ` +
-        `judged by the criterion it names instead.\n` +
+        `you consider that one fixed. If fixing a finding would change ` +
+        `behaviour a settled decision specifies, do not change it: report the ` +
+        `conflict in note.\n` +
         open.map(f => `- ${f.title} (${locusOf(f)}): ${f.claim}` +
           (f.reproducer?.command ? ` [reproduce: ${f.reproducer.command}]` : '') +
           (f.reproducer_run?.outcome === 'errored'
