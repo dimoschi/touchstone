@@ -95,6 +95,26 @@ async function scenarioFixerSeesSettledDecisions() {
     fix.includes('judged by the criterion it names'), false)
 }
 
+// The fixer reports a conflict only in note, and the loop otherwise reads that
+// field on the unsupported_language path alone, so a run that halts at Fix on
+// the finding must carry what the fixer said.
+async function scenarioFixerNoteReachesFixHalt() {
+  console.log('\n== scenario: a fixer note reaches the Fix halt when the finding stays open')
+  const { result } = await run({
+    args: { maxReviewRounds: 2 }, diffstatFiles: bigDiffstat,
+    ticketResult: { found: true, summary: 'stub', comments: '', description: DESCRIPTION_WITH_DECISIONS },
+    initialReview: {
+      correctness: [],
+      advocate: [{ category: 'design', title: 'No retries', file: 'src/p.js',
+        claim: 'retries should be enabled', evidence: 'e' }],
+    },
+    tailReview: [],
+  })
+  check('the run halted at Fix', result.halted_at, 'Fix')
+  check('the halt note carries the first fixer note', result.note.includes('stub fix round 1'), true)
+  check('the halt note carries the second fixer note', result.note.includes('stub fix round 2'), true)
+}
+
 async function scenarioFixerWithoutDecisions() {
   console.log('\n== scenario: a ticket with no settled decisions gets no settled-decisions block in the fixer prompt')
   const { captured } = await run(convergedWithSuspect({
@@ -209,6 +229,7 @@ const SCENARIOS = [
   scenarioSettledDecisionsInitialLenses,
   scenarioSettledDecisionsTailAndMutation,
   scenarioFixerSeesSettledDecisions,
+  scenarioFixerNoteReachesFixHalt,
   scenarioFixerWithoutDecisions,
   scenarioNoSection,
   scenarioEmptyOrPlaceholder,

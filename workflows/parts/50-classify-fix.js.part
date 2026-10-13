@@ -528,6 +528,7 @@ const regressedOf = (items, exec, round) => {
   return { regressed, errored }
 }
 
+const fixerNotes = []
 while ((open.length || blockingChecksOpen()) && round < MAX_REVIEW_ROUNDS && !outOfBudget() && !sFix.over()) {
   round++
   enterPhase('Fix')
@@ -599,6 +600,7 @@ while ((open.length || blockingChecksOpen()) && round < MAX_REVIEW_ROUNDS && !ou
       : ''),
     { label: `fix:${round}`, schema: FIXED, model: 'sonnet', effort: effortFor.implement })
   fixRoundSpend.push({ round, output: budget.spent() - fixSpendStart })
+  if (fixed?.note?.trim()) fixerNotes.push(`round ${round}: ${fixed.note.trim()}`)
   // Folded before the halt check below, not after: a fixer that committed part
   // of the work and only then hit the refusal still has a gate result, and the
   // halt is the only place left to report it.
@@ -801,6 +803,10 @@ if (open.length || blockingChecksOpen()) {
           (staleCount
             ? ` ${staleCount} of them have code that changed since they were ` +
               `recorded; re-check those against HEAD before acting on them.`
+            : '') +
+          (fixerNotes.length
+            ? ` The fixer's own notes, which is where it reports a finding that ` +
+              `conflicts with a settled decision: ${fixerNotes.join('; ')}.`
             : ''),
   })
 }
