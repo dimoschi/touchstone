@@ -576,7 +576,7 @@ const parseCheckRow = (line, checks, rows, run) => {
 const runnerLinesOf = (output) =>
   String(output ?? '').split(/\r?\n/).map(l => l.trimEnd()).filter(l => l !== '')
 const dirOf = (p) => p.slice(0, p.lastIndexOf('/'))
-const CHECK_PENDING_LINE = /^TOUCHSTONE_CHECK_PENDING (\S+) (\d+)$/
+const CHECK_PENDING_LINE = /^TOUCHSTONE_CHECK_PENDING (\S+) ([01])$/
 const parseCheckRun = (output, checks, run) => {
   const lines = runnerLinesOf(output)
   if (!lines.length) return { reason: 'no output' }
@@ -584,7 +584,7 @@ const parseCheckRun = (output, checks, run) => {
     .map(l => CHECK_PENDING_LINE.exec(l))
   if (pending.length) {
     if (pending.some(m => !m || !checks.some(c => c.id === m[1]))) return { reason: 'malformed pending line' }
-    return { pending: pending.map(m => m[1]), bytes: pending.reduce((sum, m) => sum + Number(m[2]), 0) }
+    return { pending: pending.map(m => m[1]), dead: pending.filter(m => m[2] === '0').map(m => m[1]) }
   }
   const end = parseCheckEnd(lines, run)
   if (end.reason) return end
@@ -2472,15 +2472,18 @@ const rowTo = (first) =>
   `printf '%s\\n' "$r" ${first ? '>|' : '>>'}"$d/rows"; printf '%s\\n' "$r"`
 // A check runs detached, so one that outlasts a Bash call (600000 ms) is never
 // cut off: its line waits at most TOUCHSTONE_CHECK_WAIT seconds (540), then
-// prints it as pending with its log's size, and executeChecks sends the same
-// run's lines again until it finishes. $d/running names the check in flight,
-// so a later line never starts beside it.
+// prints it as pending, with 1 while its process (pid in $d/<id>.pid, the
+// leader of its own process group) is alive or not yet started and 0 once it
+// is gone without an exit code. executeChecks sends the same run's lines again
+// until it finishes. $d/running names the check in flight, so a later line
+// never starts beside it. The exit file is looked for again after the
+// liveness test, since a check can finish between the two.
 // The detached script is fixed text with no single quote in it, and the check
 // is passed to it as one argument quoted once, so no line nests quoting for
-// the runner to copy (#116).
+// the runner to copy.
 const DETACH = `python3 -c 'import os,sys; os.setsid(); ` +
   `os.execvp("bash", ["bash", "-c", sys.argv[1], "check", *sys.argv[2:]])' ` +
-  `'d="$1"; bash -c "$3" >|"$d/$2.log" 2>&1; echo "$?" >|"$d/$2.exit.tmp"; ` +
+  `'d="$1"; echo "$$" >|"$d/$2.pid"; bash -c "$3" >|"$d/$2.log" 2>&1; echo "$?" >|"$d/$2.exit.tmp"; ` +
   `mv "$d/$2.exit.tmp" "$d/$2.exit"; rm -f "$d/running"'`
 const checkLineFor = (c, run, first) => {
   const f = (ext) => `"$d/${c.id}.${ext}"`
@@ -2492,8 +2495,9 @@ const checkLineFor = (c, run, first) => {
     `[ "$w" -lt "\${TOUCHSTONE_CHECK_WAIT:-540}" ]; do sleep 1; w=$((w+1)); done; fi; ` +
     `if [ -f ${f('exit')} ]; then e="$(cat ${f('exit')})"; ` +
     `r="$(printf 'TOUCHSTONE_CHECK %s %s %s' ${c.id} "$e" "$d/${c.id}.log")"; ${rowTo(first)}; ` +
-    `else n="$(wc -c < ${f('log')} 2>/dev/null)"; ` +
-    `printf 'TOUCHSTONE_CHECK_PENDING %s %d\\n' ${c.id} "\${n:-0}"; fi; }`
+    `else a=1; if [ -f ${f('pid')} ] && ! kill -0 "$(cat ${f('pid')})" 2>/dev/null && ` +
+    `[ ! -f ${f('exit')} ]; then a=0; fi; ` +
+    `printf 'TOUCHSTONE_CHECK_PENDING %s %s\\n' ${c.id} "$a"; fi; }`
 }
 // The tree is looked at once, after the last check: a check that writes to it
 // (a ledger, a generated file) must be visible, not silently carried into
@@ -2534,24 +2538,34 @@ const runnerPrompt = (label, lines, note = '') =>
   `write, change or reorder a line yourself; a line you did not see printed ` +
   `is not reported.\n` + note +
   '```bash\n' + lines.join('\n') + '\n```'
-// A pending check is asked about again for as long as its log keeps growing.
-const executeChecks = async (checks = discoveredChecks) => {
+// Kills the process group of every check of a run that has no exit code yet.
+// Best effort: what it prints is not read.
+const killLineFor = (run) =>
+  `${logDirFor(run)} && for p in "$d"/*.pid; do [ -f "$p" ] && [ ! -f "\${p%.pid}.exit" ] && ` +
+  `kill -TERM -- "-$(cat "$p")" 2>/dev/null; done; printf 'TOUCHSTONE_CHECKS_KILLED %s\\n' ${run}`
+// A pending check is asked about again for as long as its process is alive. A
+// checks stage budget, when the user set one, is the only other end, and the
+// check is killed then rather than left running beside the next attempt.
+const executeChecks = async (checks, over) => {
   checkAttempt++
   const run = `${planId}-${checkAttempt}`
+  const label = `checks:run:${checkAttempt}`
   const lines = [...checks.map((c, i) => checkLineFor(c, run, i === 0)), endLineFor(run)]
-  let bytes = -1, quiet = 0
   for (let poll = 1; ; poll++) {
     const out = await treeAgent(runnerPrompt('checks:run', lines), {
-      label: poll === 1 ? `checks:run:${checkAttempt}` : `checks:run:${checkAttempt}:poll:${poll}`,
+      label: poll === 1 ? label : `${label}:poll:${poll}`,
       schema: CHECK_RUN, model: 'haiku', effort: 'low' })
     const parsed = parseCheckRun(out?.output, checks, run)
     if (!parsed.pending) return parsed
-    quiet = parsed.bytes > bytes ? 0 : quiet + 1
-    bytes = parsed.bytes
-    if (quiet >= STALL_ROUNDS) {
-      return { reason: `${parsed.pending.join(', ')} stopped writing output while still running` }
+    if (parsed.dead.length) {
+      return { reason: `${parsed.dead.join(', ')} stopped without recording an exit code` }
     }
-    log(`checks: ${parsed.pending.join(', ')} still running (${parsed.bytes} bytes logged), asking again`)
+    if (over()) {
+      await treeAgent(runnerPrompt('checks:run', [killLineFor(run)]), {
+        label: `${label}:kill`, schema: CHECK_RUN, model: 'haiku', effort: 'low' })
+      return { reason: `the checks stage budget ran out while ${parsed.pending.join(', ')} was still running` }
+    }
+    log(`checks: ${parsed.pending.join(', ')} still running, asking again`)
   }
 }
 // The one record kept of what a reproducer actually did at a given round: the
@@ -2583,12 +2597,12 @@ const classifyResults = (checks, parsed) => {
 // own halt). The retry is the whole batch under a new run, so the first
 // attempt's logs are kept as they were. dirty and statusLog describe the
 // attempt that was measured.
-const runChecks = async (checks = discoveredChecks) => {
+const runChecks = async (checks = discoveredChecks, over = () => false) => {
   if (!checks.length) return { red: [], unmeasured: [], dirty: false, statusLog: null }
-  const first = await executeChecks(checks)
+  const first = await executeChecks(checks, over)
   if (!first.reason) return { ...classifyResults(checks, first), dirty: first.dirty, statusLog: first.statusLog }
   log(`checks: the batch was unmeasured (${first.reason}), retrying once`)
-  const second = await executeChecks(checks)
+  const second = await executeChecks(checks, over)
   if (!second.reason) return { ...classifyResults(checks, second), dirty: second.dirty, statusLog: second.statusLog }
   return {
     red: [], dirty: false, statusLog: null,
@@ -2642,7 +2656,7 @@ const unmeasuredChecksHalt = (at, extra) => {
 // before anything is implemented.
 let droppedAtBaseline = []
 if (discoveredChecks.length && checksBlocking) {
-  const baseline = await runChecks()
+  const baseline = await runChecks(discoveredChecks, sChecksPre.over)
   if (baseline.unmeasured.length) {
     sChecksPre.close()
     return await halted('Implement', {
@@ -2906,7 +2920,7 @@ const sChecksPost = stage('checks')
 let lastCheckedHead = headOf(impl.commit_range)
 const implBase = impl.commit_range.includes('..')
   ? impl.commit_range.split('..')[0].trim() : impl.commit_range.trim()
-;({ red: redChecks, unmeasured: unmeasuredChecks } = await runChecks())
+;({ red: redChecks, unmeasured: unmeasuredChecks } = await runChecks(discoveredChecks, sChecksPost.over))
 if (redChecks.length) {
   log(`checks: ${redChecks.length} discovered check(s) red after Implement: ` +
       redChecks.map(c => c.id).join(', '))
@@ -2968,7 +2982,7 @@ if (blockingChecksOpen() && !sChecksPost.over()) {
     impl.commit_range = `${implBase}..${preReviewHead}`
     lastCheckedHead = preReviewHead
     signals = (await measureSignals(impl.commit_range)) ?? signals
-    ;({ red: redChecks, unmeasured: unmeasuredChecks } = await runChecks())
+    ;({ red: redChecks, unmeasured: unmeasuredChecks } = await runChecks(discoveredChecks, sChecksPost.over))
     log(redChecks.length
       ? `checks: ${redChecks.length} still red after the pre-review fix round`
       : `checks: all clear after the pre-review fix round`)
@@ -4146,6 +4160,9 @@ const regressedOf = (items, exec, round) => {
 const fixerNotes = []
 const openIds = () => new Set([...open.map(f => f.id),
   ...(blockingChecksOpen() ? redChecks.map(c => `check:${c.id}`) : [])])
+// Progress is a finding or check closing for the first time: one that closes
+// again after it was reopened only undoes a regression.
+const everClosed = new Set()
 let stalledRounds = 0
 while ((open.length || blockingChecksOpen()) && round < MAX_REVIEW_ROUNDS &&
        stalledRounds < STALL_ROUNDS && !outOfBudget() && !sFix.over()) {
@@ -4348,7 +4365,7 @@ while ((open.length || blockingChecksOpen()) && round < MAX_REVIEW_ROUNDS &&
   }
 
   if (checksBlocking && discoveredChecks.length && head && head !== lastCheckedHead && !outOfBudget()) {
-    ;({ red: redChecks, unmeasured: unmeasuredChecks } = await runChecks())
+    ;({ red: redChecks, unmeasured: unmeasuredChecks } = await runChecks(discoveredChecks, sFix.over))
     lastCheckedHead = head
     if (unmeasuredChecks.length) {
       sFix.close()
@@ -4361,7 +4378,9 @@ while ((open.length || blockingChecksOpen()) && round < MAX_REVIEW_ROUNDS &&
   log(`round ${round}: ${open.length} finding(s) still open` +
       (discoveredChecks.length ? `, ${redChecks.length} check(s) still red` : ''))
   const openAfterRound = openIds()
-  stalledRounds = [...openBeforeRound].some(id => !openAfterRound.has(id)) ? 0 : stalledRounds + 1
+  const closedFirstTime = [...openBeforeRound].filter(id => !openAfterRound.has(id) && !everClosed.has(id))
+  for (const id of openBeforeRound) if (!openAfterRound.has(id)) everClosed.add(id)
+  stalledRounds = closedFirstTime.length ? 0 : stalledRounds + 1
 }
 
 sFix.close()

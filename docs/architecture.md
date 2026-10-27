@@ -715,12 +715,15 @@ as its own foreground Bash call. A check's line is self-contained: it resolves
 <worktree> && <command>'` detached (a `setsid`, through `python3`) with its output in
 `$d/<id>.log` and its exit code written to `$d/<id>.exit` when it ends, and waits for that
 file. The wait is at most 540 seconds (`TOUCHSTONE_CHECK_WAIT`), inside the 600000 ms Bash
-cap; a check still running then prints `TOUCHSTONE_CHECK_PENDING <id> <log bytes>` instead
-of its row, and `executeChecks` sends the same run's lines again
-(`checks:run:N:poll:M`). A line whose check already has an exit file prints its row at
-once, and `$d/running` names the check in flight so a later line never starts beside it.
-A check is unmeasured only when its log stops growing for `STALL_ROUNDS` polls in a row,
-so no suite is cut off for being long.
+cap; a check still running then prints `TOUCHSTONE_CHECK_PENDING <id> <1|0>` instead of
+its row, and `executeChecks` sends the same run's lines again (`checks:run:N:poll:M`). The
+flag is 1 while the check's process (pid in `$d/<id>.pid`, the leader of its own process
+group) is alive or not yet started, and 0 once it is gone with no exit file. A line whose
+check already has an exit file prints its row at once, and `$d/running` names the check
+in flight so a later line never starts beside it. A check is unmeasured when its process
+died without an exit code, never for being long or quiet. A `checks` stage budget, when
+the user set one, also ends the asking: `checks:run:N:kill` then kills the process group
+of every check with no exit file, so a retry never runs beside it.
 
 The check's whole output, stdout and stderr, goes to
 `touchstone-checks/<run>/<id>.log` under the worktree's own git dir, so a log is never

@@ -535,6 +535,9 @@ const regressedOf = (items, exec, round) => {
 const fixerNotes = []
 const openIds = () => new Set([...open.map(f => f.id),
   ...(blockingChecksOpen() ? redChecks.map(c => `check:${c.id}`) : [])])
+// Progress is a finding or check closing for the first time: one that closes
+// again after it was reopened only undoes a regression.
+const everClosed = new Set()
 let stalledRounds = 0
 while ((open.length || blockingChecksOpen()) && round < MAX_REVIEW_ROUNDS &&
        stalledRounds < STALL_ROUNDS && !outOfBudget() && !sFix.over()) {
@@ -737,7 +740,7 @@ while ((open.length || blockingChecksOpen()) && round < MAX_REVIEW_ROUNDS &&
   }
 
   if (checksBlocking && discoveredChecks.length && head && head !== lastCheckedHead && !outOfBudget()) {
-    ;({ red: redChecks, unmeasured: unmeasuredChecks } = await runChecks())
+    ;({ red: redChecks, unmeasured: unmeasuredChecks } = await runChecks(discoveredChecks, sFix.over))
     lastCheckedHead = head
     if (unmeasuredChecks.length) {
       sFix.close()
@@ -750,7 +753,9 @@ while ((open.length || blockingChecksOpen()) && round < MAX_REVIEW_ROUNDS &&
   log(`round ${round}: ${open.length} finding(s) still open` +
       (discoveredChecks.length ? `, ${redChecks.length} check(s) still red` : ''))
   const openAfterRound = openIds()
-  stalledRounds = [...openBeforeRound].some(id => !openAfterRound.has(id)) ? 0 : stalledRounds + 1
+  const closedFirstTime = [...openBeforeRound].filter(id => !openAfterRound.has(id) && !everClosed.has(id))
+  for (const id of openBeforeRound) if (!openAfterRound.has(id)) everClosed.add(id)
+  stalledRounds = closedFirstTime.length ? 0 : stalledRounds + 1
 }
 
 sFix.close()

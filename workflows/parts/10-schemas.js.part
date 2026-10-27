@@ -185,7 +185,7 @@ const parseCheckRow = (line, checks, rows, run) => {
 const runnerLinesOf = (output) =>
   String(output ?? '').split(/\r?\n/).map(l => l.trimEnd()).filter(l => l !== '')
 const dirOf = (p) => p.slice(0, p.lastIndexOf('/'))
-const CHECK_PENDING_LINE = /^TOUCHSTONE_CHECK_PENDING (\S+) (\d+)$/
+const CHECK_PENDING_LINE = /^TOUCHSTONE_CHECK_PENDING (\S+) ([01])$/
 const parseCheckRun = (output, checks, run) => {
   const lines = runnerLinesOf(output)
   if (!lines.length) return { reason: 'no output' }
@@ -193,7 +193,7 @@ const parseCheckRun = (output, checks, run) => {
     .map(l => CHECK_PENDING_LINE.exec(l))
   if (pending.length) {
     if (pending.some(m => !m || !checks.some(c => c.id === m[1]))) return { reason: 'malformed pending line' }
-    return { pending: pending.map(m => m[1]), bytes: pending.reduce((sum, m) => sum + Number(m[2]), 0) }
+    return { pending: pending.map(m => m[1]), dead: pending.filter(m => m[2] === '0').map(m => m[1]) }
   }
   const end = parseCheckEnd(lines, run)
   if (end.reason) return end

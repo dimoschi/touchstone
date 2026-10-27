@@ -166,6 +166,7 @@ def test_limits_are_read_whatever_unicode_encoding_the_json_uses(world, capsys):
     ('{"runBudget": true}', "'runBudget' must be a non-negative integer"),
     ('{"stageBudgets": 5}', "'stageBudgets' must map stage names to non-negative integers"),
     ('{"stageBudgets": {"fix": "x"}}', "'stageBudgets' must map stage names to non-negative integers"),
+    ('{"stageBudgets": {"fixes": 1}}', "'stageBudgets' must map stage names to non-negative integers"),
 ])
 def test_a_malformed_touchstone_json_is_a_setup_refusal(world, capsys, text, reason):
     (world.tmp / "repo" / ".touchstone.json").write_text(text)

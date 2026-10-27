@@ -195,7 +195,7 @@ const sChecksPost = stage('checks')
 let lastCheckedHead = headOf(impl.commit_range)
 const implBase = impl.commit_range.includes('..')
   ? impl.commit_range.split('..')[0].trim() : impl.commit_range.trim()
-;({ red: redChecks, unmeasured: unmeasuredChecks } = await runChecks())
+;({ red: redChecks, unmeasured: unmeasuredChecks } = await runChecks(discoveredChecks, sChecksPost.over))
 if (redChecks.length) {
   log(`checks: ${redChecks.length} discovered check(s) red after Implement: ` +
       redChecks.map(c => c.id).join(', '))
@@ -257,7 +257,7 @@ if (blockingChecksOpen() && !sChecksPost.over()) {
     impl.commit_range = `${implBase}..${preReviewHead}`
     lastCheckedHead = preReviewHead
     signals = (await measureSignals(impl.commit_range)) ?? signals
-    ;({ red: redChecks, unmeasured: unmeasuredChecks } = await runChecks())
+    ;({ red: redChecks, unmeasured: unmeasuredChecks } = await runChecks(discoveredChecks, sChecksPost.over))
     log(redChecks.length
       ? `checks: ${redChecks.length} still red after the pre-review fix round`
       : `checks: all clear after the pre-review fix round`)

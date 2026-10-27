@@ -30,15 +30,16 @@ async function scenarioPromptIsOneLinePerCheck() {
       `mkdir -p "$d" && { if [ ! -f "$d/check:${n}.exit" ]; then ` +
       `if [ ! -e "$d/running" ]; then printf '%s' check:${n} >|"$d/running"; : >|"$d/check:${n}.log"; ` +
       `python3 -c 'import os,sys; os.setsid(); os.execvp("bash", ["bash", "-c", sys.argv[1], "check", *sys.argv[2:]])' ` +
-      `'d="$1"; bash -c "$3" >|"$d/$2.log" 2>&1; echo "$?" >|"$d/$2.exit.tmp"; mv "$d/$2.exit.tmp" "$d/$2.exit"; rm -f "$d/running"' ` +
+      `'d="$1"; echo "$$" >|"$d/$2.pid"; bash -c "$3" >|"$d/$2.log" 2>&1; echo "$?" >|"$d/$2.exit.tmp"; mv "$d/$2.exit.tmp" "$d/$2.exit"; rm -f "$d/running"' ` +
       `"$d" check:${n} 'cd /tmp/stub-worktree && ${cmd}' </dev/null >/dev/null 2>&1 & fi; ` +
       `w=0; while [ ! -f "$d/check:${n}.exit" ] && [ "$(cat "$d/running" 2>/dev/null)" = check:${n} ] && ` +
       `[ "$w" -lt "\${TOUCHSTONE_CHECK_WAIT:-540}" ]; do sleep 1; w=$((w+1)); done; fi; ` +
       `if [ -f "$d/check:${n}.exit" ]; then e="$(cat "$d/check:${n}.exit")"; ` +
       `r="$(printf 'TOUCHSTONE_CHECK %s %s %s' check:${n} "$e" "$d/check:${n}.log")"; ` +
       `printf '%s\\n' "$r" ${n === 1 ? '>|' : '>>'}"$d/rows"; printf '%s\\n' "$r"; ` +
-      `else n="$(wc -c < "$d/check:${n}.log" 2>/dev/null)"; ` +
-      `printf 'TOUCHSTONE_CHECK_PENDING %s %d\\n' check:${n} "\${n:-0}"; fi; }`
+      `else a=1; if [ -f "$d/check:${n}.pid" ] && ! kill -0 "$(cat "$d/check:${n}.pid")" 2>/dev/null && ` +
+      `[ ! -f "$d/check:${n}.exit" ]; then a=0; fi; ` +
+      `printf 'TOUCHSTONE_CHECK_PENDING %s %s\\n' check:${n} "$a"; fi; }`
   }
   check('check:1 is one line that logs to the git dir and prints only its id, exit and log',
     runnerLineOf(p, 'check:1'), lineFor(1, 'make test'))
@@ -443,13 +444,50 @@ async function scenarioRealRunnerLongCheck() {
 }
 
 async function scenarioRealRunnerSilentCheck() {
-  console.log('\n== scenario RQ: a running check whose log stops growing for two waits is unmeasured')
+  console.log('\n== scenario RQ: a check that prints nothing for several waits is still measured while it runs')
   const dir = scratchRepo()
   try {
-    const { scenario } = realRun(dir, 'sleep 6')
+    const { scenario } = realRun(dir, 'sleep 8')
+    const { result, captured } = await withWait(1, () => run(scenario))
+    check('it was asked about more than twice', captured.calls.filter(c => c.label.startsWith('checks:run:1')).length > 2, true)
+    check('nothing is unmeasured', result.checks?.unmeasured?.length ?? 0, 0)
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true })
+  }
+}
+
+async function scenarioRealRunnerDeadCheck() {
+  console.log('\n== scenario RK: a check whose process dies without an exit code is unmeasured')
+  const dir = scratchRepo()
+  try {
+    const { scenario } = realRun(dir, 'sleep 2; kill -9 0')
     const { result } = await withWait(1, () => run(scenario))
-    check('the baseline is unmeasured because the check went quiet',
-      (result.checks?.unmeasured?.[0]?.reason ?? '').includes('stopped writing'), true)
+    check('the baseline is unmeasured because the check died',
+      (result.checks?.unmeasured?.[0]?.reason ?? '').includes('stopped without recording an exit code'), true)
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true })
+  }
+}
+
+async function scenarioRealRunnerChecksBudget() {
+  console.log('\n== scenario RG: a checks stage budget stops the asking and kills the check')
+  const dir = scratchRepo()
+  try {
+    const { scenario } = realRun(dir, 'sleep 30')
+    scenario.args = { stageBudgets: { checks: 1000 } }
+    scenario.budgetPerAgentCall = 5000
+    const { result, captured } = await withWait(1, () => run(scenario))
+    check('the reason is the budget',
+      (result.checks?.unmeasured?.[0]?.reason ?? '').includes('checks stage budget'), true)
+    const kill = captured.calls.find(c => c.label === 'checks:run:1:kill')
+    check('a kill was sent for the attempt', Boolean(kill), true)
+    const logDir = fs.readdirSync(path.join(dir, '.git', 'touchstone-checks'))
+      .map(r => path.join(dir, '.git', 'touchstone-checks', r)).find(d => fs.existsSync(path.join(d, 'check:1.pid')))
+    const pid = Number(fs.readFileSync(path.join(logDir, 'check:1.pid'), 'utf8'))
+    await new Promise(r => setTimeout(r, 500))
+    let alive = true
+    try { process.kill(pid, 0) } catch { alive = false }
+    check('the check is no longer running', alive, false)
   } finally {
     fs.rmSync(dir, { recursive: true, force: true })
   }
@@ -461,7 +499,7 @@ const SCENARIOS = [scenarioPromptIsOneLinePerCheck, scenarioParserMeasures, scen
   scenarioFixersGetLogPaths, scenarioRealRunner, scenarioRealRunnerDirtyTree, scenarioRealRunnerNoclobber,
   scenarioRealRunnerStatusWarning, scenarioRealRunnerRevParseWarning, scenarioRealRunnerCwd,
   scenarioRealRunnerLargeOutput, scenarioRealRunnerInventedRow, scenarioRealRunnerLongCheck,
-  scenarioRealRunnerSilentCheck]
+  scenarioRealRunnerSilentCheck, scenarioRealRunnerDeadCheck, scenarioRealRunnerChecksBudget]
 JS_EOF
 
 finish

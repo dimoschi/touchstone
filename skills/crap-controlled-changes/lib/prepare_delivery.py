@@ -179,6 +179,8 @@ def markers(root):
 
 
 LIMIT_KEYS = ("maxReviewRounds", "maxGateAttempts", "runBudget")
+# The workflow's STAGES (workflows/parts/00-meta-bounds.js.part).
+STAGES = ("setup", "triage", "branch", "plan", "implement", "checks", "review", "fix", "mutation", "pr")
 
 
 def _count(value):
@@ -186,7 +188,7 @@ def _count(value):
 
 
 def _stage_budgets_problem(value):
-    if isinstance(value, dict) and all(_count(v) for v in value.values()):
+    if isinstance(value, dict) and all(k in STAGES and _count(v) for k, v in value.items()):
         return None
     return "'stageBudgets' must map stage names to non-negative integers"
 

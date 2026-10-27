@@ -132,8 +132,23 @@ async function scenarioLJ() {
   check('its round limit applies', callCount(captured, 'fix:4'), 0)
 }
 
+async function scenarioLK() {
+  console.log('\n== scenario LK: a fixer that only swaps which finding is open stalls')
+  // f1 holds on odd rounds and f2 on even ones, so each round closes one and
+  // reopens the other.
+  const swap = (id, round) => round > 0 && (id === 'f1' ? round % 2 === 1 : round % 2 === 0) ? true : undefined
+  const { result, captured } = await run({
+    args: { ...UNBOUNDED, maxReviewRounds: 8 },
+    initialReview: { correctness: findings(2), advocate: [] },
+    verify: swap, settledExit: (id, round) => swap(id, round) ? 0 : 1,
+    fixHead: headOf, staleness: () => [] })
+  check('a fourth round ran', callCount(captured, 'fix:4'), 1)
+  check('no fifth round ran', callCount(captured, 'fix:5'), 0)
+  check('the reason is the stall', /closed no finding or check/.test(result.stopped_because ?? ''), true)
+}
+
 const SCENARIOS = [scenarioLA, scenarioLB, scenarioLC, scenarioLD, scenarioLE,
-  scenarioLF, scenarioLG, scenarioLH, scenarioLI, scenarioLJ]
+  scenarioLF, scenarioLG, scenarioLH, scenarioLI, scenarioLJ, scenarioLK]
 JS_EOF
 
 finish
