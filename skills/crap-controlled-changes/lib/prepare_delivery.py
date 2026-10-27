@@ -210,7 +210,7 @@ def limits(root):
     path = os.path.join(root, ".touchstone.json")
     if not os.path.isfile(path):
         return {}
-    with open(path, encoding="utf-8") as f:
+    with open(path, "rb") as f:
         data = _json_or_none(f.read())
     problem = "is not valid JSON" if data is None else _limits_problem(data)
     if problem:

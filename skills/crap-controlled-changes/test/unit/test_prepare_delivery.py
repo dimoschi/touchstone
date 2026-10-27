@@ -141,6 +141,13 @@ def test_limits_are_read_from_touchstone_json_at_the_repo_root(world, capsys):
     assert out["limits"] == limits
 
 
+def test_limits_are_read_whatever_unicode_encoding_the_json_uses(world, capsys):
+    (world.tmp / "repo" / ".touchstone.json").write_bytes('{"runBudget": 5}'.encode("utf-16"))
+    code, out = run(world, capsys)
+    assert code == 0
+    assert out["limits"] == {"runBudget": 5}
+
+
 @pytest.mark.parametrize("text, reason", [
     ("{not json", "is not valid JSON"),
     ("[]", "must hold a JSON object"),
