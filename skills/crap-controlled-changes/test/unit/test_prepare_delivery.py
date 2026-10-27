@@ -155,7 +155,7 @@ def test_a_malformed_touchstone_json_is_a_setup_refusal(world, capsys, text, rea
     code, out = run(world, capsys)
     assert code == 2
     assert out["error"] == "bad-limits"
-    assert reason in out["reason"]
+    assert out["reason"] == f"{os.path.join(world.repo, '.touchstone.json')} {reason}"
 
 
 def test_fresh_refuses_a_name_that_exists_on_the_remote_only(world, capsys):
