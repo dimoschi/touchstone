@@ -29,7 +29,7 @@ export const meta = {
 // against the manifest in scripts/check-version-bump.sh, so drift is a
 // gate's job rather than something this script verifies about itself.
 const PLUGIN_NAME = 'touchstone'
-const PIPELINE_VERSION = '0.38.1'
+const PIPELINE_VERSION = '0.39.0'
 // The plugin's gates are this skill's scripts. A user or project skill with the
 // bare name can resolve first and run an older copy of the gates, whose result
 // would then be read as this version's, so prompts name the namespaced skill.
@@ -88,10 +88,17 @@ const runRecordFile = `.claude/touchstone-runs/${String(ticket).replace(/[^A-Za-
 const baseOverride = typeof args?.base === 'string' && args.base.trim()
   ? args.base.trim() : null
 
-const MAX_GATE_ATTEMPTS = args?.maxGateAttempts ?? 3
-// Three, not two: a fix round that introduces a new finding now spends a round
-// discovering that, so two left no round to actually resolve it.
-const MAX_REVIEW_ROUNDS = args?.maxReviewRounds ?? 3
+// A run ends in a finished PR or in a halt only the user can resolve, so every
+// spend limit is opt-in: a /touchstone:deliver flag (args) wins over the
+// repo's .touchstone.json (prepared.limits), and with neither it is unbounded.
+const repoLimits = args?.prepared?.limits ?? {}
+const limitOf = (name) => args?.[name] ?? repoLimits[name] ?? null
+const MAX_GATE_ATTEMPTS = limitOf('maxGateAttempts') ?? Infinity
+const MAX_REVIEW_ROUNDS = limitOf('maxReviewRounds') ?? Infinity
+// What ends a loop nothing caps: two rounds in a row that closed nothing.
+// One is not enough, since a round that fixes a finding can raise a new one
+// and only the next round can tell whether that one is fixable.
+const STALL_ROUNDS = 2
 const BUDGET_FLOOR = 30_000
 const outOfBudget = () => budget.total && budget.remaining() < BUDGET_FLOOR
 
@@ -155,38 +162,21 @@ const GENERATED_FILES =
 // agent can't be stopped from here, so over() is read only after the agent has
 // returned. On a single-shot stage that makes the ceiling retrospective -- it
 // cannot prevent the spend, it can only discard the finished work, which is why
-// plan and implement carry none. A ceiling is a real bound only where over()
-// gates a further iteration (the fix rounds, the mutation attempts, the
-// re-review latches), and those keep theirs. triage and branch keep theirs too:
-// both halt before any code exists, so tripping them forfeits nothing.
-// null means uncapped; args.stageBudgets can set a number to opt one back in.
+// a ceiling on plan or implement only throws finished work away. A ceiling is
+// a real bound only where over() gates a further iteration (the fix rounds,
+// the mutation attempts, the re-review latches). null means uncapped, which
+// every stage is unless stageBudgets names it. The checks ceiling, when set,
+// bounds its two windows (before and after Implement) each on its own; the
+// fix ceiling carries each round's tail review as well as the fixing.
+const STAGES = ['setup', 'triage', 'branch', 'plan', 'implement', 'checks',
+  'review', 'fix', 'mutation', 'pr']
+const objectOr = (v) => v !== null && typeof v === 'object' && !Array.isArray(v) ? v : {}
 const CEILINGS = {
-  // No ceiling: it runs once, before any code exists, so tripping one here
-  // would forfeit nothing but also bound nothing real.
-  setup: null,
-  triage: 15_000,
-  branch: 10_000,
-  plan: null,
-  implement: null,
-  // Two separate windows share this ceiling: discovery+baseline before
-  // Implement, and the post-Implement run plus its one pre-review fix
-  // round. stage_spend.checks sums both; each is bounded on its own.
-  checks: 20_000,
-  review: 80_000,
-  // Carries the tail review of each fix round as well as the fixing itself.
-  fix: 170_000,
-  mutation: 150_000,
-  pr: 30_000,
-  ...(args?.stageBudgets ?? {}),
+  ...Object.fromEntries(STAGES.map(s => [s, null])),
+  ...objectOr(repoLimits.stageBudgets),
+  ...objectOr(args?.stageBudgets),
 }
 const stageSpend = {}
-// Names the caller set by hand. Those keep their literal value: an explicit
-// budget is a decision, and scaling it would silently overrule it.
-const EXPLICIT_BUDGETS = new Set(Object.keys(args?.stageBudgets ?? {}))
-// Applied to every ceiling of a stage created after Triage, so the sizing that
-// already picks effort and lens count also picks how much the stage may spend.
-// 1 until Triage has judged; the stages before it are cheap and fixed.
-let ceilingScale = 1
 // Stages left open when a throw unwinds past their own close(): stage()
 // records a start tick here, and close() deletes it again, so whatever
 // remains when the run-budget catch (below) fires is the stage that was
@@ -210,10 +200,7 @@ const closeOpenStages = () => {
 const stage = (name) => {
   const start = budget.spent()
   openStages[name] = start
-  const raw = CEILINGS[name]
-  const cap = raw == null || EXPLICIT_BUDGETS.has(name)
-    ? raw
-    : Math.round(raw * ceilingScale)
+  const cap = CEILINGS[name]
   return {
     over: () => cap != null && budget.spent() - start > cap,
     close: () => {
@@ -235,12 +222,10 @@ const enterPhase = (name) => { currentPhase = name; phase(name) }
 // The one choke point every agent dispatch passes through -- a static check
 // in test-static.sh asserts `agent(` appears nowhere else -- so a run-wide
 // token budget can refuse a call before it starts rather than merely notice
-// after. runBudget stays null until Triage has sized the work (set in the
-// Triage phase, below), so every dispatch before that -- setup, branch,
-// branch:existing -- is unbounded by it: there is no code yet for a budget to
-// bound.
+// after. runBudget stays null until the Triage phase sets the user's limit, if
+// any, so every dispatch before that -- setup, branch, branch:existing -- is
+// unbounded by it: there is no code yet for a budget to bound.
 let runBudget = null
-let runBudgetNote = null
 // Set only by a refused dispatch, read only by the top-level catch: its
 // presence, not the thrown error's identity, is what tells that catch this
 // throw was the budget's doing rather than a genuine failure to rethrow, since

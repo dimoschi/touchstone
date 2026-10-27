@@ -50,6 +50,12 @@ bash scripts/check-assertions-discriminate.sh
 
 ## Rules that are easy to break by habit
 
+- **A run finishes or asks the user, nothing else.** A new halt in the pipeline
+  must be one only the user can resolve: a disproved premise, a broken setup, a
+  gate that needs `--accept`, a finding to judge. Anything else (a timeout, a
+  flaky relay, a spend count) retries, splits the work, or keeps going. Spend
+  limits exist only as opt-in knobs (`.touchstone.json`, `/touchstone:deliver`
+  flags) and default to none.
 - **Never pipe a gate**, not even into `tail`. `$?` after a pipeline is the last
   command's status, so a red gate reads as a pass. Redirect and read the file:
   `<gate> > /tmp/gate.log 2>&1; echo "EXIT=$?"`. A hook refuses the piped form.

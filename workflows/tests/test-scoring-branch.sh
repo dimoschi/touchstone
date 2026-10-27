@@ -4,10 +4,10 @@
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/harness.sh"
 
 run_js_scenarios <<'JS_EOF'
-// Scenario AD -- an explicit budget is a decision, so scaling must not overrule
-// it. The unlisted stages still scale.
+// Scenario AD -- a stage budget is a decision the user made, so it is kept as
+// passed, and a stage it does not name stays uncapped.
 async function scenarioAD() {
-  console.log('\n== scenario AD: an explicit stage budget is not scaled')
+  console.log('\n== scenario AD: an explicit stage budget is kept as passed, the rest uncapped')
   const { captured } = await run({
     triage: { complexity: 'trivial' },
     args: { stageBudgets: { fix: 170000 } },
@@ -17,8 +17,7 @@ async function scenarioAD() {
   })
   const logs = captured.logs.join('\n')
   check('the fix ceiling keeps the value passed in', logs.includes('(ceiling 170k)'), true)
-  check('it is named as exempt', logs.includes('fix left at the value you passed'), true)
-  check('review still scales', logs.includes('(ceiling 32k)'), true)
+  check('review has no ceiling', /review: \d+k output tokens \(no ceiling\)/.test(logs), true)
 }
 
 // Scenario AE -- read wide, report narrow. The charge authorises reading past

@@ -595,7 +595,7 @@ function makeAgent(scenario, captured) {
     // row with an integer exit_code, then the end line. Without checkRuns every
     // check exits 0.
     if (label.startsWith('checks:run:')) {
-      const attempt = Number(label.slice('checks:run:'.length))
+      const attempt = Number.parseInt(label.slice('checks:run:'.length), 10)
       const reply = scenario.checkRuns ? scenario.checkRuns(attempt, prompt) : undefined
       if (reply === null || typeof reply?.output === 'string') return reply
       const exits = checkIdsOf(prompt).map(id =>

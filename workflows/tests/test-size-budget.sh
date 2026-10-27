@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# The run-wide token budget (gh-118): how runBudget is derived from triage,
+# The run-wide token budget (gh-118), set only when the user asks for one:
 # how dispatch() refuses a call past it, and how that refusal reaches a halt
 # rather than reading as a clean run. New for this ticket, not split out of
 # test-fix-loop-join.sh; see harness.sh for the shared scenario runner.
@@ -38,66 +38,8 @@ git -C "$COMMENT_REPO" commit -qm "add PHP attributes and a Go pointer write"
 export COMMENT_REPO
 
 run_js_scenarios <<'JS_EOF'
-// Scenario SBA -- the formula: 100_000 + 1_500 * estimated_loc, logged so a run
-// states what it derived and why.
-async function scenarioSBA() {
-  console.log('\n== scenario SBA: the run budget follows triage\'s estimated_loc')
-  const { captured } = await run({
-    args: { runBudget: undefined },
-    triage: { estimated_loc: 300 },
-    initialReview: { correctness: [], advocate: [] },
-    verify: () => undefined,
-    staleness: () => [],
-  })
-  check('the derived budget is logged', captured.logs.some(l => /run budget: 550k output tokens \(derived/.test(l)), true)
-}
-
-// Scenario SBB -- the derived figure is clamped at the floor: a tiny estimate
-// still gets at least 300k, since even a one-line change spends a few calls
-// on setup, triage, implement and review.
-async function scenarioSBB() {
-  console.log('\n== scenario SBB: a tiny estimated_loc clamps the derived budget to the 300k floor')
-  const { captured } = await run({
-    args: { runBudget: undefined },
-    triage: { estimated_loc: 1 },
-    initialReview: { correctness: [], advocate: [] },
-    verify: () => undefined,
-    staleness: () => [],
-  })
-  check('the budget is clamped up to 300k', captured.logs.some(l => /run budget: 300k output tokens/.test(l)), true)
-}
-
-// Scenario SBC -- and clamped at the ceiling: a huge estimate does not buy an
-// unbounded run.
-async function scenarioSBC() {
-  console.log('\n== scenario SBC: a huge estimated_loc clamps the derived budget to the 1000k ceiling')
-  const { captured } = await run({
-    args: { runBudget: undefined },
-    triage: { estimated_loc: 10000 },
-    initialReview: { correctness: [], advocate: [] },
-    verify: () => undefined,
-    staleness: () => [],
-  })
-  check('the budget is clamped down to 1000k', captured.logs.some(l => /run budget: 1000k output tokens/.test(l)), true)
-}
-
-// Scenario SBD -- no estimate at all falls back to a flat default by scope,
-// never to the formula with a missing number silently read as zero.
-async function scenarioSBD() {
-  console.log('\n== scenario SBD: a missing estimated_loc falls back to the inline default')
-  const { captured } = await run({
-    args: { runBudget: undefined },
-    triage: { estimated_loc: undefined },
-    initialReview: { correctness: [], advocate: [] },
-    verify: () => undefined,
-    staleness: () => [],
-  })
-  check('the inline default (300k) is used, not a formula on a missing number',
-    captured.logs.some(l => /run budget: 300k output tokens \(triage gave no estimated_loc; using the inline default\)/.test(l)), true)
-}
-
-// Scenario SBE -- the team-scoped default is higher, and a numeric
-// args.runBudget overrides the derivation outright, formula or fallback.
+// Scenario SBE -- a numeric args.runBudget is the run budget, whatever triage
+// estimated.
 async function scenarioSBE() {
   console.log('\n== scenario SBE: an explicit args.runBudget replaces the derived value')
   const { captured } = await run({
@@ -107,8 +49,8 @@ async function scenarioSBE() {
     verify: () => undefined,
     staleness: () => [],
   })
-  check('the explicit value is used, not the team default',
-    captured.logs.some(l => /run budget: 12k output tokens \(set explicitly via args\.runBudget\)/.test(l)), true)
+  check('the explicit value is used',
+    captured.logs.some(l => /^run budget: 12k output tokens$/.test(l)), true)
 }
 
 // Scenario SBF -- the refusal itself: dispatch() checks budget.spent() before
@@ -434,7 +376,7 @@ async function scenarioSBY() {
   check('it names estimated_loc', /Set estimated_loc to/.test(prompt), true)
 }
 
-const SCENARIOS = [scenarioSBA, scenarioSBB, scenarioSBC, scenarioSBD, scenarioSBE, scenarioSBF, scenarioSBG,
+const SCENARIOS = [scenarioSBE, scenarioSBF, scenarioSBG,
   scenarioSBH, scenarioSBI, scenarioSBJ, scenarioSBK, scenarioSBL, scenarioSBM, scenarioSBN, scenarioSBO,
   scenarioSBP, scenarioSBQ, scenarioSBR, scenarioSBS, scenarioSBT, scenarioSBU, scenarioSBV, scenarioSBW,
   scenarioSBX, scenarioSBZ, scenarioSBY]

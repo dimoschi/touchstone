@@ -83,10 +83,14 @@ const verifyMutation = async (label) => {
 // another mutation run cannot fix a relay that did not print its line, and so
 // does a --verify that could not run at all (127, 2): another attempt meets
 // the same missing script or setup failure.
+let mutationAttempts = 0
+let stalledAttempts = 0
+let headBeforeAttempt = reviewedThrough
 for (let attempt = 1; attempt <= MAX_GATE_ATTEMPTS && !mutation.green
      && !mutation.needs_user_run && !mutation.unsupported_language
      && !mutation.verdict_unmeasured && !mutation.verify_setup
-     && !outOfBudget() && !sMut.over(); attempt++) {
+     && stalledAttempts < STALL_ROUNDS && !outOfBudget() && !sMut.over(); attempt++) {
+  mutationAttempts = attempt
   const reported = await treeAgent(
     `Run mutation-check.sh ${wt.path} from the ${GATES_SKILL} skill in ` +
     `this repo. ${GATES_SKILL_ONLY} It mutates files in place and needs a clean working tree, so ` +
@@ -163,6 +167,9 @@ for (let attempt = 1; attempt <= MAX_GATE_ATTEMPTS && !mutation.green
     : { ...agentSaid, green: verdict.exit === 0, head_sha: verdict.head,
         verify: { exit: verdict.exit, log: verdict.log },
         ...(verdict.exit !== 0 && verdict.exit !== VERIFY_UNRECORDED ? { verify_setup: true } : {}) }
+  const headAfter = mutation.head_sha ?? null
+  stalledAttempts = headAfter && headAfter !== headBeforeAttempt ? 0 : stalledAttempts + 1
+  headBeforeAttempt = headAfter ?? headBeforeAttempt
 }
 sMut.close()
 
@@ -201,7 +208,11 @@ if (!mutation.green) {
         `script was not found and 2 is a setup failure. No further mutation ` +
         `attempt was made. ${prNote()}. ` +
         `mutation-pr-gate.py blocks gh pr ready until --verify reads green.`
-      : `Mutation gate still red after ${MAX_GATE_ATTEMPTS} attempt(s)` +
+      : `Mutation gate still red after ${mutationAttempts} attempt(s)` +
+        (stalledAttempts >= STALL_ROUNDS
+          ? `, the last ${STALL_ROUNDS} of which committed nothing, so another ` +
+            `would not either`
+          : '') +
         (mutation.verify
           ? `: mutation-check.sh --verify exited ${mutation.verify.exit} ` +
             `(${mutation.verify.log}), so the gate has not recorded a green run ` +
@@ -495,7 +506,7 @@ return result
     return await halted(currentPhase, {
       ...budgetHaltState(),
       note: `Run budget exhausted (${Math.round(runBudget / 1000)}k output ` +
-        `tokens, ${runBudgetNote}). Spend at halt: ` +
+        `tokens, the limit you set). Spend at halt: ` +
         `${Math.round(runBudgetSpent.spent / 1000)}k output tokens (${byStage}). The ` +
         `'${runBudgetSpent.refused}' dispatch was refused before it could ` +
         `run` +

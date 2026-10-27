@@ -126,6 +126,38 @@ def test_mutation_marker_is_read_from_the_repo_root(world, capsys):
     assert out["markers"] == {"crap_gated": False, "mutation_gated": True}
 
 
+def test_limits_are_empty_without_a_touchstone_json(world, capsys):
+    code, out = run(world, capsys)
+    assert code == 0
+    assert out["limits"] == {}
+
+
+def test_limits_are_read_from_touchstone_json_at_the_repo_root(world, capsys):
+    limits = {"maxReviewRounds": 3, "maxGateAttempts": 0, "runBudget": 600000,
+              "stageBudgets": {"fix": 170000}}
+    (world.tmp / "repo" / ".touchstone.json").write_text(json.dumps(limits))
+    code, out = run(world, capsys)
+    assert code == 0
+    assert out["limits"] == limits
+
+
+@pytest.mark.parametrize("text, reason", [
+    ("{not json", "is not valid JSON"),
+    ("[]", "must hold a JSON object"),
+    ('{"maxRounds": 3}', "unknown key 'maxRounds'"),
+    ('{"runBudget": -1}', "'runBudget' must be a non-negative integer"),
+    ('{"runBudget": true}', "'runBudget' must be a non-negative integer"),
+    ('{"stageBudgets": 5}', "'stageBudgets' must map stage names to non-negative integers"),
+    ('{"stageBudgets": {"fix": "x"}}', "'stageBudgets' must map stage names to non-negative integers"),
+])
+def test_a_malformed_touchstone_json_is_a_setup_refusal(world, capsys, text, reason):
+    (world.tmp / "repo" / ".touchstone.json").write_text(text)
+    code, out = run(world, capsys)
+    assert code == 2
+    assert out["error"] == "bad-limits"
+    assert reason in out["reason"]
+
+
 def test_fresh_refuses_a_name_that_exists_on_the_remote_only(world, capsys):
     git(world.seed, "branch", "fix/gh-163-prepare-worktree")
     git(world.origin, "fetch", "-q", str(world.seed), "fix/gh-163-prepare-worktree:fix/gh-163-prepare-worktree")

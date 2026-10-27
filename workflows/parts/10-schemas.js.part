@@ -185,9 +185,16 @@ const parseCheckRow = (line, checks, rows, run) => {
 const runnerLinesOf = (output) =>
   String(output ?? '').split(/\r?\n/).map(l => l.trimEnd()).filter(l => l !== '')
 const dirOf = (p) => p.slice(0, p.lastIndexOf('/'))
+const CHECK_PENDING_LINE = /^TOUCHSTONE_CHECK_PENDING (\S+) (\d+)$/
 const parseCheckRun = (output, checks, run) => {
   const lines = runnerLinesOf(output)
   if (!lines.length) return { reason: 'no output' }
+  const pending = lines.filter(l => l.startsWith('TOUCHSTONE_CHECK_PENDING'))
+    .map(l => CHECK_PENDING_LINE.exec(l))
+  if (pending.length) {
+    if (pending.some(m => !m || !checks.some(c => c.id === m[1]))) return { reason: 'malformed pending line' }
+    return { pending: pending.map(m => m[1]), bytes: pending.reduce((sum, m) => sum + Number(m[2]), 0) }
+  }
   const end = parseCheckEnd(lines, run)
   if (end.reason) return end
   const rows = []

@@ -457,6 +457,10 @@ const fixStopReason = () =>
   : round >= MAX_REVIEW_ROUNDS
     ? `the ${MAX_REVIEW_ROUNDS}-round limit was reached; each of these was ` +
       `checked against the code and is still open`
+  : stalledRounds >= STALL_ROUNDS
+    ? `the last ${STALL_ROUNDS} rounds closed no finding or check, so another ` +
+      `round would not either; each of these was checked against the code and ` +
+      `is still open`
   : sFix.over()
     ? `the fix stage passed its ${Math.round(CEILINGS.fix / 1000)}k output-token ` +
       `ceiling, so the loop stopped early -- these have not had every round`
@@ -529,8 +533,13 @@ const regressedOf = (items, exec, round) => {
 }
 
 const fixerNotes = []
-while ((open.length || blockingChecksOpen()) && round < MAX_REVIEW_ROUNDS && !outOfBudget() && !sFix.over()) {
+const openIds = () => new Set([...open.map(f => f.id),
+  ...(blockingChecksOpen() ? redChecks.map(c => `check:${c.id}`) : [])])
+let stalledRounds = 0
+while ((open.length || blockingChecksOpen()) && round < MAX_REVIEW_ROUNDS &&
+       stalledRounds < STALL_ROUNDS && !outOfBudget() && !sFix.over()) {
   round++
+  const openBeforeRound = openIds()
   enterPhase('Fix')
   const fixSpendStart = budget.spent()
   const fixed = await treeAgent(
@@ -740,6 +749,8 @@ while ((open.length || blockingChecksOpen()) && round < MAX_REVIEW_ROUNDS && !ou
 
   log(`round ${round}: ${open.length} finding(s) still open` +
       (discoveredChecks.length ? `, ${redChecks.length} check(s) still red` : ''))
+  const openAfterRound = openIds()
+  stalledRounds = [...openBeforeRound].some(id => !openAfterRound.has(id)) ? 0 : stalledRounds + 1
 }
 
 sFix.close()

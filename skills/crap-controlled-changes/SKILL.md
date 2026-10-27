@@ -177,11 +177,11 @@ measure says why. See docs/architecture.md in the plugin repository for what eac
 `prepare-delivery.sh <absolute-repo-path> --ticket <ref> --type <type> --slug <slug> [--existing] [--base <ref>] [--prior-head <sha>]`
 finds or cuts the ticket's branch and worktree under `<repo>/.claude/worktrees/`, and
 prints one JSON object the delivery workflow takes as `args.prepared`: the worktree,
-branch and base, the gate markers, this plugin's version, the base branch's manifest and
+branch and base, the gate markers, the spend limits in the repo's `.touchstone.json` (none when it is absent), this plugin's version, the base branch's manifest and
 the repo's `AGENTS.md` sections. `/touchstone:deliver` runs it before launching the
 workflow. A refusal (a branch name already taken locally or on origin, an occupied path,
 a merged, dirty or ambiguous match) exits 3 with `{"error", "reason"}`; bad arguments
-exit 2.
+and a malformed `.touchstone.json` exit 2.
 
 ## Out of Scope
 
