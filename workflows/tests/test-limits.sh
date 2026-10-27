@@ -122,8 +122,18 @@ async function scenarioLI() {
     /the last 2 of which committed nothing/.test(result.note ?? ''), true)
 }
 
+async function scenarioLJ() {
+  console.log('\n== scenario LJ: the documented example passes the limits check and applies')
+  const example = JSON.parse(fs.readFileSync(
+    path.join(path.dirname(SCRIPT_PATH), '..', 'docs', 'touchstone.example.json'), 'utf8'))
+  const { result, captured } = await run({
+    args: { ...UNBOUNDED, prepared: prepared({ limits: example }) }, ...progressing(5) })
+  check('it is not refused', result.halted_at === 'Worktree', false)
+  check('its round limit applies', callCount(captured, 'fix:4'), 0)
+}
+
 const SCENARIOS = [scenarioLA, scenarioLB, scenarioLC, scenarioLD, scenarioLE,
-  scenarioLF, scenarioLG, scenarioLH, scenarioLI]
+  scenarioLF, scenarioLG, scenarioLH, scenarioLI, scenarioLJ]
 JS_EOF
 
 finish

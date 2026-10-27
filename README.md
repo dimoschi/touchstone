@@ -46,9 +46,10 @@ the repo root, or pass `--max-review-rounds`, `--max-gate-attempts`,
 `--run-budget` or `--stage-budget <stage>=<n>` to `/touchstone:deliver` for one
 run. A flag wins over the file.
 
-```json
-{ "maxReviewRounds": 3, "runBudget": 600000, "stageBudgets": { "fix": 170000 } }
-```
+[`docs/touchstone.example.json`](docs/touchstone.example.json) sets every key to the
+limits runs had before 0.39.0; copy it to `.touchstone.json` and drop what you do not
+want. `stageBudgets` takes `setup`, `triage`, `branch`, `plan`, `implement`, `checks`,
+`review`, `fix`, `mutation` and `pr`.
 
 It is not a standalone agent. It runs on Claude Code's own subagents and needs no
 sandbox, no server, and no API key beyond the one you already have.
