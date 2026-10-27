@@ -96,7 +96,11 @@ bash scripts/check-assertions-discriminate.sh
   while the ledger is unverified. `--verify` reads the ledger and needs nothing
   installed; a real run needs mutmut and pytest, which are not importable from the
   system python3 here, so pass
-  `MUTATION_PY_RUN='uv run --no-project --with mutmut --with pytest --'`. Exempt paths
+  `MUTATION_PY_RUN="uv run --no-project --with mutmut==3.8.0 --with pytest==9.1.1 --"`.
+  Both are pinned because an unpinned run resolves the newest release, and
+  pytest 9.2.0 breaks mutmut 3.8.0 (`'Function' object has no attribute
+  '_nodeid'`), so the same commit can pass one day and fail to measure the next.
+  Raise the pins together, on purpose, once a run with the new pair is green. Exempt paths
   live in `.crap-gated`, never in this marker: `mutation-check.sh` reads that marker's
   patterns for its own selection so there is one list rather than two. `conftest.py` and
   `test_*.py` are outside mutation selection already, so a branch that only touches

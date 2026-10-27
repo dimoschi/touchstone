@@ -11,7 +11,7 @@ SCRIPT="$SKILL_DIR/mutation-check.sh"
 command -v uv  >/dev/null || { echo "SKIP: uv not on PATH"; exit 0; }
 command -v git >/dev/null || { echo "SKIP: git not on PATH"; exit 0; }
 
-export MUTATION_PY_RUN="uv run --no-project --with mutmut --with pytest --"
+export MUTATION_PY_RUN="uv run --no-project --with mutmut==3.8.0 --with pytest==9.1.1 --"
 
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
