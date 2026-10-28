@@ -191,6 +191,8 @@ async function scenarioUnmeasuredAfterImplementHalts() {
   check('both reasons are in the note',
     (result.note ?? '').includes('first run no end line; second run no output'), true)
   check('the note says it is about measurement, not the code', (result.note ?? '').includes('not the code'), true)
+  check('the note gives the causes the runner detects',
+    (result.note ?? '').includes('a check ended without recording an exit code, or the checks stage budget ran out'), true)
 }
 
 async function scenarioFixersGetLogPaths() {
@@ -470,7 +472,7 @@ async function scenarioRealRunnerDeadCheck() {
 }
 
 async function scenarioRealRunnerChecksBudget() {
-  console.log('\n== scenario RG: a checks stage budget stops the asking and kills the check')
+  console.log('\n== scenario RZ: a checks stage budget stops the asking and kills the check')
   const dir = scratchRepo()
   try {
     const { scenario } = realRun(dir, 'sleep 30')
@@ -481,6 +483,7 @@ async function scenarioRealRunnerChecksBudget() {
       (result.checks?.unmeasured?.[0]?.reason ?? '').includes('checks stage budget'), true)
     const kill = captured.calls.find(c => c.label === 'checks:run:1:kill')
     check('a kill was sent for the attempt', Boolean(kill), true)
+    check('the batch is not retried once the budget is out', callCount(captured, 'checks:run:2'), 0)
     const logDir = fs.readdirSync(path.join(dir, '.git', 'touchstone-checks'))
       .map(r => path.join(dir, '.git', 'touchstone-checks', r)).find(d => fs.existsSync(path.join(d, 'check:1.pid')))
     const pid = Number(fs.readFileSync(path.join(logDir, 'check:1.pid'), 'utf8'))

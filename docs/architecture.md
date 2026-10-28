@@ -723,7 +723,9 @@ check already has an exit file prints its row at once, and `$d/running` names th
 in flight so a later line never starts beside it. A check is unmeasured when its process
 died without an exit code, never for being long or quiet. A `checks` stage budget, when
 the user set one, also ends the asking: `checks:run:N:kill` then kills the process group
-of every check with no exit file, so a retry never runs beside it.
+of every check with no exit file, and the batch is not retried, since the budget is
+still spent. A check that stays alive and never exits is asked about until the user stops
+the run or sets that budget.
 
 The check's whole output, stdout and stderr, goes to
 `touchstone-checks/<run>/<id>.log` under the worktree's own git dir, so a log is never

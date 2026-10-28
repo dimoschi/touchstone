@@ -534,7 +534,7 @@ const executeChecks = async (checks, over) => {
     if (over()) {
       await treeAgent(runnerPrompt('checks:run', [killLineFor(run)]), {
         label: `${label}:kill`, schema: CHECK_RUN, model: 'haiku', effort: 'low' })
-      return { reason: `the checks stage budget ran out while ${parsed.pending.join(', ')} was still running` }
+      return { reason: `the checks stage budget ran out while ${parsed.pending.join(', ')} was still running`, final: true }
     }
     log(`checks: ${parsed.pending.join(', ')} still running, asking again`)
   }
@@ -572,8 +572,10 @@ const runChecks = async (checks = discoveredChecks, over = () => false) => {
   if (!checks.length) return { red: [], unmeasured: [], dirty: false, statusLog: null }
   const first = await executeChecks(checks, over)
   if (!first.reason) return { ...classifyResults(checks, first), dirty: first.dirty, statusLog: first.statusLog }
-  log(`checks: the batch was unmeasured (${first.reason}), retrying once`)
-  const second = await executeChecks(checks, over)
+  // A spent budget is still spent on a retry, which would only restart the checks.
+  const second = first.final
+    ? { reason: 'not run, since the checks stage budget was already spent' }
+    : (log(`checks: the batch was unmeasured (${first.reason}), retrying once`), await executeChecks(checks, over))
   if (!second.reason) return { ...classifyResults(checks, second), dirty: second.dirty, statusLog: second.statusLog }
   return {
     red: [], dirty: false, statusLog: null,
@@ -607,8 +609,9 @@ const unmeasuredLines = (checks) => checks.map(c =>
 const unmeasuredChecksHalt = (at, extra) => {
   const note = `${unmeasuredChecks.length} discovered check(s) could not be ` +
     `measured after a retry. This halt is about measurement, not the code: ` +
-    `the runner did not print what the script asked for, or a check stopped ` +
-    `writing output while still running, so no verdict exists either ` +
+    `the runner did not print what the script asked for, a check ended ` +
+    `without recording an exit code, or the checks stage budget ran out ` +
+    `while one was still running, so no verdict exists either ` +
     `way, and no fix round has been spent on them.\n` +
     unmeasuredLines(unmeasuredChecks)
   return halted(at, {
