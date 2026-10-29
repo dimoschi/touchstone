@@ -8,8 +8,6 @@ the package name off a parsed tree, and the tree-sitter helpers walk a tree of
 nodes shaped like tree-sitter-go's.
 """
 
-import builtins
-import codecs
 import sys
 import types
 from dataclasses import dataclass, field
@@ -246,20 +244,11 @@ def test_the_module_prefix_is_built_against_the_root_given(tmp_path, crapper):
     assert crapper.roots == [str(tmp_path)]
 
 
-def test_a_file_is_read_as_utf_8(tmp_path, crapper, monkeypatch):
-    (tmp_path / "a.py").write_text("")
+def test_a_file_is_decoded_as_utf_8(tmp_path, crapper):
+    (tmp_path / "a.py").write_bytes("# café\n".encode("utf-8"))
     crapper.found["a.py"] = []
-    opened = []
-    real_open = builtins.open
-
-    def spy(file, *args, **kwargs):
-        opened.append((str(file), kwargs.get("encoding")))
-        return real_open(file, *args, **kwargs)
-
-    monkeypatch.setattr(builtins, "open", spy)
     run(tmp_path, "a.py")
-    [(_, encoding)] = [entry for entry in opened if entry[0].endswith("a.py")]
-    assert codecs.lookup(encoding).name == "utf-8"
+    assert crapper.seen[0][1] == "# café\n"
 
 
 def test_the_root_option_is_required(capsys):

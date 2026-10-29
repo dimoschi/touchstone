@@ -109,7 +109,7 @@ def load_spans(spans_path, repo_root):
     blocks = []
     with open(spans_path) as fh:
         for line in fh:
-            path, start, _end, cc, name, _package = line.rstrip("\n").split("\t")
+            path, start, _end, cc, name = line.split("\t")[:5]
             blocks.append((normrel(path, repo_root), name, int(cc), int(start)))
     return blocks
 

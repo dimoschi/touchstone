@@ -64,7 +64,7 @@ def go_rows(crapper, functions, source, path, root):
     package = crapper.golang._package_clause(data, tree.root_node)
     receivers = {crapper.start_line(node): _receiver_type(crapper, data, node)
                  for node in crapper.descendants(tree.root_node) if node.type == "method_declaration"}
-    return [(fn, f"{package}.{_qualified(fn.name, receivers.get(fn.start_line, ''))}", package)
+    return [(fn, f"{package}.{_qualified(fn.name, receivers.get(fn.start_line))}", package)
             for fn in functions]
 
 
@@ -75,8 +75,8 @@ def rows_for(crapper, path, root):
     language = LANGUAGES.get(os.path.splitext(path)[1])
     if language is None:
         raise SystemExit(f"crapper_spans: {path} is neither a Go nor a Python file")
-    with open(os.path.join(root, path), encoding="utf-8", errors="replace") as handle:
-        source = handle.read()
+    with open(os.path.join(root, path), "rb") as handle:
+        source = handle.read().decode(errors="replace")
     functions = crapper.functions_in_file(language, source, path, root)
     return [(path, fn.start_line, fn.end_line, fn.complexity, name, package)
             for fn, name, package in ROWS[language](crapper, functions, source, path, root)]

@@ -83,7 +83,7 @@ def entries_of(blobs, name, path, dryer):
     data = blobs.read(name)
     if language not in LANGUAGES or data is None:
         return []
-    found, _ = dryer.entries_in_source(language, data.decode("utf-8", "replace"), path, path)
+    found, _ = dryer.entries_in_source(language, data.decode(errors="replace"), path, path)
     return [entry for entry in found if _kept(entry)]
 
 

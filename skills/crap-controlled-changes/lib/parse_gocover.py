@@ -78,7 +78,7 @@ def load_blocks(profile, modpath, moddir):
             if file:
                 seen = files.setdefault(file, {})
                 key = (block[1], block[2])
-                seen[key] = seen.get(key, False) or block[3]
+                seen[key] = seen.get(key) or block[3]
     return files
 
 
