@@ -26,6 +26,11 @@ const preparedWorktreeName = (p) => {
 const preparedChecksOk = (c, worktree) => isObj(c) && isStr(c.detail) && Array.isArray(c.sections) &&
   c.sections.every(s => isObj(s) && isStr(s.heading) && s.heading.startsWith('##') && isStr(s.fence)) &&
   [ '', `${worktree}/AGENTS.md`, `${worktree}/CLAUDE.md` ].includes(c.file)
+const isCount = (v) => Number.isInteger(v) && v >= 0
+const preparedLimitsOk = (l) => isObj(l) && Object.entries(l).every(([k, v]) =>
+  k === 'stageBudgets'
+    ? isObj(v) && Object.entries(v).every(([s, n]) => STAGES.includes(s) && isCount(n))
+    : ['maxReviewRounds', 'maxGateAttempts', 'runBudget'].includes(k) && isCount(v))
 const preparedManifestOk = (m) => isObj(m) && isBool(m.found) && isBool(m.refreshed) &&
   ['name', 'version', 'detail'].every(k => isStr(m[k]))
 
@@ -74,6 +79,9 @@ const PREPARED_FIELDS = [
   ['prior_head_check', (p) => p.prior_head_check == null ||
     (p.prior_head != null && isStr(p.prior_head_check) && PRIOR_HEAD_LINE.test(p.prior_head_check)),
     'null, or the TOUCHSTONE_PRIOR_HEAD_LINEAR line for prior_head'],
+  ['limits', (p) => preparedLimitsOk(p.limits),
+    `maxReviewRounds, maxGateAttempts, runBudget as non-negative integers, and stageBudgets ` +
+    `mapping ${STAGES.join(', ')} to them`],
 ]
 
 const preparedProblem = (p) => {

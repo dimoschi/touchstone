@@ -29,7 +29,7 @@ export const meta = {
 // against the manifest in scripts/check-version-bump.sh, so drift is a
 // gate's job rather than something this script verifies about itself.
 const PLUGIN_NAME = 'touchstone'
-const PIPELINE_VERSION = '0.38.1'
+const PIPELINE_VERSION = '0.39.0'
 // The plugin's gates are this skill's scripts. A user or project skill with the
 // bare name can resolve first and run an older copy of the gates, whose result
 // would then be read as this version's, so prompts name the namespaced skill.
@@ -88,10 +88,17 @@ const runRecordFile = `.claude/touchstone-runs/${String(ticket).replace(/[^A-Za-
 const baseOverride = typeof args?.base === 'string' && args.base.trim()
   ? args.base.trim() : null
 
-const MAX_GATE_ATTEMPTS = args?.maxGateAttempts ?? 3
-// Three, not two: a fix round that introduces a new finding now spends a round
-// discovering that, so two left no round to actually resolve it.
-const MAX_REVIEW_ROUNDS = args?.maxReviewRounds ?? 3
+// A run ends in a finished PR or in a halt only the user can resolve, so every
+// spend limit is opt-in: a /touchstone:deliver flag (args) wins over the
+// repo's .touchstone.json (prepared.limits), and with neither it is unbounded.
+const repoLimits = args?.prepared?.limits ?? {}
+const limitOf = (name) => args?.[name] ?? repoLimits[name] ?? null
+const MAX_GATE_ATTEMPTS = limitOf('maxGateAttempts') ?? Infinity
+const MAX_REVIEW_ROUNDS = limitOf('maxReviewRounds') ?? Infinity
+// What ends a loop nothing caps: two rounds in a row that closed nothing.
+// One is not enough, since a round that fixes a finding can raise a new one
+// and only the next round can tell whether that one is fixable.
+const STALL_ROUNDS = 2
 const BUDGET_FLOOR = 30_000
 const outOfBudget = () => budget.total && budget.remaining() < BUDGET_FLOOR
 
@@ -155,38 +162,21 @@ const GENERATED_FILES =
 // agent can't be stopped from here, so over() is read only after the agent has
 // returned. On a single-shot stage that makes the ceiling retrospective -- it
 // cannot prevent the spend, it can only discard the finished work, which is why
-// plan and implement carry none. A ceiling is a real bound only where over()
-// gates a further iteration (the fix rounds, the mutation attempts, the
-// re-review latches), and those keep theirs. triage and branch keep theirs too:
-// both halt before any code exists, so tripping them forfeits nothing.
-// null means uncapped; args.stageBudgets can set a number to opt one back in.
+// a ceiling on plan or implement only throws finished work away. A ceiling is
+// a real bound only where over() gates a further iteration (the fix rounds,
+// the mutation attempts, the re-review latches). null means uncapped, which
+// every stage is unless stageBudgets names it. The checks ceiling, when set,
+// bounds its two windows (before and after Implement) each on its own; the
+// fix ceiling carries each round's tail review as well as the fixing.
+const STAGES = ['setup', 'triage', 'branch', 'plan', 'implement', 'checks',
+  'review', 'fix', 'mutation', 'pr']
+const objectOr = (v) => v !== null && typeof v === 'object' && !Array.isArray(v) ? v : {}
 const CEILINGS = {
-  // No ceiling: it runs once, before any code exists, so tripping one here
-  // would forfeit nothing but also bound nothing real.
-  setup: null,
-  triage: 15_000,
-  branch: 10_000,
-  plan: null,
-  implement: null,
-  // Two separate windows share this ceiling: discovery+baseline before
-  // Implement, and the post-Implement run plus its one pre-review fix
-  // round. stage_spend.checks sums both; each is bounded on its own.
-  checks: 20_000,
-  review: 80_000,
-  // Carries the tail review of each fix round as well as the fixing itself.
-  fix: 170_000,
-  mutation: 150_000,
-  pr: 30_000,
-  ...(args?.stageBudgets ?? {}),
+  ...Object.fromEntries(STAGES.map(s => [s, null])),
+  ...objectOr(repoLimits.stageBudgets),
+  ...objectOr(args?.stageBudgets),
 }
 const stageSpend = {}
-// Names the caller set by hand. Those keep their literal value: an explicit
-// budget is a decision, and scaling it would silently overrule it.
-const EXPLICIT_BUDGETS = new Set(Object.keys(args?.stageBudgets ?? {}))
-// Applied to every ceiling of a stage created after Triage, so the sizing that
-// already picks effort and lens count also picks how much the stage may spend.
-// 1 until Triage has judged; the stages before it are cheap and fixed.
-let ceilingScale = 1
 // Stages left open when a throw unwinds past their own close(): stage()
 // records a start tick here, and close() deletes it again, so whatever
 // remains when the run-budget catch (below) fires is the stage that was
@@ -210,10 +200,7 @@ const closeOpenStages = () => {
 const stage = (name) => {
   const start = budget.spent()
   openStages[name] = start
-  const raw = CEILINGS[name]
-  const cap = raw == null || EXPLICIT_BUDGETS.has(name)
-    ? raw
-    : Math.round(raw * ceilingScale)
+  const cap = CEILINGS[name]
   return {
     over: () => cap != null && budget.spent() - start > cap,
     close: () => {
@@ -235,12 +222,10 @@ const enterPhase = (name) => { currentPhase = name; phase(name) }
 // The one choke point every agent dispatch passes through -- a static check
 // in test-static.sh asserts `agent(` appears nowhere else -- so a run-wide
 // token budget can refuse a call before it starts rather than merely notice
-// after. runBudget stays null until Triage has sized the work (set in the
-// Triage phase, below), so every dispatch before that -- setup, branch,
-// branch:existing -- is unbounded by it: there is no code yet for a budget to
-// bound.
+// after. runBudget stays null until the Triage phase sets the user's limit, if
+// any, so every dispatch before that -- setup, branch, branch:existing -- is
+// unbounded by it: there is no code yet for a budget to bound.
 let runBudget = null
-let runBudgetNote = null
 // Set only by a refused dispatch, read only by the top-level catch: its
 // presence, not the thrown error's identity, is what tells that catch this
 // throw was the budget's doing rather than a genuine failure to rethrow, since
@@ -591,9 +576,16 @@ const parseCheckRow = (line, checks, rows, run) => {
 const runnerLinesOf = (output) =>
   String(output ?? '').split(/\r?\n/).map(l => l.trimEnd()).filter(l => l !== '')
 const dirOf = (p) => p.slice(0, p.lastIndexOf('/'))
+const CHECK_PENDING_LINE = /^TOUCHSTONE_CHECK_PENDING (\S+) ([01])$/
 const parseCheckRun = (output, checks, run) => {
   const lines = runnerLinesOf(output)
   if (!lines.length) return { reason: 'no output' }
+  const pending = lines.filter(l => l.startsWith('TOUCHSTONE_CHECK_PENDING'))
+    .map(l => CHECK_PENDING_LINE.exec(l))
+  if (pending.length) {
+    if (pending.some(m => !m || !checks.some(c => c.id === m[1]))) return { reason: 'malformed pending line' }
+    return { pending: pending.map(m => m[1]), dead: pending.filter(m => m[2] === '0').map(m => m[1]) }
+  }
   const end = parseCheckEnd(lines, run)
   if (end.reason) return end
   const rows = []
@@ -1219,6 +1211,11 @@ const preparedWorktreeName = (p) => {
 const preparedChecksOk = (c, worktree) => isObj(c) && isStr(c.detail) && Array.isArray(c.sections) &&
   c.sections.every(s => isObj(s) && isStr(s.heading) && s.heading.startsWith('##') && isStr(s.fence)) &&
   [ '', `${worktree}/AGENTS.md`, `${worktree}/CLAUDE.md` ].includes(c.file)
+const isCount = (v) => Number.isInteger(v) && v >= 0
+const preparedLimitsOk = (l) => isObj(l) && Object.entries(l).every(([k, v]) =>
+  k === 'stageBudgets'
+    ? isObj(v) && Object.entries(v).every(([s, n]) => STAGES.includes(s) && isCount(n))
+    : ['maxReviewRounds', 'maxGateAttempts', 'runBudget'].includes(k) && isCount(v))
 const preparedManifestOk = (m) => isObj(m) && isBool(m.found) && isBool(m.refreshed) &&
   ['name', 'version', 'detail'].every(k => isStr(m[k]))
 
@@ -1267,6 +1264,9 @@ const PREPARED_FIELDS = [
   ['prior_head_check', (p) => p.prior_head_check == null ||
     (p.prior_head != null && isStr(p.prior_head_check) && PRIOR_HEAD_LINE.test(p.prior_head_check)),
     'null, or the TOUCHSTONE_PRIOR_HEAD_LINEAR line for prior_head'],
+  ['limits', (p) => preparedLimitsOk(p.limits),
+    `maxReviewRounds, maxGateAttempts, runBudget as non-negative integers, and stageBudgets ` +
+    `mapping ${STAGES.join(', ')} to them`],
 ]
 
 const preparedProblem = (p) => {
@@ -2164,16 +2164,12 @@ const EFFORT = {
   routine:  { plan: 'medium', implement: 'high',   review: 'high',   verify: 'low' },
   involved: { plan: 'high',   implement: 'xhigh',  review: 'xhigh',  verify: 'medium' },
 }
-// Ceilings scale with the same judgement as effort. A trivial change used to
-// get a trivial effort setting and the full 80k review ceiling, which is not a
-// budget so much as permission to keep going.
-const CEILING_SCALE = { trivial: 0.4, routine: 1, involved: 1.5 }
 let complexity = EFFORT[triage.complexity] ? triage.complexity : 'involved'
 if (triage.complexity && complexity !== triage.complexity) {
   log(`triage returned an unrecognised complexity (${triage.complexity}); ` +
       `treating it as involved, which spends the most rather than the least`)
 }
-// involved triples effort and ceilings against routine, so it stands only
+// involved triples effort against routine, so it stands only
 // when triage backs it with a reason and the files and call sites that
 // reason names -- never on the strength of the word alone. This demotes a
 // *recognised* involved verdict that arrived unjustified; it never touches
@@ -2192,42 +2188,18 @@ if (triage.complexity === 'involved' && !involvedJustified) {
       `${triage.expected_call_sites.join(', ')})`)
 }
 const effortFor = EFFORT[complexity]
-ceilingScale = CEILING_SCALE[complexity]
 log(`triage judged this ${complexity}` +
     (triage.complexity_note ? `: ${triage.complexity_note}` : '') +
     ` -- plan/implement/review/verify effort ` +
-    `${effortFor.plan}/${effortFor.implement}/${effortFor.review}/${effortFor.verify}` +
-    `, ceilings x${ceilingScale}` +
-    (EXPLICIT_BUDGETS.size
-      ? ` (${[...EXPLICIT_BUDGETS].join(', ')} left at the value you passed)`
-      : ''))
+    `${effortFor.plan}/${effortFor.implement}/${effortFor.review}/${effortFor.verify}`)
 sTriage.close()
 
-// Derived from the size triage just judged, in output tokens: a run-wide
-// ceiling dispatch() (part 00) refuses a call past, catching what the
-// per-stage ceilings above cannot -- those bound one stage each, and a run
-// that overruns several of them in turn still has nothing stopping it
-// overall. estimated_loc is optional on TRIAGE (a disproved premise trips
-// regardless of it), so a numeric args.runBudget aside, a missing one falls
-// back to a flat default by scope rather than the LOC formula: there is no
-// number to derive from and a change already latched to inline is smaller by
-// definition than a team-scoped one. The figures are set so healthy runs
-// finish with room to spare (about 270k-300k output tokens for 240-450
-// changed lines, and an inline-sized gate fix that spent 141k in Implement
-// alone): a budget halt strands work mid-run, so it is for a run that has
-// gone wrong, not a tight fit.
-const budgetForLoc = (loc) => Math.min(1_000_000, Math.max(300_000, 100_000 + 1_500 * loc))
-if (typeof args?.runBudget === 'number') {
-  runBudget = args.runBudget
-  runBudgetNote = `set explicitly via args.runBudget`
-} else if (triage.estimated_loc != null) {
-  runBudget = budgetForLoc(triage.estimated_loc)
-  runBudgetNote = `derived from triage's ~${triage.estimated_loc} estimated LOC`
-} else {
-  runBudget = inlineMode ? 300_000 : 600_000
-  runBudgetNote = `triage gave no estimated_loc; using the ${inlineMode ? 'inline' : 'team'} default`
-}
-log(`run budget: ${Math.round(runBudget / 1000)}k output tokens (${runBudgetNote})`)
+// A run-wide ceiling dispatch() (part 00) refuses a call past, set only when
+// the user asked for one: the per-stage ceilings bound one stage each, and
+// this bounds them together.
+runBudget = limitOf('runBudget')
+log(runBudget == null ? 'run budget: none'
+  : `run budget: ${Math.round(runBudget / 1000)}k output tokens`)
 
 // Everything from here on runs inside one try, so a dispatch the budget
 // above refuses -- wherever in the run it happens to fall -- unwinds to one
@@ -2485,13 +2457,12 @@ let checkAttempt = 0
 // line. The printed line is why a long suite's output no longer has to fit
 // the Bash tool's inline preview. c.command is spliced in unquoted -- it is
 // the -c script's source, not one argument -- so only the cd target and the
-// outer -c argument need quoting. There is no `exit` in any line: the agent's
+// -c script itself need quoting. There is no `exit` in any line: the agent's
 // shell persists, and one would end it. A line whose git or mkdir fails
 // prints nothing, which parseCheckRun reads as unmeasured. Every git call's
 // stderr stays out of what the agent relays: a warning git prints on a healthy
 // tree (an unreadable excludes or attributes file) would otherwise read as an
 // unexpected line, or as a dirty tree.
-const bashCommandFor = (c) => `bash -c ${shQuote(`cd ${shQuote(wt.path)} && ${c.command}`)}`
 const logDirFor = (run, area = 'touchstone-checks') =>
   `d="$(git -C ${shQuote(wt.path)} rev-parse --path-format=absolute --git-path ${area}/${run} 2>/dev/null)"`
 // The printed row is also written to the run's rows file (rowsSumMatches): the
@@ -2499,9 +2470,35 @@ const logDirFor = (run, area = 'touchstone-checks') =>
 // never sums the previous run's rows.
 const rowTo = (first) =>
   `printf '%s\\n' "$r" ${first ? '>|' : '>>'}"$d/rows"; printf '%s\\n' "$r"`
-const checkLineFor = (c, run, first) =>
-  `${logDirFor(run)} && mkdir -p "$d" && { ${bashCommandFor(c)} >|"$d/${c.id}.log" 2>&1; e=$?; ` +
-  `r="$(printf 'TOUCHSTONE_CHECK %s %s %s' ${c.id} "$e" "$d/${c.id}.log")"; ${rowTo(first)}; }`
+// A check runs detached, so one that outlasts a Bash call (600000 ms) is never
+// cut off: its line waits at most TOUCHSTONE_CHECK_WAIT seconds (540), then
+// prints it as pending, with 1 while its process (pid in $d/<id>.pid, the
+// leader of its own process group) is alive or not yet started and 0 once it
+// is gone without an exit code. executeChecks sends the same run's lines again
+// until it finishes. $d/running names the check in flight, so a later line
+// never starts beside it. The exit file is looked for again after the
+// liveness test, since a check can finish between the two.
+// The detached script is fixed text with no single quote in it, and the check
+// is passed to it as one argument quoted once, so no line nests quoting for
+// the runner to copy.
+const DETACH = `python3 -c 'import os,sys; os.setsid(); ` +
+  `os.execvp("bash", ["bash", "-c", sys.argv[1], "check", *sys.argv[2:]])' ` +
+  `'d="$1"; echo "$$" >|"$d/$2.pid"; bash -c "$3" >|"$d/$2.log" 2>&1; echo "$?" >|"$d/$2.exit.tmp"; ` +
+  `mv "$d/$2.exit.tmp" "$d/$2.exit"; rm -f "$d/running"'`
+const checkLineFor = (c, run, first) => {
+  const f = (ext) => `"$d/${c.id}.${ext}"`
+  const script = shQuote(`cd ${shQuote(wt.path)} && ${c.command}`)
+  return `${logDirFor(run)} && mkdir -p "$d" && { if [ ! -f ${f('exit')} ]; then ` +
+    `if [ ! -e "$d/running" ]; then printf '%s' ${c.id} >|"$d/running"; : >|${f('log')}; ` +
+    `${DETACH} "$d" ${c.id} ${script} </dev/null >/dev/null 2>&1 & fi; ` +
+    `w=0; while [ ! -f ${f('exit')} ] && [ "$(cat "$d/running" 2>/dev/null)" = ${c.id} ] && ` +
+    `[ "$w" -lt "\${TOUCHSTONE_CHECK_WAIT:-540}" ]; do sleep 1; w=$((w+1)); done; fi; ` +
+    `if [ -f ${f('exit')} ]; then e="$(cat ${f('exit')})"; ` +
+    `r="$(printf 'TOUCHSTONE_CHECK %s %s %s' ${c.id} "$e" "$d/${c.id}.log")"; ${rowTo(first)}; ` +
+    `else a=1; if [ -f ${f('pid')} ] && ! kill -0 "$(cat ${f('pid')})" 2>/dev/null && ` +
+    `[ ! -f ${f('exit')} ]; then a=0; fi; ` +
+    `printf 'TOUCHSTONE_CHECK_PENDING %s %s\\n' ${c.id} "$a"; fi; }`
+}
 // The tree is looked at once, after the last check: a check that writes to it
 // (a ledger, a generated file) must be visible, not silently carried into
 // whatever commits next. The porcelain goes to a log beside the others and its
@@ -2541,13 +2538,35 @@ const runnerPrompt = (label, lines, note = '') =>
   `write, change or reorder a line yourself; a line you did not see printed ` +
   `is not reported.\n` + note +
   '```bash\n' + lines.join('\n') + '\n```'
-const executeChecks = async (checks = discoveredChecks) => {
+// Kills the process group of every check of a run that has no exit code yet.
+// Best effort: what it prints is not read.
+const killLineFor = (run) =>
+  `${logDirFor(run)} && for p in "$d"/*.pid; do [ -f "$p" ] && [ ! -f "\${p%.pid}.exit" ] && ` +
+  `kill -TERM -- "-$(cat "$p")" 2>/dev/null; done; printf 'TOUCHSTONE_CHECKS_KILLED %s\\n' ${run}`
+// A pending check is asked about again for as long as its process is alive. A
+// checks stage budget, when the user set one, is the only other end, and the
+// check is killed then rather than left running beside the next attempt.
+const executeChecks = async (checks, over) => {
   checkAttempt++
   const run = `${planId}-${checkAttempt}`
-  const out = await treeAgent(
-    runnerPrompt('checks:run', [...checks.map((c, i) => checkLineFor(c, run, i === 0)), endLineFor(run)]),
-    { label: `checks:run:${checkAttempt}`, schema: CHECK_RUN, model: 'haiku', effort: 'low' })
-  return parseCheckRun(out?.output, checks, run)
+  const label = `checks:run:${checkAttempt}`
+  const lines = [...checks.map((c, i) => checkLineFor(c, run, i === 0)), endLineFor(run)]
+  for (let poll = 1; ; poll++) {
+    const out = await treeAgent(runnerPrompt('checks:run', lines), {
+      label: poll === 1 ? label : `${label}:poll:${poll}`,
+      schema: CHECK_RUN, model: 'haiku', effort: 'low' })
+    const parsed = parseCheckRun(out?.output, checks, run)
+    if (!parsed.pending) return parsed
+    if (parsed.dead.length) {
+      return { reason: `${parsed.dead.join(', ')} stopped without recording an exit code` }
+    }
+    if (over()) {
+      await treeAgent(runnerPrompt('checks:run', [killLineFor(run)]), {
+        label: `${label}:kill`, schema: CHECK_RUN, model: 'haiku', effort: 'low' })
+      return { reason: `the checks stage budget ran out while ${parsed.pending.join(', ')} was still running`, final: true }
+    }
+    log(`checks: ${parsed.pending.join(', ')} still running, asking again`)
+  }
 }
 // The one record kept of what a reproducer actually did at a given round: the
 // log path, never its output, which a fixer reads from the log itself.
@@ -2578,12 +2597,14 @@ const classifyResults = (checks, parsed) => {
 // own halt). The retry is the whole batch under a new run, so the first
 // attempt's logs are kept as they were. dirty and statusLog describe the
 // attempt that was measured.
-const runChecks = async (checks = discoveredChecks) => {
+const runChecks = async (checks = discoveredChecks, over = () => false) => {
   if (!checks.length) return { red: [], unmeasured: [], dirty: false, statusLog: null }
-  const first = await executeChecks(checks)
+  const first = await executeChecks(checks, over)
   if (!first.reason) return { ...classifyResults(checks, first), dirty: first.dirty, statusLog: first.statusLog }
-  log(`checks: the batch was unmeasured (${first.reason}), retrying once`)
-  const second = await executeChecks(checks)
+  // A spent budget is still spent on a retry, which would only restart the checks.
+  const second = first.final
+    ? { reason: 'not run, since the checks stage budget was already spent' }
+    : (log(`checks: the batch was unmeasured (${first.reason}), retrying once`), await executeChecks(checks, over))
   if (!second.reason) return { ...classifyResults(checks, second), dirty: second.dirty, statusLog: second.statusLog }
   return {
     red: [], dirty: false, statusLog: null,
@@ -2617,8 +2638,9 @@ const unmeasuredLines = (checks) => checks.map(c =>
 const unmeasuredChecksHalt = (at, extra) => {
   const note = `${unmeasuredChecks.length} discovered check(s) could not be ` +
     `measured after a retry. This halt is about measurement, not the code: ` +
-    `the runner did not print what the script asked for, or they did not ` +
-    `finish within the 600000 ms Bash timeout, so no verdict exists either ` +
+    `the runner did not print what the script asked for, a check ended ` +
+    `without recording an exit code, or the checks stage budget ran out ` +
+    `while one was still running, so no verdict exists either ` +
     `way, and no fix round has been spent on them.\n` +
     unmeasuredLines(unmeasuredChecks)
   return halted(at, {
@@ -2637,7 +2659,7 @@ const unmeasuredChecksHalt = (at, extra) => {
 // before anything is implemented.
 let droppedAtBaseline = []
 if (discoveredChecks.length && checksBlocking) {
-  const baseline = await runChecks()
+  const baseline = await runChecks(discoveredChecks, sChecksPre.over)
   if (baseline.unmeasured.length) {
     sChecksPre.close()
     return await halted('Implement', {
@@ -2901,7 +2923,7 @@ const sChecksPost = stage('checks')
 let lastCheckedHead = headOf(impl.commit_range)
 const implBase = impl.commit_range.includes('..')
   ? impl.commit_range.split('..')[0].trim() : impl.commit_range.trim()
-;({ red: redChecks, unmeasured: unmeasuredChecks } = await runChecks())
+;({ red: redChecks, unmeasured: unmeasuredChecks } = await runChecks(discoveredChecks, sChecksPost.over))
 if (redChecks.length) {
   log(`checks: ${redChecks.length} discovered check(s) red after Implement: ` +
       redChecks.map(c => c.id).join(', '))
@@ -2963,7 +2985,7 @@ if (blockingChecksOpen() && !sChecksPost.over()) {
     impl.commit_range = `${implBase}..${preReviewHead}`
     lastCheckedHead = preReviewHead
     signals = (await measureSignals(impl.commit_range)) ?? signals
-    ;({ red: redChecks, unmeasured: unmeasuredChecks } = await runChecks())
+    ;({ red: redChecks, unmeasured: unmeasuredChecks } = await runChecks(discoveredChecks, sChecksPost.over))
     log(redChecks.length
       ? `checks: ${redChecks.length} still red after the pre-review fix round`
       : `checks: all clear after the pre-review fix round`)
@@ -3339,24 +3361,6 @@ if (!sizeParsed) {
   })
 }
 size = sizeOf(sizeParsed)
-
-// The budget was set from Triage's estimate, or a flat default when it gave none,
-// but a resumed run's first review range is whatever the last run left unreviewed,
-// or the whole branch when a merge came after the record's head, and either can be
-// bigger than that budget allows for. Raised, never lowered, and never over an
-// explicit args.runBudget.
-if (recordedHead && typeof args?.runBudget !== 'number') {
-  const needed = budgetForLoc(size.totalChurn)
-  if (needed > runBudget) {
-    const wasBudget = runBudget
-    const wasNote = runBudgetNote
-    runBudget = needed
-    runBudgetNote = `raised to fit the ${size.totalChurn} changed lines of the first review ` +
-      `range ${firstReviewRange}, from ${Math.round(wasBudget / 1000)}k (${wasNote})`
-    log(`run budget raised to ${Math.round(runBudget / 1000)}k (first review range ` +
-        `${firstReviewRange}, ${size.totalChurn} changed lines)`)
-  }
-}
 
 // Below RATIO_MIN_CODE the ratio does not apply at all: an ordinary TDD
 // change reads well over 1:1 test-to-code and must not halt on that alone.
@@ -4081,6 +4085,10 @@ const fixStopReason = () =>
   : round >= MAX_REVIEW_ROUNDS
     ? `the ${MAX_REVIEW_ROUNDS}-round limit was reached; each of these was ` +
       `checked against the code and is still open`
+  : stalledRounds >= STALL_ROUNDS
+    ? `the last ${STALL_ROUNDS} rounds closed no finding or check, so another ` +
+      `round would not either; each of these was checked against the code and ` +
+      `is still open`
   : sFix.over()
     ? `the fix stage passed its ${Math.round(CEILINGS.fix / 1000)}k output-token ` +
       `ceiling, so the loop stopped early -- these have not had every round`
@@ -4153,8 +4161,16 @@ const regressedOf = (items, exec, round) => {
 }
 
 const fixerNotes = []
-while ((open.length || blockingChecksOpen()) && round < MAX_REVIEW_ROUNDS && !outOfBudget() && !sFix.over()) {
+const openIds = () => new Set([...open.map(f => f.id),
+  ...(blockingChecksOpen() ? redChecks.map(c => `check:${c.id}`) : [])])
+// Progress is a finding or check closing for the first time: one that closes
+// again after it was reopened only undoes a regression.
+const everClosed = new Set()
+let stalledRounds = 0
+while ((open.length || blockingChecksOpen()) && round < MAX_REVIEW_ROUNDS &&
+       stalledRounds < STALL_ROUNDS && !outOfBudget() && !sFix.over()) {
   round++
+  const openBeforeRound = openIds()
   enterPhase('Fix')
   const fixSpendStart = budget.spent()
   const fixed = await treeAgent(
@@ -4352,7 +4368,7 @@ while ((open.length || blockingChecksOpen()) && round < MAX_REVIEW_ROUNDS && !ou
   }
 
   if (checksBlocking && discoveredChecks.length && head && head !== lastCheckedHead && !outOfBudget()) {
-    ;({ red: redChecks, unmeasured: unmeasuredChecks } = await runChecks())
+    ;({ red: redChecks, unmeasured: unmeasuredChecks } = await runChecks(discoveredChecks, sFix.over))
     lastCheckedHead = head
     if (unmeasuredChecks.length) {
       sFix.close()
@@ -4364,6 +4380,10 @@ while ((open.length || blockingChecksOpen()) && round < MAX_REVIEW_ROUNDS && !ou
 
   log(`round ${round}: ${open.length} finding(s) still open` +
       (discoveredChecks.length ? `, ${redChecks.length} check(s) still red` : ''))
+  const openAfterRound = openIds()
+  const closedFirstTime = [...openBeforeRound].filter(id => !openAfterRound.has(id) && !everClosed.has(id))
+  for (const id of openBeforeRound) if (!openAfterRound.has(id)) everClosed.add(id)
+  stalledRounds = closedFirstTime.length ? 0 : stalledRounds + 1
 }
 
 sFix.close()
@@ -4520,10 +4540,14 @@ const verifyMutation = async (label) => {
 // another mutation run cannot fix a relay that did not print its line, and so
 // does a --verify that could not run at all (127, 2): another attempt meets
 // the same missing script or setup failure.
+let mutationAttempts = 0
+let stalledAttempts = 0
+let headBeforeAttempt = reviewedThrough
 for (let attempt = 1; attempt <= MAX_GATE_ATTEMPTS && !mutation.green
      && !mutation.needs_user_run && !mutation.unsupported_language
      && !mutation.verdict_unmeasured && !mutation.verify_setup
-     && !outOfBudget() && !sMut.over(); attempt++) {
+     && stalledAttempts < STALL_ROUNDS && !outOfBudget() && !sMut.over(); attempt++) {
+  mutationAttempts = attempt
   const reported = await treeAgent(
     `Run mutation-check.sh ${wt.path} from the ${GATES_SKILL} skill in ` +
     `this repo. ${GATES_SKILL_ONLY} It mutates files in place and needs a clean working tree, so ` +
@@ -4600,6 +4624,9 @@ for (let attempt = 1; attempt <= MAX_GATE_ATTEMPTS && !mutation.green
     : { ...agentSaid, green: verdict.exit === 0, head_sha: verdict.head,
         verify: { exit: verdict.exit, log: verdict.log },
         ...(verdict.exit !== 0 && verdict.exit !== VERIFY_UNRECORDED ? { verify_setup: true } : {}) }
+  const headAfter = mutation.head_sha ?? null
+  stalledAttempts = headAfter && headAfter !== headBeforeAttempt ? 0 : stalledAttempts + 1
+  headBeforeAttempt = headAfter ?? headBeforeAttempt
 }
 sMut.close()
 
@@ -4638,7 +4665,11 @@ if (!mutation.green) {
         `script was not found and 2 is a setup failure. No further mutation ` +
         `attempt was made. ${prNote()}. ` +
         `mutation-pr-gate.py blocks gh pr ready until --verify reads green.`
-      : `Mutation gate still red after ${MAX_GATE_ATTEMPTS} attempt(s)` +
+      : `Mutation gate still red after ${mutationAttempts} attempt(s)` +
+        (stalledAttempts >= STALL_ROUNDS
+          ? `, the last ${STALL_ROUNDS} of which committed nothing, so another ` +
+            `would not either`
+          : '') +
         (mutation.verify
           ? `: mutation-check.sh --verify exited ${mutation.verify.exit} ` +
             `(${mutation.verify.log}), so the gate has not recorded a green run ` +
@@ -4932,7 +4963,7 @@ return result
     return await halted(currentPhase, {
       ...budgetHaltState(),
       note: `Run budget exhausted (${Math.round(runBudget / 1000)}k output ` +
-        `tokens, ${runBudgetNote}). Spend at halt: ` +
+        `tokens, the limit you set). Spend at halt: ` +
         `${Math.round(runBudgetSpent.spent / 1000)}k output tokens (${byStage}). The ` +
         `'${runBudgetSpent.refused}' dispatch was refused before it could ` +
         `run` +

@@ -7,15 +7,16 @@ source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/harness.sh"
 
 echo "== static: the bounds the signals must not move"
 for line in \
-  "const MAX_REVIEW_ROUNDS = args?.maxReviewRounds ?? 3" \
+  "const MAX_REVIEW_ROUNDS = limitOf('maxReviewRounds') ?? Infinity" \
+  "const MAX_GATE_ATTEMPTS = limitOf('maxGateAttempts') ?? Infinity" \
+  "const STALL_ROUNDS = 2" \
   "const INLINE_LOC = args?.inlineLoc ?? 10" \
   "const ONE_LENS_LOC = 150" \
   "const BIG_LOC = 400" \
   "const BIG_FILES = 5" \
   "const RATIO_MIN_CODE = 20" \
   "const MAX_SUPPORT_RATIO = 10" \
-  "  setup: null," "  triage: 15_000," "  branch: 10_000," "  plan: null," "  implement: null," \
-  "  checks: 20_000," "  review: 80_000," "  fix: 170_000," "  mutation: 150_000," "  pr: 30_000,"; do
+  "  ...Object.fromEntries(STAGES.map(s => [s, null])),"; do
   check "unchanged: $line" "$(grep -Fxc -- "$line" "$SCRIPT" || true)" 1
 done
 

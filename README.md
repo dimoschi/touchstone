@@ -33,11 +33,23 @@ hook runs it on `gh pr create`, so a red ledger blocks the PR at the tool call.
 There is no flag to skip it, and the workflow's own instructions tell every agent
 never to weaken production code to kill a mutant.
 
-Touchstone is also **bounded**. Each stage carries an output-token ceiling and the
-run halts rather than looping: a disproved premise stops before any code exists, an
-unresolvable base ref stops before it branches, and a plan that overruns stops before
-implementing. Unbounded agent runs are where the money goes on trajectories that
-merge nothing.
+Touchstone **finishes**. A run ends in a pull request, or in a halt that only you
+can resolve: a disproved premise, a broken setup, a gate that needs your
+`--accept`, a finding you have to judge. It does not stop on a spend limit unless
+you set one. The fix loop and the mutation attempts keep going while each round
+makes progress, and stop when two rounds in a row change nothing, since a third
+would not either. Slow is the trade it makes for not handing work back half done.
+
+To bound a run, set any of `maxReviewRounds`, `maxGateAttempts`, `runBudget`
+(output tokens) or `stageBudgets` (per stage) in a committed `.touchstone.json` at
+the repo root, or pass `--max-review-rounds`, `--max-gate-attempts`,
+`--run-budget` or `--stage-budget <stage>=<n>` to `/touchstone:deliver` for one
+run. A flag wins over the file.
+
+[`docs/touchstone.example.json`](docs/touchstone.example.json) sets every key to the
+limits runs had before 0.39.0; copy it to `.touchstone.json` and drop what you do not
+want. `stageBudgets` takes `setup`, `triage`, `branch`, `plan`, `implement`, `checks`,
+`review`, `fix`, `mutation` and `pr`.
 
 It is not a standalone agent. It runs on Claude Code's own subagents and needs no
 sandbox, no server, and no API key beyond the one you already have.
@@ -166,7 +178,7 @@ hooks/                           eight policy gates, with a manifest per host
 4. **Implement** — TDD via the skill, committing through `crap-commit.sh`, which runs both commit-time gates and refuses while either is red. Alongside it, every line under the target repo's own `## Checks` heading (in `AGENTS.md` or `CLAUDE.md`) is executed before this phase and again after every step that commits: it must list only read-only, deterministic checks, since it runs repeatedly against the same tree.
 5. **Draft PR** — pushes the branch and opens a draft, so the work is visible and any later halt has somewhere durable to be reported.
 6. **Review** — adversarial reviewers on distinct lenses, chosen by diff size. A finding only holds the run if it carries a complete reproducer that, run for real, exits nonzero *with* a fixed marker line on its own in the output; nonzero without the marker means the reproducer itself failed to run, not that it demonstrated anything, and becomes a note instead. The category does not decide this: a design or docs finding whose reproducer reproduces holds the run like a wrong-result one, and an unmet-criterion finding is no exception. Everything else reaches the PR as a non-blocking note. Re-runs on commits any later phase adds, and from that point on a finding also has to fall inside what the new commits actually changed.
-7. **Fix** — confirmed findings only, bounded rounds. A finding counts as fixed when its own reproducer exits 0 against the new commits, marker or not, never by a model's judgement of the diff. One whose reproducer instead errors (nonzero, no marker) stays open and the next round's brief carries its exit code and output, so the fixer chases a real failure rather than a demonstration nobody gave.
+7. **Fix** — confirmed findings only, round after round until they close or two rounds in a row close nothing. A finding counts as fixed when its own reproducer exits 0 against the new commits, marker or not, never by a model's judgement of the diff. One whose reproducer instead errors (nonzero, no marker) stays open and the next round's brief carries its exit code and output, so the fixer chases a real failure rather than a demonstration nobody gave.
 8. **Mutation** — kill every survivor with a test. Its own commits get reviewed too.
 9. **PR** — fills in the PR against the repo's template and marks the draft ready, only once every gate is green.
 
@@ -269,11 +281,8 @@ run needed one, while earlier runs on code tickets needed three and came to 252k
 Triage scales reasoning effort to the difficulty it judges, which bounds the output
 share. It does not bound the context re-reads, which are the larger half.
 
-A run budget, derived from the same triage judgement (roughly 100k output tokens
-plus 1,500 per estimated line of change, clamped 300k-1M), refuses any further
-dispatch once the run has spent past it, so a ticket whose fix rounds run long
-still stops rather than compounding. `args.runBudget` overrides the derived
-figure. Review also measures the actual diff before choosing reviewer lenses,
+A run budget, when you set one (see above), refuses any further dispatch once the
+run has spent past it. Review also measures the actual diff before choosing reviewer lenses,
 rather than trusting the implementer's own report of what it touched, and
 halts before spending any lens on a change whose tests, docs and comments
 outweigh its actual code by more than 10:1 (`args.supportRatio` to raise it).

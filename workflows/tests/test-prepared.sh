@@ -20,7 +20,7 @@ function prepared(over) {
     plugin: { name: 'touchstone', version: VERSION },
     base_manifest: { found: true, refreshed: true, name: 'touchstone', version: VERSION, detail: 'read' },
     checks_source: { file: `${WT}/AGENTS.md`, sections: [{ heading: '## Other', fence: '' }], detail: 'read' },
-    prior_head: null, prior_head_check: null,
+    prior_head: null, prior_head_check: null, limits: {},
     ...over,
   }
 }

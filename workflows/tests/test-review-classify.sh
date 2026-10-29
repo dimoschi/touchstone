@@ -641,23 +641,7 @@ async function scenarioAB() {
     result.record_file, '.claude/touchstone-runs/-216.json')
 }
 
-// Scenario AC -- ceilings follow the same judgement as effort. A trivial change
-// used to get trivial effort and the full 80k review ceiling.
-async function scenarioAC() {
-  console.log('\n== scenario AC: a trivial triage scales the ceilings down')
-  const { captured } = await run({
-    triage: { complexity: 'trivial' },
-    initialReview: { correctness: [], advocate: [] },
-    verify: () => undefined,
-    staleness: () => [],
-  })
-  const logs = captured.logs.join('\n')
-  check('the scale is reported with the effort', logs.includes('ceilings x0.4'), true)
-  check('the review ceiling scales 80k -> 32k', logs.includes('(ceiling 32k)'), true)
-  check('the fix ceiling scales 170k -> 68k', logs.includes('(ceiling 68k)'), true)
-}
-
-const SCENARIOS = [scenarioA, scenarioB, scenarioG, scenarioC, scenarioD, scenarioE, scenarioH, scenarioI, scenarioJ, scenarioK, scenarioL, scenarioM, scenarioN, scenarioO, scenarioP, scenarioQ, scenarioR, scenarioS, scenarioT, scenarioU, scenarioV, scenarioW, scenarioX, scenarioY, scenarioZ, scenarioAA, scenarioAB, scenarioAC]
+const SCENARIOS = [scenarioA, scenarioB, scenarioG, scenarioC, scenarioD, scenarioE, scenarioH, scenarioI, scenarioJ, scenarioK, scenarioL, scenarioM, scenarioN, scenarioO, scenarioP, scenarioQ, scenarioR, scenarioS, scenarioT, scenarioU, scenarioV, scenarioW, scenarioX, scenarioY, scenarioZ, scenarioAA, scenarioAB]
 JS_EOF
 
 finish

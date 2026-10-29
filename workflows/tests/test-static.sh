@@ -178,10 +178,6 @@ check "and that an unconfirmed head drops it from every later halt and the resul
   "$(docHas "$DELIVER_MD" "a head the check does not confirm as an ancestor is dropped at the check. Either way, every later halt and the result report")" 1
 check "deliver.md no longer says a halt before reviewing returns the record as it was" \
   "$(docHas "$DELIVER_MD" 'A run that halts before reviewing anything returns the record as it was')" 0
-check "architecture.md raises the budget whether it came from an estimate or the flat default" \
-  "$(docHas "$ARCH_MD" "whether that budget came from triage's estimate or from the flat default")" 1
-check "and no longer says the range was bigger than triage estimated" \
-  "$(docHas "$ARCH_MD" 'more changed lines than triage estimated')" 0
 
 echo ""
 echo "== static: gh-163 -- the relayed check-row contract is gone, the runner's is in"

@@ -2,9 +2,10 @@
 
 prepare-delivery.sh runs this from the invoking session. It does with fixed
 commands what the workflow's setup and branch agents used to relay: find or cut
-the ticket's branch and worktree, read the gate markers, the plugin's own
-version, the base branch's manifest, and the AGENTS.md (or CLAUDE.md) sections
-the workflow parses its checks from. It prints one JSON object and exits 0, or
+the ticket's branch and worktree, read the gate markers, the repo's spend
+limits (.touchstone.json), the plugin's own version, the base branch's
+manifest, and the AGENTS.md (or CLAUDE.md) sections the workflow parses its
+checks from. It prints one JSON object and exits 0, or
 prints {"error", "reason"} and exits 2 (bad arguments, setup problem) or 3 (a
 refusal: nothing to deliver into, or something in the way).
 """
@@ -175,6 +176,48 @@ def _json_or_none(text):
 def markers(root):
     return {"crap_gated": os.path.isfile(os.path.join(root, ".crap-gated")),
             "mutation_gated": os.path.isfile(os.path.join(root, ".mutation-gated"))}
+
+
+LIMIT_KEYS = ("maxReviewRounds", "maxGateAttempts", "runBudget")
+# The workflow's STAGES (workflows/parts/00-meta-bounds.js.part).
+STAGES = ("setup", "triage", "branch", "plan", "implement", "checks", "review", "fix", "mutation", "pr")
+
+
+def _count(value):
+    return isinstance(value, int) and not isinstance(value, bool) and value >= 0
+
+
+def _stage_budgets_problem(value):
+    if isinstance(value, dict) and all(k in STAGES and _count(v) for k, v in value.items()):
+        return None
+    return "'stageBudgets' must map stage names to non-negative integers"
+
+
+def _key_problem(key, value):
+    if key == "stageBudgets":
+        return _stage_budgets_problem(value)
+    if key not in LIMIT_KEYS:
+        return f"unknown key {key!r}"
+    return None if _count(value) else f"{key!r} must be a non-negative integer"
+
+
+def _limits_problem(data):
+    if not isinstance(data, dict):
+        return "must hold a JSON object"
+    return next(filter(None, (_key_problem(k, v) for k, v in data.items())), None)
+
+
+def limits(root):
+    """The spend limits the repo opts into. A run is unbounded by default."""
+    path = os.path.join(root, ".touchstone.json")
+    if not os.path.isfile(path):
+        return {}
+    with open(path, "rb") as f:
+        data = _json_or_none(f.read())
+    problem = "is not valid JSON" if data is None else _limits_problem(data)
+    if problem:
+        raise Refusal("bad-limits", f"{path} {problem}", 2)
+    return data
 
 
 def canonical(root, name):
@@ -395,6 +438,7 @@ def prepare(opts):
     marker = validate(opts)
     plugin = plugin_of(opts.plugin_json)
     root = repo_root(opts.repo)
+    run_limits = limits(root)
     git(root, "worktree", "prune")
     default = default_base(root)
     refreshed = bool(default) and git(root, "fetch", "origin", default).code == 0
@@ -403,7 +447,7 @@ def prepare(opts):
     head = opts.prior_head
     return {"repo_root": root, **place, "ticket": opts.ticket, "ticket_marker": marker,
             "mode": "existing" if opts.existing else "fresh", "markers": markers(root),
-            "plugin": plugin, "base_manifest": base_manifest(root, default, refreshed),
+            "limits": run_limits, "plugin": plugin, "base_manifest": base_manifest(root, default, refreshed),
             "checks_source": checks_source(place["worktree"]), "prior_head": head,
             "prior_head_check": prior_head_check(place["worktree"], head) if head else None}
 

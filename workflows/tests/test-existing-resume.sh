@@ -150,75 +150,6 @@ async function scenarioR3() {
     result.scope_split, { ticket: 2, addition: 0, unattributed: 1 })
 }
 
-async function scenarioR4() {
-  console.log('\n== scenario R4: a resumed run\'s budget is raised to fit a first review range bigger than triage estimated')
-  const range = `${P}..${REVIEWED_THROUGH}`
-  const raisedRun = (spend, triage = { estimated_loc: 100 }) => resumed({}, {
-    args: { runBudget: undefined },
-    triage,
-    diffstatFiles: [['a.js', 1000, 0]],
-    initialReview: { correctness: [{ title: 'Needs a fix', file: 'a.js', claim: 'c', evidence: 'e' }],
-      advocate: [], requirements: [] },
-    initialExit: () => { spend.v = spend.after; return 1 },
-    verify: () => true,
-    staleness: () => [],
-    budget: { total: null, spent: () => spend.v, remaining: () => Infinity },
-  })
-  const raised = await run(raisedRun({ v: 0, after: 600_000 }))
-  check('the derived budget is still logged first', raised.captured.logs.some(
-    l => /run budget: 300k output tokens \(derived from triage's ~100 estimated LOC\)/.test(l)), true)
-  check('the raise is logged with the range and the line count', raised.captured.logs.includes(
-    `run budget raised to 1000k (first review range ${range}, 1000 changed lines)`), true)
-  check('the run is not refused at 600k, which the unraised 300k would have refused',
-    callCount(raised.captured, 'fix:1'), 1)
-
-  const refused = await run(raisedRun({ v: 0, after: 1_100_000 }))
-  check('the raised figure is the one dispatch() refuses at',
-    (refused.result.note ?? '').includes('Run budget exhausted (1000k output tokens'), true)
-  check('the halt note says the budget was raised', /raised/.test(refused.result.note ?? ''), true)
-  check('the halt note names the line count and range it was raised to fit',
-    (refused.result.note ?? '').includes(`raised to fit the 1000 changed lines of the first review range ${range}`), true)
-  check('and still names triage\'s estimate, as the figure it was raised from',
-    (refused.result.note ?? '').includes(`from 300k (derived from triage's ~100 estimated LOC)`), true)
-
-  const unestimated = await run(raisedRun({ v: 0, after: 1_100_000 }, { estimated_loc: null }))
-  const unestimatedNote = unestimated.result.note ?? ''
-  check('with no triage estimate the raise is still logged with the range and the line count',
-    unestimated.captured.logs.includes(`run budget raised to 1000k (first review range ${range}, 1000 changed lines)`), true)
-  check('the halt note says the budget was raised to fit the measured lines',
-    unestimatedNote.includes('raised to fit the 1000 changed lines'), true)
-  check('and keeps the note that triage gave no estimate, with the default it was raised from',
-    unestimatedNote.includes('from 300k (triage gave no estimated_loc; using the inline default)'), true)
-  check('and never claims a triage estimate that did not exist',
-    unestimatedNote.includes('triage estimated'), false)
-
-  const small = await run(resumed({}, { args: { runBudget: undefined },
-    triage: { estimated_loc: 1000 }, diffstatFiles: [['a.js', 50, 0]] }))
-  check('a range under the estimate leaves the budget alone',
-    small.captured.logs.some(l => l.startsWith('run budget raised')), false)
-
-  const explicit = await run(resumed({}, { args: { runBudget: 400_000 },
-    triage: { estimated_loc: 100 }, diffstatFiles: [['a.js', 1000, 0]] }))
-  check('an explicit args.runBudget is never raised',
-    explicit.captured.logs.some(l => l.startsWith('run budget raised')), false)
-  check('and its own log line is unchanged', explicit.captured.logs.includes(
-    'run budget: 400k output tokens (set explicitly via args.runBudget)'), true)
-
-  const fresh = await run({
-    args: { runBudget: undefined, priorRun: { reviewed_through: P }, reviewedThrough: P },
-    triage: { estimated_loc: 100 }, diffstatFiles: [['a.js', 1000, 0]],
-  })
-  check('a run that is not --existing never raises it, whatever the args carry',
-    fresh.captured.logs.some(l => l.startsWith('run budget raised')), false)
-  const noHead = await run({
-    args: { existingBranch: true, runBudget: undefined },
-    existingBranchResult: existing(),
-    triage: { estimated_loc: 100 }, diffstatFiles: [['a.js', 1000, 0]],
-  })
-  check('an --existing run with no prior head never raises it either',
-    noHead.captured.logs.some(l => l.startsWith('run budget raised')), false)
-}
-
 async function scenarioR5() {
   console.log('\n== scenario R5: without a verified 40-hex prior head the run reviews the whole branch and carries nothing')
   const prior = { unresolved_findings: [carriedFinding('f9')], notes: [carriedNote('f8')] }
@@ -271,9 +202,6 @@ async function scenarioR5() {
       lenses.length > 0 && lenses.every(l => l.prompt.includes(`Commit range: ${COMMIT_RANGE}\n`)), true)
     check(`${c.name}: nothing is carried and the first id is f1`,
       [idsOf(result.unresolved_findings), idsOf(result.notes)], [['f1'], []])
-    check(`${c.name}: the budget log is today's and there is no raise`,
-      [captured.logs.includes(`run budget: 300k output tokens (derived from triage's ~100 estimated LOC)`),
-       captured.logs.some(l => l.startsWith('run budget raised'))], [true, false])
     check(`${c.name}: reviewed_through is this run's own review head`, result.reviewed_through, REVIEWED_THROUGH)
     const bx = captured.calls.find(l => l.label === (c.label ?? 'branch:existing'))?.prompt ?? ''
     check(`${c.name}: the ancestry step is ${c.ancestry ? 'asked for' : 'absent'}`,
@@ -571,8 +499,6 @@ async function scenarioR11() {
     (reviewed.captured.calls.find(c => c.label === 'fix:1')?.prompt ?? '').includes('Carried f3'), true)
   check('the carried finding and note are in the result',
     [idsOf(reviewed.result.unresolved_findings), idsOf(reviewed.result.notes)], [['f3'], ['f5']])
-  check('the whole branch is what the first review reads, so the budget is raised to fit it, not left at triage\'s estimate of the narrowed task',
-    reviewed.captured.logs.includes(`run budget raised to 1000k (first review range ${COMMIT_RANGE}, 1000 changed lines)`), true)
   check('the head check is not repeated once the branch step found the merge',
     callCount(reviewed.captured, 'resume:range-check'), 0)
   check('the head it reports is the one that review read up to', reviewed.result.reviewed_through, REVIEWED_THROUGH)
@@ -669,8 +595,6 @@ async function scenarioR13() {
       lenses.flatMap(c => gitIn(repo, 'diff', '--name-only', rangeOf(c)).split('\n')).includes('main-only.txt'), false)
     check('the diffstat measures the whole branch, not the range from the record\'s head',
       (merged.captured.calls.find(c => c.label === 'diffstat')?.prompt ?? '').includes(`printf 'TOUCHSTONE_DIFFSTAT %s\\n' ${whole};`), true)
-    check('the budget is raised to fit the whole branch it now reviews',
-      merged.captured.logs.includes(`run budget raised to 1000k (first review range ${whole}, 1000 changed lines)`), true)
     check('the record is still carried',
       [idsOf(merged.result.unresolved_findings), idsOf(merged.result.notes)], [['f3'], ['f5']])
     check('the head reported is the one the whole-branch review read up to', merged.result.reviewed_through, head)
@@ -720,7 +644,7 @@ async function scenarioR14() {
     (result.unresolved_findings ?? []).some(f => f.awaiting_recheck), false)
 }
 
-const SCENARIOS = [scenarioR1, scenarioR2, scenarioR3, scenarioR4, scenarioR5, scenarioR6, scenarioR7,
+const SCENARIOS = [scenarioR1, scenarioR2, scenarioR3, scenarioR5, scenarioR6, scenarioR7,
   scenarioR8, scenarioR9, scenarioR10, scenarioR11, scenarioR12, scenarioR13, scenarioR14]
 JS_EOF
 

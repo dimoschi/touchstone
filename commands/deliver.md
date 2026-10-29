@@ -1,11 +1,11 @@
 ---
 description: Run the touchstone delivery pipeline (triage, worktree, plan, TDD, gates, review, mutation, PR)
-argument-hint: --ticket <PROJ-4821|216> [--type feat|fix|...] [--existing] [optional narrowing]
+argument-hint: --ticket <PROJ-4821|216> [--type feat|fix|...] [--existing] [--max-review-rounds N] [--max-gate-attempts N] [--run-budget N] [--stage-budget <stage>=N] [optional narrowing]
 ---
 
 Invoke the `deliver-pipeline` workflow via the **Workflow** tool. Do not use the Skill
 tool, and do not read the workflow script and run its phases by hand: hand-running
-skips the token ceilings, the halt latches, and the gates, which are the reason the
+skips the halt latches and the gates, which are the reason the
 workflow exists.
 
 ```
@@ -45,6 +45,18 @@ the fabricated link.
   **`--ticket` is still required.** Without this flag the workflow cuts a
   fresh branch and worktree off the base, which would strand follow-up work
   away from the PR it belongs to.
+- `--max-review-rounds <n>`, `--max-gate-attempts <n>`, `--run-budget <tokens>` --
+  optional. Pass as `maxReviewRounds`, `maxGateAttempts` and `runBudget`, as numbers.
+- `--stage-budget <stage>=<tokens>` -- optional, repeatable. Collect them into one
+  `stageBudgets` object, e.g. `{ fix: 170000 }`. The stages are `setup`, `triage`,
+  `branch`, `plan`, `implement`, `checks`, `review`, `fix`, `mutation` and `pr`.
+
+  A run has no spend limit unless one is set: it keeps going while it makes
+  progress, and halts only on what the user has to resolve, or when two fix rounds
+  or two mutation attempts in a row change nothing. These four flags set a limit
+  for this run. The repo's committed `.touchstone.json` sets the same keys as its
+  default, and a flag wins over it. Pass only the flags the user gave; never
+  invent a limit.
 - Everything remaining, with the flags removed, is `task`. **Optional.** The
   workflow fetches the ticket's title, description and comments and gives them to
   every phase, so the ticket is the specification. Pass task text only to *narrow*

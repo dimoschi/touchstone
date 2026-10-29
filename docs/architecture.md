@@ -295,18 +295,26 @@ Two invariants the script exists to hold:
 - **Every run needs a ticket**, and the marker (`gh-216` vs `jira-PROJ-4821`) is decided
   in the script by regex, never by an agent. The branch name is the run's only ticket
   link, so a guessed one is unrecoverable after the fact.
+- **A run finishes or asks the user.** It ends in a PR, or in a halt only the user can
+  resolve (a disproved premise, a broken setup, a gate that needs `--accept`, a finding
+  to judge). No spend limit applies unless the user set one, through flags on
+  `/touchstone:deliver` or the repo's `.touchstone.json` (read by `prepare-delivery.sh`
+  into `prepared.limits`, checked in part 15); a flag wins. Without a round or attempt
+  limit, the fix loop and the mutation attempts end on a stall instead:
+  `STALL_ROUNDS` (2) rounds in a row that close no finding or check, or attempts that
+  commit nothing.
 - **Ceilings are tripwires, not aborts.** A running agent cannot be stopped from the
-  script, so `over()` is read only after an agent returns. That makes a ceiling a real
-  bound only where it gates a further iteration (fix rounds, mutation attempts,
-  re-review latches). `plan` and `implement` are deliberately uncapped. Do not describe
-  these as hard per-call token limits.
+  script, so `over()` is read only after an agent returns. That makes a stage budget a
+  real bound only where it gates a further iteration (fix rounds, mutation attempts,
+  re-review latches). Every stage is uncapped unless `stageBudgets` names it. Do not
+  describe these as hard per-call token limits.
 
 `workflows/test-fix-loop-join.sh` drives the real script with stubbed globals, which is
 how the loop logic is tested without spending tokens.
 
 ### Triage's involved verdict has to be earned
 
-`involved` triples effort and ceilings against `routine` (see `EFFORT`/`CEILING_SCALE`),
+`involved` triples effort against `routine` (see `EFFORT`),
 so the script does not take the word alone: it stands only when `TRIAGE`'s response also
 carries `involved_reason`, `expected_files`, and `expected_call_sites`, all non-empty. A
 recognised `involved` verdict missing any of the three demotes to `routine` and logs why;
@@ -327,19 +335,9 @@ invoking session always has a record to write.
 `dispatch()` is the one function that ever calls the runtime's own `agent()`; a static
 check in `test-static.sh` asserts nothing else does. Every `treeAgent` call and every
 direct `agent()`-style call (`setup`, `branch`, `branch:existing`, `collapseDuplicates`'s
-`review:dedup`) goes through it. Before Triage has sized the work, `runBudget` is `null`
-and `dispatch()` never refuses; right after Triage, it is set to `100_000 + 1_500 *
-estimated_loc` output tokens, clamped `300_000..1_000_000`, or a flat `300_000`/`600_000`
-default by scope when triage gave no estimate, and `args.runBudget` overrides either.
-A resumed `--existing` run raises the budget to the same formula applied to its first
-review range's measured changed lines, and logs it, when that figure is above the budget
-set after Triage, whether that budget came from triage's estimate or from the flat default.
-The range is the whole branch, not the part after the record's head, when a merge came
-after that head. The branch step checks that once; the implementer may merge the base
-too, so a `resume:range-check` probe asks the same question at the head Implement left,
-and a probe that is missing or not the marker line is read as a merge.
-`args.runBudget` is never raised. A halt note after a raise says what the budget was raised
-to fit and what it was raised from, including why that figure was set. From there, `dispatch()` refuses any call once `budget.spent()` has reached it.
+`review:dedup`) goes through it. `runBudget` is `null`, and `dispatch()` never
+refuses, unless the user set one (`--run-budget` or `.touchstone.json`); it is applied
+right after Triage. From there, `dispatch()` refuses any call once `budget.spent()` has reached it.
 
 Everything after that point runs inside one `try`/`catch`, so a refusal anywhere in the
 run unwinds to a single halt rather than needing its own latch at every call site. Two
@@ -712,11 +710,22 @@ repeat.
 A batch of checks is run by lines the script builds, never by a model copying a
 command or relaying output (`checkLineFor` and `endLineFor` in `30-triage-plan-checks.js.part`). The
 `checks:run:N` agent is given one fenced line per check, plus an end line, and runs each
-as its own foreground Bash call. A check's line is self-contained:
-
-```
-d="$(git -C <worktree> rev-parse --path-format=absolute --git-path touchstone-checks/<run> 2>/dev/null)" && mkdir -p "$d" && { bash -c 'cd <worktree> && <command>' >|"$d/<id>.log" 2>&1; e=$?; r="$(printf 'TOUCHSTONE_CHECK %s %s %s' <id> "$e" "$d/<id>.log")"; printf '%s\n' "$r" >>"$d/rows"; printf '%s\n' "$r"; }
-```
+as its own foreground Bash call. A check's line is self-contained: it resolves
+`touchstone-checks/<run>` under the worktree's git dir as `$d`, starts `bash -c 'cd
+<worktree> && <command>'` detached (a `setsid`, through `python3`) with its output in
+`$d/<id>.log` and its exit code written to `$d/<id>.exit` when it ends, and waits for that
+file. The wait is at most 540 seconds (`TOUCHSTONE_CHECK_WAIT`), inside the 600000 ms Bash
+cap; a check still running then prints `TOUCHSTONE_CHECK_PENDING <id> <1|0>` instead of
+its row, and `executeChecks` sends the same run's lines again (`checks:run:N:poll:M`). The
+flag is 1 while the check's process (pid in `$d/<id>.pid`, the leader of its own process
+group) is alive or not yet started, and 0 once it is gone with no exit file. A line whose
+check already has an exit file prints its row at once, and `$d/running` names the check
+in flight so a later line never starts beside it. A check is unmeasured when its process
+died without an exit code, never for being long or quiet. A `checks` stage budget, when
+the user set one, also ends the asking: `checks:run:N:kill` then kills the process group
+of every check with no exit file, and the batch is not retried, since the budget is
+still spent. A check that stays alive and never exits is asked about until the user stops
+the run or sets that budget.
 
 The check's whole output, stdout and stderr, goes to
 `touchstone-checks/<run>/<id>.log` under the worktree's own git dir, so a log is never
@@ -725,7 +734,7 @@ id and the attempt number (`<planId>-<n>`): the retry of a batch writes new logs
 leaves the first attempt's as they were. A later run with the same plan in the same
 worktree reuses those directories and overwrites them; every redirect is `>|`, so a
 shell with `noclobber` set still writes the log instead of failing the check. The exit
-code is read from `$?` after `;` rather than `&&`, so it is printed even when the check
+code is read from `$?` after `;` rather than `&&`, so it is recorded even when the check
 failed or called `exit N` itself. The only thing the shell prints per check is `TOUCHSTONE_CHECK <id>
 <exit> <log path>`, which is also why a long suite (this repo's own prints minutes of
 output) no longer has to fit the Bash tool's inline preview. The end line runs `git
@@ -735,8 +744,8 @@ dirty: git's stderr goes to `status.err` beside it (and a `rev-parse` warning is
 dropped), because a warning on a healthy tree, such as an unreadable excludes file,
 would otherwise read as a dirty tree or as an unexpected line. Every line is a
 separate call because one call per batch would sit close to the 600000 ms Bash cap: this
-repo's checks took 526 s in sequence on one machine, so a slower machine or a growing
-suite crosses it. The agent still joins one short line per call, but the parser holds
+repo's checks took 526 s in sequence on one machine, and `run-go-tests.sh` alone has run
+past 600 s on a loaded one. The agent still joins one short line per call, but the parser holds
 every id, exit and log path to what the script expects, so a misjoined batch reads as
 unmeasured, never as a pass.
 

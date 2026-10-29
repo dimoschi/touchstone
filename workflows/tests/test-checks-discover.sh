@@ -224,9 +224,9 @@ async function scenarioDX() {
   })
   const runPrompt = captured.calls.find(c => c.label === 'checks:run:1')?.prompt ?? ''
   const expectedOrder = [
-    ['check:1', "bash -c 'cd /tmp/stub-worktree && bash scripts/run-tests.sh'"],
-    ['check:2', "bash -c 'cd /tmp/stub-worktree && bash scripts/lint.sh'"],
-    ['check:3', "bash -c 'cd /tmp/stub-worktree && bash scripts/echo.sh '\\''a # b'\\'''"],
+    ['check:1', "check:1 'cd /tmp/stub-worktree && bash scripts/run-tests.sh'"],
+    ['check:2', "check:2 'cd /tmp/stub-worktree && bash scripts/lint.sh'"],
+    ['check:3', "check:3 'cd /tmp/stub-worktree && bash scripts/echo.sh '\\''a # b'\\'''"],
   ]
   check('exactly three checks, each with the expected trimmed command',
     expectedOrder.every(([id, inner]) => runnerLineOf(runPrompt, id).includes(inner)), true)
@@ -419,7 +419,7 @@ async function scenarioEM() {
   const runPrompt = captured.calls.find(c => c.label === 'checks:run:1')?.prompt ?? ''
   check('the worktree path is bare in both the git -C and the bash -c, no \\\'\\\' near it',
     runnerLineOf(runPrompt, 'check:1').startsWith('d="$(git -C /tmp/stub-worktree rev-parse ') &&
-    runnerLineOf(runPrompt, 'check:1').includes("{ bash -c 'cd /tmp/stub-worktree && make test' >"), true)
+    runnerLineOf(runPrompt, 'check:1').includes("check:1 'cd /tmp/stub-worktree && make test' <"), true)
 }
 
 // Scenario EO -- #116: existingBranch has no clean base tree to block on

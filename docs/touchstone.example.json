@@ -1,0 +1,14 @@
+{
+  "maxReviewRounds": 3,
+  "maxGateAttempts": 3,
+  "runBudget": 600000,
+  "stageBudgets": {
+    "triage": 15000,
+    "branch": 10000,
+    "checks": 20000,
+    "review": 80000,
+    "fix": 170000,
+    "mutation": 150000,
+    "pr": 30000
+  }
+}

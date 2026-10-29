@@ -126,6 +126,56 @@ def test_mutation_marker_is_read_from_the_repo_root(world, capsys):
     assert out["markers"] == {"crap_gated": False, "mutation_gated": True}
 
 
+def test_limits_are_empty_without_a_touchstone_json(world, capsys):
+    code, out = run(world, capsys)
+    assert code == 0
+    assert out["limits"] == {}
+
+
+def test_limits_are_read_from_touchstone_json_at_the_repo_root(world, capsys):
+    limits = {"maxReviewRounds": 3, "maxGateAttempts": 0, "runBudget": 600000,
+              "stageBudgets": {"fix": 170000}}
+    (world.tmp / "repo" / ".touchstone.json").write_text(json.dumps(limits))
+    code, out = run(world, capsys)
+    assert code == 0
+    assert out["limits"] == limits
+
+
+def test_the_documented_example_is_accepted_as_it_is(world, capsys):
+    example = os.path.join(os.path.dirname(__file__), *[os.pardir] * 4, "docs", "touchstone.example.json")
+    with open(example, encoding="utf-8") as f:
+        text = f.read()
+    (world.tmp / "repo" / ".touchstone.json").write_text(text)
+    code, out = run(world, capsys)
+    assert code == 0
+    assert out["limits"] == json.loads(text)
+
+
+def test_limits_are_read_whatever_unicode_encoding_the_json_uses(world, capsys):
+    (world.tmp / "repo" / ".touchstone.json").write_bytes('{"runBudget": 5}'.encode("utf-16"))
+    code, out = run(world, capsys)
+    assert code == 0
+    assert out["limits"] == {"runBudget": 5}
+
+
+@pytest.mark.parametrize("text, reason", [
+    ("{not json", "is not valid JSON"),
+    ("[]", "must hold a JSON object"),
+    ('{"maxRounds": 3}', "unknown key 'maxRounds'"),
+    ('{"runBudget": -1}', "'runBudget' must be a non-negative integer"),
+    ('{"runBudget": true}', "'runBudget' must be a non-negative integer"),
+    ('{"stageBudgets": 5}', "'stageBudgets' must map stage names to non-negative integers"),
+    ('{"stageBudgets": {"fix": "x"}}', "'stageBudgets' must map stage names to non-negative integers"),
+    ('{"stageBudgets": {"fixes": 1}}', "'stageBudgets' must map stage names to non-negative integers"),
+])
+def test_a_malformed_touchstone_json_is_a_setup_refusal(world, capsys, text, reason):
+    (world.tmp / "repo" / ".touchstone.json").write_text(text)
+    code, out = run(world, capsys)
+    assert code == 2
+    assert out["error"] == "bad-limits"
+    assert out["reason"] == f"{os.path.join(world.repo, '.touchstone.json')} {reason}"
+
+
 def test_fresh_refuses_a_name_that_exists_on_the_remote_only(world, capsys):
     git(world.seed, "branch", "fix/gh-163-prepare-worktree")
     git(world.origin, "fetch", "-q", str(world.seed), "fix/gh-163-prepare-worktree:fix/gh-163-prepare-worktree")
