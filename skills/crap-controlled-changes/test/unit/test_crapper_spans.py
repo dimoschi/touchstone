@@ -8,6 +8,8 @@ the package name off a parsed tree, and the tree-sitter helpers walk a tree of
 nodes shaped like tree-sitter-go's.
 """
 
+import builtins
+import codecs
 import sys
 import types
 from dataclasses import dataclass, field
@@ -56,21 +58,30 @@ def method(line, receiver):
 def crapper(monkeypatch):
     """Install a stand-in crapper; `.found` maps a path to the functions it holds,
     `.methods` to the method declarations its Go tree holds."""
-    state = types.SimpleNamespace(found={}, seen=[], package="calc", methods=[])
+    state = types.SimpleNamespace(found={}, seen=[], package="calc", methods=[], roots=[],
+                                  data=None, tree=None)
 
     def functions_in_file(language, source, path, root):
         state.seen.append((language, source, path, root))
         return state.found[path]
 
     def module_namespace(path, root):
+        state.roots.append(root)
         return path[:-len(".py")].replace("/", ".")
 
     def parse(source, language):
+        assert language == "go"
         tree = Node("source_file", tuple(state.methods))
-        return source.encode(), types.SimpleNamespace(root_node=tree)
+        state.data, state.tree = source.encode(), types.SimpleNamespace(root_node=tree)
+        return state.data, state.tree
 
     def package_clause(data, root):
+        assert data is state.data and root is state.tree.root_node
         return state.package
+
+    def node_text(data, node):
+        assert data is state.data
+        return node.text
 
     def descendants(node):
         stack = [node]
@@ -94,7 +105,7 @@ def crapper(monkeypatch):
     languages.golang = module("crapper.languages.golang", _package_clause=package_clause)
     treesitter = module("crapper.languages.treesitter", parse=parse, descendants=descendants,
                         child_of_type=child_of_type, start_line=lambda node: node.row + 1,
-                        node_text=lambda data, node: node.text)
+                        node_text=node_text)
     package.languages = languages
     languages.treesitter = treesitter
     return state
@@ -219,3 +230,40 @@ def test_a_missing_crapper_is_an_error_not_an_empty_report(tmp_path, monkeypatch
     (tmp_path / "a.py").write_text("")
     with pytest.raises(ImportError):
         run(tmp_path, "a.py")
+
+
+def test_a_class_name_that_starts_with_a_dot_or_x_keeps_every_letter(tmp_path, crapper, capsys):
+    (tmp_path / "mod.py").write_text("")
+    crapper.found["mod.py"] = [Function("m", "mod.XYZ", 1, 2, 3, "mod.py", "python")]
+    run(tmp_path, "mod.py")
+    assert capsys.readouterr().out == "mod.py\t2\t3\t1\tXYZ.m\t\n"
+
+
+def test_the_module_prefix_is_built_against_the_root_given(tmp_path, crapper):
+    (tmp_path / "mod.py").write_text("")
+    crapper.found["mod.py"] = [Function("m", "mod", 1, 2, 3, "mod.py", "python")]
+    run(tmp_path, "mod.py")
+    assert crapper.roots == [str(tmp_path)]
+
+
+def test_a_file_is_read_as_utf_8(tmp_path, crapper, monkeypatch):
+    (tmp_path / "a.py").write_text("")
+    crapper.found["a.py"] = []
+    opened = []
+    real_open = builtins.open
+
+    def spy(file, *args, **kwargs):
+        opened.append((str(file), kwargs.get("encoding")))
+        return real_open(file, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "open", spy)
+    run(tmp_path, "a.py")
+    [(_, encoding)] = [entry for entry in opened if entry[0].endswith("a.py")]
+    assert codecs.lookup(encoding).name == "utf-8"
+
+
+def test_the_root_option_is_required(capsys):
+    with pytest.raises(SystemExit) as refused:
+        crapper_spans.main(["a.py"])
+    assert refused.value.code == 2
+    assert "--root" in capsys.readouterr().err
