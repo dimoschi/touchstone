@@ -7,9 +7,11 @@ Files are repo-relative to --root and are Go or Python. Each row is
   <file> <start line> <end line> <complexity> <name> <package>
 where <name> is what a CRAP row is keyed on: "Class.method" or "func" for Python,
 "pkg.func" or "pkg.Recv.method" for Go (<package> is the Go package clause, and
-empty for Python). A Go receiver is named as written, minus its star, type
-parameters included (`pkg.Stack[T].Push`): crapper's own namespace drops them,
-and the id is what a function's refactor attempts are filed under.
+empty for Python). A Go receiver is named as written, minus its star and every
+space, type parameters included (`pkg.Map[K,V].Get`): crapper's own namespace
+drops them, and the id is what a function's refactor attempts are filed under.
+It carries no whitespace because the Go rows that carry it downstream are split
+on whitespace.
 
 crapper is imported, never run as a command: its CLI writes .metrics/*.edn into
 the project, and its coverage step installs tools and reports 0% when it fails.
@@ -53,7 +55,8 @@ def python_rows(crapper, functions, source, path, root):
 def _receiver_type(crapper, data, method):
     receiver = crapper.child_of_type(method, "parameter_list")
     declaration = crapper.child_of_type(receiver, "parameter_declaration")
-    return crapper.node_text(data, declaration.child_by_field_name("type")).removeprefix("*")
+    written = crapper.node_text(data, declaration.child_by_field_name("type"))
+    return "".join(written.split()).removeprefix("*")
 
 
 def go_rows(crapper, functions, source, path, root):

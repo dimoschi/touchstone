@@ -159,6 +159,22 @@ def test_a_go_method_keeps_the_type_parameters_its_receiver_declares(tmp_path, c
     ]
 
 
+def test_a_go_method_id_has_no_whitespace_however_the_receiver_is_spaced(tmp_path, crapper, capsys):
+    (tmp_path / "gen.go").write_text("package calc")
+    crapper.found["gen.go"] = [
+        Function("Get", "example.com/m/calc.Map", 1, 5, 7, "gen.go", "go"),
+        Function("Put", "example.com/m/calc.Map", 1, 9, 11, "gen.go", "go"),
+        Function("Len", "example.com/m/calc.Stack", 1, 13, 15, "gen.go", "go"),
+    ]
+    crapper.methods = [method(5, "*Map[K, V]"), method(9, "Map[K,  V]"), method(13, "* Stack[T]")]
+    run(tmp_path, "gen.go")
+    assert capsys.readouterr().out.splitlines() == [
+        "gen.go\t5\t7\t1\tcalc.Map[K,V].Get\tcalc",
+        "gen.go\t9\t11\t1\tcalc.Map[K,V].Put\tcalc",
+        "gen.go\t13\t15\t1\tcalc.Stack[T].Len\tcalc",
+    ]
+
+
 def test_the_go_package_clause_decides_the_package_not_the_directory(tmp_path, crapper, capsys):
     (tmp_path / "x.go").write_text("package other")
     crapper.package = "other"

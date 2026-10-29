@@ -105,10 +105,13 @@ is a Go file the default build leaves out (`go list`: another GOOS, an ignore ta
 nothing can measure it, so it is not scored, unless the profile has blocks for it,
 which is what `CRAP_GO_TEST_COMMAND` building with tags produces.
 
-A Go method's id is its receiver as written, minus the star, type parameters
-included (`pkg.Stack[T].Push`), which is what go-crap named it. crapper's own
+A Go method's id is its receiver as written, minus the star and any whitespace,
+type parameters included (`pkg.Stack[T].Push`, `pkg.Map[K,V].Get`). crapper's own
 namespace drops them, so `lib/crapper_spans.py` reads the receiver off the tree:
 a function's refactor attempts in `crap-check-state.json` are filed under its id.
+The whitespace goes because the Go rows that carry the id are split on whitespace
+(`parse_gocover.py` writes them, `classify_rows.py` reads them): `Map[K, V]` would
+become two fields and every method of the type one row.
 
 ### The duplication gate
 

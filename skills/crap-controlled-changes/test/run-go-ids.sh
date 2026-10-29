@@ -2,9 +2,10 @@
 # run-go-ids.sh: the ids lib/crapper_spans.py gives Go functions, with the real crapper.
 #
 # A function's id is what its refactor attempts are filed under in
-# crap-check-state.json, so it has to stay what it was when go-crap named it: a
-# method is "<pkg>.<receiver as written, minus its star>.<name>", type
-# parameters included. crapper's own namespace drops them.
+# crap-check-state.json: a method is "<pkg>.<receiver as written, minus its star
+# and any whitespace>.<name>", type parameters included. crapper's own namespace
+# drops them. The Go rows carrying the id are split on whitespace, so a receiver
+# like Map[K, V] must not keep its space.
 
 set -euo pipefail
 
@@ -35,6 +36,12 @@ func (w *Widget) Run() {}
 
 func (Widget) Name() string { return "widget" }
 
+type Map[K comparable, V any] struct{ items map[K]V }
+
+func (m *Map[K, V]) Get(k K) V { return m.items[k] }
+
+func (m * Map[K, V]) Put(k K, v V) { m.items[k] = v }
+
 func Plain() {}
 GO
 
@@ -46,6 +53,8 @@ WANT='ids.Stack[T].Push
 ids.Stack[T].Len
 ids.Widget.Run
 ids.Widget.Name
+ids.Map[K,V].Get
+ids.Map[K,V].Put
 ids.Plain'
 
 if [ "$GOT" = "$WANT" ]; then
