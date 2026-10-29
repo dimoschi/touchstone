@@ -161,7 +161,7 @@ def test_a_span_row_whose_package_ends_in_x_keeps_it(tmp_path, capsys):
 
 
 def test_a_profile_field_without_a_colon_is_not_a_block():
-    assert parse_gocover._block("a.go2.2,4.3 1 1") is None
+    assert parse_gocover._block("2.2,4.3 1 1") is None
 
 
 def test_a_profile_field_without_a_comma_is_not_a_block():
