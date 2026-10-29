@@ -72,6 +72,8 @@ jobs:
       - uses: actions/setup-python@v6
         with:
           python-version: '3.12'
+      # The gates run crapper (complexity) and dryer (duplication) through uv.
+      - uses: astral-sh/setup-uv@v10.1.0
       - name: Configure git and a throwaway commit-signing key
         run: |
           git config --global user.email ci@example.com

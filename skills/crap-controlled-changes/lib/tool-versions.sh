@@ -14,3 +14,5 @@
 MUTAGO_VERSION_DEFAULT=v2.8.1
 GOCRAP_VERSION_DEFAULT=v0.5.0
 DEADCODE_VERSION_DEFAULT=v0.49.0
+# unclebob/dryer has no release to pin, so a commit SHA stands in for a version.
+DRYER_SHA_DEFAULT=66ff6d21a42c04afcad89c78a80066176d1294b0

@@ -22,9 +22,10 @@ class Thresholds(NamedTuple):
     hard: float
     main: float
     cognitive: float
+    duplication: float
 
 
-DEFAULTS = Thresholds(soft=6.0, hard=8.0, main=5.0, cognitive=15.0)
+DEFAULTS = Thresholds(soft=6.0, hard=8.0, main=5.0, cognitive=15.0, duplication=0.82)
 
 # The marker's other lines are gitignore-style exemption patterns, so a key added
 # here must also be skipped by lib/unsupported-sources.sh or it becomes a pattern.
@@ -33,6 +34,7 @@ SETTINGS = {
     "crap-hard": "hard",
     "main-complexity": "main",
     "cognitive-complexity": "cognitive",
+    "duplication-threshold": "duplication",
 }
 
 

@@ -24,6 +24,7 @@ set -euo pipefail
 SKILL_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CRAP_CHECK="$SKILL_DIR/crap-check.sh"
 DEADCODE_CHECK="$SKILL_DIR/deadcode-check.sh"
+DUP_CHECK="$SKILL_DIR/dup-check.sh"
 . "$SKILL_DIR/lib/require-bash.sh"
 # Injected git config outranks the repo's own .git/config, so imposing a key
 # here silently overrides a repo that signs with a different one. Only ever set
@@ -34,8 +35,9 @@ usage() {
   {
     echo "usage: crap-commit.sh <absolute-repo-path> -m \"message\" [git commit flags...]"
     echo ""
-    echo "  Runs the dead-code and CRAP gates in that repo and commits the staged"
-    echo "  diff only if both are green. Signing follows the repo's git config."
+    echo "  Runs the dead-code, duplication and CRAP gates in that repo and commits"
+    echo "  the staged diff only if all are green. Signing follows the repo's git"
+    echo "  config."
     echo "  Stage your files first; -a is refused."
   } >&2
   exit 2
@@ -139,10 +141,11 @@ run_gate() {
   fi
 }
 
-# Dead-code first: it is static analysis, while the CRAP gate runs the test suite
-# twice. Failing on the cheap gate first saves the expensive one when the diff
-# adds code nothing can reach anyway.
+# The static gates first: the CRAP gate runs the test suite twice. Failing on a
+# cheap gate first saves the expensive one when the diff adds code nothing can
+# reach, or a copy of code already there, anyway.
 run_gate "the dead-code gate" "$DEADCODE_CHECK"
+run_gate "the duplication gate" "$DUP_CHECK"
 run_gate "the CRAP gate" "$CRAP_CHECK"
 
 COMMIT_STATUS=0
