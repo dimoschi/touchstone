@@ -9,7 +9,7 @@
 # or above the threshold when the staged diff is what created it.
 #
 # Only pairs the diff introduces are reported: a duplicate already at HEAD, in a
-# file that is merely edited elsewhere, never blocks. See lib/dup_scan.py.
+# file that is merely edited, moved or renamed, never blocks. See lib/dup_scan.py.
 #
 #   dup-check.sh                      check the staged diff
 #   dup-check.sh --accept '<key>'     record a user-approved exception
@@ -18,7 +18,8 @@
 # A key is "<side>|<side>", printed on each finding. Acceptance is per branch and
 # needs explicit user approval: some duplication is deliberate (two handlers that
 # are meant to stay in step), which is why the escape hatch is recorded rather
-# than absent. It lapses when either function's structure changes.
+# than absent. It lapses when either function's structure changes, or when its
+# file gains another copy of it.
 #
 # Runs only in a repo carrying .crap-gated, which also holds its settings:
 #   duplication-threshold = 0.82   pairs scoring at or above this are reported
@@ -69,23 +70,25 @@ while IFS= read -r ex; do
   [ -n "$ex" ] && EXEMPT_SPEC+=("$ex")
 done < <(crap_exempt_pathspecs "$REPO_ROOT")
 
-# The same files crap-check.sh scores for Go and Python: tests and generated
-# code are not authored in this repo, and a copy there is not a finding.
+# The files crap-check.sh scores for Go and Python, less vendor/: tests,
+# generated code and third-party code are not authored in this repo, and a copy
+# there is not a finding.
 DUP_SPEC=('*.go' '*.py'
-          ':(exclude)*_test.go' ':(exclude)*mock_*.go' ':(exclude)*.sql.go' ':(exclude)*.pb.go'
+          ':(exclude)*_test.go' ':(exclude)*mock_*.go' ':(exclude)*_mock.go'
+          ':(exclude)*.sql.go' ':(exclude)*.pb.go' ':(glob,exclude)**/vendor/**'
           ':(exclude)**/test_*.py' ':(exclude)**/*_test.py'
           ':(exclude)tests/**' ':(exclude)**/tests/**'
           ':(exclude)conftest.py' ':(exclude)**/conftest.py'
           ${EXEMPT_SPEC[@]+"${EXEMPT_SPEC[@]}"})
 
-STAGED_LIST="$(mktemp)"
+CHANGES_LIST="$(mktemp)"
 POOL_LIST="$(mktemp)"
 FOUND="$(mktemp)"
 SCAN_ERR="$(mktemp)"
-trap 'rm -f "$STAGED_LIST" "$POOL_LIST" "$FOUND" "$SCAN_ERR"' EXIT
+trap 'rm -f "$CHANGES_LIST" "$POOL_LIST" "$FOUND" "$SCAN_ERR"' EXIT
 
-git -c core.quotePath=false diff --cached --name-only --diff-filter=d -- "${DUP_SPEC[@]}" > "$STAGED_LIST"
-if [ ! -s "$STAGED_LIST" ]; then
+git -c core.quotePath=false diff --cached -M --name-status -- "${DUP_SPEC[@]}" > "$CHANGES_LIST"
+if ! grep -qv '^D' "$CHANGES_LIST"; then
   echo "dup-check: no staged Go or Python files"
   exit 0
 fi
@@ -97,7 +100,7 @@ THRESHOLD="$(python3 "$LIB_DIR/thresholds.py" --repo-root "$REPO_ROOT" --show du
 
 SCAN_STATUS=0
 pinned_run dryer "$DRYER_SHA_DEFAULT" "${CRAP_DRYER_RUN:-}" "$LIB_DIR/dup_scan.py" \
-  --root "$REPO_ROOT" --threshold "$THRESHOLD" --staged "$STAGED_LIST" --pool "$POOL_LIST" \
+  --root "$REPO_ROOT" --threshold "$THRESHOLD" --changes "$CHANGES_LIST" --pool "$POOL_LIST" \
   > "$FOUND" 2> "$SCAN_ERR" || SCAN_STATUS=$?
 if [ "$SCAN_STATUS" -ne 0 ]; then
   {

@@ -1,12 +1,14 @@
 #!/usr/bin/env python3
 """Duplicates a staged change introduces, found with dryer's structural comparison.
 
-Usage: dup_scan.py [--root DIR] --threshold T --staged FILE --pool FILE
+Usage: dup_scan.py [--root DIR] --threshold T --changes FILE --pool FILE
 
---staged and --pool name files holding one repo-relative path per line: the
-staged Go and Python files, and every tracked Go and Python file to compare them
-against. Forms are read from the index (`:path`) and, for the staged files, from
-HEAD, through one `git cat-file --batch`, so the working tree never matters.
+--changes holds `git diff --cached -M --name-status` for the staged Go and Python
+files, and --pool one repo-relative path per line for every tracked Go and Python
+file to compare them against. Forms are read from the index (`:path`) and, for
+what the change replaced, from HEAD (`HEAD:path` of each changed file, a rename's
+old name and a deleted file included), through one `git cat-file --batch`, so the
+working tree never matters.
 
 dryer is imported, never run as a command: its CLI writes .metrics/dry.edn into
 the project and cannot compare a blob. It is not importable outside the
@@ -14,11 +16,14 @@ environment lib/uv-pinned.sh builds, so this is run through that.
 
 Prints one line per introduced pair, best score first:
   DUPLICATE score=0.91 a.py:3-12 b.py:5-14 key=<side>|<side>
-A side is "<file>#<digest of the form's normalized structure>". A pair is
-introduced when either side occurs more often among the staged file's forms in
-the index than at HEAD: a new copy, a third copy, or a form whose structure
-changed. A duplicate that was already at HEAD, in a file only edited elsewhere,
-is therefore not reported.
+A side is "<file>#<digest of the form's normalized structure>x<copies>", copies
+being how many forms of that structure the file holds, so an acceptance of a
+same-file pair covers those copies and not a further one. A pair is introduced
+when either side occurs more often among the staged file's forms in the index
+than at HEAD, and its structure occurs more often across the whole change: a new
+copy, a third copy, or a form whose structure changed. A duplicate that was
+already at HEAD, in a file only edited elsewhere, moved to another file or
+renamed with its file, is therefore not reported.
 """
 
 import argparse
@@ -82,15 +87,33 @@ def entries_of(blobs, name, path, dryer):
     return [entry for entry in found if _kept(entry)]
 
 
-def side_key(entry):
+def _digest(entry):
     structure = "\n".join(sorted(entry.fingerprints))
-    return f"{entry.file}#{hashlib.sha1(structure.encode()).hexdigest()[:12]}"
+    return hashlib.sha1(structure.encode()).hexdigest()[:12]
 
 
-def new_keys(now, before):
-    """Side keys that occur more often now than at HEAD, counting every copy."""
-    was = Counter(map(side_key, before))
-    return {key for key, count in Counter(map(side_key, now)).items() if count > was[key]}
+def _identity(entry):
+    return entry.file, _digest(entry)
+
+
+def side_key(entry, copies):
+    return f"{entry.file}#{_digest(entry)}x{copies[_identity(entry)]}"
+
+
+def _more_often(now, before):
+    was = Counter(before)
+    return {key for key, count in Counter(now).items() if count > was[key]}
+
+
+def fresh_forms(now, before):
+    """Identities that occur more often now than at HEAD, counting every copy.
+
+    A structure that occurs no more often across the whole change was moved, to
+    another file or under another name, and no copy of it was added.
+    """
+    added = _more_often(map(_digest, now), map(_digest, before))
+    return {form for form in _more_often(map(_identity, now), map(_identity, before))
+            if form[1] in added}
 
 
 def _span(entry):
@@ -112,13 +135,13 @@ def pairs(staged, pool, threshold, jaccard):
 
 def introduced(found, fresh):
     for score, left, right in found:
-        if side_key(left) in fresh or side_key(right) in fresh:
+        if _identity(left) in fresh or _identity(right) in fresh:
             first, second = sorted((left, right), key=_span)
             yield score, first, second
 
 
-def line_for(score, first, second):
-    key = "|".join(sorted((side_key(first), side_key(second))))
+def line_for(score, first, second, copies):
+    key = "|".join(sorted((side_key(first, copies), side_key(second, copies))))
     return (f"DUPLICATE score={score:.2f} {first.file}:{first.start_line}-{first.end_line} "
             f"{second.file}:{second.start_line}-{second.end_line} key={key}")
 
@@ -128,9 +151,24 @@ def _paths(listing):
         return [line.rstrip("\n") for line in handle if line.strip()]
 
 
+def _changes(listing):
+    """[(path at HEAD, path in the index, None when deleted)] from `git diff --name-status`."""
+    changes = []
+    for line in _paths(listing):
+        status, *paths = line.split("\t")
+        changes.append((paths[0], None if status.startswith("D") else paths[-1]))
+    return changes
+
+
 def _forms(blobs, prefix, paths, dryer):
     """{path: its forms, read from git under prefix + path}."""
     return {path: entries_of(blobs, f"{prefix}{path}", path, dryer) for path in paths}
+
+
+def _replaced(blobs, changes, dryer):
+    """The forms at HEAD of what the change replaced, labelled by where they went."""
+    return [entry for old, new in changes
+            for entry in entries_of(blobs, f"HEAD:{old}", new or old, dryer)]
 
 
 def _flatten(forms, paths):
@@ -143,30 +181,32 @@ def _best_first(found):
 
 
 def scan(args, dryer):
-    """Every pair the staged files introduce, best score first."""
-    staged_paths, pool_paths = _paths(args.staged), _paths(args.pool)
+    """The DUPLICATE line of every pair the staged files introduce, best score first."""
+    changes, pool_paths = _changes(args.changes), _paths(args.pool)
+    staged_paths = [new for _, new in changes if new]
     with Blobs(args.root) as blobs:
         index = _forms(blobs, ":", dict.fromkeys(pool_paths + staged_paths), dryer)
-        head = _forms(blobs, "HEAD:", staged_paths, dryer)
-    staged = _flatten(index, staged_paths)
-    fresh = new_keys(staged, _flatten(head, staged_paths))
-    found = introduced(pairs(staged, _flatten(index, index), args.threshold, dryer.jaccard), fresh)
-    return sorted(found, key=_best_first)
+        before = _replaced(blobs, changes, dryer)
+    staged, everything = _flatten(index, staged_paths), _flatten(index, index)
+    fresh = fresh_forms(staged, before)
+    found = introduced(pairs(staged, everything, args.threshold, dryer.jaccard), fresh)
+    copies = Counter(map(_identity, everything))
+    return [line_for(*pair, copies) for pair in sorted(found, key=_best_first)]
 
 
 def _arguments(argv):
     parser = argparse.ArgumentParser()
     parser.add_argument("--root", default=".")
     parser.add_argument("--threshold", type=float, required=True)
-    parser.add_argument("--staged", required=True)
+    parser.add_argument("--changes", required=True)
     parser.add_argument("--pool", required=True)
     return parser.parse_args(argv)
 
 
 def main(argv=None):
     args = _arguments(argv)
-    for found in scan(args, _dryer()):
-        print(line_for(*found))
+    for line in scan(args, _dryer()):
+        print(line)
     return 0
 
 

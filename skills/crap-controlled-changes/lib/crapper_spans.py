@@ -7,7 +7,9 @@ Files are repo-relative to --root and are Go or Python. Each row is
   <file> <start line> <end line> <complexity> <name> <package>
 where <name> is what a CRAP row is keyed on: "Class.method" or "func" for Python,
 "pkg.func" or "pkg.Recv.method" for Go (<package> is the Go package clause, and
-empty for Python).
+empty for Python). A Go receiver is named as written, minus its star, type
+parameters included (`pkg.Stack[T].Push`): crapper's own namespace drops them,
+and the id is what a function's refactor attempts are filed under.
 
 crapper is imported, never run as a command: its CLI writes .metrics/*.edn into
 the project, and its coverage step installs tools and reports 0% when it fails.
@@ -27,9 +29,11 @@ LANGUAGES = {".py": "python", ".go": "go"}
 
 def _crapper():
     from crapper.languages import functions_in_file, golang, python
-    from crapper.languages.treesitter import absolute_path, parse
+    from crapper.languages.treesitter import (child_of_type, descendants, node_text, parse,
+                                              start_line)
     return SimpleNamespace(functions_in_file=functions_in_file, golang=golang, python=python,
-                           absolute_path=absolute_path, parse=parse)
+                           child_of_type=child_of_type, descendants=descendants,
+                           node_text=node_text, parse=parse, start_line=start_line)
 
 
 def _inside(namespace, prefix):
@@ -46,11 +50,18 @@ def python_rows(crapper, functions, source, path, root):
     return [(fn, _qualified(fn.name, _inside(fn.namespace, module)), "") for fn in functions]
 
 
+def _receiver_type(crapper, data, method):
+    receiver = crapper.child_of_type(method, "parameter_list")
+    declaration = crapper.child_of_type(receiver, "parameter_declaration")
+    return crapper.node_text(data, declaration.child_by_field_name("type")).removeprefix("*")
+
+
 def go_rows(crapper, functions, source, path, root):
     data, tree = crapper.parse(source, "go")
     package = crapper.golang._package_clause(data, tree.root_node)
-    package_ns = crapper.golang.package_namespace(crapper.absolute_path(path, root), package)
-    return [(fn, f"{package}.{_qualified(fn.name, _inside(fn.namespace, package_ns))}", package)
+    receivers = {crapper.start_line(node): _receiver_type(crapper, data, node)
+                 for node in crapper.descendants(tree.root_node) if node.type == "method_declaration"}
+    return [(fn, f"{package}.{_qualified(fn.name, receivers.get(fn.start_line, ''))}", package)
             for fn in functions]
 
 

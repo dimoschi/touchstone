@@ -200,6 +200,52 @@ OUT="$(CRAP_DRYER_RUN=false "$SCRIPT" "$R" 2>&1)" || STATUS=$?
 expect_status   "exit 0"                 0
 expect_contains "says nothing to check"  "no staged Go or Python files"
 
+echo "case I: renaming a file does not introduce a duplicate it already held"
+R="$(new_repo i "")"
+py_function total_price total > "$R/pkg/a.py"
+py_function order_cost cost > "$R/pkg/c.py"
+commit_all "$R" "two copies"
+git -C "$R" mv pkg/a.py pkg/b.py
+run_gate "$R"
+expect_status   "exit 0"                 0
+expect_contains "says so"                "DUPLICATION_OK"
+
+echo "case J: vendored code is not something a new function can duplicate"
+R="$(new_repo j "")"
+mkdir -p "$R/vendor/example.com/lib"
+{ printf 'package lib\n\ntype Item struct {\n\tPrice float64\n\tQty   int\n}\n\n'; go_function Total total; } \
+  > "$R/vendor/example.com/lib/lib.go"
+commit_all "$R" "vendor a library"
+{ printf 'package shop\n\n'; go_function OrderCost cost; } > "$R/pkg/b.go"
+git -C "$R" add pkg/b.go
+run_gate "$R"
+expect_status   "exit 0"                 0
+expect_contains "says so"                "DUPLICATION_OK"
+
+echo "case K: a generated mock is not compared, in either spelling"
+R="$(new_repo k "")"
+{ printf 'package shop\n\n'; go_function TotalPrice total; go_function OrderCost cost; } > "$R/pkg/store_mock.go"
+git -C "$R" add pkg/store_mock.go
+run_gate "$R"
+expect_status   "exit 0"                 0
+expect_contains "finds nothing to check" "no staged Go or Python files"
+
+echo "case L: accepting a pair in one file does not accept a further copy there"
+R="$(new_repo l "")"
+{ py_function handle_a first; printf '\n\n'; py_function handle_b second; } > "$R/pkg/h.py"
+git -C "$R" add pkg/h.py
+run_gate "$R"
+expect_status   "exit 1"                 1
+KEY="$(printf '%s\n' "$OUT" | sed -n 's/.*key=//p' | sed -n 1p)"
+"$SCRIPT" "$R" --accept "$KEY" >/dev/null 2>&1
+run_gate "$R"
+expect_status   "exit 0 once accepted"   0
+{ py_function handle_a first; printf '\n\n'; py_function handle_b second; printf '\n\n'
+  py_function handle_c third; printf '\n\n'; py_function handle_d fourth; } > "$R/pkg/h.py"
+git -C "$R" add pkg/h.py
+run_gate "$R"
+expect_status   "exit 1 for the further copies" 1
+
 echo ""
 if [ "$failures" -eq 0 ]; then
   echo "DUP OK"

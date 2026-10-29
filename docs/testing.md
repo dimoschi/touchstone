@@ -61,9 +61,14 @@ runs every scenario it defines.
 
 `skills/crap-controlled-changes/test/run-dup.sh` runs `dup-check.sh` against throwaway
 repos with the real dryer (a Python copy and a Go copy of a function, an unrelated edit
-beside a duplicate already at HEAD, `--accept` and `--revoke`, a threshold override, an
-exempt path, and that no `.metrics/`, venv or cache is left behind). It needs `uv` and a
-network. `run-pinned-runner.sh` covers `lib/uv-pinned.sh` and what each gate does on a
+beside a duplicate already at HEAD, a rename, vendored code and generated mocks left out,
+`--accept` and `--revoke` including a further copy after an acceptance, a threshold
+override, an exempt path, and that no `.metrics/`, venv or cache is left behind). It needs
+`uv` and a network. `run-go-ids.sh` runs the real crapper over a Go file and checks the
+ids its methods get, generic receivers included; it needs `uv` and a network too.
+`run-go-selection.sh` checks which staged Go files `crap-check.sh` hands the Go module
+(tests, generated code and both spellings of a mock are left out), with the module
+stubbed. `run-pinned-runner.sh` covers `lib/uv-pinned.sh` and what each gate does on a
 machine without uv, hermetically: uv is a stub that records its arguments, and a PATH
 holding no uv stands in for the machine.
 

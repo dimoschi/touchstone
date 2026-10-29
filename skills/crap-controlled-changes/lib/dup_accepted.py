@@ -11,9 +11,10 @@ Usage:
 finding, and exits 1 if any are unaccepted.
 
 A key is "<side>|<side>", the two sides sorted, exactly as dup_scan.py prints it.
-A side is "<repo-relative-file>#<digest of the function's structure>", so an
-acceptance follows the duplicated code and lapses as soon as either function's
-shape changes, rather than silently covering whatever lands at those lines next.
+A side is "<repo-relative-file>#<digest of the function's structure>x<copies>",
+so an acceptance follows the duplicated code and lapses as soon as either
+function's shape changes or its file gains another copy, rather than silently
+covering whatever lands next.
 """
 
 import argparse

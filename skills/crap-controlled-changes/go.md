@@ -33,7 +33,7 @@ The helper:
 
 Coverage profiles are written to temp files and removed after each measurement; nothing is left in the working tree.
 
-Complexity is crapper's, not the Go toolchain's: one for the function, plus one for each `if`, `for` (a `range` loop is a `for`), `case` of a `switch` or type switch (a `default` included), `select` clause, and `&&` or `||`. A function literal inside a function is counted in the function that holds it. Coverage per function is the share of the function's coverage blocks that ran, each block counted once however often the profile repeats it. A changed file with functions that the profile has no block for was not part of the coverage run, which is exit 4, not a 0% row. A file the build leaves out (another `GOOS`, an ignore tag) is not scored and is not an error. The scores of functions you did not touch can move the first time a repo is measured this way, since the counting rules differ from the tools it replaced.
+Complexity is crapper's, not the Go toolchain's: one for the function, plus one for each `if`, `for` (a `range` loop is a `for`), `case` of a `switch` or type switch (a `default` included), `select` clause, and `&&` or `||`. A function literal inside a function is counted in the function that holds it. Coverage per function is the share of the function's coverage blocks that ran, each block counted once however often the profile repeats it. A changed file with functions that the profile has no block for was not part of the coverage run, which is exit 4, not a 0% row. A file the default build leaves out (another `GOOS`, an ignore tag) is not scored and is not an error, unless the profile has blocks for it, as it does when `CRAP_GO_TEST_COMMAND` builds with that tag: then it is scored. A method is named by its receiver as written, minus the star, type parameters included (`pkg.Stack[T].Push`). The scores of functions you did not touch can move the first time a repo is measured this way, since the counting rules differ from the tools it replaced.
 
 After the CRAP table, the helper also runs `gocognit -over <cognitive-complexity>` (default 15) on the same files and prints a "Cognitive complexity" section if any function exceeds the threshold. This is advisory (see SKILL.md).
 
@@ -67,7 +67,7 @@ When ignored source files are present, the diagnostic names them and labels the 
 
 The gate deliberately does **not** use `git stash push --all`. That would hide the underlying problem, and stashing build caches, vendored trees, and `.env` files is slow and risks losing them. Reporting is safer than hiding.
 
-Note that the selection excludes in `crap-check.sh` (`*_test.go`, `*mock_*.go`, `*.sql.go`) control only which files get *scored*. They have no effect on the stash: an excluded file still sits in the working tree during the baseline and still has to compile.
+Note that the selection excludes in `crap-check.sh` (`*_test.go`, `*mock_*.go`, `*_mock.go`, `*.sql.go`, `*.pb.go`) control only which files get *scored*. They have no effect on the stash: an excluded file still sits in the working tree during the baseline and still has to compile.
 
 ### Exit codes
 

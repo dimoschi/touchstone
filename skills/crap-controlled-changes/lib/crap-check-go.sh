@@ -194,9 +194,11 @@ score_module() {
   spans="$(mktemp)"
   unprofiled="$(mktemp)"
 
-  # Which of the changed files this build includes. A file a build constraint
-  # leaves out (another GOOS, an ignore tag) has no block in the profile, and
-  # reading that as "unmeasured" would refuse a change nothing can measure.
+  # Which of the changed files the default build includes. A file a build
+  # constraint leaves out (another GOOS, an ignore tag) has no block in the
+  # profile, and reading that as "unmeasured" would refuse a change nothing can
+  # measure. Only the profile can overrule this: CRAP_GO_TEST_COMMAND may build
+  # with tags `go list` does not see.
   (cd "$root/$mod" && go list -e \
      -f '{{range .GoFiles}}{{$.Dir}}/{{.}}{{"\n"}}{{end}}{{range .CgoFiles}}{{$.Dir}}/{{.}}{{"\n"}}{{end}}' \
      "${patterns[@]}") >"$built" 2>"$RAW_ERR" || status=$?

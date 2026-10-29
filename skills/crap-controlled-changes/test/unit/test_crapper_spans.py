@@ -3,13 +3,14 @@
 The stand-in mirrors the parts of crapper's API the script reads, as they are at
 the pinned commit: `functions_in_file` returns Function-like records whose
 `namespace` is the module (Python) or import path (Go) plus any class or
-receiver, `_module_namespace` and `package_namespace` build that prefix, and
-`_package_clause` reads the package name off a parsed tree.
+receiver, `_module_namespace` builds the Python prefix, `_package_clause` reads
+the package name off a parsed tree, and the tree-sitter helpers walk a tree of
+nodes shaped like tree-sitter-go's.
 """
 
 import sys
 import types
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import pytest
 
@@ -27,10 +28,35 @@ class Function:
     language: str
 
 
+@dataclass(frozen=True)
+class Node:
+    type: str
+    children: tuple = ()
+    text: str = ""
+    row: int = 0
+    fields: dict = field(default_factory=dict)
+
+    @property
+    def start_point(self):
+        return (self.row, 0)
+
+    def child_by_field_name(self, name):
+        return self.fields[name]
+
+
+def method(line, receiver):
+    """`func (s <receiver>) M()` on <line>, reduced to the nodes the script reads."""
+    written = Node("type", text=receiver)
+    declaration = Node("parameter_declaration", (Node("identifier", text="s"), written),
+                       fields={"type": written})
+    return Node("method_declaration", (Node("parameter_list", (declaration,)),), row=line - 1)
+
+
 @pytest.fixture
 def crapper(monkeypatch):
-    """Install a stand-in crapper; `.found` maps a path to the functions it holds."""
-    state = types.SimpleNamespace(found={}, seen=[], package="calc", go_namespace="example.com/m/calc")
+    """Install a stand-in crapper; `.found` maps a path to the functions it holds,
+    `.methods` to the method declarations its Go tree holds."""
+    state = types.SimpleNamespace(found={}, seen=[], package="calc", methods=[])
 
     def functions_in_file(language, source, path, root):
         state.seen.append((language, source, path, root))
@@ -39,15 +65,22 @@ def crapper(monkeypatch):
     def module_namespace(path, root):
         return path[:-len(".py")].replace("/", ".")
 
-    def package_namespace(path, package):
-        state.seen.append(("package_namespace", path, package))
-        return state.go_namespace
-
     def parse(source, language):
-        return source.encode(), types.SimpleNamespace(root_node=object())
+        tree = Node("source_file", tuple(state.methods))
+        return source.encode(), types.SimpleNamespace(root_node=tree)
 
     def package_clause(data, root):
         return state.package
+
+    def descendants(node):
+        stack = [node]
+        while stack:
+            current = stack.pop()
+            yield current
+            stack.extend(reversed(current.children))
+
+    def child_of_type(node, *kinds):
+        return next((child for child in node.children if child.type in kinds), None)
 
     def module(name, **attributes):
         made = types.ModuleType(name)
@@ -58,10 +91,10 @@ def crapper(monkeypatch):
     package = module("crapper")
     languages = module("crapper.languages", functions_in_file=functions_in_file)
     languages.python = module("crapper.languages.python", _module_namespace=module_namespace)
-    languages.golang = module("crapper.languages.golang", package_namespace=package_namespace,
-                              _package_clause=package_clause)
-    treesitter = module("crapper.languages.treesitter", parse=parse,
-                        absolute_path=lambda path, root: f"{root}/{path}")
+    languages.golang = module("crapper.languages.golang", _package_clause=package_clause)
+    treesitter = module("crapper.languages.treesitter", parse=parse, descendants=descendants,
+                        child_of_type=child_of_type, start_line=lambda node: node.row + 1,
+                        node_text=lambda data, node: node.text)
     package.languages = languages
     languages.treesitter = treesitter
     return state
@@ -103,9 +136,27 @@ def test_a_go_function_is_named_by_its_package(tmp_path, crapper, capsys):
 def test_a_go_method_is_named_by_package_and_receiver(tmp_path, crapper, capsys):
     (tmp_path / "calc.go").write_text("package calc")
     crapper.found["calc.go"] = [Function("Run", "example.com/m/calc.Widget", 2, 1, 5, "calc.go", "go")]
+    crapper.methods = [method(1, "*Widget")]
     run(tmp_path, "calc.go")
     assert capsys.readouterr().out == "calc.go\t1\t5\t2\tcalc.Widget.Run\tcalc\n"
-    assert ("package_namespace", f"{tmp_path}/calc.go", "calc") in crapper.seen
+
+
+def test_a_go_method_keeps_the_type_parameters_its_receiver_declares(tmp_path, crapper, capsys):
+    (tmp_path / "gen.go").write_text("package calc")
+    crapper.found["gen.go"] = [
+        Function("Push", "example.com/m/calc.Stack", 1, 5, 7, "gen.go", "go"),
+        Function("Len", "example.com/m/calc.Stack", 1, 9, 11, "gen.go", "go"),
+        Function("Run", "example.com/m/calc.Widget", 2, 13, 15, "gen.go", "go"),
+        Function("Plain", "example.com/m/calc", 1, 17, 19, "gen.go", "go"),
+    ]
+    crapper.methods = [method(5, "*Stack[T]"), method(9, "Stack[T]"), method(13, "Widget")]
+    run(tmp_path, "gen.go")
+    assert capsys.readouterr().out.splitlines() == [
+        "gen.go\t5\t7\t1\tcalc.Stack[T].Push\tcalc",
+        "gen.go\t9\t11\t1\tcalc.Stack[T].Len\tcalc",
+        "gen.go\t13\t15\t2\tcalc.Widget.Run\tcalc",
+        "gen.go\t17\t19\t1\tcalc.Plain\tcalc",
+    ]
 
 
 def test_the_go_package_clause_decides_the_package_not_the_directory(tmp_path, crapper, capsys):

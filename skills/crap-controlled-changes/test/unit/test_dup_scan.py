@@ -60,18 +60,22 @@ def dryer(monkeypatch):
     module("dryer.shape", jaccard=jaccard)
 
 
-def key_of(path, fingerprints):
+def key_of(path, fingerprints, copies=1):
     digest = hashlib.sha1("\n".join(sorted(fingerprints.split(","))).encode()).hexdigest()
-    return f"{path}#{digest[:12]}"
+    return f"{path}#{digest[:12]}x{copies}"
 
 
 def scan(repo, staged, threshold=0.8, pool=None, extra=()):
+    """Scan what `git diff --cached --name-status` would list: `staged` paths as
+    modified, unless a name-status line is given whole."""
     lists = repo.root.parent
-    (lists / "staged.txt").write_text("".join(f"{p}\n" for p in staged))
-    pool = staged if pool is None else pool
+    changes = (p if "\t" in p else f"M\t{p}" for p in staged)
+    (lists / "changes.txt").write_text("".join(f"{line}\n" for line in changes))
+    paths = [p.split("\t")[-1] for p in staged if not p.startswith("D\t")]
+    pool = paths if pool is None else pool
     (lists / "pool.txt").write_text("".join(f"{p}\n" for p in pool))
     return dup_scan.main(["--root", str(repo.root), "--threshold", str(threshold),
-                          "--staged", str(lists / "staged.txt"),
+                          "--changes", str(lists / "changes.txt"),
                           "--pool", str(lists / "pool.txt"), *extra])
 
 
@@ -124,6 +128,44 @@ def test_editing_a_function_that_is_already_duplicated_introduces_it_anew(repo, 
     assert "DUPLICATE" in capsys.readouterr().out
 
 
+def test_a_rename_introduces_no_duplicate_that_was_already_at_head(repo, dryer, capsys):
+    committed(repo, {"a.py": form("f", BODY), "c.py": form("g", BODY)})
+    repo.git("mv", "a.py", "b.py")
+    scan(repo, ["R100\ta.py\tb.py"], pool=["b.py", "c.py"])
+    assert capsys.readouterr().out == ""
+
+
+def test_a_rename_that_changes_a_functions_structure_introduces_it_anew(repo, dryer, capsys):
+    committed(repo, {"a.py": form("f", BODY), "c.py": form("g", BODY)})
+    repo.git("mv", "a.py", "b.py")
+    stage(repo, {"b.py": form("f", CLOSE)})
+    scan(repo, ["R090\ta.py\tb.py"], pool=["b.py", "c.py"])
+    assert "DUPLICATE" in capsys.readouterr().out
+
+
+def test_a_function_moved_to_another_staged_file_is_not_a_new_copy(repo, dryer, capsys):
+    committed(repo, {"a.py": form("f", BODY) + form("x", OTHER, 20, 30), "c.py": form("g", BODY)})
+    stage(repo, {"a.py": form("x", OTHER, 20, 30), "b.py": form("f", BODY)})
+    scan(repo, ["a.py", "b.py"], pool=["a.py", "b.py", "c.py"])
+    assert capsys.readouterr().out == ""
+
+
+def test_a_function_moved_out_of_a_deleted_file_is_not_a_new_copy(repo, dryer, capsys):
+    committed(repo, {"a.py": form("f", BODY), "c.py": form("g", BODY)})
+    repo.git("rm", "-q", "a.py")
+    stage(repo, {"b.py": form("f", BODY)})
+    scan(repo, ["D\ta.py", "A\tb.py"], pool=["b.py", "c.py"])
+    assert capsys.readouterr().out == ""
+
+
+def test_a_new_copy_does_not_report_the_pair_its_siblings_already_formed(repo, dryer, capsys):
+    committed(repo, {"a.py": form("f", BODY), "c.py": form("g", BODY)})
+    stage(repo, {"a.py": form("f", BODY) + form("x", OTHER, 20, 30), "b.py": form("h", BODY)})
+    scan(repo, ["a.py", "b.py"], pool=["a.py", "b.py", "c.py"])
+    reported = [line.split()[2:4] for line in capsys.readouterr().out.splitlines()]
+    assert sorted(reported) == [["a.py:1-10", "b.py:1-10"], ["b.py:1-10", "c.py:1-10"]]
+
+
 def test_a_third_copy_in_one_file_is_introduced(repo, dryer, capsys):
     two = form("f", BODY, 1, 10) + form("g", BODY, 11, 20)
     committed(repo, {"a.py": two})
@@ -132,6 +174,31 @@ def test_a_third_copy_in_one_file_is_introduced(repo, dryer, capsys):
     out = capsys.readouterr().out.splitlines()
     assert len(out) == 3
     assert all(line.startswith("DUPLICATE score=1.00 a.py:") for line in out)
+
+
+def test_a_key_counts_the_copies_of_a_structure_the_file_holds(repo, dryer, capsys):
+    stage(repo, {"a.py": form("f", BODY, 1, 10) + form("g", BODY, 11, 20)})
+    scan(repo, ["a.py"])
+    key = key_of("a.py", BODY, copies=2)
+    assert capsys.readouterr().out == f"DUPLICATE score=1.00 a.py:1-10 a.py:11-20 key={key}|{key}\n"
+
+
+def test_a_further_copy_in_the_file_gives_every_pair_a_new_key(repo, dryer, capsys):
+    stage(repo, {"a.py": "".join(form(name, BODY, start, start + 9)
+                                  for name, start in (("f", 1), ("g", 11), ("h", 21)))})
+    scan(repo, ["a.py"])
+    key = key_of("a.py", BODY, copies=3)
+    keys = [line.split("key=")[1] for line in capsys.readouterr().out.splitlines()]
+    assert keys == [f"{key}|{key}"] * 3
+
+
+def test_copies_in_another_file_do_not_change_a_pairs_key(repo, dryer, capsys):
+    committed(repo, {"a.py": form("f", BODY), "c.py": form("g", BODY)})
+    stage(repo, {"b.py": form("h", BODY)})
+    scan(repo, ["b.py"], pool=["a.py", "b.py", "c.py"])
+    keys = sorted(line.split("key=")[1] for line in capsys.readouterr().out.splitlines())
+    assert keys == sorted([f"{key_of('a.py', BODY)}|{key_of('b.py', BODY)}",
+                           f"{key_of('b.py', BODY)}|{key_of('c.py', BODY)}"])
 
 
 def test_a_new_file_has_nothing_at_head_to_count_against(repo, dryer, capsys):

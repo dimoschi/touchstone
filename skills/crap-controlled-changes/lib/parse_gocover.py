@@ -7,9 +7,11 @@ Usage: parse_gocover.py <spans.tsv> <profile> <modpath> <moddir>
   spans.tsv   lib/crapper_spans.py's rows for the changed files, repo-relative
   profile     the module's coverage profile; its paths start with <modpath>
   moddir      the module's directory in the repo, "." for the root module
-  --built     files `go list` says the build includes (absolute paths, one per
-              line), judged against --root; a changed file it leaves out, a
-              _windows.go on macOS or a `//go:build ignore`, is not scored
+  --built     files `go list` says the default build includes (absolute paths, one
+              per line), judged against --root; a changed file it leaves out, a
+              _windows.go on macOS or a `//go:build ignore`, is not scored unless
+              the profile has blocks for it: the coverage command may build it
+              with tags or a GOOS `go list` does not see
   --unmeasured-out
               where to write the changed files the profile has no block for
   --zero-fill-unmeasured
@@ -114,12 +116,12 @@ def _arguments(argv):
     return parser.parse_args(argv)
 
 
-def wanted_spans(args):
+def wanted_spans(args, blocks):
     spans = load_spans(args.spans)
     if not args.built:
         return spans
     built = built_files(args.built, args.root)
-    return [span for span in spans if built(span[0])]
+    return [span for span in spans if span[0] in blocks or built(span[0])]
 
 
 def rows(spans, blocks, dropped):
@@ -130,8 +132,8 @@ def rows(spans, blocks, dropped):
 
 def main(argv=None):
     args = _arguments(argv)
-    spans = wanted_spans(args)
     blocks = load_blocks(args.profile, args.modpath, args.moddir)
+    spans = wanted_spans(args, blocks)
     unmeasured = unmeasured_files(spans, blocks)
     if args.unmeasured_out:
         with open(args.unmeasured_out, "w") as handle:

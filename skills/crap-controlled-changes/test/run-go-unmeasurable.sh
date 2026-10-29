@@ -288,9 +288,32 @@ expect_contains "denies being a zero"       "not a genuine 0%"
 git reset --hard -q HEAD
 git clean -qfd
 
+echo "case G: a changed file only the coverage command's build tags select is still scored"
+# `go list` sees the default build, which leaves tagged.go out; the profile the
+# configured command writes has blocks for it, so it is measured, not dropped.
+cat > "$STUBS/spans" <<'SH'
+#!/bin/sh
+printf 'internal/tagged.go\t3\t12\t4\tcalc.Tagged\tcalc\n'
+SH
+cat > "$STUBS/cover" <<'SH'
+#!/bin/sh
+for a in "$@"; do
+  case "$a" in -coverprofile=*) profile="${a#-coverprofile=}" ;; esac
+done
+printf 'mode: set\ncrapcheckunmeasurable/internal/tagged.go:4.2,6.3 1 1\n' > "$profile"
+SH
+printf '//go:build integration\n\npackage calc\n\nfunc Tagged(x int) int {\n\treturn x\n}\n' > internal/tagged.go
+git add internal/tagged.go
+CRAP_CRAPPER_RUN="$STUBS/spans" run_check "$STUBS/cover"
+printf '%s\n' "$OUT" | sed 's/^/    | /'
+expect_status "scored, exit 0"              0
+expect_contains "has a row for the function" "calc.Tagged"
+git reset --hard -q HEAD
+git clean -qfd
+
 echo ""
 if [ "$failures" -eq 0 ]; then
-  echo "OK (6 cases)"
+  echo "OK (7 cases)"
 else
   echo "FAILED: $failures assertion(s)"
   exit 1

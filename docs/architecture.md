@@ -100,20 +100,33 @@ produced.
 
 Coverage stays with the language's own tools (`coverage.py` for Python, `go test`
 for Go). A changed file with functions that its coverage run has no data for is
-exit 4 in the current phase for both languages, never a 0% row.
+exit 4 in the current phase for both languages, never a 0% row. The one exception
+is a Go file the default build leaves out (`go list`: another GOOS, an ignore tag):
+nothing can measure it, so it is not scored, unless the profile has blocks for it,
+which is what `CRAP_GO_TEST_COMMAND` building with tags produces.
+
+A Go method's id is its receiver as written, minus the star, type parameters
+included (`pkg.Stack[T].Push`), which is what go-crap named it. crapper's own
+namespace drops them, so `lib/crapper_spans.py` reads the receiver off the tree:
+a function's refactor attempts in `crap-check-state.json` are filed under its id.
 
 ### The duplication gate
 
 `dup-check.sh` runs between the dead-code and CRAP gates, in a repo with `.crap-gated`,
-over the staged Go and Python files (the files CRAP scores: no tests, generated code
-or exempt paths). `lib/dup_scan.py` reads the staged files from the index and, for
-the staged files, from HEAD, through one `git cat-file --batch`, so the working tree
-never matters. A form's identity is `<file>#<digest of its normalized structure>`, and
-a pair is introduced when either side occurs more often among the staged file's forms
-in the index than at HEAD: a new copy, a third copy, or a form whose structure
-changed. A duplicate already at HEAD in a file that is only edited elsewhere is not.
+over the staged Go and Python files (the files CRAP scores, less `vendor/`: no tests,
+generated code, vendored code or exempt paths). `dup-check.sh` hands `lib/dup_scan.py`
+`git diff --cached -M --name-status` and every tracked file in scope. It reads the
+staged files from the index and what the change replaced from HEAD (a rename's old
+name and a deleted file included), through one `git cat-file --batch`, so the working
+tree never matters. A form's identity is `<file>#<digest of its normalized structure>`,
+and a pair is introduced when either side occurs more often among the staged file's
+forms in the index than at HEAD and its structure occurs more often across the whole
+change: a new copy, a third copy, or a form whose structure changed. A duplicate
+already at HEAD in a file that is only edited, moved or renamed is not.
 `--accept <key>` records a pair per branch in `dup-accepted.json`, written only by
-`dup-check.sh`; the key lapses when either side's structure changes.
+`dup-check.sh`. A key names each side as `<file>#<digest>x<copies>`, the copies being
+how many forms of that structure the file holds, so the key lapses when either side's
+structure changes and when its file gains another copy.
 
 ### Thresholds and classification live in one place
 

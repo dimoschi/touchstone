@@ -121,6 +121,16 @@ def test_a_file_the_build_leaves_out_is_neither_scored_nor_unmeasured(tmp_path, 
     assert out.read_text() == ""
 
 
+def test_a_file_the_build_leaves_out_is_scored_when_the_profile_holds_its_blocks(tmp_path, capsys):
+    s = spans(tmp_path, ("a_integration.go", 1, 5, 2, "m.I", "m"), ("a_windows.go", 1, 5, 2, "m.W", "m"))
+    p = profile(tmp_path, f"{MOD}/a_integration.go:2.2,4.3 1 1")
+    built = write(tmp_path, "built.txt", "")
+    out = tmp_path / "unmeasured.txt"
+    run(tmp_path, s, p, "--built", built, "--unmeasured-out", str(out), "--root", str(tmp_path))
+    assert capsys.readouterr().out == "m.I m 2 100.0 2.0\n"
+    assert out.read_text() == ""
+
+
 def test_without_an_unmeasured_file_asked_for_none_is_written(tmp_path):
     s = spans(tmp_path, ("a.go", 1, 5, 1, "m.A", "m"))
     p = profile(tmp_path, f"{MOD}/a.go:2.2,4.3 1 1")
