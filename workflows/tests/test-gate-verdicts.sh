@@ -498,10 +498,20 @@ async function scenarioRealGateTrailer() {
 
 const USER_GATE = '/opt/agent-config/skills/crap-controlled-changes/mutation-check.sh'
 const PLUGIN_FIELDS = ` touchstone ${STUB_PLUGIN_VERSION} `
+async function scenarioRedundantSurvivor() {
+  console.log('\n== scenario GW: the mutation agent removes code a survivor shows does nothing, and stops only on a true equivalent')
+  const { captured } = await run(gated({ mutationResult: green() }))
+  const p = captured.calls.find(c => c.label === 'mutation:1')?.prompt ?? ''
+  check('it names redundant code as the fix',
+    p.includes('a default equal to the one the call already uses, a transform of a value nothing reads'), true)
+  check('it removes that code rather than stopping', p.includes('delete it, keep every test green, and commit'), true)
+  check('it stops only when no simpler form exists', p.includes('only when no simpler form of the code exists'), true)
+}
+
 const SCENARIOS = [scenarioRealGateTrailer, scenarioVerifyLine, scenarioOtherCopyHalts, scenarioPromptsNameNamespacedSkill, scenarioClaimedGreenButRed, scenarioSetupExitStops, scenarioHookAllowsLines, scenarioClaimedRedButGreen,
   scenarioHeadFromShell, scenarioNullAgentStillMeasured, scenarioUngatedSkips, scenarioParserRejects,
   scenarioUnparseableTwiceHalts, scenarioUnreviewedLine, scenarioUnreviewedHalts,
-  scenarioUnreviewedUnparseable, scenarioNoReviewersNoCount, scenarioRealVerify, scenarioRealVerifyNotTheGate, scenarioRealUnreviewed]
+  scenarioUnreviewedUnparseable, scenarioNoReviewersNoCount, scenarioRealVerify, scenarioRealVerifyNotTheGate, scenarioRealUnreviewed, scenarioRedundantSurvivor]
 JS_EOF
 
 finish
