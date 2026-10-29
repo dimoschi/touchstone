@@ -18,7 +18,7 @@ Usage: parse_gocover.py <spans.tsv> <profile> <modpath> <moddir>
 Emits one space-separated row per function:
   <pkg>.<func> <pkg> <complexity> <coverage> <crap>
 
-Coverage follows go-crap, which this replaces so that scores do not move: blocks
+Coverage keeps the block rules of the tool this replaced, so that scores do not move: blocks
 are counted once per (first line, last line) and count as run if any copy ran,
 each goes to the function whose span holds its first line, and coverage is the
 share of those blocks that ran, 0 for a function with none.
