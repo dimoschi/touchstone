@@ -8,7 +8,7 @@ are the exception, driven by `pytest.ini` and `conftest.py`; see `run-python-tes
 
 ```bash
 bash scripts/run-hook-tests.sh          # every hooks/test-*.sh; needs only python3 and git
-bash scripts/run-go-tests.sh            # the skill's Go-toolchain suites; needs Go, python3, an ssh signing key
+bash scripts/run-go-tests.sh            # the skill's Go-toolchain suites; needs Go, uv, python3, an ssh signing key
 bash scripts/run-php-python-tests.sh    # the skill's PHP/uv suites; needs a live PHP ^8.3 + infection + phpunit, and uv
 bash scripts/run-python-tests.sh        # pytest unit suites for hooks/ and lib/; needs pytest + coverage>=7.13.1
 bash workflows/test-fix-loop-join.sh    # the workflow's fix/verify/review loop
@@ -58,6 +58,14 @@ name and keeps running the rest.
 and `workflows/test-unsupported-language-halt.sh` are separate, narrower
 suites at the top level; none of the four takes a scenario filter, so each
 runs every scenario it defines.
+
+`skills/crap-controlled-changes/test/run-dup.sh` runs `dup-check.sh` against throwaway
+repos with the real dryer (a Python copy and a Go copy of a function, an unrelated edit
+beside a duplicate already at HEAD, `--accept` and `--revoke`, a threshold override, an
+exempt path, and that no `.metrics/`, venv or cache is left behind). It needs `uv` and a
+network. `run-pinned-runner.sh` covers `lib/uv-pinned.sh` and what each gate does on a
+machine without uv, hermetically: uv is a stub that records its arguments, and a PATH
+holding no uv stands in for the machine.
 
 `skills/crap-controlled-changes/test/run-repo-arg.sh` covers the optional leading
 `<absolute-repo-path>` argument that `crap-check.sh`, `mutation-check.sh` and
@@ -121,11 +129,12 @@ Discard them yourself if that is what you want; the refusal message names the co
   since GitHub's macOS image resolves `env bash` to the 3.2 Apple ships and the gates
   correctly refuse below 4.0.
 - The `go` job installs python3 alongside Go. Most selected suites shell out to
-  `python3`, and so do the three gates themselves, so it is a declared prerequisite
-  rather than a runner-image accident.
+  `python3`, and so do the gates themselves, so it is a declared prerequisite
+  rather than a runner-image accident. It installs `uv` too: the Go gate's complexity
+  step runs crapper through it, and `run-dup.sh` runs dryer.
 - The `php-python` job installs a live PHP ^8.3 toolchain (with a pcov coverage driver,
   phpunit and infection) and `uv`, and runs `scripts/run-php-python-tests.sh`: the
-  suites the `go` job excludes because it installs neither.
+  suites the `go` job excludes because it installs no PHP toolchain.
 - The `python` job also runs on **ubuntu and macOS**, for the same reason as `hooks`:
   `copilot_session_evidence.py`'s permission checks and `contributing-gate.py`'s symlink
   comparison are exactly the platform-sensitive code that matrix exists to catch.

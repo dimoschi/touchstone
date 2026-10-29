@@ -32,12 +32,18 @@ cp "$FIXTURE_SRC/current/calc.py" calc.py
 git add calc.py
 
 export CRAP_PY_RUN="uv run --no-project --with coverage --with pytest --"
+# The fixture's own suite would leave bytecode and a pytest cache behind; the
+# check below is for what the gate leaves, so keep those out of it.
+export PYTHONDONTWRITEBYTECODE=1 CRAP_PY_PYTEST_ARGS="-p no:cacheprovider"
 
+BEFORE="$(git status --porcelain --ignored)"
 RC=0
 OUT="$("$SCRIPT" 2>&1)" || RC=$?
 echo "$OUT"
+AFTER="$(git status --porcelain --ignored)"
 
 [ "$RC" -eq 1 ] || { echo "FAIL: expected exit 1 (gate red), got $RC"; exit 1; }
+[ "$BEFORE" = "$AFTER" ] || { echo "FAIL: the run changed the repo's status (.metrics, a venv, coverage files)"; echo "$BEFORE"; echo "$AFTER"; exit 1; }
 echo "$OUT" | grep -q 'calc.py::branchy'             || { echo "FAIL: branchy not in output"; exit 1; }
 echo "$OUT" | grep 'branchy' | head -1 | grep -q 'NEEDS_TESTS' || { echo "FAIL: branchy not NEEDS_TESTS"; exit 1; }
 echo "$OUT" | grep -q 'worsened'                     || { echo "FAIL: branchy not worsened"; exit 1; }

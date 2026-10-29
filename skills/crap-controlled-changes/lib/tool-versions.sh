@@ -12,7 +12,8 @@
 # deliberate, visible act; x/tools tracks the Go toolchain, so expect to bump it
 # when the toolchain moves.
 MUTAGO_VERSION_DEFAULT=v2.8.1
-GOCRAP_VERSION_DEFAULT=v0.5.0
 DEADCODE_VERSION_DEFAULT=v0.49.0
-# unclebob/dryer has no release to pin, so a commit SHA stands in for a version.
+# unclebob/crapper and unclebob/dryer have no releases to pin, so a commit SHA stands
+# in for a version. Both run through lib/uv-pinned.sh.
+CRAPPER_SHA_DEFAULT=6fd92c4c9bcc56efb64a2f8743d5a2993bcfd42d
 DRYER_SHA_DEFAULT=66ff6d21a42c04afcad89c78a80066176d1294b0

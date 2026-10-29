@@ -87,8 +87,9 @@ jobs:
         run: bash scripts/run-go-tests.sh
 
   php-python:
-    # The suites the go job excludes because it installs neither toolchain:
-    # infection/phpunit (run-mutation-php-live.sh) and uv (run-mutation-python.sh,
+    # The suites the go job excludes because it sets up neither a PHP toolchain
+    # nor Python test tooling: infection/phpunit (run-mutation-php-live.sh) and
+    # coverage/mutmut fetched through uv (run-mutation-python.sh,
     # run-python-e2e.sh). One job, not two: splitting PHP from uv would need a
     # second hand-maintained suite list where scripts/lib/skill-suites.sh has one.
     runs-on: ubuntu-latest

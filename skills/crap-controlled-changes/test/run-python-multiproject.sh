@@ -32,17 +32,32 @@ cp "$FIXTURE_SRC/current/projB/calc.py" projB/src/calc.py
 git add projA/src/calc.py projB/src/calc.py
 
 export CRAP_PY_RUN="uv run --no-project --with coverage>=7.13.1 --with pytest --"
+# The fixture's own suite would leave bytecode and a pytest cache behind; what is
+# checked below is what the gate leaves, so keep those out of it.
+export PYTHONDONTWRITEBYTECODE=1 CRAP_PY_PYTEST_ARGS="-p no:cacheprovider"
 
 failures=0
 check() {
   if [ "$2" = "pass" ]; then echo "  ok: $1"; else echo "  FAIL: $1"; failures=$((failures + 1)); fi
 }
 
+run_gate() {
+  local before after
+  before="$(git status --porcelain --ignored)"
+  set +e
+  OUT="$("$SCRIPT" 2>&1)"
+  STATUS=$?
+  set -e
+  after="$(git status --porcelain --ignored)"
+  if [ "$before" = "$after" ]; then
+    check "the run left the tree as it found it" pass
+  else
+    check "the run left the tree as it found it (status changed)" fail
+  fi
+}
+
 echo "case A: two subprojects touched, no CRAP_PY_PROJECT_DIR"
-set +e
-OUT="$("$SCRIPT" 2>&1)"
-STATUS=$?
-set -e
+run_gate
 printf '%s\n' "$OUT" | sed 's/^/    | /'
 [ "$STATUS" -eq 2 ] && check "refuses rather than guessing (exit $STATUS)" pass \
   || check "refuses rather than guessing (exit $STATUS, want 2)" fail
@@ -55,10 +70,7 @@ printf '%s' "$OUT" | grep -q 'name which one' \
 echo "case B: CRAP_PY_PROJECT_DIR names both, space-separated"
 CRAP_PY_PROJECT_DIR="projA projB"
 export CRAP_PY_PROJECT_DIR
-set +e
-OUT="$("$SCRIPT" 2>&1)"
-STATUS=$?
-set -e
+run_gate
 printf '%s\n' "$OUT" | sed 's/^/    | /'
 [ "$STATUS" -ne 2 ] && [ "$STATUS" -ne 4 ] && check "measures rather than refusing (exit $STATUS)" pass \
   || check "measures rather than refusing (exit $STATUS)" fail
@@ -79,10 +91,7 @@ echo "case C: CRAP_PY_PROJECT_DIR names both, newline-separated"
 find . -name '__pycache__' -type d -exec rm -rf {} +
 CRAP_PY_PROJECT_DIR="$(printf 'projA\nprojB')"
 export CRAP_PY_PROJECT_DIR
-set +e
-OUT="$("$SCRIPT" 2>&1)"
-STATUS=$?
-set -e
+run_gate
 printf '%s\n' "$OUT" | sed 's/^/    | /'
 [ "$STATUS" -ne 2 ] && [ "$STATUS" -ne 4 ] && check "measures rather than refusing (exit $STATUS)" pass \
   || check "measures rather than refusing (exit $STATUS)" fail

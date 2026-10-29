@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# run-pinned-runner.sh: lib/uv-pinned.sh, and what the gates do without uv.
+# run-pinned-runner.sh: lib/uv-pinned.sh, and what the gates and the Go and Python
+# modules do without uv, or with a crapper that cannot be imported.
 #
 # Hermetic: uv itself is a stub that records how it was called, so the pinned
 # command line is asserted without a network, and a PATH holding no uv at all
@@ -89,6 +90,59 @@ contains "says why" "$out" "uv is not on PATH, and dryer runs through it."
 out="$(CRAP_DRYER_RUN=false PATH="$NOUV" "$SKILL_DIR/dup-check.sh" "$R" 2>&1)"; rc=$?
 check "an override that does not run is a failed analysis, not a pass" "$rc" "2"
 contains "says it could not analyse" "$out" "FAILED TO ANALYSE"
+
+# A repo with one committed file and a staged change to it, for a language module.
+changed_repo() {
+  local dir="$1" ext="$2"
+  git init -q "$dir"
+  case "$ext" in
+    py) printf 'def f():\n    return 1\n' > "$dir/a.py" ;;
+    go) printf 'module example.com/m\n\ngo 1.21\n' > "$dir/go.mod"
+        printf 'package m\n\nfunc F() int {\n\treturn 1\n}\n' > "$dir/a.go"
+        printf 'package m\n\nimport "testing"\n\nfunc TestF(t *testing.T) {\n\tif F() == 0 {\n\t\tt.Fatal("zero")\n\t}\n}\n' > "$dir/a_test.go"
+        git -C "$dir" add go.mod a_test.go ;;
+  esac
+  git -C "$dir" add "a.$ext"
+  git -C "$dir" -c user.name=t -c user.email=t@t -c commit.gpgsign=false commit -q -m base
+  printf '\n%s changed\n' "$([ "$ext" = py ] && echo '#' || echo '//')" >> "$dir/a.$ext"
+  git -C "$dir" add "a.$ext"
+}
+
+cat > "$STUBS/coverage" <<'SH'
+#!/bin/sh
+case "$1" in
+  json) shift; while [ $# -gt 0 ]; do [ "$1" = "-o" ] && printf '{}' > "$2"; shift; done ;;
+esac
+exit 0
+SH
+chmod +x "$STUBS/coverage"
+
+echo "the language modules without uv"
+changed_repo "$WORK/py" py
+out="$(cd "$WORK/py" && CRAP_FILES=a.py PATH="$NOUV" bash "$LIB/crap-check-python.sh" 2>&1)"; rc=$?
+check "python: exit 2" "$rc" "2"
+contains "python: says uv is missing" "$out" "crap-check[python]: uv is not on PATH, and crapper runs through it."
+if command -v go >/dev/null; then
+  changed_repo "$WORK/go" go
+  out="$(cd "$WORK/go" && CRAP_FILES=a.go PATH="$NOUV" bash "$LIB/crap-check-go.sh" 2>&1)"; rc=$?
+  check "go: exit 2" "$rc" "2"
+  contains "go: says uv is missing" "$out" "crap-check[go]: uv is not on PATH, and crapper runs through it."
+fi
+
+echo "a crapper that cannot be imported is exit 2, not an empty list of functions"
+# python3 stands in for a launcher whose environment lacks crapper.
+out="$(cd "$WORK/py" && CRAP_CRAPPER_RUN=python3 CRAP_FILES=a.py PATH="$STUBS:$PATH" bash "$LIB/crap-check-python.sh" 2>&1)"; rc=$?
+check "python: exit 2" "$rc" "2"
+contains "python: says crapper failed" "$out" "crap-check[python]: crapper failed"
+contains "python: shows why" "$out" "No module named 'crapper'"
+contains "python: says it is not a pass" "$out" "This is NOT a pass."
+check "python: the staged change is still staged" "$(git -C "$WORK/py" diff --cached --name-only)" "a.py"
+if command -v go >/dev/null; then
+  out="$(cd "$WORK/go" && CRAP_CRAPPER_RUN=python3 CRAP_FILES=a.go bash "$LIB/crap-check-go.sh" 2>&1)"; rc=$?
+  check "go: exit 2" "$rc" "2"
+  contains "go: says crapper failed" "$out" "crap-check[go]: crapper failed"
+  contains "go: shows why" "$out" "No module named 'crapper'"
+fi
 
 echo ""
 if [ "$failures" -eq 0 ]; then

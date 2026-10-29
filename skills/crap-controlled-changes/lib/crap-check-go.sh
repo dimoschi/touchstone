@@ -1,11 +1,12 @@
 #!/usr/bin/env bash
 # crap-check.sh: per-function CRAP report for staged Go changes.
-# Drives github.com/padiazg/go-crap to measure complexity and coverage,
-# compares the working tree (with staged changes) against HEAD baseline,
-# and prints one row per function in changed files with status and tag.
+# Complexity and function spans come from unclebob/crapper (lib/crapper_spans.py,
+# run through uv), coverage from `go test -coverprofile`; lib/parse_gocover.py
+# joins them. Compares the working tree (with staged changes) against the HEAD
+# baseline and prints one row per function in changed files with status and tag.
 #
-# Exit codes: 0 measured (possibly zero functions), 2 setup problem,
-# 4 could not measure (no CRAP report produced).
+# Exit codes: 0 measured (possibly zero functions), 2 setup problem (no go, no
+# uv, crapper failed), 4 could not measure (no usable coverage for a changed file).
 #
 # The HEAD baseline is measured in a throwaway detached worktree, never by
 # stashing: the stash stack is repo-global across linked worktrees, so two
@@ -20,6 +21,9 @@
 # replaced by those packages, e.g.
 #   CRAP_GO_TEST_COMMAND='go test ./internal/...'
 #   CRAP_GO_TEST_COMMAND='some-runner go test {packages}'
+#
+# CRAP_CRAPPER_RUN replaces the launcher crapper runs through (see
+# lib/uv-pinned.sh); it exists for the suites here, which run without a network.
 #
 # The baseline depends only on HEAD, the change set and the build
 # configuration, so it is cached under the common git dir and a retry against
@@ -53,27 +57,15 @@ fi
 
 command -v go >/dev/null || { echo "crap-check: go not on PATH" >&2; exit 2; }
 
-source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/tool-versions.sh"
-GOCRAP_VERSION="${CRAP_GO_GOCRAP_VERSION:-$GOCRAP_VERSION_DEFAULT}"
-GOCRAP_PKG="github.com/padiazg/go-crap"
-GOCRAP=(go run "$GOCRAP_PKG@$GOCRAP_VERSION" scan)
+. "$SKILL_LIB/tool-versions.sh"
+. "$SKILL_LIB/uv-pinned.sh"
+CRAPPER_RUN="${CRAP_CRAPPER_RUN:-}"
+pinned_ready "crap-check[go]" crapper CRAP_CRAPPER_RUN "$CRAPPER_RUN" || exit 2
 GO_TEST_COMMAND="${CRAP_GO_TEST_COMMAND:-}"
 
-# go-crap selects whole packages, so the per-file excludes that the staged-file
-# globs apply have to be repeated here: generated mocks and sqlc output are not
-# authored in this repo. _test.go is excluded by go-crap already.
-#
-# Both mock spellings: mockery emits mock_foo.go, but Go's own convention is
-# foo_mock.go, and scoring the latter also makes the <pkg>.<func> join key
-# ambiguous whenever a build tag selects between two same-named constructors.
-GOCRAP_EXCLUDES=(--exclude '.*mock_.*\.go' --exclude '.*_mock\.go' --exclude '.*\.sql\.go')
-
-# go-crap can run `go test` itself, and must not be allowed to: when its run
-# produces no usable coverage it reports every function at 0% (the default
-# --missing pessimistic), prints nothing, and exits 0. That reads as a very bad
-# but successful measurement. It also has no equivalent of CRAP_GO_TEST_COMMAND,
-# which repos needing live services depend on. So the profile is generated here,
-# checked for content, and passed in with --coverage-profile.
+# The coverage profile is generated here, checked for content, and only then
+# read: a run that collects nothing must be reported, not scored as 0%. It also
+# has to honour CRAP_GO_TEST_COMMAND, which repos needing live services depend on.
 gen_coverage() {
   local dir="$1" prof="$2" phase="$3" status=0 body cmd="$GO_TEST_COMMAND" pkgs
   shift 3
@@ -115,14 +107,14 @@ teardown_base_tree() {
 }
 
 # A missing report means nothing was scored, which must never read as a pass.
-# The coverage run's output and go-crap's own stderr both carry the reason, so
-# both streams are reported.
+# The coverage run's own output carries the reason, so both of its streams are
+# reported.
 report_unmeasurable() {
   local phase="$1" mod="$2" status="$3" err_file="$4" out_file="$5"
   shift 5
   collect_ignored_files "$phase" '*.go' ':(glob,exclude)**/vendor/**'
   {
-    echo "crap-check: FAILED TO MEASURE - no usable coverage or CRAP report."
+    echo "crap-check: FAILED TO MEASURE - no usable coverage report."
     echo "  phase:               $phase$(ignored_files_phase_suffix)"
     echo "  module:              $mod"
     echo "  selected files:      $*"
@@ -159,8 +151,28 @@ report_unmeasurable() {
   } >&2
 }
 
+# A changed file with functions that the coverage profile has no block for was
+# never measured, and has no row: its coverage is unknown, not 0%.
+report_unprofiled() {
+  local files=("$@")
+  {
+    echo "crap-check: FAILED TO MEASURE - the coverage profile has no data for changed file(s):"
+    printf '    %s\n' "${files[@]}"
+    echo ""
+    echo "  This is NOT a pass. No row was built for these files: there is no"
+    echo "  coverage percentage to report for them, not a genuine 0%."
+    echo ""
+    echo "  Their package was not part of the coverage run. If CRAP_GO_TEST_COMMAND"
+    echo "  is set, make it cover these packages ({packages} stands for them):"
+    echo ""
+    echo "    CRAP_GO_TEST_COMMAND='go test ./internal/... {packages}' \\"
+    echo "      $(dirname "$SKILL_LIB")/crap-check.sh"
+    echo ""
+  } >&2
+}
+
 # pkg_pattern prints pkgdir as a package pattern relative to module mod, the
-# directory go test and go-crap are invoked from.
+# directory go test and go list are invoked from.
 pkg_pattern() {
   local mod="$1" pkgdir="$2" pattern
   if [ "$mod" = "." ]; then pattern="./$pkgdir"; else pattern="./${pkgdir#"$mod"/}"; fi
@@ -168,22 +180,60 @@ pkg_pattern() {
   printf '%s\n' "${pattern%/.}"
 }
 
-# Run go-crap filtered to the changed files and emit
+# score_module appends, for the changed files of one module, a row
 #   <pkg>.<func> <pkg> <complexity> <coverage> <crap>
-# one per line. Coverage is a number or "n/a"; CRAP likewise.
-# Returns $EXIT_UNMEASURABLE if any module yielded no report.
+# per function to $out. Returns $EXIT_UNMEASURABLE when `go list` fails and 2
+# when crapper does. Changed files the coverage profile has no block for are
+# appended to $UNPROFILED, and in the baseline phase scored at 0% as well.
+score_module() {
+  local out="$1" phase="$2" root="$3" mod="$4" prof="$5" patterns_file="$6"
+  shift 6
+  local patterns=() built spans unprofiled modpath status=0 zero_fill=()
+  read_lines patterns < "$patterns_file"
+  built="$(mktemp)"
+  spans="$(mktemp)"
+  unprofiled="$(mktemp)"
+
+  # Which of the changed files this build includes. A file a build constraint
+  # leaves out (another GOOS, an ignore tag) has no block in the profile, and
+  # reading that as "unmeasured" would refuse a change nothing can measure.
+  (cd "$root/$mod" && go list -e \
+     -f '{{range .GoFiles}}{{$.Dir}}/{{.}}{{"\n"}}{{end}}{{range .CgoFiles}}{{$.Dir}}/{{.}}{{"\n"}}{{end}}' \
+     "${patterns[@]}") >"$built" 2>"$RAW_ERR" || status=$?
+  if [ "$status" -eq 0 ]; then
+    crapper_spans "crap-check[go]" "$root" "$spans" "$@" || status=2
+  else
+    report_unmeasurable "$phase" "$mod" "$status" "$RAW_ERR" "$RAW_OUT" "$@"
+    status="$EXIT_UNMEASURABLE"
+  fi
+
+  if [ "$status" -eq 0 ]; then
+    modpath="$(cd "$root" && python3 "$SKILL_LIB/go_modules.py" modpath "$mod")"
+    [ "$phase" = "$PHASE_BASELINE" ] && zero_fill=(--zero-fill-unmeasured)
+    python3 "$SKILL_LIB/parse_gocover.py" "$spans" "$prof" "$modpath" "$mod" \
+      --root "$root" --built "$built" --unmeasured-out "$unprofiled" \
+      ${zero_fill[@]+"${zero_fill[@]}"} >> "$out" || status=$?
+    cat "$unprofiled" >> "$UNPROFILED"
+  fi
+  rm -f "$built" "$spans" "$unprofiled"
+  return "$status"
+}
+
+# Measure the changed files and emit one row per function (see score_module).
+# Returns $EXIT_UNMEASURABLE if any module yielded no coverage.
 measure() {
   local out="$1" phase="$2" root="${3:-$REPO_ROOT}"
-  local existing=()
+  local existing=() f
   for f in "${CHANGED[@]}"; do
     if [ -f "$root/$f" ]; then existing+=("$f"); fi
   done
   : > "$out"
+  : > "$UNPROFILED"
   if [ "${#existing[@]}" -eq 0 ]; then
     return 0
   fi
 
-  # Multi-module repos: go-crap must run from inside a module, not the repo
+  # Multi-module repos: the tools must run from inside a module, not the repo
   # root (a rootless-go.mod monorepo measures nothing and false-passes).
   # Group changed files by nearest enclosing go.mod; "." keeps the historic
   # single-module behavior. lib/go_modules.py does the resolution, shared with
@@ -194,9 +244,9 @@ measure() {
   printf '%s\n' "${existing[@]}" \
     | (cd "$root" && python3 "$SKILL_LIB/go_modules.py" group) | cut -f1-3 > "$grouped"
 
-  # One coverage run per module, then a cheap scan per changed package: profiles
-  # are module-wide, so re-running the suite per package would be waste.
-  local mod status prof pkgdir pattern base bases patterns
+  # One coverage run per module: profiles are module-wide, so re-running the
+  # suite per package would be waste.
+  local mod status prof pkgdir patterns patterns_file modfiles
   while IFS= read -r mod; do
     patterns=()
     while IFS= read -r pkgdir; do
@@ -208,32 +258,16 @@ measure() {
       return "$EXIT_UNMEASURABLE"
     fi
 
-    while IFS= read -r pkgdir; do
-      [ -n "$pkgdir" ] || continue
-
-      pattern="$(pkg_pattern "$mod" "$pkgdir")"
-
-      bases=()
-      while IFS= read -r f; do
-        [ -n "$f" ] || continue
-        bases+=("$(basename "$f")")
-      done < <(awk -F'\t' -v m="$mod" -v p="$pkgdir" '$1 == m && $2 == p { print $3 }' "$grouped")
-
-      status=0
-      (cd "$root/$mod" && "${GOCRAP[@]}" "$pattern" --format json \
-         --coverage-profile "$prof" "${GOCRAP_EXCLUDES[@]}") \
-        >"$RAW_OUT" 2>"$RAW_ERR" || status=$?
-
-      if [ "$status" -ne 0 ] || ! python3 -c "import json,sys; json.load(open(sys.argv[1]))" \
-           "$RAW_OUT" 2>/dev/null; then
-        report_unmeasurable "$phase" "$mod" "$status" "$RAW_ERR" "$RAW_OUT" "${bases[@]}"
-        rm -f "$prof"
-        return "$EXIT_UNMEASURABLE"
-      fi
-
-      python3 "$SKILL_LIB/parse_gocrap.py" "$RAW_OUT" "${bases[@]}" >> "$out"
-    done < <(awk -F'\t' -v m="$mod" '$1 == m { print $2 }' "$grouped" | sort -u)
-    rm -f "$prof"
+    patterns_file="$(mktemp)"
+    printf '%s\n' "${patterns[@]}" > "$patterns_file"
+    read_lines modfiles < <(awk -F'\t' -v m="$mod" '$1 == m { print $3 }' "$grouped")
+    status=0
+    score_module "$out" "$phase" "$root" "$mod" "$prof" "$patterns_file" "${modfiles[@]}" || status=$?
+    rm -f "$prof" "$patterns_file"
+    if [ "$status" -ne 0 ]; then
+      rm -f "$grouped"
+      return "$status"
+    fi
   done < <(cut -f1 "$grouped" | sort -u)
   rm -f "$grouped"
 }
@@ -243,16 +277,9 @@ BASE="$(mktemp)"
 CUR="$(mktemp)"
 RAW_OUT="$(mktemp)"
 RAW_ERR="$(mktemp)"
+UNPROFILED="$(mktemp)"
 
-# crap4go writes target/coverage/coverage.out to the repo root on every run.
-# Strip it after each measurement so the artifact doesn't collide with git
-# (e.g., when --include-untracked stashes it before pop).
-clean_target() {
-  rm -rf target/coverage
-  rmdir target 2>/dev/null || true
-}
-
-cleanup() { rm -f "$BASE" "$CUR" "$RAW_OUT" "$RAW_ERR"; clean_target; teardown_base_tree; }
+cleanup() { rm -f "$BASE" "$CUR" "$RAW_OUT" "$RAW_ERR" "$UNPROFILED"; teardown_base_tree; }
 trap cleanup EXIT
 
 # Everything the baseline's rows depend on. The scripts are in it so an edit to
@@ -262,10 +289,11 @@ baseline_key() {
     git rev-parse HEAD
     printf '%s\n' "${CHANGED[@]}" | sort
     printf 'cmd=%s\n' "${GO_TEST_COMMAND:-<changed packages>}"
-    printf 'gocrap=%s\n' "$GOCRAP_VERSION"
+    printf 'crapper=%s\n' "${CRAPPER_RUN:-$CRAPPER_SHA_DEFAULT}"
     go version
     go env GOFLAGS CGO_ENABLED GOOS GOARCH GOEXPERIMENT
-    git hash-object "$SKILL_LIB/crap-check-go.sh" "$SKILL_LIB/parse_gocrap.py" "$SKILL_LIB/go_modules.py"
+    git hash-object "$SKILL_LIB/crap-check-go.sh" "$SKILL_LIB/parse_gocover.py" \
+      "$SKILL_LIB/go_modules.py" "$SKILL_LIB/crapper_spans.py" "$SKILL_LIB/uv-pinned.sh"
   } | git hash-object --stdin
 }
 
@@ -283,6 +311,17 @@ else
   setup_base_tree
   measure "$BASE" "$PHASE_BASELINE" "$BASE_TREE" || exit $?
   teardown_base_tree
+  if [ -s "$UNPROFILED" ]; then
+    # HEAD never having measured a file is not this run's failure: the file may
+    # be new since HEAD, or only covered by a test this change adds. Its rows are
+    # scored at 0% and compared normally, so a function unchanged since HEAD
+    # still tags "unchanged" rather than a false "new".
+    {
+      echo "crap-check: baseline (HEAD) has no coverage data for:"
+      sed 's/^/    /' "$UNPROFILED"
+      echo "  Rows for these are zero-filled at 0% and compared normally, not tagged new."
+    } >&2
+  fi
   if [ -n "$CACHED_BASE" ]; then
     mkdir -p "$BASELINE_CACHE_DIR"
     find "$BASELINE_CACHE_DIR" -name '*.tsv' -mtime +14 -delete 2>/dev/null || true
@@ -292,7 +331,11 @@ fi
 
 # Current state: the real working tree, with its index untouched throughout.
 measure "$CUR" "$PHASE_CURRENT" "$REPO_ROOT" || exit $?
-clean_target
+if [ -s "$UNPROFILED" ]; then
+  read_lines UNPROFILED_LIST < "$UNPROFILED"
+  report_unprofiled "${UNPROFILED_LIST[@]}"
+  exit "$EXIT_UNMEASURABLE"
+fi
 
 # Join by "<pkg>.<func>" and classify. The bands, the coverage requirement and
 # the `package main` rule are lib/thresholds.py, shared with the other two

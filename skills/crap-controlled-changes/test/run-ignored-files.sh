@@ -106,7 +106,7 @@ expect_count   "vendor stays out of it"      'vendor/pkg/dep\.php' 0
 echo "python: baseline names the ignored file, current does not repeat it"
 setup_repo "$WORK/py" py .venv
 run_module "$WORK/py" "$LIB/crap-check-python.sh" \
-  env CRAP_PY_RADON=false CRAP_PY_COMPLEXIPY=false
+  env CRAP_CRAPPER_RUN=true CRAP_PY_COMPLEXIPY=false
 printf '%s\n' "$OUT" | sed 's/^/    | /'
 expect_matches "labels the baseline phase" 'phase: baseline \(HEAD\) \+ 1 ignored file'
 expect_matches "lists the ignored file"    '^ +gen/mock\.py$'

@@ -2,8 +2,8 @@
 # Regression test: a failure to measure must never look like a clean pass.
 #
 # The fixture is a monorepo shape that occurs often: a test/integration package
-# that needs a live service, so crap4go's default `go test ./...` fails and it
-# prints no CRAP report. Before the fix, crap-check.sh printed "== go ==" and
+# that needs a live service, so the default `go test ./...` fails and no
+# coverage is produced. Before the fix, crap-check.sh printed "== go ==" and
 # exited 0, which is indistinguishable from "no changed functions".
 
 set -euo pipefail
@@ -55,7 +55,8 @@ git clean -qfd
 failures=0
 
 run_check() {
-  local test_command="$1"
+  local test_command="$1" before after
+  before="$(git status --porcelain --ignored)"
   set +e
   if [ -z "$test_command" ]; then
     OUT="$(unset CRAP_GO_TEST_COMMAND; bash "$SCRIPT" 2>&1)"
@@ -64,6 +65,12 @@ run_check() {
   fi
   STATUS=$?
   set -e
+  after="$(git status --porcelain --ignored)"
+  if [ "$before" = "$after" ]; then
+    check "the run left the tree as it found it" pass
+  else
+    check "the run left the tree as it found it (status changed)" fail
+  fi
 }
 
 check() {
@@ -143,7 +150,7 @@ printf '%s\n' "$OUT" | sed 's/^/    | /'
 expect_status "non-zero exit" 4
 expect_contains "says it failed to measure" "FAILED TO MEASURE"
 expect_contains "names the module"          "internal/calc.go"
-expect_contains "surfaces crap4go output"   ".s.PGSQL.5432"
+expect_contains "surfaces the test output"  ".s.PGSQL.5432"
 expect_contains "points at the override"    "CRAP_GO_TEST_COMMAND"
 expect_contains "denies being a pass"       "NOT a pass"
 expect_contains "denies being a flake"      "NOT a flake"
@@ -253,9 +260,37 @@ expect_status "clean exit" 0
 expect_contains "measured without contamination" "COMMIT_OK"
 teardown_ignored_generated_file
 
+echo "case F: a changed file the coverage profile has no block for is exit 4, not 0%"
+# crapper and the coverage run are both stand-ins here: the function exists and
+# the profile is real in shape, but it covers another file.
+STUBS="$(mktemp -d)"
+trap 'rm -rf "$STUBS"' EXIT
+cat > "$STUBS/spans" <<'SH'
+#!/bin/sh
+printf 'internal/calc.go\t11\t22\t4\tcalc.Branchy\tcalc\n'
+SH
+cat > "$STUBS/cover" <<'SH'
+#!/bin/sh
+for a in "$@"; do
+  case "$a" in -coverprofile=*) profile="${a#-coverprofile=}" ;; esac
+done
+printf 'mode: set\ncrapcheckunmeasurable/elsewhere/other.go:1.1,2.2 1 1\n' > "$profile"
+SH
+chmod +x "$STUBS/spans" "$STUBS/cover"
+stage_function_change
+CRAP_CRAPPER_RUN="$STUBS/spans" run_check "$STUBS/cover"
+printf '%s\n' "$OUT" | sed 's/^/    | /'
+expect_status "refused, not a pass"         4
+expect_contains "names the file"            "internal/calc.go"
+expect_contains "says it has no data"       "the coverage profile has no data for changed file(s)"
+expect_contains "denies being a pass"       "NOT a pass"
+expect_contains "denies being a zero"       "not a genuine 0%"
+git reset --hard -q HEAD
+git clean -qfd
+
 echo ""
 if [ "$failures" -eq 0 ]; then
-  echo "OK (5 cases)"
+  echo "OK (6 cases)"
 else
   echo "FAILED: $failures assertion(s)"
   exit 1

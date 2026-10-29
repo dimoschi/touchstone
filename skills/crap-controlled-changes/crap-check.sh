@@ -33,7 +33,7 @@ source "$LIB_DIR/tool-fingerprint.sh"
 source "$LIB_DIR/unsupported-sources.sh"
 
 crap_fingerprint() {
-  tool_fingerprint "$1" gocrap "${CRAP_GO_GOCRAP_VERSION:-$GOCRAP_VERSION_DEFAULT}"
+  tool_fingerprint "$1" crapper "${CRAP_CRAPPER_RUN:-$CRAPPER_SHA_DEFAULT}"
 }
 
 REPO_ROOT="$(resolve_repo_root crap-check "${1:-}")" || exit 2

@@ -9,7 +9,7 @@
 # which silently drops staged edits from the user's next commit; this test
 # pins the correct behavior.
 #
-# The external toolchains (go, phpunit, coverage/radon) are stubbed so the test
+# The external toolchains (go, phpunit, coverage, crapper) are stubbed so the test
 # is hermetic and exercises only the stash push -> baseline -> restore path,
 # which is where the corruption lived. No real Go/PHP/Python tooling is needed.
 
@@ -106,9 +106,9 @@ check() {
   fi
 }
 
-check go     go  "$LIB/crap-check-go.sh"
+check go     go  "$LIB/crap-check-go.sh"      env CRAP_CRAPPER_RUN=true
 check php    php "$LIB/crap-check-php.sh"     env PHPUNIT_BIN="$STUBS/phpunit"
-check python py  "$LIB/crap-check-python.sh"  env CRAP_PY_RADON=false CRAP_PY_COMPLEXIPY=false
+check python py  "$LIB/crap-check-python.sh"  env CRAP_CRAPPER_RUN=true CRAP_PY_COMPLEXIPY=false
 
 if [ "$fail" -eq 0 ]; then
   echo "INDEX PRESERVATION OK"

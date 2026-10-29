@@ -70,6 +70,7 @@ expect "tee keeps output, not status" BLOCK "$MUT | tee /tmp/x.log"
 expect "behind mise exec"            BLOCK "mise exec -- $MUT | tail -5"
 expect "crap-check.sh"               BLOCK "/opt/touchstone/skills/crap-controlled-changes/crap-check.sh | tail -30"
 expect "deadcode-check.sh"           BLOCK "/opt/touchstone/skills/crap-controlled-changes/deadcode-check.sh | tail -3"
+expect "dup-check.sh"                BLOCK "/opt/touchstone/skills/crap-controlled-changes/dup-check.sh | tail -3"
 expect "second segment of a chain"   BLOCK "cd /tmp && $MUT | tail -5"
 
 echo "the sanctioned form and unrelated pipes are untouched"

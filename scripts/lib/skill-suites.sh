@@ -5,7 +5,9 @@
 # select_suites and run_suites for the sourcing script to call.
 #
 # NEEDS_OTHER_TOOLCHAIN names every skill test/run*.sh suite that needs a live
-# PHP toolchain or uv, neither of which the go job installs. select_suites
+# PHP toolchain, or a Python project's coverage and mutation tooling fetched with
+# uv. The go job does not set those up (it installs uv only so the gates can run
+# crapper and dryer). select_suites
 # partitions by exclusion against that one list, not by grepping each suite for
 # a `command -v go`/`uv` guard: that rule could never match run-go-modules.sh,
 # which tests Go module resolution in pure Python and so never carried one. A

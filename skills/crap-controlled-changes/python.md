@@ -6,15 +6,19 @@ Run this from the repo root after staging your changes (`git add ...`).
 
 The Python module needs:
 
-1. **`uv` / `uvx` on PATH.** Complexity (`radon`) and cognitive complexity
-   (`complexipy`) run ephemerally via `uvx`, so no project changes are required
-   (the Python analogue of Go's `go run ...@latest`). The first run downloads
-   each tool; subsequent runs are cached.
+1. **`uv` / `uvx` on PATH.** Complexity ([crapper](https://github.com/unclebob/crapper),
+   pinned to a commit, run through `uv run --isolated --no-project`) and cognitive
+   complexity (`complexipy`, via `uvx`) run ephemerally, so no project changes are
+   required: uv builds a throwaway environment, nothing is installed into the
+   project's own, and nothing is written under it. The first run downloads each
+   tool; subsequent runs are cached. Without uv the helper exits 2 and says so,
+   and so it does if crapper cannot be imported or run, since an empty result
+   would read as a file with no functions.
 2. **coverage.py (>=7.13.1) and pytest in the project environment.** Coverage must
    instrument the real test run, so it runs inside the project's own env, not in
    isolation. The floor is 7.13.1, not merely "7": that release is what puts a
    `start_line` on each entry in `coverage json`'s per-function `functions` map,
-   which is the key `lib/parse_python.py` joins radon's complexity against. An
+   which is the key `lib/parse_python.py` joins crapper's complexity against. An
    older coverage produces a JSON the joiner silently reads as 0% coverage for
    every function. The default test command is `coverage run -m pytest`. If your
    env needs a launcher, set `CRAP_PY_RUN` (e.g. `poetry run`, `uv run`).
@@ -40,7 +44,7 @@ The dispatcher detects staged `.py` files (excluding `test_*.py`, `*_test.py`,
 module:
 
 1. Stashes any other working-tree changes.
-2. Runs the test suite under coverage and `radon cc -j` against HEAD (baseline).
+2. Runs the test suite under coverage and crapper's function spans against HEAD (baseline).
 3. Restores your working tree.
 4. Re-runs both against the staged changes (current).
 5. Joins per function by `(file, start_line)` (`lib/parse_python.py`), classifies
@@ -52,6 +56,13 @@ module:
    ```
 
    `<name>` is `Class.method` for methods, the bare name for functions.
+
+   Complexity is crapper's: one for the function, plus one for each `if`, `elif`,
+   `for`, `while`, `except`, `case` of a `match`, comprehension filter,
+   conditional expression, and `and` or `or`. A nested function is counted in the
+   function that holds it, and a comprehension's own `for` is not counted. The
+   scores of functions you did not touch can move the first time a repo is
+   measured this way, since the counting rules differ from radon's.
 
 After the CRAP table, the helper runs `complexipy -mx <cognitive-complexity> -f`
 (default 15) on the changed files and prints a "Cognitive complexity" section if
@@ -127,7 +138,7 @@ CRAP_PY_PYTEST_ARGS="tests/unit -k somepattern" crap-check.sh
 |-----|---------|---------|
 | `CRAP_PY_RUN` | *(empty)* | Prefix for in-env commands (`poetry run`, `uv run`) |
 | `CRAP_PY_PYTEST_ARGS` | *(empty)* | Extra pytest args to scope/speed the suite |
-| `CRAP_PY_RADON` | `uvx radon` | Override to a project-local `radon` |
+| `CRAP_CRAPPER_RUN` | *(uv, pinned crapper)* | Launcher that runs `python3 <script> ...` with crapper importable, in place of uv; for machines that cannot reach the network |
 | `CRAP_PY_COMPLEXIPY` | `uvx complexipy` | Override to a project-local `complexipy` |
 | `CRAP_PY_PROJECT_DIR` | *(repo root)* | Directory (or space/newline-separated directories) to run the suite and coverage from; see Subdirectory projects |
 
@@ -140,9 +151,10 @@ CRAP_PY_PYTEST_ARGS="tests/unit -k somepattern" crap-check.sh
 2. Capture a current report:
    ```bash
    coverage run -m pytest && coverage json -o cur-cov.json
-   uvx radon cc -j path/to/changed1.py path/to/changed2.py > cur-radon.json
+   uv run --isolated --no-project --with 'crapper @ git+https://github.com/unclebob/crapper@<pinned sha>' \
+     python3 lib/crapper_spans.py --root . path/to/changed1.py path/to/changed2.py > cur-spans.tsv
    CRAP_REPO_ROOT="$PWD" CRAP_CHANGED_FILES="$(git diff --name-only --cached -- '*.py')" \
-     python3 lib/parse_python.py cur-radon.json cur-cov.json
+     python3 lib/parse_python.py cur-spans.tsv cur-cov.json
    ```
 3. For a baseline at HEAD, stash first (`git stash push --include-untracked`),
    repeat step 2, then `git stash pop`.
@@ -196,7 +208,7 @@ change your suite cannot detect.
   and names the file rather than reporting a false `coverage=0.0%`. Import it
   from at least the unit suite. (Same blind spot Go's `_test.go`-only coverage
   and PHP's class-named tests have; here it refuses instead of scoring it.)
-- **Closures and module-level code are not scored.** radon only surfaces
+- **Closures and module-level code are not scored.** crapper only surfaces
   top-level functions and methods, so nested functions and `if __name__ ==
   "__main__":` blocks don't get a CRAP row. Extract logic into named functions to
   bring it under the gate.

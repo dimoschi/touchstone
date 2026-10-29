@@ -42,11 +42,22 @@ cp "$FIXTURE_SRC/current/pkg/calc.py" pkg/calc.py
 git add pkg/calc.py
 
 export CRAP_PY_RUN="uv run --no-project --with coverage>=7.13.1 --with pytest --"
+# The fixture's own suite would leave bytecode and a pytest cache behind; what is
+# checked below is what the gate leaves, so keep those out of it.
+export PYTHONDONTWRITEBYTECODE=1 CRAP_PY_PYTEST_ARGS="-p no:cacheprovider"
+
+run_gate() {
+  local before after
+  before="$(git status --porcelain --ignored)"
+  RC=0
+  OUT="$("$SCRIPT" 2>&1)" || RC=$?
+  echo "$OUT"
+  after="$(git status --porcelain --ignored)"
+  [ "$before" = "$after" ] || { echo "FAIL: the run changed the repo's status (.metrics, a venv, coverage files)"; echo "$before"; echo "$after"; exit 1; }
+}
 
 echo "case A: root declares [tool.coverage.run], member's own header is incidental"
-RC=0
-OUT="$("$SCRIPT" 2>&1)" || RC=$?
-echo "$OUT"
+run_gate
 
 [ "$RC" -ne 2 ] || { echo "FAIL: refused (exit 2) despite the root's own pyproject.toml declaring a project"; exit 1; }
 echo "$OUT" | grep -q 'pkg/calc.py::add' || { echo "FAIL: add not in output"; exit 1; }
@@ -70,9 +81,7 @@ GIT_AUTHOR_NAME=t GIT_AUTHOR_EMAIL=t@t GIT_COMMITTER_NAME=t GIT_COMMITTER_EMAIL=
 cp "$PYTEST_ONLY_SRC/current/pkg/calc.py" pkg/calc.py
 git add pkg/calc.py
 
-RC=0
-OUT="$("$SCRIPT" 2>&1)" || RC=$?
-echo "$OUT"
+run_gate
 
 [ "$RC" -eq 2 ] || { echo "FAIL: expected exit 2 (refuse), got $RC -- root's pytest-only header silently won"; exit 1; }
 echo "$OUT" | grep -q 'pkg' || { echo "FAIL: refusal does not name the member directory"; exit 1; }

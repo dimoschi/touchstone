@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""Join radon complexity with coverage.py per-function coverage into CRAP rows.
+"""Join crapper complexity with coverage.py per-function coverage into CRAP rows.
 
 Reads:
-  argv[1]                 - path to radon `cc -j` JSON
+  argv[1]                 - path to lib/crapper_spans.py's rows for the changed files
   argv[2]                 - path to `coverage json` output
   --unmeasured-out <path>  - optional; write unmeasured repo-relative paths here
   --zero-fill-unmeasured   - optional; emit unmeasured functions at 0.0% instead
@@ -22,10 +22,10 @@ Emits to stdout, tab-separated, one function/method per line:
 <id> is "<relpath>::<name>"; <name> is "<Class>.<method>" for methods. CRAP =
 cc**2 * (1 - cov/100)**3 + cc.
 
-A changed file with radon blocks that is absent from the coverage JSON (or
+A changed file with functions that is absent from the coverage JSON (or
 present with no per-line data at all) was never measured, not measured at
 0%, and gets no row here; see `unmeasured_files`. A function whose own
-`start_line` does not match radon's `lineno` for that block (a decorator, a
+`start_line` does not match crapper's for that function (a decorator, a
 line-shift) still reads 0.0 -- that is a pre-existing join miss, not an
 absence, and turning it into a refusal would flag every such mismatch.
 """
@@ -83,13 +83,13 @@ def load_coverage(cov_path, repo_root, cov_root=None):
 
 
 def unmeasured_files(changed, cov, blocks):
-    """Sorted repo-relative changed paths that have a radon block but no
+    """Sorted repo-relative changed paths that have a function but no
     coverage data at all.
 
     A file missing from `cov`, or present with an empty per-line map, was
     never measured (coverage.py's per-file `functions` map is built from
     parsing the source, so every function of a file it *did* measure shows
-    up, 0% included). Requiring a radon block excludes a changed file with
+    up, 0% included). Requiring a function excludes a changed file with
     nothing to score (constants-only, `__init__.py`), which would otherwise
     be reported as a refusal over noise.
     """
@@ -104,24 +104,13 @@ def unmeasured_files(changed, cov, blocks):
     return sorted(out)
 
 
-def load_radon(radon_path, repo_root):
-    """Return list of (relpath, name, cc, lineno) for function/method blocks."""
-    try:
-        with open(radon_path) as fh:
-            data = json.load(fh)
-    except (OSError, json.JSONDecodeError):
-        return []
+def load_spans(spans_path, repo_root):
+    """Return list of (relpath, name, cc, lineno) for each function in the spans rows."""
     blocks = []
-    for path, items in data.items():
-        rel = normrel(path, repo_root)
-        for b in items:
-            if b.get("type") not in ("function", "method"):
-                continue
-            name = b["name"]
-            cls = b.get("classname")
-            if cls:
-                name = f"{cls}.{name}"
-            blocks.append((rel, name, int(b["complexity"]), int(b["lineno"])))
+    with open(spans_path) as fh:
+        for line in fh:
+            path, start, _end, cc, name, _package = line.rstrip("\n").split("\t")
+            blocks.append((normrel(path, repo_root), name, int(cc), int(start)))
     return blocks
 
 
@@ -149,7 +138,7 @@ def _emit_rows(blocks, changed, unmeasured, cov, zero_fill_unmeasured=False):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("radon_json")
+    ap.add_argument("spans_tsv")
     ap.add_argument("cov_json")
     ap.add_argument("--unmeasured-out")
     ap.add_argument("--zero-fill-unmeasured", action="store_true")
@@ -166,7 +155,7 @@ def main():
         return 0
 
     cov = load_coverage(args.cov_json, repo_root, cov_root)
-    blocks = load_radon(args.radon_json, repo_root)
+    blocks = load_spans(args.spans_tsv, repo_root)
     unmeasured = set(unmeasured_files(changed, cov, blocks))
 
     _write_unmeasured(args.unmeasured_out, unmeasured)

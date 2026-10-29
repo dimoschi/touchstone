@@ -29,6 +29,9 @@ GIT_AUTHOR_NAME=t GIT_AUTHOR_EMAIL=t@t GIT_COMMITTER_NAME=t GIT_COMMITTER_EMAIL=
   bash -c 'git add . && git commit -q -m baseline'
 
 export CRAP_PY_RUN="uv run --no-project --with coverage>=7.13.1 --with pytest --"
+# The fixture's own suite would leave bytecode and a pytest cache behind; what is
+# checked below is what the gate leaves, so keep those out of it.
+export PYTHONDONTWRITEBYTECODE=1 CRAP_PY_PYTEST_ARGS="-p no:cacheprovider"
 
 failures=0
 
@@ -79,10 +82,18 @@ expect_status_not() {
 }
 
 run_check() {
+  local before after
+  before="$(git status --porcelain --ignored)"
   set +e
   OUT="$(bash "$SCRIPT" 2>&1)"
   STATUS=$?
   set -e
+  after="$(git status --porcelain --ignored)"
+  if [ "$before" = "$after" ]; then
+    check "the run left the tree as it found it" pass
+  else
+    check "the run left the tree as it found it (status changed)" fail
+  fi
 }
 
 echo "case A: subdirectory project, no CRAP_PY_PROJECT_DIR"

@@ -141,6 +141,13 @@ def test_a_new_file_has_nothing_at_head_to_count_against(repo, dryer, capsys):
     assert capsys.readouterr().out.count("DUPLICATE") == 1
 
 
+def test_a_pair_is_introduced_when_only_the_other_side_is_new(repo, dryer, capsys):
+    committed(repo, {"a.py": form("f", BODY)})
+    stage(repo, {"a.py": form("f", BODY) + form("extra", OTHER, 20, 30), "b.py": form("g", BODY)})
+    scan(repo, ["a.py", "b.py"])
+    assert capsys.readouterr().out.count("DUPLICATE") == 1
+
+
 def test_a_pair_with_both_sides_staged_is_reported_once(repo, dryer, capsys):
     stage(repo, {"a.py": form("f", BODY), "b.py": form("g", BODY)})
     scan(repo, ["a.py", "b.py"])
@@ -157,6 +164,12 @@ def test_forms_in_different_languages_are_not_compared(repo, dryer, capsys):
     committed(repo, {"a.py": form("f", BODY)})
     stage(repo, {"b.go": form("g", BODY)})
     scan(repo, ["b.go"], pool=["a.py", "b.go"])
+    assert capsys.readouterr().out == ""
+
+
+def test_two_files_in_a_language_dryer_does_not_know_are_not_compared(repo, dryer, capsys):
+    stage(repo, {"a.txt": form("f", BODY), "b.txt": form("g", BODY)})
+    scan(repo, ["a.txt", "b.txt"])
     assert capsys.readouterr().out == ""
 
 
