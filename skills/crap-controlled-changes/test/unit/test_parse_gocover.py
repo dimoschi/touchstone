@@ -136,3 +136,58 @@ def test_without_an_unmeasured_file_asked_for_none_is_written(tmp_path):
     p = profile(tmp_path, f"{MOD}/a.go:2.2,4.3 1 1")
     assert run(tmp_path, s, p) == 0
     assert not (tmp_path / "unmeasured.txt").exists()
+
+
+def test_a_span_row_with_a_space_in_its_path_is_read_whole(tmp_path, capsys):
+    s = spans(tmp_path, ("my dir/a.go", 1, 5, 1, "m.A", "m"))
+    p = profile(tmp_path, f"{MOD}/other.go:2.2,4.3 1 1")
+    out = tmp_path / "unmeasured.txt"
+    run(tmp_path, s, p, "--unmeasured-out", str(out))
+    assert out.read_text() == "my dir/a.go\n"
+
+
+def test_a_span_row_with_an_empty_package_is_read(tmp_path, capsys):
+    s = spans(tmp_path, ("a.go", 1, 5, 1, "m.A", ""))
+    p = profile(tmp_path, f"{MOD}/a.go:2.2,4.3 1 1")
+    run(tmp_path, s, p)
+    assert capsys.readouterr().out == "m.A  1 100.0 1.0\n"
+
+
+def test_a_span_row_whose_package_ends_in_x_keeps_it(tmp_path, capsys):
+    s = spans(tmp_path, ("a.go", 1, 5, 1, "ctX.A", "ctX"))
+    p = profile(tmp_path, f"{MOD}/a.go:2.2,4.3 1 1")
+    run(tmp_path, s, p)
+    assert capsys.readouterr().out == "ctX.A ctX 1 100.0 1.0\n"
+
+
+def test_a_profile_field_without_a_colon_is_not_a_block():
+    assert parse_gocover._block("a.go2.2,4.3 1 1") is None
+
+
+def test_a_profile_field_without_a_comma_is_not_a_block():
+    assert parse_gocover._block("a.go:2.2 1 1") is None
+
+
+def test_a_block_is_split_at_the_last_colon_of_the_path():
+    assert parse_gocover._block("m/a:b.go:2.2,4.3 1 1") == ("m/a:b.go", 2, 4, True)
+
+
+def test_a_block_ends_at_the_first_comma_after_its_start():
+    assert parse_gocover._block("m/a.go:2.2,4.3,5 1 1") == ("m/a.go", 2, 4, True)
+
+
+def test_blocks_ending_on_the_same_line_stay_separate_blocks(tmp_path, capsys):
+    s = spans(tmp_path, ("a.go", 1, 9, 2, "m.A", "m"))
+    p = profile(tmp_path, f"{MOD}/a.go:2.2,4.3 1 1", f"{MOD}/a.go:3.2,4.3 1 0")
+    run(tmp_path, s, p)
+    assert capsys.readouterr().out == "m.A m 2 50.0 2.5\n"
+
+
+def test_a_file_the_build_includes_but_the_profile_lacks_is_unmeasured(tmp_path, capsys):
+    s = spans(tmp_path, ("a.go", 1, 5, 1, "m.A", "m"))
+    p = profile(tmp_path, f"{MOD}/other.go:2.2,4.3 1 1")
+    built = write(tmp_path, "built.txt", f"{tmp_path}/a.go\n")
+    out = tmp_path / "unmeasured.txt"
+    run(tmp_path, s, p, "--built", built, "--unmeasured-out", str(out), "--root", str(tmp_path))
+    assert capsys.readouterr().out == ""
+    assert out.read_text() == "a.go\n"

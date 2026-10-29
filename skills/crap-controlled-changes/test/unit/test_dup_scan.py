@@ -35,10 +35,13 @@ def form(name, fingerprints, start=1, end=10, nodes=30):
 
 @pytest.fixture
 def dryer(monkeypatch):
+    calls = []
+
     def language_of(path):
         return {".py": "python", ".go": "go", ".txt": "text"}.get(str(path)[str(path).rfind("."):])
 
     def entries_in_source(language, source, path, file):
+        calls.append((path, file))
         found = []
         for line in source.splitlines():
             _, start, end, nodes, fps = line.split()
@@ -58,6 +61,7 @@ def dryer(monkeypatch):
     module("dryer.discover", language_of=language_of)
     module("dryer.extract", entries_in_source=entries_in_source)
     module("dryer.shape", jaccard=jaccard)
+    return calls
 
 
 def key_of(path, fingerprints, copies=1):
@@ -319,3 +323,65 @@ def test_a_missing_dryer_is_an_error_not_an_empty_report(repo, monkeypatch):
     stage(repo, {"a.py": form("f", BODY)})
     with pytest.raises(ImportError):
         scan(repo, ["a.py"])
+
+
+def test_dryer_is_given_the_path_as_both_its_path_and_its_file(repo, dryer):
+    stage(repo, {"a.py": form("f", BODY)})
+    scan(repo, ["a.py"])
+    assert dryer == [("a.py", "a.py")]
+
+
+def test_blobs_starts_git_by_that_name_in_the_given_root(repo, monkeypatch):
+    started = []
+    real = dup_scan.subprocess.Popen
+
+    def spy(command, **kwargs):
+        started.append(command)
+        return real(command, **kwargs)
+
+    monkeypatch.setattr(dup_scan.subprocess, "Popen", spy)
+    with dup_scan.Blobs(str(repo.root)):
+        pass
+    assert started == [["git", "-C", str(repo.root), "cat-file", "--batch"]]
+
+
+def test_a_missing_name_with_spaces_in_it_reads_as_none(repo):
+    committed(repo, {"a.py": "old\n"})
+    with dup_scan.Blobs(str(repo.root)) as blobs:
+        assert blobs.read("HEAD:my dir/missing.py") is None
+
+
+def test_paths_keeps_trailing_spaces_and_letters_and_skips_blank_lines(tmp_path):
+    listing = tmp_path / "paths.txt"
+    listing.write_text("a b.py \n\nsrc/TeX\n")
+    assert dup_scan._paths(str(listing)) == ["a b.py ", "src/TeX"]
+
+
+def test_changes_pairs_the_old_path_with_the_new_one_and_none_for_a_deletion(tmp_path):
+    listing = tmp_path / "changes.txt"
+    listing.write_text("M\tmy dir/a.py\nR100\told name.py\tnew name.py\nD\tgone.py\nd\tlower.py\n")
+    assert dup_scan._changes(str(listing)) == [
+        ("my dir/a.py", "my dir/a.py"), ("old name.py", "new name.py"),
+        ("gone.py", None), ("lower.py", "lower.py")]
+
+
+def test_the_repository_defaults_to_the_current_directory(repo, dryer, monkeypatch, capsys):
+    committed(repo, {"a.py": form("f", BODY)})
+    stage(repo, {"b.py": form("g", BODY)})
+    lists = repo.root.parent
+    (lists / "changes.txt").write_text("M\tb.py\n")
+    (lists / "pool.txt").write_text("a.py\nb.py\n")
+    monkeypatch.chdir(repo.root)
+    assert dup_scan.main(["--threshold", "0.8", "--changes", str(lists / "changes.txt"),
+                          "--pool", str(lists / "pool.txt")]) == 0
+    assert capsys.readouterr().out.count("DUPLICATE") == 1
+
+
+@pytest.mark.parametrize("omitted", ["--threshold", "--changes", "--pool"])
+def test_every_option_but_the_root_is_required(tmp_path, capsys, omitted):
+    given = {"--threshold": "0.8", "--changes": str(tmp_path / "c"), "--pool": str(tmp_path / "p")}
+    del given[omitted]
+    with pytest.raises(SystemExit) as refused:
+        dup_scan.main([arg for pair in given.items() for arg in pair])
+    assert refused.value.code == 2
+    assert omitted in capsys.readouterr().err

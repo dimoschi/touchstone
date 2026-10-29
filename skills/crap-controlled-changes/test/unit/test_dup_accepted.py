@@ -102,3 +102,30 @@ def test_add_and_remove_need_a_key(monkeypatch, tmp_path, mode):
         run(monkeypatch, mode, str(store), "br")
     assert stop.value.code == 2
     assert not store.exists()
+
+
+def test_remove_on_a_branch_that_has_no_accepted_keys_fails(monkeypatch, tmp_path, capsys):
+    store = tmp_path / "store.json"
+    store.write_text(json.dumps({"other": [KEY]}))
+    assert run(monkeypatch, "remove", str(store), "br", KEY) == 1
+    assert f"{KEY} is not accepted on branch 'br'" in capsys.readouterr().err
+    assert json.loads(store.read_text()) == {"other": [KEY]}
+
+
+def test_report_keeps_reading_after_a_line_that_is_not_a_finding(monkeypatch, tmp_path, capsys):
+    assert run(monkeypatch, "report", str(tmp_path / "s.json"), "br", stdin="noise\n" + LINE) == 1
+    assert capsys.readouterr().out == (f"a.py:3-12  b.py:5-14  score=0.91  DUPLICATE  key={KEY}\n"
+                                       "duplicates=1\n")
+
+
+def test_an_unknown_mode_is_refused_even_when_a_key_is_given(monkeypatch, tmp_path):
+    with pytest.raises(SystemExit) as stop:
+        run(monkeypatch, "nope", str(tmp_path / "s.json"), "br", KEY)
+    assert stop.value.code == 2
+
+
+@pytest.mark.parametrize("mode", ["add", "remove"])
+def test_the_refusal_to_run_without_a_key_names_the_mode(monkeypatch, tmp_path, capsys, mode):
+    with pytest.raises(SystemExit):
+        run(monkeypatch, mode, str(tmp_path / "s.json"), "br")
+    assert f"{mode} needs a key" in capsys.readouterr().err
