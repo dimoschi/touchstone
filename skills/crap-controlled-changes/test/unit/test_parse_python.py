@@ -91,6 +91,12 @@ def test_load_spans_normalizes_the_path_against_the_repo_root(tmp_path):
         (os.path.normpath("pkg/mod.py"), "f", 2, 1)]
 
 
+def test_load_spans_keeps_a_path_with_a_space_in_one_field(tmp_path):
+    rows = spans(tmp_path / "spans.tsv", ("my pkg/mod.py", "f", 2, 1))
+    assert parse_python.load_spans(str(rows), str(tmp_path)) == [
+        (os.path.normpath("my pkg/mod.py"), "f", 2, 1)]
+
+
 def test_load_spans_of_no_functions_is_empty(tmp_path):
     (tmp_path / "spans.tsv").write_text("")
     assert parse_python.load_spans(str(tmp_path / "spans.tsv"), str(tmp_path)) == []
