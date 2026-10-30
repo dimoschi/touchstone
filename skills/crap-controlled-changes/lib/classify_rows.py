@@ -20,7 +20,7 @@ EPS = 0.05
 # Go carries the package so `package main` can be scored on complexity alone.
 # The other modules have no equivalent and measure one column fewer.
 #
-# lib/parse_gocrap.py separates Go's columns with spaces, which its ids never
+# lib/parse_gocover.py separates Go's columns with spaces, which its ids never
 # contain; the other two use tabs because a PHP or Python id is a file path and
 # can. Splitting Go on tabs alone yields one field and measures nothing.
 LAYOUTS = {

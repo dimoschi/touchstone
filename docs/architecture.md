@@ -116,16 +116,18 @@ become two fields and every method of the type one row.
 ### The duplication gate
 
 `dup-check.sh` runs between the dead-code and CRAP gates, in a repo with `.crap-gated`,
-over the staged Go and Python files (the files CRAP scores, less `vendor/`: no tests,
-generated code, vendored code or exempt paths). `dup-check.sh` hands `lib/dup_scan.py`
+over the staged Go and Python files, less generated code, exempt paths and whatever
+dryer's own walk skips (tests, `vendor/`, `testdata/`, `build/` and the rest of its
+`SKIP_DIRS`, applied with dryer's own rules so the two cannot disagree). `dup-check.sh` hands `lib/dup_scan.py`
 `git diff --cached -M --name-status` and every tracked file in scope. It reads the
 staged files from the index and what the change replaced from HEAD (a rename's old
 name and a deleted file included), through one `git cat-file --batch`, so the working
 tree never matters. A form's identity is `<file>#<digest of its normalized structure>`,
 and a pair is introduced when either side occurs more often among the staged file's
-forms in the index than at HEAD and its structure occurs more often across the whole
-change: a new copy, a third copy, or a form whose structure changed. A duplicate
-already at HEAD in a file that is only edited, moved or renamed is not.
+forms in the index than at HEAD, its structure occurs more often across the whole
+change, and the two files hold more pairs than at HEAD: a new copy, a third copy, or
+an edit that brings a pair up to the threshold. A duplicate already at HEAD in a file
+that is only edited, moved or renamed, or with one of its copies edited, is not.
 `--accept <key>` records a pair per branch in `dup-accepted.json`, written only by
 `dup-check.sh`. A key names each side as `<file>#<digest>x<copies>`, the copies being
 how many forms of that structure the file holds, so the key lapses when either side's

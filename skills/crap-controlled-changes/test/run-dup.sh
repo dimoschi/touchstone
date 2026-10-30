@@ -246,6 +246,32 @@ git -C "$R" add pkg/h.py
 run_gate "$R"
 expect_status   "exit 1 for the further copies" 1
 
+echo "case M: editing one copy of a duplicate already at HEAD does not introduce it"
+R="$(new_repo m "")"
+py_function total_price total > "$R/pkg/a.py"
+py_function order_cost cost > "$R/pkg/b.py"
+commit_all "$R" "two copies"
+sed -i.bak 's/if discount:/if discount > 0:/' "$R/pkg/b.py" && rm "$R/pkg/b.py.bak"
+git -C "$R" add pkg/b.py
+run_gate "$R"
+expect_status   "exit 0"                 0
+expect_contains "says so"                "DUPLICATION_OK"
+cp "$R/pkg/b.py" "$R/pkg/c.py"
+git -C "$R" add pkg/c.py
+run_gate "$R"
+expect_status   "exit 1 for a new copy of the edited form" 1
+
+echo "case N: a testdata fixture is not compared, as dryer itself skips it"
+R="$(new_repo n "")"
+mkdir -p "$R/pkg/testdata"
+py_function total_price total > "$R/pkg/testdata/fixture.py"
+commit_all "$R" "a fixture"
+py_function order_cost cost > "$R/pkg/b.py"
+git -C "$R" add pkg/b.py
+run_gate "$R"
+expect_status   "exit 0"                 0
+expect_contains "says so"                "DUPLICATION_OK"
+
 echo ""
 if [ "$failures" -eq 0 ]; then
   echo "DUP OK"

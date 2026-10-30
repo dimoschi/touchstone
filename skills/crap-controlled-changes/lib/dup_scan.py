@@ -20,10 +20,15 @@ A side is "<file>#<digest of the form's normalized structure>x<copies>", copies
 being how many forms of that structure the file holds, so an acceptance of a
 same-file pair covers those copies and not a further one. A pair is introduced
 when either side occurs more often among the staged file's forms in the index
-than at HEAD, and its structure occurs more often across the whole change: a new
-copy, a third copy, or a form whose structure changed. A duplicate that was
-already at HEAD, in a file only edited elsewhere, moved to another file or
-renamed with its file, is therefore not reported.
+than at HEAD, its structure occurs more often across the whole change, and the
+two files hold more pairs than the same comparison finds at HEAD: a new copy, a
+third copy, or an edit that brings a pair up to the threshold. A duplicate that
+was already at HEAD, in a file only edited elsewhere, moved to another file,
+renamed with its file, or with one of its copies edited, is therefore not
+reported.
+
+Paths dryer's own walk would skip (tests, vendor/, testdata/, build/ and the
+rest of its SKIP_DIRS) are dropped from both sides with dryer's own rules.
 """
 
 import argparse
@@ -66,11 +71,17 @@ class Blobs:
 
 
 def _dryer():
-    from dryer.discover import language_of
+    from dryer.discover import SKIP_DIRS, is_test_file, language_of
     from dryer.extract import entries_in_source
     from dryer.shape import jaccard
     return SimpleNamespace(language_of=language_of, entries_in_source=entries_in_source,
-                           jaccard=jaccard)
+                           jaccard=jaccard, skip_dirs=SKIP_DIRS, is_test_file=is_test_file)
+
+
+def _scanned(path, dryer):
+    """Whether dryer's own walk would read `path`: not a test, not under vendor/,
+    testdata/, build/ or another directory it skips."""
+    return not dryer.is_test_file(path) and not dryer.skip_dirs.intersection(path.split("/"))
 
 
 def _kept(entry):
@@ -133,9 +144,23 @@ def pairs(staged, pool, threshold, jaccard):
     return found.values()
 
 
-def introduced(found, fresh):
+def _files(left, right):
+    return tuple(sorted((left.file, right.file)))
+
+
+def _between(found):
+    return Counter(_files(left, right) for _, left, right in found)
+
+
+def introduced(found, fresh, before):
+    """The pairs in `found` with a fresh side, between two files that hold more
+    pairs now than in `before`, the same comparison at HEAD.
+
+    Editing one copy of a pair already at HEAD changes its structure but adds no
+    pair, so it is not reported."""
+    grown = _between(found) - _between(before)
     for score, left, right in found:
-        if _identity(left) in fresh or _identity(right) in fresh:
+        if (_identity(left) in fresh or _identity(right) in fresh) and _files(left, right) in grown:
             first, second = sorted((left, right), key=_span)
             yield score, first, second
 
@@ -180,16 +205,25 @@ def _best_first(found):
     return (-score, _span(first), _span(second))
 
 
+def _selected(args, dryer):
+    """(changes, pool paths) less what dryer's own walk would skip."""
+    changes = [change for change in _changes(args.changes)
+               if _scanned(change[1] or change[0], dryer)]
+    return changes, [path for path in _paths(args.pool) if _scanned(path, dryer)]
+
+
 def scan(args, dryer):
     """The DUPLICATE line of every pair the staged files introduce, best score first."""
-    changes, pool_paths = _changes(args.changes), _paths(args.pool)
+    changes, pool_paths = _selected(args, dryer)
     staged_paths = [new for _, new in changes if new]
     with Blobs(args.root) as blobs:
         index = _forms(blobs, ":", dict.fromkeys(pool_paths + staged_paths), dryer)
         before = _replaced(blobs, changes, dryer)
     staged, everything = _flatten(index, staged_paths), _flatten(index, index)
+    unchanged = _flatten(index, index.keys() - set(staged_paths))
     fresh = fresh_forms(staged, before)
-    found = introduced(pairs(staged, everything, args.threshold, dryer.jaccard), fresh)
+    found = introduced(list(pairs(staged, everything, args.threshold, dryer.jaccard)), fresh,
+                       pairs(before, unchanged + before, args.threshold, dryer.jaccard))
     copies = Counter(map(_identity, everything))
     return [line_for(*pair, copies) for pair in sorted(found, key=_best_first)]
 

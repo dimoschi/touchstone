@@ -58,7 +58,8 @@ def dryer(monkeypatch):
         monkeypatch.setitem(sys.modules, name, made)
 
     module("dryer")
-    module("dryer.discover", language_of=language_of)
+    module("dryer.discover", language_of=language_of, SKIP_DIRS={"testdata", "build"},
+           is_test_file=lambda path: str(path).rsplit("/", 1)[-1].startswith("test_"))
     module("dryer.extract", entries_in_source=entries_in_source)
     module("dryer.shape", jaccard=jaccard)
     return calls
@@ -125,11 +126,26 @@ def test_a_duplicate_already_at_head_is_not_introduced_by_an_unrelated_edit(repo
     assert capsys.readouterr().out == ""
 
 
-def test_editing_a_function_that_is_already_duplicated_introduces_it_anew(repo, dryer, capsys):
+def test_editing_a_function_that_is_already_duplicated_does_not_introduce_it(repo, dryer, capsys):
     committed(repo, {"a.py": form("f", BODY), "b.py": form("g", BODY)})
     stage(repo, {"b.py": form("g", CLOSE)})
     scan(repo, ["b.py"], pool=["a.py", "b.py"])
-    assert "DUPLICATE" in capsys.readouterr().out
+    assert capsys.readouterr().out == ""
+
+
+def test_an_edit_that_brings_a_pair_up_to_the_threshold_introduces_it(repo, dryer, capsys):
+    committed(repo, {"a.py": form("f", BODY), "b.py": form("g", OTHER)})
+    stage(repo, {"b.py": form("g", CLOSE)})
+    scan(repo, ["b.py"], pool=["a.py", "b.py"])
+    assert capsys.readouterr().out.split()[2:4] == ["a.py:1-10", "b.py:1-10"]
+
+
+def test_editing_a_duplicated_function_reports_only_the_partner_it_newly_matches(repo, dryer, capsys):
+    committed(repo, {"a.py": form("f", BODY), "b.py": form("g", BODY), "c.py": form("h", CLOSE)})
+    stage(repo, {"b.py": form("g", CLOSE)})
+    scan(repo, ["b.py"], threshold=0.9, pool=["a.py", "b.py", "c.py"])
+    assert [line.split()[2:4] for line in capsys.readouterr().out.splitlines()] == [
+        ["b.py:1-10", "c.py:1-10"]]
 
 
 def test_a_rename_introduces_no_duplicate_that_was_already_at_head(repo, dryer, capsys):
@@ -139,12 +155,12 @@ def test_a_rename_introduces_no_duplicate_that_was_already_at_head(repo, dryer, 
     assert capsys.readouterr().out == ""
 
 
-def test_a_rename_that_changes_a_functions_structure_introduces_it_anew(repo, dryer, capsys):
+def test_a_rename_that_changes_a_duplicated_functions_structure_does_not_introduce_it(repo, dryer, capsys):
     committed(repo, {"a.py": form("f", BODY), "c.py": form("g", BODY)})
     repo.git("mv", "a.py", "b.py")
     stage(repo, {"b.py": form("f", CLOSE)})
     scan(repo, ["R090\ta.py\tb.py"], pool=["b.py", "c.py"])
-    assert "DUPLICATE" in capsys.readouterr().out
+    assert capsys.readouterr().out == ""
 
 
 def test_a_function_moved_to_another_staged_file_is_not_a_new_copy(repo, dryer, capsys):
@@ -223,6 +239,27 @@ def test_a_pair_with_both_sides_staged_is_reported_once(repo, dryer, capsys):
     stage(repo, {"a.py": form("f", BODY), "b.py": form("g", BODY)})
     scan(repo, ["a.py", "b.py"])
     assert capsys.readouterr().out.count("DUPLICATE") == 1
+
+
+def test_a_staged_file_in_a_directory_dryer_skips_is_not_scanned(repo, dryer, capsys):
+    committed(repo, {"a.py": form("f", BODY)})
+    stage(repo, {"pkg/testdata/b.py": form("g", BODY)})
+    scan(repo, ["pkg/testdata/b.py"], pool=["a.py", "pkg/testdata/b.py"])
+    assert capsys.readouterr().out == ""
+
+
+def test_a_file_in_a_directory_dryer_skips_is_not_a_partner(repo, dryer, capsys):
+    committed(repo, {"build/a.py": form("f", BODY)})
+    stage(repo, {"b.py": form("g", BODY)})
+    scan(repo, ["b.py"], pool=["build/a.py", "b.py"])
+    assert capsys.readouterr().out == ""
+
+
+def test_a_file_dryer_counts_as_a_test_is_not_scanned(repo, dryer, capsys):
+    committed(repo, {"a.py": form("f", BODY)})
+    stage(repo, {"test_b.py": form("g", BODY)})
+    scan(repo, ["test_b.py"], pool=["a.py", "test_b.py"])
+    assert capsys.readouterr().out == ""
 
 
 def test_a_form_is_never_paired_with_itself(repo, dryer, capsys):

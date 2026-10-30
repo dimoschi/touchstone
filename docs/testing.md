@@ -61,7 +61,8 @@ runs every scenario it defines.
 
 `skills/crap-controlled-changes/test/run-dup.sh` runs `dup-check.sh` against throwaway
 repos with the real dryer (a Python copy and a Go copy of a function, an unrelated edit
-beside a duplicate already at HEAD, a rename, vendored code and generated mocks left out,
+beside a duplicate already at HEAD, an edit to one copy of such a duplicate, a rename,
+vendored code, a testdata fixture and generated mocks left out,
 `--accept` and `--revoke` including a further copy after an acceptance, a threshold
 override, an exempt path, and that no `.metrics/`, venv or cache is left behind). It needs
 `uv` and a network. `run-go-ids.sh` runs the real crapper over a Go file and checks the

@@ -9,7 +9,8 @@
 # or above the threshold when the staged diff is what created it.
 #
 # Only pairs the diff introduces are reported: a duplicate already at HEAD, in a
-# file that is merely edited, moved or renamed, never blocks. See lib/dup_scan.py.
+# file that is merely edited, moved or renamed, or one of whose copies is edited,
+# never blocks. See lib/dup_scan.py.
 #
 #   dup-check.sh                      check the staged diff
 #   dup-check.sh --accept '<key>'     record a user-approved exception
@@ -70,15 +71,12 @@ while IFS= read -r ex; do
   [ -n "$ex" ] && EXEMPT_SPEC+=("$ex")
 done < <(crap_exempt_pathspecs "$REPO_ROOT")
 
-# The files crap-check.sh scores for Go and Python, less vendor/: tests,
-# generated code and third-party code are not authored in this repo, and a copy
-# there is not a finding.
+# Generated code is not authored in this repo, and a copy there is not a finding.
+# Tests, vendor/, testdata/ and the other directories dryer's own walk skips are
+# left out by lib/dup_scan.py with dryer's rules, so the two cannot disagree.
 DUP_SPEC=('*.go' '*.py'
-          ':(exclude)*_test.go' ':(exclude)*mock_*.go' ':(exclude)*_mock.go'
-          ':(exclude)*.sql.go' ':(exclude)*.pb.go' ':(glob,exclude)**/vendor/**'
-          ':(exclude)**/test_*.py' ':(exclude)**/*_test.py'
-          ':(exclude)tests/**' ':(exclude)**/tests/**'
-          ':(exclude)conftest.py' ':(exclude)**/conftest.py'
+          ':(exclude)*mock_*.go' ':(exclude)*_mock.go'
+          ':(exclude)*.sql.go' ':(exclude)*.pb.go'
           ${EXEMPT_SPEC[@]+"${EXEMPT_SPEC[@]}"})
 
 CHANGES_LIST="$(mktemp)"
