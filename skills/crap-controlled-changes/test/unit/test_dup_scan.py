@@ -278,6 +278,14 @@ def test_a_copy_elsewhere_does_not_make_an_unchanged_form_in_a_grown_file_pair_n
         line.split()[2:4] for line in capsys.readouterr().out.splitlines()]
 
 
+def test_a_fixture_moved_out_of_a_directory_dryer_skips_is_a_new_copy(repo, dryer, capsys):
+    committed(repo, {"testdata/a.py": form("f", BODY), "c.py": form("g", BODY)})
+    repo.git("rm", "-q", "testdata/a.py")
+    stage(repo, {"b.py": form("f", BODY)})
+    scan(repo, ["D\ttestdata/a.py", "A\tb.py"], pool=["b.py", "c.py"])
+    assert capsys.readouterr().out.split()[2:4] == ["b.py:1-10", "c.py:1-10"]
+
+
 def test_a_form_is_never_paired_with_itself(repo, dryer, capsys):
     stage(repo, {"a.py": form("f", BODY)})
     scan(repo, ["a.py"])
