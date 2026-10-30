@@ -262,6 +262,22 @@ def test_a_file_dryer_counts_as_a_test_is_not_scanned(repo, dryer, capsys):
     assert capsys.readouterr().out == ""
 
 
+def test_a_file_renamed_out_of_a_directory_dryer_skips_is_scanned_by_its_new_name(repo, dryer, capsys):
+    committed(repo, {"testdata/a.py": form("f", OTHER), "c.py": form("g", BODY)})
+    repo.git("mv", "testdata/a.py", "b.py")
+    stage(repo, {"b.py": form("f", BODY)})
+    scan(repo, ["R010\ttestdata/a.py\tb.py"], pool=["b.py", "c.py"])
+    assert capsys.readouterr().out.split()[2:4] == ["b.py:1-10", "c.py:1-10"]
+
+
+def test_a_copy_elsewhere_does_not_make_an_unchanged_form_in_a_grown_file_pair_new(repo, dryer, capsys):
+    committed(repo, {"a.py": form("f", BODY), "g.py": form("g", BODY)})
+    stage(repo, {"a.py": form("f", BODY) + form("h", CLOSE, 20, 30), "k.py": form("k", BODY)})
+    scan(repo, ["a.py", "k.py"], pool=["a.py", "g.py", "k.py"])
+    assert ["a.py:1-10", "g.py:1-10"] not in [
+        line.split()[2:4] for line in capsys.readouterr().out.splitlines()]
+
+
 def test_a_form_is_never_paired_with_itself(repo, dryer, capsys):
     stage(repo, {"a.py": form("f", BODY)})
     scan(repo, ["a.py"])
