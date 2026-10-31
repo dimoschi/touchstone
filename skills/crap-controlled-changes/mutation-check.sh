@@ -10,8 +10,9 @@
 # before opening a PR. Not wired into the commit hook: a full mutation run
 # costs one test-suite run per mutant.
 #
-# Exit codes: 0 no survivors (MUTATION_OK, or MUTATION_UNMEASURED when nothing
-# was actually generated to kill), 1 survivors (KILL_SURVIVORS), 2 setup
+# Exit codes: 0 no survivors (MUTATION_OK; MUTATION_UNMEASURED when nothing
+# was actually generated to kill; NOTHING_TO_MEASURE when the source filter
+# selected no changed file), 1 survivors (KILL_SURVIVORS), 2 setup
 # problem, 4 could not measure, 5 --verify found unrecorded paths.
 #
 # MUTATION_BASE overrides the diff base (default: origin/HEAD, then main,
@@ -103,14 +104,14 @@ LOG="$(git rev-parse --path-format=absolute --git-common-dir)/mutation-check.log
 
 echo "mutation-check: repo $REPO_ROOT branch $BRANCH"
 
-# Flips to 1 once a module's own "this is not a pass" line is seen, so the
-# final verdict below does not read a zero-mutant run as MUTATION_OK.
-ZERO_MUTANTS_RUN=0
+# What a clean exit 0 is called. Replaced where a run is not a pass: a module's
+# own "this is not a pass" line, or no source file selected at all.
+OK_VERDICT=MUTATION_OK
 
 summarise() {
   local code=$? verdict
   case "$code" in
-    0) if [ "$ZERO_MUTANTS_RUN" -eq 1 ]; then verdict=MUTATION_UNMEASURED; else verdict=MUTATION_OK; fi ;;
+    0) verdict="$OK_VERDICT" ;;
     1) verdict=KILL_SURVIVORS ;;
     2) verdict=SETUP_FAILURE ;;
     *) verdict="see the output above" ;;
@@ -262,13 +263,14 @@ TOOLS="$(mutation_fingerprint "$MUTATION_PATHS")"
 # boundaries, which would also exclude a main.go nested deeper than the entry
 # file itself (cmd/x/internal/main.go), not just the entry file this is
 # limited to.
-GO_FILES="$( (git diff --name-only "$BASE" -- '*.go' ':(exclude)*_test.go' ':(exclude)*mock_*.go' ':(exclude)*_mock.go' ':(exclude)**/*test/*.go' ':(exclude)test/**' ':(exclude)**/test/**' ':(exclude)*.sql.go' ':(exclude)*.pb.go' ':(exclude,glob)**/cmd/*/main.go' ${EXEMPT_SPEC[@]+"${EXEMPT_SPEC[@]}"} || true) | filter_only)"
-PHP_FILES="$( (git diff --name-only "$BASE" -- '*.php' \
-  ':(exclude)tests/**' ':(exclude)**/Tests/**' ':(exclude)**/*Test.php' \
+GO_EXCLUDES=(':(exclude)*_test.go' ':(exclude)*mock_*.go' ':(exclude)*_mock.go' ':(exclude)**/*test/*.go' ':(exclude)test/**' ':(exclude)**/test/**' ':(exclude)*.sql.go' ':(exclude)*.pb.go' ':(exclude,glob)**/cmd/*/main.go')
+PHP_EXCLUDES=(':(exclude)tests/**' ':(exclude)**/Tests/**' ':(exclude)**/*Test.php')
+PY_EXCLUDES=(':(exclude)**/test_*.py' ':(exclude)**/*_test.py'
+  ':(exclude)tests/**' ':(exclude)**/tests/**' ':(exclude)conftest.py' ':(exclude)**/conftest.py')
+GO_FILES="$( (git diff --name-only "$BASE" -- '*.go' "${GO_EXCLUDES[@]}" ${EXEMPT_SPEC[@]+"${EXEMPT_SPEC[@]}"} || true) | filter_only)"
+PHP_FILES="$( (git diff --name-only "$BASE" -- '*.php' "${PHP_EXCLUDES[@]}" \
   ${EXEMPT_SPEC[@]+"${EXEMPT_SPEC[@]}"} || true) | filter_only)"
-PY_FILES="$( (git diff --name-only "$BASE" -- '*.py' \
-  ':(exclude)**/test_*.py' ':(exclude)**/*_test.py' \
-  ':(exclude)tests/**' ':(exclude)**/tests/**' ':(exclude)conftest.py' ':(exclude)**/conftest.py' \
+PY_FILES="$( (git diff --name-only "$BASE" -- '*.py' "${PY_EXCLUDES[@]}" \
   ${EXEMPT_SPEC[@]+"${EXEMPT_SPEC[@]}"} || true) | filter_only)"
 
 ran_any=0
@@ -328,6 +330,45 @@ run_module() {
   RAN_LANGS="$RAN_LANGS $lang"
 }
 
+# Names each changed go, php or python file the filters dropped, with the
+# pattern that dropped it. Attribution asks git itself, once per pattern, which
+# files survive that pattern, so the report is computed by the same pathspec
+# matching as the selection and cannot drift from it.
+EXCLUDED_LEFT=""
+attribute_exclusions() {
+  local label="$1" spec="$2" lang_files kept hit f
+  shift 2
+  lang_files="$(git diff --name-only "$BASE" -- "$@" || true)"
+  kept="$(git diff --name-only "$BASE" -- "$@" "$spec" || true)"
+  hit="$( (printf '%s\n' "$lang_files" | grep -vxFf <(printf '%s\n' "$kept") \
+    | grep -xFf <(printf '%s\n' "$EXCLUDED_LEFT")) || true)"
+  [ -n "$hit" ] || return 0
+  EXCLUDED_LEFT="$( (printf '%s\n' "$EXCLUDED_LEFT" | grep -vxFf <(printf '%s\n' "$hit")) || true)"
+  while IFS= read -r f; do
+    printf '  %s  excluded by %s%s\n' "$f" "$label" "${spec#*)}"
+  done <<< "$hit"
+}
+
+excluded_report() {
+  local spec f
+  EXCLUDED_LEFT="$(git diff --name-only "$BASE" -- '*.go' '*.php' '*.py' || true)"
+  if [ -z "$EXCLUDED_LEFT" ]; then
+    echo "  no changed go, php or python files"
+    return 0
+  fi
+  for spec in ${EXEMPT_SPEC[@]+"${EXEMPT_SPEC[@]}"}; do
+    attribute_exclusions ".crap-gated " "$spec" '*.go' '*.php' '*.py'
+  done
+  for spec in "${GO_EXCLUDES[@]}"; do attribute_exclusions "" "$spec" '*.go'; done
+  for spec in "${PHP_EXCLUDES[@]}"; do attribute_exclusions "" "$spec" '*.php'; done
+  for spec in "${PY_EXCLUDES[@]}"; do attribute_exclusions "" "$spec" '*.py'; done
+  # What no pattern dropped can only have been dropped by MUTATION_ONLY.
+  while IFS= read -r f; do
+    [ -n "$f" ] || continue
+    printf '  %s  excluded by MUTATION_ONLY %s\n' "$f" "$MUTATION_ONLY"
+  done <<< "$EXCLUDED_LEFT"
+}
+
 run_module go     "$GO_FILES"  "$LIB_DIR/mutation-check-go.sh"
 run_module php    "$PHP_FILES" "$LIB_DIR/mutation-check-php.sh"
 run_module python "$PY_FILES"  "$LIB_DIR/mutation-check-python.sh"
@@ -343,6 +384,13 @@ if [ "$ran_any" -eq 0 ]; then
   printf '%s\n' "$MUTATION_PATHS" | head_pairs HEAD \
     | python3 "$LIB_DIR/scored_ledger.py" record "$LEDGER" "$BRANCH" \
       --commit "$(git rev-parse HEAD)" --tools "$TOOLS" >/dev/null
+  if [ "$SOURCES_BEFORE" -eq 0 ]; then
+    OK_VERDICT=NOTHING_TO_MEASURE
+    echo ""
+    echo "== NEXT_ACTION =="
+    echo "NOTHING_TO_MEASURE: no changed source file was selected for mutation, so this run is no mutation evidence for the change. Excluded:"
+    excluded_report
+  fi
   exit 0
 fi
 
@@ -377,7 +425,7 @@ printf '%s\n' "$MUTATION_PATHS" | head_pairs HEAD \
   | python3 "$LIB_DIR/scored_ledger.py" record "$LEDGER" "$BRANCH" \
     --commit "$(git rev-parse HEAD)" --tools "$TOOLS" >/dev/null
 if grep -q 'this is not a pass' "$CAPTURE"; then
-  ZERO_MUTANTS_RUN=1
+  OK_VERDICT=MUTATION_UNMEASURED
   echo "MUTATION_UNMEASURED: no mutants were generated on the changed lines/functions;"
   echo "see the module output above for which ones. This is not the same as a kill;"
   echo "narrow MUTATION_BASE or MUTATION_ONLY, or accept that nothing here is mutable."

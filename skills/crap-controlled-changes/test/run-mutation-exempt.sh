@@ -104,6 +104,10 @@ OUT="$("$MUTATION" 2>&1)"; RC=$?
 check "full run exits clean"         "0" "$RC"
 check "full run selects no sources"  "1" \
       "$(printf '%s\n' "$OUT" | grep -c 'no changed source files')"
+check "full run is NOTHING_TO_MEASURE"  "mutation-check: EXIT=0 NOTHING_TO_MEASURE" \
+      "$(printf '%s\n' "$OUT" | tail -n 1)"
+check "exempted file listed with its pattern" "1" \
+      "$(printf '%s\n' "$OUT" | grep -cE 'tools/scratch\.go +excluded by \.crap-gated tools/scratch\.go$')"
 
 echo ""
 if [ "$failures" -eq 0 ]; then
