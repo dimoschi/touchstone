@@ -235,6 +235,7 @@ run
 echo "$OUT"
 [ "$RC" -eq 0 ] || { echo "FAIL: expected exit 0, got $RC"; exit 1; }
 echo "$OUT" | grep -q 'already measured' || { echo "FAIL: expected the already-measured message"; exit 1; }
+[ "$(echo "$OUT" | tail -n 1)" = "mutation-check: EXIT=0 MUTATION_OK" ] || { echo "FAIL: an earlier green run did measure these files, so the verdict stays MUTATION_OK"; exit 1; }
 echo "$OUT" | grep -q 'no changed source files' && { echo "FAIL: that message is for a branch with no changed sources at all"; exit 1; }
 echo "$OUT" | grep -qi 'SURVIVED' && { echo "FAIL: ran mutants when there was nothing to measure"; exit 1; }
 

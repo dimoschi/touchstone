@@ -81,6 +81,7 @@ run
 echo "$OUT"
 [ "$RC" -eq 0 ] || { echo "FAIL: expected MUTATION_OK, got $RC"; exit 1; }
 echo "$OUT" | grep -q 'MUTATION_OK' || { echo "FAIL: no MUTATION_OK"; exit 1; }
+echo "$OUT" | tail -n 1 | grep -q '^mutation-check: EXIT=0 MUTATION_OK' || { echo "FAIL: a run that killed mutants must end EXIT=0 MUTATION_OK"; exit 1; }
 [ -f .git/mutation-ledger.json ] || { echo "FAIL: ledger not written"; exit 1; }
 grep -q 'calc.go' .git/mutation-ledger.json      || { echo "FAIL: calc.go not recorded"; exit 1; }
 grep -q 'calc_test.go' .git/mutation-ledger.json || { echo "FAIL: calc_test.go not recorded (tests must be in the key)"; exit 1; }
@@ -140,6 +141,9 @@ run
 echo "$OUT"
 [ "$RC" -eq 0 ] || { echo "FAIL: test-only branch should take the early exit (exit 0), got $RC"; exit 1; }
 echo "$OUT" | grep -q 'no changed source files' || { echo "FAIL: expected the early-exit message"; exit 1; }
+[ "$(echo "$OUT" | tail -n 1)" = "mutation-check: EXIT=0 NOTHING_TO_MEASURE" ] || { echo "FAIL: a run that measured nothing must end NOTHING_TO_MEASURE, not MUTATION_OK"; exit 1; }
+echo "$OUT" | grep -q '^== NEXT_ACTION ==$' || { echo "FAIL: expected a NEXT_ACTION block"; exit 1; }
+echo "$OUT" | grep -qE 'calc_test\.go +excluded by \*_test\.go$' || { echo "FAIL: calc_test.go not listed with the pattern that excluded it"; exit 1; }
 run --verify
 [ "$RC" -eq 0 ] || { echo "FAIL: early exit must still record calc_test.go; --verify should pass, got $RC"; echo "$OUT"; exit 1; }
 
