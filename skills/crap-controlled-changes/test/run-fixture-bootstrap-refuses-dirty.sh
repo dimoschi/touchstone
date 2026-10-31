@@ -140,7 +140,7 @@ run_core_cases() {
 }
 
 run_core_cases fixture main.go run.sh OK
-run_core_cases fixture-go-unmeasurable internal/calc.go run-go-unmeasurable.sh "OK (5 cases)"
+run_core_cases fixture-go-unmeasurable internal/calc.go run-go-unmeasurable.sh "OK (7 cases)"
 
 # --- config-independence, pinned against one fixture: the underlying check
 # is identical (by copy) in both scripts, see run.sh and run-go-unmeasurable.sh.

@@ -140,7 +140,7 @@ def marker(tmp_path, text):
 def test_each_setting_is_read_from_the_marker(tmp_path):
     got = marker(tmp_path, "crap-soft = 8\ncrap-hard = 10\n"
                            "main-complexity = 7\ncognitive-complexity = 20\n")
-    assert got == thresholds.Thresholds(soft=8, hard=10, main=7, cognitive=20)
+    assert got == thresholds.Thresholds(soft=8, hard=10, main=7, cognitive=20, duplication=0.82)
 
 
 def test_settings_the_marker_omits_keep_their_default(tmp_path):
@@ -171,6 +171,17 @@ def test_a_malformed_value_falls_back_to_the_default(tmp_path):
 def test_a_non_finite_setting_is_rejected(tmp_path):
     assert marker(tmp_path, "crap-hard = inf\n") == thresholds.DEFAULTS
     assert marker(tmp_path, "crap-hard = nan\n") == thresholds.DEFAULTS
+
+
+def test_the_duplication_threshold_defaults_to_dryers_own(tmp_path):
+    assert thresholds.DEFAULTS.duplication == 0.82
+    assert show(tmp_path, "duplication") == "0.82"
+
+
+def test_the_duplication_threshold_is_read_from_the_marker(tmp_path):
+    got = marker(tmp_path, "duplication-threshold = 0.9  # fewer, closer pairs\n")
+    assert got == thresholds.DEFAULTS._replace(duplication=0.9)
+    assert show(tmp_path, "duplication") == "0.9"
 
 
 def test_whitespace_around_a_setting_does_not_matter(tmp_path):

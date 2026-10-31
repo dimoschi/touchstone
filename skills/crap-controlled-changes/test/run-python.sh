@@ -9,9 +9,9 @@ WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
 
 BASE_TSV="$(CRAP_REPO_ROOT="$WORK" CRAP_CHANGED_FILES="src/branchy.py" \
-  python3 "$PARSER" "$FIXTURE_DIR/radon-baseline.json" "$FIXTURE_DIR/coverage-baseline.json")"
+  python3 "$PARSER" "$FIXTURE_DIR/spans-baseline.tsv" "$FIXTURE_DIR/coverage-baseline.json")"
 CUR_TSV="$(CRAP_REPO_ROOT="$WORK" CRAP_CHANGED_FILES="src/branchy.py" \
-  python3 "$PARSER" "$FIXTURE_DIR/radon-current.json" "$FIXTURE_DIR/coverage-current.json")"
+  python3 "$PARSER" "$FIXTURE_DIR/spans-current.tsv" "$FIXTURE_DIR/coverage-current.json")"
 
 echo "--- baseline ---"; echo "$BASE_TSV"
 echo "--- current ---";  echo "$CUR_TSV"

@@ -11,6 +11,10 @@ def test_pipes_a_gate_detects_pipe_after_gate_name():
     assert gate_pipe.pipes_a_gate("mutation-check.sh | tail -45") is True
 
 
+def test_pipes_a_gate_detects_the_duplication_gate():
+    assert gate_pipe.pipes_a_gate("/opt/skills/dup-check.sh | tail -3") is True
+
+
 def test_pipes_a_gate_false_when_gate_not_piped():
     assert gate_pipe.pipes_a_gate("mutation-check.sh > /tmp/out.log 2>&1") is False
 

@@ -106,6 +106,43 @@ else
   echo "  skip: go not on PATH, red-gate case not exercised"
 fi
 
+echo "gates run dead code, then duplication, then CRAP, and the first red one stops the commit"
+# A copy of the wrapper beside stub gates that only log their own name, so the
+# order and the stop are observed without any language toolchain.
+FAKE="$WORK/skill"
+mkdir -p "$FAKE/lib"
+cp "$WRAP" "$FAKE/crap-commit.sh"
+cp "$SKILL_DIR/lib/require-bash.sh" "$FAKE/lib/"
+# crap-commit.sh calls crap-check.sh a second time after the commit, to anchor
+# it; that call carries a flag, and is not a gate run.
+stub_gate() {
+  printf '#!/usr/bin/env bash\n[ -n "${2:-}" ] || echo %s >> "%s"\nexit "${%s:-0}"\n' \
+    "$2" "$WORK/gate.log" "$3" > "$FAKE/$1"
+  chmod +x "$FAKE/$1"
+}
+stub_gate deadcode-check.sh deadcode DEADCODE_EXIT
+stub_gate dup-check.sh dup DUP_EXIT
+stub_gate crap-check.sh crap CRAP_EXIT
+R="$(new_repo ordered)"
+echo "change" >> "$R/README.md"
+git -C "$R" add README.md
+: > "$WORK/gate.log"
+"$FAKE/crap-commit.sh" "$R" -m "docs: ordered" >/dev/null 2>&1
+check "all green: dead code, duplication, CRAP in that order" \
+      "$(tr '\n' ' ' < "$WORK/gate.log")" "deadcode dup crap "
+check "all green: committed" "$(git -C "$R" log -1 --format=%s)" "docs: ordered"
+
+echo "more" >> "$R/README.md"
+git -C "$R" add README.md
+: > "$WORK/gate.log"
+rc=0
+out="$(DUP_EXIT=1 "$FAKE/crap-commit.sh" "$R" -m "docs: refused" 2>&1)" || rc=$?
+check "duplication red: exit is the gate's" "$rc" "1"
+check "duplication red: CRAP never ran" "$(tr '\n' ' ' < "$WORK/gate.log")" "deadcode dup "
+check "duplication red: names the gate" \
+      "$(printf '%s' "$out" | grep -c 'not committing; the duplication gate exited 1')" "1"
+check "duplication red: nothing committed" "$(git -C "$R" log -1 --format=%s)" "docs: ordered"
+
 echo ""
 if [ "$failures" -eq 0 ]; then
   echo "CRAP COMMIT OK"

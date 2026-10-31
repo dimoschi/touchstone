@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # crap-check-python.sh: per-function CRAP report for staged Python changes.
-# Complexity from radon (cc -j); per-function coverage from coverage.py's JSON.
-# parse_python.py joins them by (file, start_line). Mirrors the PHP module's
+# Complexity and function spans from unclebob/crapper (lib/crapper_spans.py, run
+# through uv); per-function coverage from coverage.py's JSON. parse_python.py
+# joins them by (file, start_line). Mirrors the PHP module's
 # stash/baseline/restore/current/join/classify shape, plus a complexipy
 # cognitive-complexity advisory like the Go module's gocognit section.
 #
@@ -29,14 +30,15 @@
 # test failures are tolerated because coverage is wanted either way. Scope the
 # suite via CRAP_PY_PYTEST_ARGS on large codebases.
 #
-# Exit codes: 0 measured (possibly zero functions), 2 setup problem,
-# 3 stash restore failed, 4 could not measure (a changed file has no coverage
-# data at all in the current phase; see EXIT_UNMEASURABLE below).
+# Exit codes: 0 measured (possibly zero functions), 2 setup problem (no uv,
+# crapper failed), 3 stash restore failed, 4 could not measure (a changed file
+# has no coverage data at all in the current phase; see EXIT_UNMEASURABLE below).
 #
 # Env overrides:
 #   CRAP_PY_RUN            - prefix for in-env commands (e.g. "poetry run", "uv run")
 #   CRAP_PY_PYTEST_ARGS    - extra pytest args (e.g. "tests/unit -k foo")
-#   CRAP_PY_RADON          - radon invocation (default "uvx radon")
+#   CRAP_CRAPPER_RUN       - launcher crapper runs through, replacing uv (see
+#                            lib/uv-pinned.sh); for suites that run without a network
 #   CRAP_PY_COMPLEXIPY     - complexipy invocation (default "uvx complexipy")
 #   CRAP_PY_PROJECT_DIR    - directory (or space/newline-separated directories)
 #                            to run the suite and coverage from
@@ -49,6 +51,8 @@ SKILL_LIB="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "$SKILL_LIB/read-lines.sh"
 . "$SKILL_LIB/ignored-files.sh"
 . "$SKILL_LIB/repo-lock.sh"
+. "$SKILL_LIB/tool-versions.sh"
+. "$SKILL_LIB/uv-pinned.sh"
 
 if [ -n "${CRAP_FILES:-}" ]; then
   read_lines CHANGED <<< "$CRAP_FILES"
@@ -62,10 +66,10 @@ if [ "${#CHANGED[@]}" -eq 0 ] || [ -z "${CHANGED[0]}" ]; then
 fi
 
 command -v python3 >/dev/null || { echo "crap-check[python]: python3 required" >&2; exit 2; }
+pinned_ready "crap-check[python]" crapper CRAP_CRAPPER_RUN "${CRAP_CRAPPER_RUN:-}" || exit 2
 
 CRAP_PY_RUN="${CRAP_PY_RUN:-}"
 CRAP_PY_PYTEST_ARGS="${CRAP_PY_PYTEST_ARGS:-}"
-CRAP_PY_RADON="${CRAP_PY_RADON:-uvx radon}"
 CRAP_PY_COMPLEXIPY="${CRAP_PY_COMPLEXIPY:-uvx complexipy}"
 
 # uv run/poetry run resolve their env, and coverage.py resolves its config,
@@ -229,7 +233,7 @@ restore() {
 BASE_TSV="$(mktemp)"
 CUR_TSV="$(mktemp)"
 COV_JSON="$(mktemp -t crap-py-cov.XXXXXX.json)"
-RADON_JSON="$(mktemp -t crap-py-radon.XXXXXX.json)"
+SPANS_TSV="$(mktemp)"
 BASE_UNMEASURED="$(mktemp)"
 CUR_UNMEASURED="$(mktemp)"
 
@@ -242,14 +246,14 @@ clean_artifacts() {
 }
 
 cleanup() {
-  rm -f "$BASE_TSV" "$CUR_TSV" "$COV_JSON" "$RADON_JSON" "$BASE_UNMEASURED" "$CUR_UNMEASURED"
+  rm -f "$BASE_TSV" "$CUR_TSV" "$COV_JSON" "$SPANS_TSV" "$BASE_UNMEASURED" "$CUR_UNMEASURED"
   clean_artifacts
   restore
   release_repo_lock
 }
 trap cleanup EXIT
 
-# Coverage + radon + join for one project directory, restricted to `files`.
+# Coverage + spans + join for one project directory, restricted to `files`.
 # Shared by the single- and multi-project cases in measure() below, so both
 # go through the identical logic; a single project is just the N=1 case.
 measure_dir() {
@@ -275,10 +279,12 @@ measure_dir() {
     } >&2
   fi
 
-  # radon and complexipy stay repo-rooted on repo-relative paths regardless of
+  # crapper and complexipy stay repo-rooted on repo-relative paths regardless of
   # project_dir: they need no project config to resolve, so their output keys
   # match `files` as-is and the join in parse_python.py needs no cov_root for them.
-  $CRAP_PY_RADON cc -j "${files[@]}" > "$RADON_JSON" 2>/dev/null || echo '{}' > "$RADON_JSON"
+  # A crapper that cannot run is a setup problem: an empty list would read as a
+  # file with no functions, and so as a pass.
+  crapper_spans "crap-check[python]" "$PWD" "$SPANS_TSV" "${files[@]}" || exit 2
 
   # Baseline only: HEAD not measuring a file is not evidence its functions are
   # new, so zero-fill instead of dropping the row. The current phase keeps
@@ -289,7 +295,7 @@ measure_dir() {
   CRAP_CHANGED_FILES="$(printf '%s\n' "${files[@]}")" \
     CRAP_REPO_ROOT="$PWD" \
     CRAP_COV_ROOT="$project_dir" \
-    python3 "$SKILL_LIB/parse_python.py" "$RADON_JSON" "$COV_JSON" \
+    python3 "$SKILL_LIB/parse_python.py" "$SPANS_TSV" "$COV_JSON" \
       --unmeasured-out "$unmeasured_out" "${zero_fill_flag[@]}" > "$out_tsv"
 
   rm -f "$project_dir/.coverage"

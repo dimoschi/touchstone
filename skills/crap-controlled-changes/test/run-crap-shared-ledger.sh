@@ -110,6 +110,11 @@ echo "$OUT"
 [ "$RC" -eq 0 ] || { echo "FAIL: a stacked branch must trust its parent's scoring, got $RC"; exit 1; }
 echo "$OUT" | grep -q 'borrowed' || { echo "FAIL: borrowing must be stated, not silent"; exit 1; }
 
+echo "--- phase 2b: a different crapper launcher is not allowed to borrow it ---"
+RC=0
+OUT="$(CRAP_CRAPPER_RUN=true "$SCRIPT" 2>&1)" || RC=$?
+[ "$RC" -eq 5 ] || { echo "FAIL: a record scored by another crapper must not count, got $RC"; echo "$OUT"; exit 1; }
+
 echo "--- phase 3: an adoption is never borrowed, only a measurement ---"
 poke source marked
 run
@@ -117,7 +122,7 @@ run
 poke source measured
 
 echo "--- phase 4: a different analyzer version is not allowed to borrow it ---"
-poke tools 'go=go0.0.0 gocrap=v0.0.0'
+poke tools 'go=go0.0.0 crapper=0000000'
 run
 [ "$RC" -eq 5 ] || { echo "FAIL: a record scored by another version must not count, got $RC"; echo "$OUT"; exit 1; }
 run --mark-scored >/dev/null 2>&1

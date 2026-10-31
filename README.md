@@ -17,13 +17,14 @@ adversarially, and opens a PR. At no point can it skip a gate to get there.
 ## What makes it different
 
 Most autonomous coding agents open a pull request when the model believes the work
-is done. Touchstone does not have that option. Three gates stand between the code
+is done. Touchstone does not have that option. Four gates stand between the code
 and the PR, and each one is a mechanical check with an exit code, not a prompt
 asking the model to be careful:
 
 | Gate | What it measures | When |
 |---|---|---|
 | **Dead code** | Static reachability. Code nothing can reach is not a feature. | Every commit |
+| **Duplication** | Structural near-duplicates a commit introduces, found by [`dryer`](https://github.com/unclebob/dryer) (Go and Python), at or above 0.82 similarity by default, set per repo in `.crap-gated` | Every commit |
 | **CRAP** | `complexity² × (1 − coverage)³ + complexity` per *changed function*, ≤6 soft, ≤8 hard by default, set per repo in `.crap-gated` | Every commit |
 | **Mutation** | Whether your tests actually fail when the code is wrong | Before the PR opens |
 
@@ -65,7 +66,7 @@ Then opt a repository in. **Nothing is gated until you say so:**
 
 ```bash
 cd your-repo
-touch .crap-gated        # dead-code + CRAP gate on every commit, and the guide gate
+touch .crap-gated        # dead-code, duplication + CRAP gate on every commit, and the guide gate
 touch .mutation-gated    # mutation gate before a PR can open
 printf '\\bTODO\\b\n' > .comment-gated   # flags a newly added comment matching any rule below, one regex per line
 git add .crap-gated .mutation-gated .comment-gated
@@ -136,15 +137,15 @@ passes what it cannot measure reports a guarantee it never checked. A repo that
 genuinely mixes languages exempts paths by listing gitignore-style patterns in
 its `.crap-gated` marker, one per line, so a Go service with a TypeScript
 frontend can gate the Go and exempt `web/**`. The same patterns also stop all
-three gates, coverage, dead code and mutation, from measuring Go, PHP or Python
-under an exempted path, not only from refusing another language there. Files that are not program source — docs,
+four gates, coverage, dead code, duplication and mutation, from measuring Go, PHP
+or Python under an exempted path, not only from refusing another language there. Files that are not program source — docs,
 config, SQL, shell — never trigger it.
 
 | Language | Gate tooling |
 |---|---|
-| Go | [`go-crap`](https://github.com/padiazg/go-crap), [`mutago`](https://github.com/quality-gates/mutago), `golang.org/x/tools/cmd/deadcode` |
+| Go | [`uv`](https://docs.astral.sh/uv/), which runs [`crapper`](https://github.com/unclebob/crapper) (complexity) and [`dryer`](https://github.com/unclebob/dryer) (duplication); [`mutago`](https://github.com/quality-gates/mutago), `golang.org/x/tools/cmd/deadcode` |
 | PHP | Composer-managed PHPUnit, [Infection](https://github.com/infection/infection) with an `infection.json` declaring `source.directories` |
-| Python | `pytest`, `coverage`, `radon`, [`mutmut`](https://github.com/boxed/mutmut) with `[tool.mutmut] source_paths` set |
+| Python | `pytest`, `coverage`, [`uv`](https://docs.astral.sh/uv/) (runs `crapper` and `dryer`), [`mutmut`](https://github.com/boxed/mutmut) with `[tool.mutmut] source_paths` set |
 
 The gate scripts tell you the exact install command when a tool is missing, and
 exit 2 (setup problem) rather than reporting a pass.
@@ -175,7 +176,7 @@ hooks/                           eight policy gates, with a manifest per host
 1. **Worktree** — canonical branch and worktree off a freshly pulled base, then one ticket fetch shared by every later phase.
 2. **Triage** — one cheap agent checks the ticket's premise, sizes the job, and judges how hard it is to get right. A disproved premise halts. Work under ten lines skips straight to Implement. The difficulty judgement sets the reasoning effort every later phase runs at, so an easy change does not get paid for like a hard one.
 3. **Plan** — a planner with no write tools produces a plan, acceptance criteria and risk areas. The plan must fit 6000 characters (one retry, then the run halts and the ticket probably needs splitting). It is written whole to an untracked `.touchstone/plan.md` in the worktree, and the implementer must read it to its last line and hand back the id printed there, or the run halts.
-4. **Implement** — TDD via the skill, committing through `crap-commit.sh`, which runs both commit-time gates and refuses while either is red. Alongside it, every line under the target repo's own `## Checks` heading (in `AGENTS.md` or `CLAUDE.md`) is executed before this phase and again after every step that commits: it must list only read-only, deterministic checks, since it runs repeatedly against the same tree.
+4. **Implement** — TDD via the skill, committing through `crap-commit.sh`, which runs the three commit-time gates and refuses while any is red. Alongside it, every line under the target repo's own `## Checks` heading (in `AGENTS.md` or `CLAUDE.md`) is executed before this phase and again after every step that commits: it must list only read-only, deterministic checks, since it runs repeatedly against the same tree.
 5. **Draft PR** — pushes the branch and opens a draft, so the work is visible and any later halt has somewhere durable to be reported.
 6. **Review** — adversarial reviewers on distinct lenses, chosen by diff size. A finding only holds the run if it carries a complete reproducer that, run for real, exits nonzero *with* a fixed marker line on its own in the output; nonzero without the marker means the reproducer itself failed to run, not that it demonstrated anything, and becomes a note instead. The category does not decide this: a design or docs finding whose reproducer reproduces holds the run like a wrong-result one, and an unmet-criterion finding is no exception. Everything else reaches the PR as a non-blocking note. Re-runs on commits any later phase adds, and from that point on a finding also has to fall inside what the new commits actually changed.
 7. **Fix** — confirmed findings only, round after round until they close or two rounds in a row close nothing. A finding counts as fixed when its own reproducer exits 0 against the new commits, marker or not, never by a model's judgement of the diff. One whose reproducer instead errors (nonzero, no marker) stays open and the next round's brief carries its exit code and output, so the fixer chases a real failure rather than a demonstration nobody gave.

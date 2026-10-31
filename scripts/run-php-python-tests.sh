@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Run the suites scripts/run-go-tests.sh excludes: the ones that need a live
-# PHP toolchain (infection, phpunit) or uv. This job installs both, so a SKIP
+# PHP toolchain (infection, phpunit) or a Python project's coverage and mutation
+# tooling, fetched with uv. This job installs both, so a SKIP
 # line here means an unmet assumption, not a legitimate absence, same rule as
 # run-go-tests.sh. Selection comes from the one NEEDS_OTHER_TOOLCHAIN list in
 # scripts/lib/skill-suites.sh; a name in it that no longer exists on disk

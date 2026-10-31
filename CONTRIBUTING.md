@@ -74,8 +74,8 @@ them.
 
 **Commit through `crap-commit.sh`, not `git commit`.** This repository gates
 itself: `.crap-gated` and `.mutation-gated` are both committed, so a hook refuses
-the raw form. The wrapper runs the dead-code and CRAP gates first and refuses
-while either is red.
+the raw form. The wrapper runs the dead-code, duplication and CRAP gates first and refuses
+while any is red.
 
 Signing follows whatever your own git configuration resolves; this project does
 not decide it for you. The one refusal is an `*_sk` hardware-token key, which an

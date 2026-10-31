@@ -4,7 +4,7 @@ Run this from the repo root after staging your changes (`git add ...`).
 
 ## Setup
 
-None. The helper invokes `go run github.com/padiazg/go-crap@v0.5.0 scan` directly, so it uses the project's active Go toolchain (mise / asdf / system). The version is pinned; override with `CRAP_GO_GOCRAP_VERSION`. The first run in a given Go version downloads and compiles it; subsequent runs are served from Go's build cache.
+`go` (the project's active toolchain: mise / asdf / system) and `uv` on PATH. Complexity and function spans come from [crapper](https://github.com/unclebob/crapper), pinned to a commit and run through `uv run --isolated --no-project`: uv builds a throwaway environment for it, so nothing is installed into the project and nothing is written under it. The first run downloads crapper; later runs are served from uv's cache. Only crapper's function reader is imported. Its own command, which writes `.metrics/` into the project and installs coverage tools of its own, is never run. Without uv the helper exits 2 and says so, and so it does if crapper cannot be imported or run: an empty result would read as a file with no functions. `CRAP_CRAPPER_RUN` replaces the launcher for a machine that cannot reach the network; it is split into words and runs `python3 <script> ...`.
 
 ## Recommended: Use the Helper
 
@@ -33,15 +33,17 @@ The helper:
 
 Coverage profiles are written to temp files and removed after each measurement; nothing is left in the working tree.
 
+Complexity is crapper's, not the Go toolchain's: one for the function, plus one for each `if`, `for` (a `range` loop is a `for`), `case` of a `switch` or type switch (a `default` included), `select` clause, and `&&` or `||`. A function literal inside a function is counted in the function that holds it. Coverage per function is the share of the function's coverage blocks that ran, each block counted once however often the profile repeats it. A changed file with functions that the profile has no block for was not part of the coverage run, which is exit 4, not a 0% row. A file the default build leaves out (another `GOOS`, an ignore tag) is not scored and is not an error, unless the profile has blocks for it, as it does when `CRAP_GO_TEST_COMMAND` builds with that tag: then it is scored. A method is named by its receiver as written, minus the star and any whitespace, type parameters included (`pkg.Stack[T].Push`, `pkg.Map[K,V].Get`). The scores of functions you did not touch can move the first time a repo is measured this way, since the counting rules differ from the tools it replaced.
+
 After the CRAP table, the helper also runs `gocognit -over <cognitive-complexity>` (default 15) on the same files and prints a "Cognitive complexity" section if any function exceeds the threshold. This is advisory (see SKILL.md).
 
 Apply the Decision Policy in `SKILL.md` to the output.
 
 ### If the changed packages' tests can't pass locally
 
-Coverage comes from `go test` on the changed files' packages by default, run by the helper rather than by go-crap. Only those packages are tested: without `-coverpkg`, a package's coverage comes from its own tests alone, so no other package can move a changed function's score. If a changed package's own tests need a live service (Postgres, RabbitMQ, and the like), that command fails everywhere, every time, regardless of your change, and there is no trustworthy coverage to score.
+Coverage comes from `go test` on the changed files' packages by default, run by the helper; crapper never runs tests here. Only those packages are tested: without `-coverpkg`, a package's coverage comes from its own tests alone, so no other package can move a changed function's score. If a changed package's own tests need a live service (Postgres, RabbitMQ, and the like), that command fails everywhere, every time, regardless of your change, and there is no trustworthy coverage to score.
 
-`crap-check-go.sh` treats this as a hard failure, not a silent pass: it exits non-zero and prints the run's stdout/stderr so you can see why. It fails on the coverage command's exit status, not just on an empty profile, because a partly failing suite still writes a profile for the packages that passed and scoring against that would be a false pass. This is also why go-crap is never allowed to run the tests itself: its own run reports every function at 0% coverage when it collects none, prints nothing, and exits 0. Override the test command with `CRAP_GO_TEST_COMMAND` to scope it to packages that can actually run:
+`crap-check-go.sh` treats this as a hard failure, not a silent pass: it exits non-zero and prints the run's stdout/stderr so you can see why. It fails on the coverage command's exit status, not just on an empty profile, because a partly failing suite still writes a profile for the packages that passed and scoring against that would be a false pass. Only the function reader of crapper is used for the same reason: its own coverage step reports every function at 0% when it collects none and exits 0. Override the test command with `CRAP_GO_TEST_COMMAND` to scope it to packages that can actually run:
 
 ```bash
 CRAP_GO_TEST_COMMAND='go test ./internal/...' \
@@ -50,7 +52,7 @@ CRAP_GO_TEST_COMMAND='go test ./internal/...' \
 
 Pick a package set that covers the function you changed and excludes anything requiring infrastructure you don't have locally. `{packages}` in the override is replaced with the changed packages, so a wrapper can keep the narrow default: `CRAP_GO_TEST_COMMAND='some-runner go test {packages}'`.
 
-The HEAD baseline is cached under the git common dir (`crap-check-baseline/`), keyed on HEAD, the changed files, the test command, the go-crap and Go versions, the Go build environment and the gate's own scripts, so a retry against the same HEAD runs the suite once, not twice. The key cannot see services the tests reach: a database that was down when the baseline ran made its tests skip, and the cached rows keep that. After fixing one, run once with `CRAP_BASELINE_CACHE=0`.
+The HEAD baseline is cached under the git common dir (`crap-check-baseline/`), keyed on HEAD, the changed files, the test command, the crapper pin and Go version, the Go build environment and the gate's own scripts, so a retry against the same HEAD runs the suite once, not twice. The key cannot see services the tests reach: a database that was down when the baseline ran made its tests skip, and the cached rows keep that. After fixing one, run once with `CRAP_BASELINE_CACHE=0`.
 
 ### If the baseline fails to build but HEAD is fine
 
@@ -65,16 +67,16 @@ When ignored source files are present, the diagnostic names them and labels the 
 
 The gate deliberately does **not** use `git stash push --all`. That would hide the underlying problem, and stashing build caches, vendored trees, and `.env` files is slow and risks losing them. Reporting is safer than hiding.
 
-Note that the selection excludes in `crap-check.sh` (`*_test.go`, `*mock_*.go`, `*.sql.go`) control only which files get *scored*. They have no effect on the stash: an excluded file still sits in the working tree during the baseline and still has to compile.
+Note that the selection excludes in `crap-check.sh` (`*_test.go`, `*mock_*.go`, `*_mock.go`, `*.sql.go`, `*.pb.go`) control only which files get *scored*. They have no effect on the stash: an excluded file still sits in the working tree during the baseline and still has to compile.
 
 ### Exit codes
 
 | Code | Meaning |
 |------|---------|
 | 0 | Measured successfully (may be zero functions, e.g. a comment-only change) |
-| 2 | Setup problem (not a git repo, `go` missing, missing module) |
+| 2 | Setup problem (not a git repo, `go` or `uv` missing, crapper could not be run, missing module) |
 | 3 | Stash restore failed — resolve the working tree manually |
-| 4 | Could not measure: the coverage run failed or no CRAP report was produced. Not a pass — see the printed diagnostic and consider `CRAP_GO_TEST_COMMAND` |
+| 4 | Could not measure: the coverage run failed, or the profile has no data for a changed file. Not a pass — see the printed diagnostic and consider `CRAP_GO_TEST_COMMAND` |
 | 5 | Nothing staged, but HEAD already touched supported-language source — you likely committed before running this. Re-stage or diff `HEAD~1..HEAD` manually |
 
 ## Manual Equivalent (if the helper is unavailable)
@@ -86,7 +88,9 @@ Note that the selection excludes in `crap-check.sh` (`*_test.go`, `*mock_*.go`, 
 2. Capture the current report, restricted to changed files:
    ```bash
    go test ./... -coverprofile=/tmp/cover.out -covermode=set
-   go run github.com/padiazg/go-crap@v0.5.0 scan ./path/to/pkg --coverage-profile /tmp/cover.out
+   uv run --isolated --no-project --with 'crapper @ git+https://github.com/unclebob/crapper@<pinned sha>' \
+     python3 lib/crapper_spans.py --root . path/to/changed.go > /tmp/spans.tsv
+   python3 lib/parse_gocover.py /tmp/spans.tsv /tmp/cover.out "$(python3 lib/go_modules.py modpath .)" .
    ```
 3. For a baseline at HEAD, stash first (`git stash push --include-untracked`), repeat step 2, then `git stash pop`.
 4. Compare the two reports per `<pkg>.<func>`. Apply thresholds: ≤6 OK, (6, 8] SOFT, >8 HARD. For `package main`, use complexity only with threshold ≤5. All three are the repo's to change in `.crap-gated` (see SKILL.md).

@@ -67,16 +67,23 @@ PY
 
 git add main.go
 
+# The gate measures in a throwaway environment and a throwaway worktree, so
+# nothing of its own may be left in the fixture, ignored files included.
+BEFORE="$(git status --porcelain --ignored)"
+
 # Run the script and capture output. NEEDS_TESTS means gate red, exit 1.
 RC=0
 OUT="$("$SCRIPT" 2>&1)" || RC=$?
 echo "$OUT"
+AFTER="$(git status --porcelain --ignored)"
 
 # Reset fixture for next run.
 git reset --hard -q HEAD
 
 # Assertions.
 [ "$RC" -eq 1 ] || { echo "FAIL: expected exit 1 (gate red), got $RC"; exit 1; }
+[ "$BEFORE" = "$AFTER" ] || { echo "FAIL: the run changed the fixture's status"; echo "$BEFORE"; echo "$AFTER"; exit 1; }
+echo "$OUT" | grep -q 'crapcheckfixture.Branchy' || { echo "FAIL: Branchy is not keyed by its package"; exit 1; }
 echo "$OUT" | grep -q 'Branchy'       || { echo "FAIL: Branchy not in output"; exit 1; }
 echo "$OUT" | grep -q 'NEEDS_TESTS'   || { echo "FAIL: NEEDS_TESTS status not present"; exit 1; }
 echo "$OUT" | grep -q 'worsened'      || { echo "FAIL: worsened tag not present"; exit 1; }

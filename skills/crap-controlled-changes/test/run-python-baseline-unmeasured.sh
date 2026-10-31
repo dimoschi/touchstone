@@ -31,10 +31,14 @@ cp "$FIXTURE_SRC/tests/test_calc.py" tests/test_calc.py
 git add calc.py tests/test_calc.py
 
 export CRAP_PY_RUN="uv run --no-project --with coverage>=7.13.1 --with pytest --"
+export PYTHONDONTWRITEBYTECODE=1 CRAP_PY_PYTEST_ARGS="-p no:cacheprovider"
 
+BEFORE="$(git status --porcelain --ignored)"
 RC=0
 OUT="$("$SCRIPT" 2>&1)" || RC=$?
 echo "$OUT"
+AFTER="$(git status --porcelain --ignored)"
+[ "$BEFORE" = "$AFTER" ] || { echo "FAIL: the run changed the repo's status (.metrics, a venv, coverage files)"; echo "$BEFORE"; echo "$AFTER"; exit 1; }
 
 [ "$RC" -eq 0 ] || { echo "FAIL: expected exit 0 (gate green), got $RC"; exit 1; }
 echo "$OUT" | grep -q 'calc.py::add' || { echo "FAIL: add not in output"; exit 1; }

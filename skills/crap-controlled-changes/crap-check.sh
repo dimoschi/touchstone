@@ -33,7 +33,7 @@ source "$LIB_DIR/tool-fingerprint.sh"
 source "$LIB_DIR/unsupported-sources.sh"
 
 crap_fingerprint() {
-  tool_fingerprint "$1" gocrap "${CRAP_GO_GOCRAP_VERSION:-$GOCRAP_VERSION_DEFAULT}"
+  tool_fingerprint "$1" crapper "${CRAP_CRAPPER_RUN:-$CRAPPER_SHA_DEFAULT}"
 }
 
 REPO_ROOT="$(resolve_repo_root crap-check "${1:-}")" || exit 2
@@ -79,7 +79,7 @@ while IFS= read -r ex; do
   [ -n "$ex" ] && EXEMPT_SPEC+=("$ex")
 done < <(crap_exempt_pathspecs "$REPO_ROOT")
 
-GO_SPEC=('*.go' ':(exclude)*_test.go' ':(exclude)*mock_*.go' ':(exclude)*.sql.go' ':(exclude)*.pb.go' ${EXEMPT_SPEC[@]+"${EXEMPT_SPEC[@]}"})
+GO_SPEC=('*.go' ':(exclude)*_test.go' ':(exclude)*mock_*.go' ':(exclude)*_mock.go' ':(exclude)*.sql.go' ':(exclude)*.pb.go' ${EXEMPT_SPEC[@]+"${EXEMPT_SPEC[@]}"})
 PHP_SPEC=('*.php' ':(exclude)tests/**' ':(exclude)**/Tests/**' ':(exclude)**/*Test.php' ${EXEMPT_SPEC[@]+"${EXEMPT_SPEC[@]}"})
 PY_SPEC=('*.py' ':(exclude)**/test_*.py' ':(exclude)**/*_test.py'
          ':(exclude)tests/**' ':(exclude)**/tests/**'

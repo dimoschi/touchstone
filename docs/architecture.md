@@ -12,7 +12,7 @@ Two consequences to internalise before changing anything:
   `${CLAUDE_PLUGIN_ROOT}`.
 - **The target repo is not this repo.** A gate measures whatever repo the agent is
   working in. Anything that reads `git rev-parse` is asking about the target, so a hook
-  must resolve which repo a command acts on before it can decide anything. All three
+  must resolve which repo a command acts on before it can decide anything. All four
   gates also take that repo as an optional leading `<absolute-repo-path>` argument
   (matching `crap-commit.sh`'s existing one), so a caller can name it explicitly rather
   than relying on the process cwd, and print the repo root and branch they resolved as
@@ -20,12 +20,13 @@ Two consequences to internalise before changing anything:
 
 ## The gates (`skills/crap-controlled-changes/`)
 
-Three entry points, each a language-agnostic dispatcher over `lib/`:
+Four entry points, each a language-agnostic dispatcher over `lib/`:
 
 | Script | Measures | When |
 |---|---|---|
 | `crap-check.sh` | `complexity² × (1 − coverage)³ + complexity` per changed function | every commit |
 | `deadcode-check.sh` | static reachability (**Go only**; exits 0 on other languages) | every commit |
+| `dup-check.sh` | structural near-duplicates the staged diff introduces (Go and Python, in a repo with `.crap-gated`) | every commit |
 | `mutation-check.sh` | surviving mutants on changed lines | before a PR |
 
 `crap-check.sh` and `mutation-check.sh` detect the languages of staged files, delegate
@@ -33,15 +34,16 @@ to `lib/<gate>-<lang>.sh`, and normalise every module's output to one row format
 real logic lives in the `lib/*.py` parsers, so bash stays orchestration. Prefer
 extending a parser over growing a shell script.
 
-`crap-commit.sh` is the only sanctioned way for an agent to commit: it runs both
-commit-time gates, then `git commit`. It takes the repo as an explicit absolute path
+`crap-commit.sh` is the only sanctioned way for an agent to commit: it runs the
+three commit-time gates (dead code, duplication, CRAP, in that order, cheapest first),
+then `git commit`. It takes the repo as an explicit absolute path
 rather than inferring it, because every parse failure in the old inference was a silent
-bypass, and forwards that same path to the two gates it runs so they never fall back to
+bypass, and forwards that same path to the gates it runs so they never fall back to
 resolving it from the cwd either.
 
 ### Exit codes are a shared vocabulary
 
-All three gates use the same codes. Do not invent new ones.
+All four gates use the same codes. Do not invent new ones.
 
 | Code | Meaning |
 |---|---|
@@ -58,8 +60,8 @@ never checked.
 
 ### Ledgers
 
-`crap-check-scored.json`, `mutation-ledger.json`, `mutation-accepted.json` and
-`deadcode-accepted.json` sit under `git rev-parse --git-common-dir`. The *common* dir,
+`crap-check-scored.json`, `mutation-ledger.json`, `mutation-accepted.json`,
+`deadcode-accepted.json` and `dup-accepted.json` sit under `git rev-parse --git-common-dir`. The *common* dir,
 not `--git-dir`: a per-ticket worktree would otherwise carry the record away when it is
 removed.
 
@@ -70,9 +72,70 @@ Only their own tools write them. Never hand-edit a ledger and never regenerate o
 clear a failure: a gate that can be satisfied by editing its own record measures
 nothing. `--accept` and `--mark-scored` are user-approved overrides, not agent moves.
 
+### Pinned tools that run through uv
+
+Go and Python complexity comes from unclebob/crapper, and duplication from
+unclebob/dryer. Neither has a release, so both are pinned by commit SHA in
+`lib/tool-versions.sh` and run by `lib/uv-pinned.sh` as `uv run --isolated --no-project`
+with the package installed from that commit. `--isolated` gives uv a throwaway
+environment instead of the target project's `.venv`, and `--no-project` stops it
+reading the project's `pyproject.toml`, so nothing is installed into or written
+under the repo being measured.
+
+Both are used as libraries, never as commands. Their CLIs write `.metrics/*.edn`
+into the project, and crapper's coverage step installs tools of its own and
+reports 0% when it fails, which is the false pass these gates exist to refuse.
+`lib/crapper_spans.py` and `lib/dup_scan.py` import the readers they need and
+print plain rows: spans and complexity per function, and the duplicate pairs a
+staged diff introduces. The `lib/*.py` parsers then do the join in the system
+python3, so they stay testable without either tool installed.
+
+`CRAP_CRAPPER_RUN` and `CRAP_DRYER_RUN` replace the launcher, for suites that run
+without a network. Without uv and without an override the gates exit 2 with a
+message. A tool that cannot be imported or run is exit 2 too, never an empty
+result: an empty list of functions is indistinguishable from a file with none.
+The crapper pin (or the override) is part of the ledger fingerprint for Go, and of
+the Go baseline cache key, so a different crapper never reads a score the old one
+produced.
+
+Coverage stays with the language's own tools (`coverage.py` for Python, `go test`
+for Go). A changed file with functions that its coverage run has no data for is
+exit 4 in the current phase for both languages, never a 0% row. The one exception
+is a Go file the default build leaves out (`go list`: another GOOS, an ignore tag):
+nothing can measure it, so it is not scored, unless the profile has blocks for it,
+which is what `CRAP_GO_TEST_COMMAND` building with tags produces.
+
+A Go method's id is its receiver as written, minus the star and any whitespace,
+type parameters included (`pkg.Stack[T].Push`, `pkg.Map[K,V].Get`). crapper's own
+namespace drops them, so `lib/crapper_spans.py` reads the receiver off the tree:
+a function's refactor attempts in `crap-check-state.json` are filed under its id.
+The whitespace goes because the Go rows that carry the id are split on whitespace
+(`parse_gocover.py` writes them, `classify_rows.py` reads them): `Map[K, V]` would
+become two fields and every method of the type one row.
+
+### The duplication gate
+
+`dup-check.sh` runs between the dead-code and CRAP gates, in a repo with `.crap-gated`,
+over the staged Go and Python files, less generated code, exempt paths and whatever
+dryer's own walk skips (tests, `vendor/`, `testdata/`, `build/` and the rest of its
+`SKIP_DIRS`, applied with dryer's own rules so the two cannot disagree). `dup-check.sh` hands `lib/dup_scan.py`
+`git diff --cached -M --name-status` and every tracked file in scope. It reads the
+staged files from the index and what the change replaced from HEAD (a rename's old
+name and a deleted file included), through one `git cat-file --batch`, so the working
+tree never matters. A form's identity is `<file>#<digest of its normalized structure>`,
+and a pair is introduced when either side occurs more often among the staged file's
+forms in the index than at HEAD, its structure occurs more often across the whole
+change, and the two files hold more pairs than at HEAD: a new copy, a third copy, or
+an edit that brings a pair up to the threshold. A duplicate already at HEAD in a file
+that is only edited, moved or renamed, or with one of its copies edited, is not.
+`--accept <key>` records a pair per branch in `dup-accepted.json`, written only by
+`dup-check.sh`. A key names each side as `<file>#<digest>x<copies>`, the copies being
+how many forms of that structure the file holds, so the key lapses when either side's
+structure changes and when its file gains another copy.
+
 ### Thresholds and classification live in one place
 
-`lib/thresholds.py` holds the four settings, their defaults, and the rule that
+`lib/thresholds.py` holds the five settings, their defaults, and the rule that
 turns a complexity/coverage pair into a status. `lib/classify_rows.py` joins the
 baseline and current measurements and prints the report rows. Both are shared by
 all three language modules.
@@ -82,7 +145,7 @@ They used to be an awk program inside each of `crap-check-go.sh`,
 `test/run-php.sh` which meant that suite verified its own replica rather than
 the module. Per-repo settings are only possible with one implementation.
 
-A repo sets any of the four in its `.crap-gated`, which already carries the
+A repo sets any of the five in its `.crap-gated`, which already carries the
 exemption patterns. The marker rather than the environment, because an
 environment variable is settable by the agent under measurement. The coverage
 requirement is not a setting: it is derived from the hard cap, so the two cannot

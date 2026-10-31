@@ -37,7 +37,7 @@ import json
 import re
 import sys
 
-GATES = ('crap-check.sh', 'crap-commit.sh', 'deadcode-check.sh', 'mutation-check.sh')
+GATES = ('crap-check.sh', 'crap-commit.sh', 'deadcode-check.sh', 'dup-check.sh', 'mutation-check.sh')
 
 # Arithmetic comes first so the `<<` in `$((1 << 3))` is not read as a heredoc.
 DATA = re.compile(r"""
