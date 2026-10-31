@@ -29,7 +29,7 @@ export const meta = {
 // against the manifest in scripts/check-version-bump.sh, so drift is a
 // gate's job rather than something this script verifies about itself.
 const PLUGIN_NAME = 'touchstone'
-const PIPELINE_VERSION = '0.40.0'
+const PIPELINE_VERSION = '0.40.1'
 // The plugin's gates are this skill's scripts. A user or project skill with the
 // bare name can resolve first and run an older copy of the gates, whose result
 // would then be read as this version's, so prompts name the namespaced skill.
@@ -4599,8 +4599,14 @@ for (let attempt = 1; attempt <= MAX_GATE_ATTEMPTS && !mutation.green
     `code and passes on the original, TDD-style, and commit it. Never weaken or ` +
     `restructure production code to dodge a mutant. If a survivor instead reveals ` +
     `a genuine defect (dead branch, wrong condition), fix that properly, TDD ` +
-    `first, and commit; that is a real bug the suite was blind to. Never run ` +
-    `--accept yourself: if a mutant is provably equivalent, report it and stop. ` +
+    `first, and commit; that is a real bug the suite was blind to. A survivor ` +
+    `no test can kill often sits on code that does nothing: a default equal to ` +
+    `the one the call already uses, a transform of a value nothing reads, a ` +
+    `name for what Python or Go would pick anyway. Then the code is the defect: ` +
+    `delete it, keep every test green, and commit. That is not dodging, since ` +
+    `the behaviour is the same for every input. Never run --accept yourself: ` +
+    `report a mutant as provably equivalent and stop only when no simpler form ` +
+    `of the code exists. ` +
     `Report the final state, and return head_sha: the full 40-character SHA of ` +
     `HEAD after your last commit, or of the unchanged HEAD if you committed ` +
     `nothing. ` +
