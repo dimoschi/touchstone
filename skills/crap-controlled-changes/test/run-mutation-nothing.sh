@@ -92,6 +92,22 @@ echo "the early exit still records the ledger"
 "$MUTATION" --verify >/dev/null 2>&1
 check "--verify passes afterwards"                0 "$?"
 
+echo "a file MUTATION_ONLY leaves out is named, with MUTATION_ONLY as the reason"
+git switch -q main
+git switch -q -c only
+mkdir -p other
+printf 'package other\n\nfunc F(x int) int {\n\tif x > 1 {\n\t\treturn x\n\t}\n\treturn 0\n}\n' > other/foo.go
+git add -A
+git commit -q -m "a source file outside MUTATION_ONLY"
+OUT="$(MUTATION_ONLY='pkg/*' "$MUTATION" 2>&1)"; RC=$?
+check "exits 0"                                   0 "$RC"
+check "final line is the NOTHING_TO_MEASURE trailer" \
+      "mutation-check: EXIT=0 NOTHING_TO_MEASURE" "$(printf '%s\n' "$OUT" | tail -n 1)"
+check "names the file and MUTATION_ONLY"          yes \
+      "$(has_line '^  other/foo\.go +excluded by MUTATION_ONLY pkg/\*$')"
+check "does not claim there are no changed files" no \
+      "$(has_line '^  no changed go, php or python files$')"
+
 echo "a branch with no go, php or python change says so"
 git switch -q main
 git switch -q -c docs

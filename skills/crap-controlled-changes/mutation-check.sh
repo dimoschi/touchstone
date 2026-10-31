@@ -350,8 +350,8 @@ attribute_exclusions() {
 }
 
 excluded_report() {
-  local spec
-  EXCLUDED_LEFT="$( (git diff --name-only "$BASE" -- '*.go' '*.php' '*.py' || true) | filter_only)"
+  local spec f
+  EXCLUDED_LEFT="$(git diff --name-only "$BASE" -- '*.go' '*.php' '*.py' || true)"
   if [ -z "$EXCLUDED_LEFT" ]; then
     echo "  no changed go, php or python files"
     return 0
@@ -362,6 +362,11 @@ excluded_report() {
   for spec in "${GO_EXCLUDES[@]}"; do attribute_exclusions "" "$spec" '*.go'; done
   for spec in "${PHP_EXCLUDES[@]}"; do attribute_exclusions "" "$spec" '*.php'; done
   for spec in "${PY_EXCLUDES[@]}"; do attribute_exclusions "" "$spec" '*.py'; done
+  # What no pattern dropped can only have been dropped by MUTATION_ONLY.
+  while IFS= read -r f; do
+    [ -n "$f" ] || continue
+    printf '  %s  excluded by MUTATION_ONLY %s\n' "$f" "$MUTATION_ONLY"
+  done <<< "$EXCLUDED_LEFT"
 }
 
 run_module go     "$GO_FILES"  "$LIB_DIR/mutation-check-go.sh"
