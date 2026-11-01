@@ -330,8 +330,13 @@ if (reviewerCount && mutHead && mutHead !== reviewedThrough && !outOfBudget()) {
 }
 
 const { checks: advisoryChecks } = checksFrom(wt.checks_source, ADVISORY_CHECKS_HEADING, 'advisory')
-if (advisoryChecks.length && !outOfBudget()) {
-  const advisory = await executeChecks(advisoryChecks)
+// Every poll is a dispatch, so a run budget would refuse one mid-wait and halt
+// a run that only has the PR left. Never poll with less than BUDGET_FLOOR
+// unspent, enough for the kill and the PR.
+const runUnderFloor = () => runBudget != null && runBudget - runSpent() < BUDGET_FLOOR
+if (advisoryChecks.length && !outOfBudget() && !runUnderFloor()) {
+  const advisoryOver = () => sMut.over() || outOfBudget() || runUnderFloor()
+  const advisory = await executeChecks(advisoryChecks, advisoryOver)
   const { red, unmeasured } = classifyResults(advisoryChecks, advisory)
   for (const c of red) {
     notes.push({ category: 'advisory', reason: 'advisory', title: `Advisory check \`${c.command}\` reported`,

@@ -73,10 +73,119 @@ async function scenarioNoAdvisorySectionRunsNothingExtra() {
     captured.calls.filter(c => c.label.startsWith('checks:run:')).length, 2)
 }
 
+const PENDING = { output: 'TOUCHSTONE_CHECK_PENDING advisory:1 1' }
+const isAdvisoryRun = (prompt) => prompt.includes(ADVISORY)
+// Pending on the first advisory poll, red after it: a note reaches the PR
+// only if a second poll was sent, so "no note" proves the poll was stopped.
+const pendingThenRed = () => {
+  let advisoryCalls = 0
+  return (attempt, prompt) => isAdvisoryRun(prompt) && ++advisoryCalls === 1 ? PENDING : rows(1)()
+}
+
+async function scenarioAdvisoryStillRunningIsAskedAgain() {
+  console.log('\n== scenario: an advisory check still running on its first poll is asked about again')
+  let advisoryCalls = 0
+  const normal = rows(1)
+  const { result, captured } = await run({
+    args: { openPr: true },
+    discovery: withAdvisory,
+    checkRuns: (attempt, prompt) => isAdvisoryRun(prompt) && ++advisoryCalls === 1 ? PENDING : normal(),
+    initialReview: { correctness: [], advocate: [] },
+    prResult: { opened: true, url: 'https://example.invalid/pr/186a', note: 'stub ready' },
+  })
+  const prPrompt = captured.calls.find(c => c.label === 'pr')?.prompt ?? ''
+  const first = captured.calls.find(c => c.label.startsWith('checks:run:') && isAdvisoryRun(c.prompt))
+  check('the run does not halt', result.halted_at, undefined)
+  check('the advisory attempt was asked about a second time',
+    callCount(captured, `${first?.label}:poll:2`), 1)
+  check('the PR prompt carries the note from the later reply',
+    prPrompt.includes(`Advisory check \`${ADVISORY}\` reported`) && prPrompt.includes('exit 1'), true)
+}
+
+async function scenarioMutationBudgetStopsAskingAboutAdvisory() {
+  console.log('\n== scenario: a mutation stage budget stops asking about a pending advisory check')
+  const { result, captured } = await run({
+    args: { openPr: true, stageBudgets: { mutation: 1000 } },
+    budgetPerAgentCall: 5000,
+    discovery: withAdvisory,
+    checkRuns: pendingThenRed(),
+    initialReview: { correctness: [], advocate: [] },
+    prResult: { opened: true, url: 'https://example.invalid/pr/186b', note: 'stub ready' },
+  })
+  const prPrompt = captured.calls.find(c => c.label === 'pr')?.prompt ?? ''
+  const first = captured.calls.find(c => c.label.startsWith('checks:run:') && isAdvisoryRun(c.prompt))
+  check('the run does not halt', result.halted_at, undefined)
+  check('a kill was sent for the advisory attempt', callCount(captured, `${first?.label}:kill`), 1)
+  check('the PR still opened', captured.calls.some(c => c.label === 'pr'), true)
+  check('no advisory note', prPrompt.includes('Advisory check'), false)
+}
+
+async function scenarioNoBudgetKeepsAskingAboutAdvisory() {
+  console.log('\n== scenario: without a stage budget a pending advisory check is asked about until it exits')
+  let advisoryCalls = 0
+  const normal = rows(1)
+  const { result, captured } = await run({
+    args: { openPr: true },
+    budgetPerAgentCall: 5000,
+    discovery: withAdvisory,
+    checkRuns: (attempt, prompt) => isAdvisoryRun(prompt) && ++advisoryCalls <= 3 ? PENDING : normal(),
+    initialReview: { correctness: [], advocate: [] },
+    prResult: { opened: true, url: 'https://example.invalid/pr/186c', note: 'stub ready' },
+  })
+  const prPrompt = captured.calls.find(c => c.label === 'pr')?.prompt ?? ''
+  const first = captured.calls.find(c => c.label.startsWith('checks:run:') && isAdvisoryRun(c.prompt))
+  check('the run does not halt', result.halted_at, undefined)
+  check('it was asked until the fourth call', callCount(captured, `${first?.label}:poll:4`), 1)
+  check('no kill was sent', callCount(captured, `${first?.label}:kill`), 0)
+  check('the PR prompt carries the advisory note', prPrompt.includes('Advisory check'), true)
+}
+
+async function scenarioRunBudgetStopsAskingAboutAdvisory() {
+  console.log('\n== scenario: a run budget stops a pending advisory check before it halts the run')
+  const { result, captured } = await run({
+    // 14 calls of 5000 come before the advisory poll, so it starts with
+    // 32500 left, just above BUDGET_FLOOR, and is under it after one poll.
+    args: { openPr: true, runBudget: 102500 },
+    budgetPerAgentCall: 5000,
+    discovery: withAdvisory,
+    checkRuns: pendingThenRed(),
+    initialReview: { correctness: [], advocate: [] },
+    prResult: { opened: true, url: 'https://example.invalid/pr/186d', note: 'stub ready' },
+  })
+  const prPrompt = captured.calls.find(c => c.label === 'pr')?.prompt ?? ''
+  const first = captured.calls.find(c => c.label.startsWith('checks:run:') && isAdvisoryRun(c.prompt))
+  check('the run does not halt', result.halted_at, undefined)
+  check('a kill was sent for the advisory attempt', callCount(captured, `${first?.label}:kill`), 1)
+  check('the PR still opened', captured.calls.some(c => c.label === 'pr'), true)
+  check('no advisory note', prPrompt.includes('Advisory check'), false)
+}
+
+async function scenarioRunBudgetUnderFloorSkipsAdvisory() {
+  console.log('\n== scenario: a run budget already under its floor never starts the advisory check')
+  const { result, captured } = await run({
+    // 20000 left when the advisory step is reached, under BUDGET_FLOOR.
+    args: { openPr: true, runBudget: 90000 },
+    budgetPerAgentCall: 5000,
+    discovery: withAdvisory,
+    checkRuns: pendingThenRed(),
+    initialReview: { correctness: [], advocate: [] },
+    prResult: { opened: true, url: 'https://example.invalid/pr/186e', note: 'stub ready' },
+  })
+  check('the run does not halt', result.halted_at, undefined)
+  check('no advisory check was dispatched',
+    captured.calls.some(c => c.label.startsWith('checks:run:') && isAdvisoryRun(c.prompt)), false)
+  check('the PR still opened', captured.calls.some(c => c.label === 'pr'), true)
+}
+
 const SCENARIOS = [
   scenarioAdvisoryReportReachesThePr,
   scenarioGreenAdvisoryAddsNothing,
   scenarioNoAdvisorySectionRunsNothingExtra,
+  scenarioAdvisoryStillRunningIsAskedAgain,
+  scenarioMutationBudgetStopsAskingAboutAdvisory,
+  scenarioNoBudgetKeepsAskingAboutAdvisory,
+  scenarioRunBudgetStopsAskingAboutAdvisory,
+  scenarioRunBudgetUnderFloorSkipsAdvisory,
 ]
 JS_EOF
 
