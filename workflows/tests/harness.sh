@@ -171,6 +171,23 @@ function mutationVerifyOutput(prompt, exit, head, trailer = exit, wtPath = STUB_
   const run = mutationVerifyRunOf(prompt)
   return `TOUCHSTONE_MUTATION_VERIFY ${run} ${exit} ${trailer} ${head} ${wtPath}/.git/touchstone-gates/${run}/mutation-verify.log ${name} ${version} ${gate}`
 }
+// What the mutation run line prints for the run its prompt names: the finished
+// line, with the exit and gate trailer the gate left, or the pending line while
+// its process is alive (alive 1) or gone with no exit file (alive 0).
+function mutationRunOf(prompt) {
+  return (/printf 'TOUCHSTONE_MUTATION_RUN %s %s %s %s %s %s\\n' (\S+) /.exec(prompt) ?? [])[1] ?? ''
+}
+function mutationLogOf(run, wtPath = STUB_WT_PATH) {
+  return `${wtPath}/.git/touchstone-gates/${run}/mutation.log`
+}
+function mutationRunOutput(prompt, exit, trailer = exit, gate = PLUGIN_GATE,
+  name = 'touchstone', version = STUB_PLUGIN_VERSION) {
+  const run = mutationRunOf(prompt)
+  return `TOUCHSTONE_MUTATION_RUN ${run} ${exit} ${trailer} ${mutationLogOf(run)} ${name} ${version} ${gate}`
+}
+function mutationPendingOutput(prompt, alive = 1) {
+  return `TOUCHSTONE_MUTATION_PENDING mutation ${alive} ${mutationLogOf(mutationRunOf(prompt))}`
+}
 // The reviewed head the unreviewed-commit line counts from.
 function unreviewedFromOf(prompt) {
   return (/printf 'TOUCHSTONE_UNREVIEWED %s %s %s\\n' (\S+) /.exec(prompt) ?? [])[1] ?? ''
@@ -616,18 +633,33 @@ function makeAgent(scenario, captured) {
       captured.lastMutation = reported ?? captured.lastMutation
       return reported
     }
-    // The verdict line run after each mutation attempt. By default it agrees
-    // with the agent: exit 0 when its last answer said green, else 5 (no green
-    // run recorded), at the head it reported. scenario.mutationVerify(attempt,
-    // prompt, retry) returns { exit, head, trailer, gate, name, version } to override any of them,
-    // { output } for a raw reply, or null for no answer.
+    // The mutation run line, answered with a finished run (exit 0) unless
+    // scenario.mutationRun(label, prompt) returns { exit, trailer, gate, name,
+    // version } to override any of them, { output } for a raw reply (see
+    // mutationPendingOutput), or null for no answer. The label carries the
+    // attempt and any :poll:K, :retry or :kill suffix.
+    if (label.startsWith('mutation-run:')) {
+      const custom = scenario.mutationRun ? scenario.mutationRun(label, prompt) : undefined
+      if (custom === null || typeof custom?.output === 'string') return custom
+      return { output: mutationRunOutput(prompt, custom?.exit ?? 0, custom?.trailer ?? custom?.exit ?? 0,
+        custom?.gate, custom?.name, custom?.version) }
+    }
+    // The verdict line run before the first attempt and after each one. After
+    // an attempt it agrees with the agent by default: exit 0 when its last
+    // answer said green, else 5 (no green run recorded), at the head it
+    // reported. Before the first (attempt 0) it records nothing, exit 5, so a
+    // scenario about the attempts still gets them; scenario.mutationVerifyFirst
+    // answers that one call. scenario.mutationVerify(attempt, prompt, retry)
+    // returns { exit, head, trailer, gate, name, version } to override any of
+    // them, { output } for a raw reply, or null for no answer.
     const verifyAt = /^mutation-verify:(\d+)(:retry)?$/.exec(label)
     if (verifyAt) {
-      const custom = scenario.mutationVerify
-        ? scenario.mutationVerify(Number(verifyAt[1]), prompt, Boolean(verifyAt[2])) : undefined
+      const first = verifyAt[1] === '0'
+      const ask = first ? scenario.mutationVerifyFirst : scenario.mutationVerify
+      const custom = ask ? ask(Number(verifyAt[1]), prompt, Boolean(verifyAt[2])) : undefined
       if (custom === null || typeof custom?.output === 'string') return custom
       const last = captured.lastMutation
-      const exit = custom?.exit ?? (last?.green ? 0 : 5)
+      const exit = custom?.exit ?? (!first && last?.green ? 0 : 5)
       return { output: mutationVerifyOutput(prompt, exit,
         custom?.head ?? (last?.head_sha || REVIEWED_THROUGH), custom?.trailer ?? exit, STUB_WT_PATH, custom?.gate, custom?.name, custom?.version) }
     }

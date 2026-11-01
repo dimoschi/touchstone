@@ -190,4 +190,26 @@ check "architecture.md describes the batch runner and its log directory" \
 check "and says an unmeasured baseline halts before Implement" \
   "$(docHas "$ARCH_MD" 'the baseline could not be established')" 1
 
+echo ""
+echo "== static: gh-159 -- scripts/gate-env.sh gives the mutation gate the pinned launcher AGENTS.md names"
+GATE_ENV="$REPO_ROOT/scripts/gate-env.sh"
+AGENTS_PIN="$(sed -n 's/.*MUTATION_PY_RUN="\([^"]*\)".*/\1/p' "$REPO_ROOT/AGENTS.md")"
+check "AGENTS.md gives a pinned launcher" \
+  "$(case "$AGENTS_PIN" in *mutmut==*pytest==*) echo yes ;; *) echo no ;; esac)" yes
+check "gate-env.sh is executable" \
+  "$([ -x "$GATE_ENV" ] && echo yes || echo no)" yes
+check "gate-env.sh mutation exports exactly that launcher" \
+  "$(eval "$("$GATE_ENV" mutation)"; printf '%s' "${MUTATION_PY_RUN:-}")" "$AGENTS_PIN"
+check "gate-env.sh crap prints nothing and exits 0" \
+  "$("$GATE_ENV" crap; echo "exit=$?")" "exit=0"
+SKILL_MD="$REPO_ROOT/skills/crap-controlled-changes/SKILL.md"
+check "SKILL.md scopes the no-background rule to a gate run by hand, and tells a relay to run the detached line as written and never refuse it" \
+  "$(docHas "$SKILL_MD" 'Inside the touchstone delivery pipeline, the pipeline starts mutation-check.sh detached and polls it itself. A line it hands a relay (with its `&` and `sleep 1` loop) is run as written and never refused.')" 1
+check "SKILL.md names the one change a relay may make to that line: the gate path after g=" \
+  "$(docHas "$SKILL_MD" 'The one change allowed is the one its prompt asks for: the gate'"'"'s absolute path in place of the bare `mutation-check.sh` after `g=`.')" 1
+check "SKILL.md no longer says the relay line is never rewritten" \
+  "$(docHas "$SKILL_MD" 'never refused or rewritten')" 0
+check "SKILL.md scopes the hand-to-the-user advice to outside the pipeline" \
+  "$(docHas "$SKILL_MD" 'So, outside the delivery pipeline, for a repo already known to cost tens of minutes, hand the user the exact command')" 1
+
 finish

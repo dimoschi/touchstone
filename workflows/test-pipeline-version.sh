@@ -159,6 +159,17 @@ function mutationVerifyReply(prompt, last) {
     `${name} ${version} /stub-plugin/skills/crap-controlled-changes/mutation-check.sh` }
 }
 
+// What the mutation run line prints: a finished run, exit 0 with the gate's
+// matching trailer, from the plugin's own gate.
+function mutationRunReply(prompt) {
+  const run = (/printf 'TOUCHSTONE_MUTATION_RUN %s %s %s %s %s %s\\n' (\S+) /.exec(prompt) ?? [])[1] ?? ''
+  const name = /^const PLUGIN_NAME = '([^']*)'/m.exec(src)?.[1]
+  const version = /^const PIPELINE_VERSION = '([^']*)'/m.exec(src)?.[1]
+  return { output: `TOUCHSTONE_MUTATION_RUN ${run} 0 0 ` +
+    `/stub-worktree/.git/touchstone-gates/${run}/mutation.log ` +
+    `${name} ${version} /stub-plugin/skills/crap-controlled-changes/mutation-check.sh` }
+}
+
 function makeAgent(scenario, captured) {
   const responses = scenario.responses ?? {}
   return async (prompt, opts) => {
@@ -170,6 +181,7 @@ function makeAgent(scenario, captured) {
       return responses[label]
     }
     if (/^mutation-verify:\d+(:retry)?$/.test(label)) return mutationVerifyReply(prompt, captured.lastMutation)
+    if (label.startsWith('mutation-run:')) return mutationRunReply(prompt)
     // Replaces the old separate ticket/plugin:version/gate:opt-in dispatches
     // (gh-118): one call, before any worktree exists, answers all three.
     if (label === 'setup') {

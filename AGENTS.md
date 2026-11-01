@@ -106,7 +106,10 @@ bash scripts/check-assertions-discriminate.sh
   Both are pinned because an unpinned run resolves the newest release, and
   pytest 9.2.0 breaks mutmut 3.8.0 (`'Function' object has no attribute
   '_nodeid'`), so the same commit can pass one day and fail to measure the next.
-  Raise the pins together, on purpose, once a run with the new pair is green. Exempt paths
+  Raise the pins together, on purpose, once a run with the new pair is green.
+  `scripts/gate-env.sh mutation` prints the same export, and the pipeline evaluates it
+  before its mutation run, so raise the pins in both places (a static test fails if they
+  differ). Exempt paths
   live in `.crap-gated`, never in this marker: `mutation-check.sh` reads that marker's
   patterns for its own selection so there is one list rather than two. `conftest.py` and
   `test_*.py` are outside mutation selection already, so a branch that only touches

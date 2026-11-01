@@ -456,20 +456,26 @@ const DETACH = `python3 -c 'import os,sys; os.setsid(); ` +
   `os.execvp("bash", ["bash", "-c", sys.argv[1], "check", *sys.argv[2:]])' ` +
   `'d="$1"; echo "$$" >|"$d/$2.pid"; bash -c "$3" >|"$d/$2.log" 2>&1; echo "$?" >|"$d/$2.exit.tmp"; ` +
   `mv "$d/$2.exit.tmp" "$d/$2.exit"; rm -f "$d/running"'`
-const checkLineFor = (c, run, first) => {
-  const f = (ext) => `"$d/${c.id}.${ext}"`
-  const script = shQuote(`cd ${shQuote(wt.path)} && ${c.command}`)
-  return `${logDirFor(run)} && mkdir -p "$d" && { if [ ! -f ${f('exit')} ]; then ` +
-    `if [ ! -e "$d/running" ]; then printf '%s' ${c.id} >|"$d/running"; : >|${f('log')}; ` +
-    `${DETACH} "$d" ${c.id} ${script} </dev/null >/dev/null 2>&1 & fi; ` +
-    `w=0; while [ ! -f ${f('exit')} ] && [ "$(cat "$d/running" 2>/dev/null)" = ${c.id} ] && ` +
+// start ends in `; ` and done does not: done runs with $e set once the exit
+// file exists. fresh is a shell command followed by ` && `. pendingLog adds the
+// log path to a pending line.
+const detachedLineFor = ({ dir, id, script, done, pendingPrefix, pendingLog = false, env = '', start = '', fresh = '' }) => {
+  const f = (ext) => `"$d/${id}.${ext}"`
+  return `${dir} && ${fresh}mkdir -p "$d" && { if [ ! -f ${f('exit')} ]; then ` +
+    `if [ ! -e "$d/running" ]; then printf '%s' ${id} >|"$d/running"; ${start}: >|${f('log')}; ` +
+    `${env}${DETACH} "$d" ${id} ${script} </dev/null >/dev/null 2>&1 & fi; ` +
+    `w=0; while [ ! -f ${f('exit')} ] && [ "$(cat "$d/running" 2>/dev/null)" = ${id} ] && ` +
     `[ "$w" -lt "\${TOUCHSTONE_CHECK_WAIT:-540}" ]; do sleep 1; w=$((w+1)); done; fi; ` +
-    `if [ -f ${f('exit')} ]; then e="$(cat ${f('exit')})"; ` +
-    `r="$(printf 'TOUCHSTONE_CHECK %s %s %s' ${c.id} "$e" "$d/${c.id}.log")"; ${rowTo(first)}; ` +
+    `if [ -f ${f('exit')} ]; then e="$(cat ${f('exit')})"; ${done}; ` +
     `else a=1; if [ -f ${f('pid')} ] && ! kill -0 "$(cat ${f('pid')})" 2>/dev/null && ` +
     `[ ! -f ${f('exit')} ]; then a=0; fi; ` +
-    `printf 'TOUCHSTONE_CHECK_PENDING %s %s\\n' ${c.id} "$a"; fi; }`
+    `printf '${pendingPrefix} %s %s${pendingLog ? ' %s' : ''}\\n' ${id} "$a"${pendingLog ? ` ${f('log')}` : ''}; fi; }`
 }
+const checkLineFor = (c, run, first) => detachedLineFor({
+  dir: logDirFor(run), id: c.id, pendingPrefix: 'TOUCHSTONE_CHECK_PENDING',
+  script: shQuote(`cd ${shQuote(wt.path)} && ${c.command}`),
+  done: `r="$(printf 'TOUCHSTONE_CHECK %s %s %s' ${c.id} "$e" "$d/${c.id}.log")"; ${rowTo(first)}`,
+})
 // The tree is looked at once, after the last check: a check that writes to it
 // (a ledger, a generated file) must be visible, not silently carried into
 // whatever commits next. The porcelain goes to a log beside the others and its
@@ -511,34 +517,43 @@ const runnerPrompt = (label, lines, note = '') =>
   '```bash\n' + lines.join('\n') + '\n```'
 // Kills the process group of every check of a run that has no exit code yet.
 // Best effort: what it prints is not read.
-const killLineFor = (run) =>
-  `${logDirFor(run)} && for p in "$d"/*.pid; do [ -f "$p" ] && [ ! -f "\${p%.pid}.exit" ] && ` +
-  `kill -TERM -- "-$(cat "$p")" 2>/dev/null; done; printf 'TOUCHSTONE_CHECKS_KILLED %s\\n' ${run}`
-// A pending check is asked about again for as long as its process is alive. The
-// caller's over(), true once a budget the user set is spent, is the only other
-// end, and the check is killed then rather than left running beside the next
-// attempt.
+const killLineFor = (run, area = 'touchstone-checks', prefix = 'TOUCHSTONE_CHECKS_KILLED') =>
+  `${logDirFor(run, area)} && for p in "$d"/*.pid; do [ -f "$p" ] && [ ! -f "\${p%.pid}.exit" ] && ` +
+  `kill -TERM -- "-$(cat "$p")" 2>/dev/null; done; printf '${prefix} %s\\n' ${run}`
+// A pending process is asked about again for as long as it is alive. The
+// caller's over() is the only other end: a stage budget the user set, and for
+// the advisory checks also the run budget's floor. The process is killed then
+// rather than left running beside the next attempt. While it runs
+// parse returns { pending, dead, log? }, dead holding what is gone without an
+// exit code. The first ask may carry a line of its own (firstPrompt): one that
+// clears what an earlier run of the same id left behind, which no later ask may do.
+const pollDetached = async ({ prompt, firstPrompt = prompt, label, schema, parse, over, killPrompt, what }) => {
+  for (let poll = 1; ; poll++) {
+    const out = await treeAgent(poll === 1 ? firstPrompt : prompt, {
+      label: poll === 1 ? label : `${label}:poll:${poll}`, schema, model: 'haiku', effort: 'low' })
+    const parsed = parse(out?.output)
+    if (!parsed.pending) return parsed
+    if (parsed.dead.length) {
+      return { reason: `${parsed.dead.join(', ')} stopped without recording an exit code`,
+        dead: parsed.dead, log: parsed.log }
+    }
+    if (over()) {
+      await treeAgent(killPrompt, { label: `${label}:kill`, schema, model: 'haiku', effort: 'low' })
+      return { reason: `the ${what} stage budget ran out while ${parsed.pending.join(', ')} was still running`,
+        final: true, budget: true, log: parsed.log }
+    }
+    log(`${what}: ${parsed.pending.join(', ')} still running, asking again`)
+  }
+}
 const executeChecks = async (checks, over) => {
   checkAttempt++
   const run = `${planId}-${checkAttempt}`
-  const label = `checks:run:${checkAttempt}`
   const lines = [...checks.map((c, i) => checkLineFor(c, run, i === 0)), endLineFor(run)]
-  for (let poll = 1; ; poll++) {
-    const out = await treeAgent(runnerPrompt('checks:run', lines), {
-      label: poll === 1 ? label : `${label}:poll:${poll}`,
-      schema: CHECK_RUN, model: 'haiku', effort: 'low' })
-    const parsed = parseCheckRun(out?.output, checks, run)
-    if (!parsed.pending) return parsed
-    if (parsed.dead.length) {
-      return { reason: `${parsed.dead.join(', ')} stopped without recording an exit code` }
-    }
-    if (over()) {
-      await treeAgent(runnerPrompt('checks:run', [killLineFor(run)]), {
-        label: `${label}:kill`, schema: CHECK_RUN, model: 'haiku', effort: 'low' })
-      return { reason: `the checks stage budget ran out while ${parsed.pending.join(', ')} was still running`, final: true }
-    }
-    log(`checks: ${parsed.pending.join(', ')} still running, asking again`)
-  }
+  return await pollDetached({
+    prompt: runnerPrompt('checks:run', lines), label: `checks:run:${checkAttempt}`, schema: CHECK_RUN,
+    parse: (output) => parseCheckRun(output, checks, run), over,
+    killPrompt: runnerPrompt('checks:run', [killLineFor(run)]), what: 'checks',
+  })
 }
 // The one record kept of what a reproducer actually did at a given round: the
 // log path, never its output, which a fixer reads from the log itself.

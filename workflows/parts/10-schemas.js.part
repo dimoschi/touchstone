@@ -319,7 +319,7 @@ const parseReproRun = (output, ids, run, withHunks) => {
   return { rows, before: before[2] === 'dirty', dirty: end.dirty, statusLog: end.path, hunkLines, diffExit }
 }
 
-// What a one-line relay returns (mutation-verify, pr-unreviewed in
+// What a one-line relay returns (mutation-run, mutation-verify, pr-unreviewed in
 // 60-mutation-pr.js.part; pr:state, pr:undo, pr:push and diffstat in
 // 40-implement-draft-review.js.part): what its script-built command printed.
 const VERDICT_RUN = {
@@ -350,12 +350,15 @@ const otherGateCopy = (gate, name, version) => {
   return what && `the relay ran a different copy of mutation-check.sh: ${gate} (${what})`
 }
 // The real mutation-check.sh ends every run past its own setup with
-// `mutation-check: EXIT=<n> ...`, so a 0 or a 5 without that trailer, or with
-// a different number, came from something else: a substituted `true`, another
-// script. A setup exit (127 not found, 2 before the trailer trap is set) may
-// carry none and is still a verdict about the gate.
-const trailerProblem = (exit, trailer) => {
-  if (trailer === '-') return exit === 0 || exit === 5 ? `exit ${exit} with no gate trailer in the log` : null
+// `mutation-check: EXIT=<n> ...`, so an exit that only the real gate gives
+// (--verify: 0 or 5, a run: 0 or 1) without that trailer, or with a different
+// number, came from something else: a substituted `true`, another script. A
+// setup exit (127 not found, 2 before the trailer trap is set) may carry none
+// and is still a verdict about the gate.
+const VERIFY_TRAILER_EXITS = [0, 5]
+const RUN_TRAILER_EXITS = [0, 1]
+const trailerProblem = (exit, trailer, needed = VERIFY_TRAILER_EXITS) => {
+  if (trailer === '-') return needed.includes(exit) ? `exit ${exit} with no gate trailer in the log` : null
   if (!/^\d+$/.test(trailer)) return 'trailer is not an integer'
   return Number(trailer) === exit ? null : `gate trailer says EXIT=${trailer}, the shell says ${exit}`
 }
@@ -377,6 +380,36 @@ const parseMutationVerify = (output, run) => {
   const other = Number(exit) === 127 ? null : otherGateCopy(gate, name, version)
   if (other) return { reason: other }
   return { exit: Number(exit), head, log }
+}
+// The run's line (mutationRunLineFor in 60-mutation-pr.js.part) prints either
+// this row, once the detached gate has left an exit file, or the pending line
+// while its process is alive (1) or gone without one (0). The gate that ran is
+// the one the line recorded when it started it, not the one a later poll names.
+// notTheGate marks a reason that comes from what the shell recorded for the run
+// (its trailer, its gate): asking about that run again reads the same record.
+const MUTATION_RUN_LINE =
+  /^TOUCHSTONE_MUTATION_RUN (\S+) (\S+) (\S+) (.+?\/mutation\.log) (\S+) (\S+) (.+)$/
+const MUTATION_PENDING_LINE = /^TOUCHSTONE_MUTATION_PENDING (\S+) ([01]) (.+)$/
+const parseMutationRun = (output, run) => {
+  const { line, reason } = oneLineOf(output)
+  if (reason) return { reason }
+  const underRun = (log) => log.startsWith('/') && log.endsWith(`/touchstone-gates/${run}/mutation.log`)
+  if (line.startsWith('TOUCHSTONE_MUTATION_PENDING')) {
+    const p = MUTATION_PENDING_LINE.exec(line)
+    if (!p || p[1] !== 'mutation' || !underRun(p[3])) return { reason: 'malformed pending line' }
+    return { pending: [p[1]], dead: p[2] === '0' ? [p[1]] : [], log: p[3] }
+  }
+  const m = MUTATION_RUN_LINE.exec(line)
+  if (!m) return { reason: 'malformed run line' }
+  const [, r, exit, trailer, log, name, version, gate] = m
+  if (r !== run) return { reason: `run line names run ${r}, not ${run}` }
+  if (!/^\d+$/.test(exit)) return { reason: 'exit is not an integer' }
+  const mismatch = trailerProblem(Number(exit), trailer, RUN_TRAILER_EXITS)
+  if (mismatch) return { reason: mismatch, notTheGate: true }
+  if (!underRun(log)) return { reason: 'log path is not under this run' }
+  const other = Number(exit) === 127 ? null : otherGateCopy(gate, name, version)
+  if (other) return { reason: other, notTheGate: true }
+  return { exit: Number(exit), log }
 }
 const UNREVIEWED_LINE = /^TOUCHSTONE_UNREVIEWED (\S+) (\S+) (\S+)$/
 const parseUnreviewed = (output, from) => {
@@ -609,7 +642,12 @@ const GATE = {
   properties: {
     green: { type: 'boolean' }, head_sha: { type: 'string' },
     detail: { type: 'string' },
-    needs_user_run: { type: 'boolean' },
+    // The flags the next run of the gate takes, when this attempt's output says
+    // one more pass is needed. The pipeline runs the gate, so the agent can only ask.
+    next_pass: {
+      type: 'object', additionalProperties: false,
+      properties: { only: { type: 'string' }, full: { type: 'boolean' } },
+    },
     scored: { type: 'boolean' }, gate_note: { type: 'string' },
     // Same halt escape IMPL carries: set when a NEXT_ACTION of
     // UNSUPPORTED_LANGUAGE fires mid-mutation, so the phase has a field to

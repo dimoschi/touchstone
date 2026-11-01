@@ -29,7 +29,7 @@ export const meta = {
 // against the manifest in scripts/check-version-bump.sh, so drift is a
 // gate's job rather than something this script verifies about itself.
 const PLUGIN_NAME = 'touchstone'
-const PIPELINE_VERSION = '0.40.3'
+const PIPELINE_VERSION = '0.41.0'
 // The plugin's gates are this skill's scripts. A user or project skill with the
 // bare name can resolve first and run an older copy of the gates, whose result
 // would then be read as this version's, so prompts name the namespaced skill.
@@ -164,7 +164,8 @@ const GENERATED_FILES =
 // cannot prevent the spend, it can only discard the finished work, which is why
 // a ceiling on plan or implement only throws finished work away. A ceiling is
 // a real bound only where over() gates a further iteration (the fix rounds,
-// the mutation attempts, the re-review latches). null means uncapped, which
+// the mutation attempts, the re-review latches, and the asking after a detached
+// check or mutation run, which kills that process too). null means uncapped, which
 // every stage is unless stageBudgets names it. The checks ceiling, when set,
 // bounds its two windows (before and after Implement) each on its own; the
 // fix ceiling carries each round's tail review as well as the fixing.
@@ -237,8 +238,11 @@ let runBudgetSpent = null
 // this run's own start.
 const runSpendStart = budget.spent()
 const runSpent = () => budget.spent() - runSpendStart
-const dispatch = async (prompt, opts) => {
-  if (runBudget != null && runSpent() >= runBudget) {
+// pastRunBudget is for the one call that stops a detached process still running
+// in the worktree: refusing it would leave that process mutating files after the
+// halt, which costs more than the call.
+const dispatch = async (prompt, { pastRunBudget = false, ...opts }) => {
+  if (!pastRunBudget && runBudget != null && runSpent() >= runBudget) {
     runBudgetSpent = { refused: opts.label, spent: runSpent() }
     throw new Error(
       `touchstone: run budget (${Math.round(runBudget / 1000)}k output ` +
@@ -322,6 +326,13 @@ const prNote = () => {
     : `PR #${draftPr.number} read as ready for review, ${holds}: it was ready when this run ` +
       `adopted it, and ${draftPr.readyWhy}`
 }
+
+// A function because wt is declared further down, and the catch at the end of
+// the script, outside the try that holds the Mutation phase, reads this too.
+const interruptedRunAdvice = () =>
+  `A gate cut off mid-run (PHP and Python stash the work while they measure) can leave ` +
+  `it in the stash or a file mutated: check git -C ${wt.path} status and ` +
+  `git -C ${wt.path} stash list before running it again.`
 
 // A halt is a result, not an absence of one, and the run record is where it
 // survives the session. It used to be posted as a comment on the draft PR too.

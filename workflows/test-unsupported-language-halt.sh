@@ -55,7 +55,7 @@ check "the 'left as a draft' wording appears only in prNote" \
 check "no text claims the work cannot open a PR, which the draft already did" \
   "$(grep -Fc 'cannot open a PR' "$SCRIPT" || true)" 0
 check "every note that reports the PR's fate reads the helper" \
-  "$(grep -Fc '${prNote()}' "$SCRIPT" || true)" 12
+  "$(grep -Fc '${prNote()}' "$SCRIPT" || true)" 14
 
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
@@ -118,6 +118,20 @@ function mutationVerifyReply(prompt, last) {
     `${name} ${version} /stub-plugin/skills/crap-controlled-changes/mutation-check.sh` }
 }
 
+// What the mutation run line prints: a finished run, exit 0 with the gate's
+// matching trailer, from the plugin's own gate.
+function mutationRunOf(prompt) {
+  return (/printf 'TOUCHSTONE_MUTATION_RUN %s %s %s %s %s %s\\n' (\S+) /.exec(prompt) ?? [])[1] ?? ''
+}
+function mutationRunReply(prompt) {
+  const run = mutationRunOf(prompt)
+  const name = /^const PLUGIN_NAME = '([^']*)'/m.exec(src)?.[1]
+  const version = /^const PIPELINE_VERSION = '([^']*)'/m.exec(src)?.[1]
+  return { output: `TOUCHSTONE_MUTATION_RUN ${run} 0 0 ` +
+    `/stub-worktree/.git/touchstone-gates/${run}/mutation.log ` +
+    `${name} ${version} /stub-plugin/skills/crap-controlled-changes/mutation-check.sh` }
+}
+
 function makeAgent(scenario, captured) {
   const responses = scenario.responses ?? {}
   return async (prompt, opts) => {
@@ -129,6 +143,9 @@ function makeAgent(scenario, captured) {
       return responses[label]
     }
     if (/^mutation-verify:\d+(:retry)?$/.test(label)) return mutationVerifyReply(prompt, captured.lastMutation)
+    if (label.startsWith('mutation-run:')) {
+      return scenario.mutationRun ? scenario.mutationRun(label, prompt) : mutationRunReply(prompt)
+    }
     // Replaces the old separate ticket/plugin:version/gate:opt-in dispatches
     // (gh-118): one call, before any worktree exists, answers all three.
     if (label === 'setup') {
@@ -401,11 +418,11 @@ async function scenarioMutationHalts() {
     /left as a draft/.test(result.note ?? ''), true)
 }
 
-// The sibling arm of the same ternary, which made the same claim. Covered
+// The sibling arms of the same ternary, which made the same claim. Covered
 // separately because only one arm renders per halt.
-async function scenarioMutationNeedsUserRun() {
-  console.log('\n== scenario: the Bash-ceiling halt does not claim no PR was opened either')
-  const { result } = await run({
+async function scenarioMutationRunDead() {
+  console.log('\n== scenario: a run that died without an exit code halts at Mutation and does not claim no PR was opened either')
+  const { result, captured } = await run({
     args: { maxGateAttempts: 3 },
     draftPr: DRAFT_OPEN,
     implementer: {
@@ -413,15 +430,13 @@ async function scenarioMutationNeedsUserRun() {
       commit_range: 'base00000000000000000000000000000000000000..impl0000000000000000000000000000000000000',
       insertions: 5, scored: true,
     },
-    responses: {
-      'mutation:1': {
-        green: false, head_sha: 'impl0000000000000000000000000000000000000',
-        detail: 'the run does not fit the Bash ceiling', needs_user_run: true, scored: false,
-      },
-    },
+    mutationRun: (label, prompt) => ({ output: `TOUCHSTONE_MUTATION_PENDING mutation 0 ` +
+      `/stub-worktree/.git/touchstone-gates/${mutationRunOf(prompt)}/mutation.log` }),
   })
   check('halted at Mutation', result.halted_at, 'Mutation')
-  check('the note blames the Bash ceiling', /Bash ceiling/.test(result.note ?? ''), true)
+  check('the note says the run stopped without an exit code and names its log',
+    (result.note ?? '').includes('stopped without recording an exit code') &&
+    (result.note ?? '').includes(`/touchstone-gates/${captured.planId}-mutation-run-1/mutation.log`), true)
   check('the note does not claim no PR was opened',
     /[Nn]o PR was opened/.test(result.note ?? ''), false)
   check('the note says the PR was left as a draft',
@@ -460,7 +475,7 @@ async function main() {
   await scenarioImplementCeiling()
   await scenarioFixHalts()
   await scenarioMutationHalts()
-  await scenarioMutationNeedsUserRun()
+  await scenarioMutationRunDead()
   await scenarioMutationHaltWithNoDraft()
   if (failures) { console.log(`\nFAILED: ${failures} assertion(s)`); process.exit(1) }
   console.log('\nOK (unsupported-language halt harness)')
