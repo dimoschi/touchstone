@@ -4693,7 +4693,8 @@ const measureRun = async (label, pass) => {
     return { exit: got.exit, log: got.log, run }
   } catch (e) {
     await killRun(`${label}:kill`)
-    mutation = { ...mutation, green: false, run_cut_off: { log: aliveLog ?? runLogHint(run) } }
+    mutation = { ...mutation, green: false,
+      run_cut_off: { log: aliveLog ?? runLogHint(run), seen_alive: Boolean(aliveLog) } }
     throw e
   }
 }
@@ -5144,10 +5145,12 @@ return result
   // complete even for the stage that was actually running when the budget
   // was refused, not just the ones that reached their own close().
   const cutOff = budgetHaltState().mutation?.run_cut_off
-  const cutOffNote = cutOff
-    ? `. The mutation gate was still running when this halted: it was killed, and its ` +
-      `log is ${cutOff.log}. ${interruptedRunAdvice()}`
-    : ''
+  const cutOffNote = !cutOff ? ''
+    : cutOff.seen_alive
+      ? `. The mutation gate was still running when this halted: it was killed, and its ` +
+        `log is ${cutOff.log}. ${interruptedRunAdvice()}`
+      : `. A kill was sent to the mutation gate in case it had started; if it did, its ` +
+        `log is ${cutOff.log}. ${interruptedRunAdvice()}`
   if (runBudgetSpent) {
     const stillOpen = closeOpenStages()
     // commands/deliver.md tells the invoking session to report the note

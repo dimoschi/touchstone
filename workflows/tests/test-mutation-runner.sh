@@ -543,12 +543,27 @@ async function scenarioRunBudgetKillsTheRun() {
   }
 }
 
+async function scenarioRunBudgetRefusesTheFirstAsk() {
+  console.log('\n== scenario MS: a run budget spent before the run started kills in case, and the halt does not say a gate was running')
+  const { result, captured } = await run(gated({
+    args: { runBudget: 5_000_000 }, spendAllAfter: 'mutation-verify:0',
+    mutationResult: green, mutationRun: () => ({ output: '' }) }))
+  const note = result.note ?? ''
+  check('the refused ask never ran, and the kill was still sent', runLabels(captured), ['mutation-run:1:kill'])
+  check('halted at Mutation on the run budget', [result.halted_at, /Run budget exhausted/.test(note)], ['Mutation', true])
+  check('the note does not claim a gate was running', /was still running/.test(note), false)
+  check('the note says a kill was sent in case the gate had started, and names the log it would write',
+    [/kill was sent to the mutation gate in case it had started/.test(note),
+     /touchstone-gates\/\S*mutation-run-1\/mutation\.log/.test(note)], [true, true])
+  check('the halt state says no poll saw the gate alive', result.mutation?.run_cut_off?.seen_alive, false)
+}
+
 const SCENARIOS = [scenarioLongRunIsPolled, scenarioFailingRunReachesTheAgent, scenarioSetupExitReachesTheAgent,
   scenarioDeadRunHalts, scenarioBudgetKillsTheRun, scenarioNoBudgetNoCeiling, scenarioNextPassFlags,
   scenarioGateEnvIsEvaluated, scenarioNotTheGate, scenarioParserRejects, scenarioScriptNotFoundRunsAgain,
   scenarioRerunOfTheSamePlan, scenarioPreLoopVerify, scenarioPromptsAreDirectAboutTheRun,
   scenarioFlakyRelayDuringLiveRun, scenarioWrongGateGetsAFreshRun, scenarioFullPassAskedOnGreenIsRun,
-  scenarioRunBudgetKillsTheRun]
+  scenarioRunBudgetKillsTheRun, scenarioRunBudgetRefusesTheFirstAsk]
 JS_EOF
 
 finish
