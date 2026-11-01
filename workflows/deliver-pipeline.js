@@ -2598,9 +2598,10 @@ const runnerPrompt = (label, lines, note = '') =>
 const killLineFor = (run, area = 'touchstone-checks', prefix = 'TOUCHSTONE_CHECKS_KILLED') =>
   `${logDirFor(run, area)} && for p in "$d"/*.pid; do [ -f "$p" ] && [ ! -f "\${p%.pid}.exit" ] && ` +
   `kill -TERM -- "-$(cat "$p")" 2>/dev/null; done; printf '${prefix} %s\\n' ${run}`
-// A pending process is asked about again for as long as it is alive. A stage
-// budget, when the user set one, is the only other end, and the process is
-// killed then rather than left running beside the next attempt. While it runs
+// A pending process is asked about again for as long as it is alive. The
+// caller's over() is the only other end: a stage budget the user set, and for
+// the advisory checks also the run budget's floor. The process is killed then
+// rather than left running beside the next attempt. While it runs
 // parse returns { pending, dead, log? }, dead holding what is gone without an
 // exit code. The first ask may carry a line of its own (firstPrompt): one that
 // clears what an earlier run of the same id left behind, which no later ask may do.
@@ -4972,8 +4973,13 @@ if (reviewerCount && mutHead && mutHead !== reviewedThrough && !outOfBudget()) {
 }
 
 const { checks: advisoryChecks } = checksFrom(wt.checks_source, ADVISORY_CHECKS_HEADING, 'advisory')
-if (advisoryChecks.length && !outOfBudget()) {
-  const advisory = await executeChecks(advisoryChecks)
+// Every poll is a dispatch, so a run budget would refuse one mid-wait and halt
+// a run that only has the PR left. Never poll with less than BUDGET_FLOOR
+// unspent, enough for the kill and the PR.
+const runUnderFloor = () => runBudget != null && runBudget - runSpent() < BUDGET_FLOOR
+if (advisoryChecks.length && !outOfBudget() && !runUnderFloor()) {
+  const advisoryOver = () => sMut.over() || outOfBudget() || runUnderFloor()
+  const advisory = await executeChecks(advisoryChecks, advisoryOver)
   const { red, unmeasured } = classifyResults(advisoryChecks, advisory)
   for (const c of red) {
     notes.push({ category: 'advisory', reason: 'advisory', title: `Advisory check \`${c.command}\` reported`,
