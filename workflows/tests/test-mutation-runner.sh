@@ -454,8 +454,13 @@ async function scenarioFlakyRelayDuringLiveRun() {
   check('one fewer glitch in a row than the limit is still asked again',
     [nearly.result.halted_at, nearly.result.mutation?.green, callCount(nearly.captured, 'mutation-run:1:kill')], [undefined, true, 0])
   const stuck = await run(gated({ mutationResult: green,
-    mutationRun: replies(['pending', ...glitches(GLITCH_LIMIT + 2)]) }))
+    mutationRun: replies(['pending', ...glitches(GLITCH_LIMIT)]) }))
   check('the limit of glitches in a row halts as unmeasured', [stuck.result.halted_at, /could not be measured/.test(stuck.result.note ?? '')], ['Mutation', true])
+  check('the limit ends the run: the retry for an unparseable reply is not spent on it',
+    runLabels(stuck.captured).some(l => l.startsWith('mutation-run:1:retry')), false)
+  check('the note gives the limit as the first reason and a second one, never a blank',
+    [(stuck.result.note ?? '').includes(`first: ${GLITCH_LIMIT} replies in a row could not be read after the run was seen alive; second: `),
+     /undefined/.test(stuck.result.note ?? '')], [true, false])
   check('and sends the kill first, since the process was last seen alive', callCount(stuck.captured, 'mutation-run:1:kill'), 1)
   check('the kill line is the same run\'s, and passes the gate-pipe hook',
     fenceOf(promptOf(stuck.captured, 'mutation-run:1:kill')).map(hookExit), [0])

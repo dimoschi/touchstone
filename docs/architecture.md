@@ -643,8 +643,8 @@ behind, unless a live process still owns it; a later ask never does, so asking a
 idempotent. A reply that does not parse is asked again once (`mutation-run:N:retry`),
 under the same run id, which starts nothing a second time. Once a poll has seen the process
 alive, a reply that does not parse is a relay glitch and is asked about again without
-spending that retry: `MAX_UNREADABLE_POLLS` (5) in a row, with no readable reply between
-them, end it as unmeasured.
+spending that retry. The 5th unreadable reply in a row (`MAX_UNREADABLE_POLLS`), with no
+readable reply between them, ends the run as unmeasured, and the retry is not spent on it.
 
 A run has no time or token ceiling by default: nothing but the run itself ends the asking.
 
@@ -657,7 +657,7 @@ A run has no time or token ceiling by default: nothing but the run itself ends t
 | process gone, no exit file | `run_dead`: halt at Mutation, the note names the log, no further attempt |
 | the user set a `mutation` stage budget (`.touchstone.json` or `--stage-budget mutation=N`) and it ran out while the process lives | `mutation-run:N:kill` kills its process group, `run_budget`: halt at Mutation, the note names the log |
 | the user set a run budget (`--run-budget`) and it ran out between two polls, or any other error ended a poll | `mutation-run:N:kill` kills its process group, sent past the spent budget (`pastRunBudget` on `dispatch`), then the error halts the run as it does anywhere else, with the log in `mutation.run_cut_off` and in the note. The note says the gate was running only when a poll saw it alive (`seen_alive`); when the first ask of a run was refused it says a kill was sent in case the gate had started |
-| unparseable twice, or `MAX_UNREADABLE_POLLS` in a row after the process was seen alive, and not the gate's own record | `mutation-run:N:kill` first, since the process may be alive, then `run_unmeasured`: halt at Mutation, saying this is about measurement, with both reasons |
+| unparseable twice, or the `MAX_UNREADABLE_POLLS`th unreadable reply in a row after the process was seen alive (no retry is spent on it), and not the gate's own record | `mutation-run:N:kill` first, since the process may be alive, then `run_unmeasured`: halt at Mutation, saying this is about measurement, with both reasons |
 
 A halt after a run that was cut off tells the user to check `git status` and `git stash
 list` in the worktree, since PHP and Python gates stash the work while they measure.

@@ -147,8 +147,12 @@ const measureRun = async (label, pass) => {
       unreadable = 0
       return parsed
     }
-    const glitch = parsed.reason && aliveLog && !parsed.notTheGate && ++unreadable < MAX_UNREADABLE_POLLS
-    return glitch ? { pending: ['mutation'], dead: [], log: aliveLog } : parsed
+    if (!parsed.reason || !aliveLog || parsed.notTheGate) return parsed
+    if (++unreadable < MAX_UNREADABLE_POLLS) return { pending: ['mutation'], dead: [], log: aliveLog }
+    // Reasons, not the unparsed reply: that would spend the retry on a relay
+    // already seen failing MAX_UNREADABLE_POLLS times in a row.
+    return { reasons: [`${MAX_UNREADABLE_POLLS} replies in a row could not be read after the run was seen alive`,
+      parsed.reason] }
   }
   const ask = (suffix) => pollDetached({
     prompt: promptFor(false), firstPrompt: promptFor(!suffix), label: `${label}${suffix}`,
