@@ -134,6 +134,24 @@ async function scenarioNoBudgetKeepsAskingAboutAdvisory() {
   check('the PR prompt carries the advisory note', prPrompt.includes('Advisory check'), true)
 }
 
+async function scenarioRunBudgetStopsAskingAboutAdvisory() {
+  console.log('\n== scenario: a run budget stops a pending advisory check before it halts the run')
+  const { result, captured } = await run({
+    args: { openPr: true, runBudget: 400000 },
+    budgetPerAgentCall: 5000,
+    discovery: withAdvisory,
+    checkRuns: (attempt, prompt) => isAdvisoryRun(prompt) ? PENDING : rows(1)(),
+    initialReview: { correctness: [], advocate: [] },
+    prResult: { opened: true, url: 'https://example.invalid/pr/186d', note: 'stub ready' },
+  })
+  const prPrompt = captured.calls.find(c => c.label === 'pr')?.prompt ?? ''
+  const first = captured.calls.find(c => c.label.startsWith('checks:run:') && isAdvisoryRun(c.prompt))
+  check('the run does not halt', result.halted_at, undefined)
+  check('a kill was sent for the advisory attempt', callCount(captured, `${first?.label}:kill`), 1)
+  check('the PR still opened', captured.calls.some(c => c.label === 'pr'), true)
+  check('no advisory note', prPrompt.includes('Advisory check'), false)
+}
+
 const SCENARIOS = [
   scenarioAdvisoryReportReachesThePr,
   scenarioGreenAdvisoryAddsNothing,
@@ -141,6 +159,7 @@ const SCENARIOS = [
   scenarioAdvisoryStillRunningIsAskedAgain,
   scenarioMutationBudgetStopsAskingAboutAdvisory,
   scenarioNoBudgetKeepsAskingAboutAdvisory,
+  scenarioRunBudgetStopsAskingAboutAdvisory,
 ]
 JS_EOF
 

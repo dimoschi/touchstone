@@ -2544,8 +2544,9 @@ const killLineFor = (run) =>
   `${logDirFor(run)} && for p in "$d"/*.pid; do [ -f "$p" ] && [ ! -f "\${p%.pid}.exit" ] && ` +
   `kill -TERM -- "-$(cat "$p")" 2>/dev/null; done; printf 'TOUCHSTONE_CHECKS_KILLED %s\\n' ${run}`
 // A pending check is asked about again for as long as its process is alive. The
-// calling stage's budget, when the user set one, is the only other end, and the
-// check is killed then rather than left running beside the next attempt.
+// caller's over(), true once a budget the user set is spent, is the only other
+// end, and the check is killed then rather than left running beside the next
+// attempt.
 const executeChecks = async (checks, over) => {
   checkAttempt++
   const run = `${planId}-${checkAttempt}`
@@ -4788,7 +4789,12 @@ if (reviewerCount && mutHead && mutHead !== reviewedThrough && !outOfBudget()) {
 
 const { checks: advisoryChecks } = checksFrom(wt.checks_source, ADVISORY_CHECKS_HEADING, 'advisory')
 if (advisoryChecks.length && !outOfBudget()) {
-  const advisory = await executeChecks(advisoryChecks, sMut.over)
+  // Every poll is a dispatch, so a run budget would refuse one mid-wait and
+  // halt a run that only has the PR left. Stop with BUDGET_FLOOR still unspent,
+  // enough for the kill and the PR.
+  const advisoryOver = () => sMut.over() || outOfBudget() ||
+    (runBudget != null && runBudget - runSpent() < BUDGET_FLOOR)
+  const advisory = await executeChecks(advisoryChecks, advisoryOver)
   const { red, unmeasured } = classifyResults(advisoryChecks, advisory)
   for (const c of red) {
     notes.push({ category: 'advisory', reason: 'advisory', title: `Advisory check \`${c.command}\` reported`,
