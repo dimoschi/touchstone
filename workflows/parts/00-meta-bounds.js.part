@@ -29,7 +29,7 @@ export const meta = {
 // against the manifest in scripts/check-version-bump.sh, so drift is a
 // gate's job rather than something this script verifies about itself.
 const PLUGIN_NAME = 'touchstone'
-const PIPELINE_VERSION = '0.40.2'
+const PIPELINE_VERSION = '0.40.3'
 // The plugin's gates are this skill's scripts. A user or project skill with the
 // bare name can resolve first and run an older copy of the gates, whose result
 // would then be read as this version's, so prompts name the namespaced skill.

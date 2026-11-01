@@ -29,7 +29,7 @@ export const meta = {
 // against the manifest in scripts/check-version-bump.sh, so drift is a
 // gate's job rather than something this script verifies about itself.
 const PLUGIN_NAME = 'touchstone'
-const PIPELINE_VERSION = '0.40.2'
+const PIPELINE_VERSION = '0.40.3'
 // The plugin's gates are this skill's scripts. A user or project skill with the
 // bare name can resolve first and run an older copy of the gates, whose result
 // would then be read as this version's, so prompts name the namespaced skill.
@@ -2543,8 +2543,8 @@ const runnerPrompt = (label, lines, note = '') =>
 const killLineFor = (run) =>
   `${logDirFor(run)} && for p in "$d"/*.pid; do [ -f "$p" ] && [ ! -f "\${p%.pid}.exit" ] && ` +
   `kill -TERM -- "-$(cat "$p")" 2>/dev/null; done; printf 'TOUCHSTONE_CHECKS_KILLED %s\\n' ${run}`
-// A pending check is asked about again for as long as its process is alive. A
-// checks stage budget, when the user set one, is the only other end, and the
+// A pending check is asked about again for as long as its process is alive. The
+// calling stage's budget, when the user set one, is the only other end, and the
 // check is killed then rather than left running beside the next attempt.
 const executeChecks = async (checks, over) => {
   checkAttempt++
@@ -4788,7 +4788,7 @@ if (reviewerCount && mutHead && mutHead !== reviewedThrough && !outOfBudget()) {
 
 const { checks: advisoryChecks } = checksFrom(wt.checks_source, ADVISORY_CHECKS_HEADING, 'advisory')
 if (advisoryChecks.length && !outOfBudget()) {
-  const advisory = await executeChecks(advisoryChecks)
+  const advisory = await executeChecks(advisoryChecks, sMut.over)
   const { red, unmeasured } = classifyResults(advisoryChecks, advisory)
   for (const c of red) {
     notes.push({ category: 'advisory', reason: 'advisory', title: `Advisory check \`${c.command}\` reported`,
