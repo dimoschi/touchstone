@@ -75,6 +75,12 @@ async function scenarioNoAdvisorySectionRunsNothingExtra() {
 
 const PENDING = { output: 'TOUCHSTONE_CHECK_PENDING advisory:1 1' }
 const isAdvisoryRun = (prompt) => prompt.includes(ADVISORY)
+// Pending on the first advisory poll, red after it: a note reaches the PR
+// only if a second poll was sent, so "no note" proves the poll was stopped.
+const pendingThenRed = () => {
+  let advisoryCalls = 0
+  return (attempt, prompt) => isAdvisoryRun(prompt) && ++advisoryCalls === 1 ? PENDING : rows(1)()
+}
 
 async function scenarioAdvisoryStillRunningIsAskedAgain() {
   console.log('\n== scenario: an advisory check still running on its first poll is asked about again')
@@ -102,7 +108,7 @@ async function scenarioMutationBudgetStopsAskingAboutAdvisory() {
     args: { openPr: true, stageBudgets: { mutation: 1000 } },
     budgetPerAgentCall: 5000,
     discovery: withAdvisory,
-    checkRuns: (attempt, prompt) => isAdvisoryRun(prompt) ? PENDING : rows(1)(),
+    checkRuns: pendingThenRed(),
     initialReview: { correctness: [], advocate: [] },
     prResult: { opened: true, url: 'https://example.invalid/pr/186b', note: 'stub ready' },
   })
@@ -137,10 +143,12 @@ async function scenarioNoBudgetKeepsAskingAboutAdvisory() {
 async function scenarioRunBudgetStopsAskingAboutAdvisory() {
   console.log('\n== scenario: a run budget stops a pending advisory check before it halts the run')
   const { result, captured } = await run({
-    args: { openPr: true, runBudget: 400000 },
+    // 14 calls of 5000 come before the advisory poll, so it starts with
+    // 32500 left, just above BUDGET_FLOOR, and is under it after one poll.
+    args: { openPr: true, runBudget: 102500 },
     budgetPerAgentCall: 5000,
     discovery: withAdvisory,
-    checkRuns: (attempt, prompt) => isAdvisoryRun(prompt) ? PENDING : rows(1)(),
+    checkRuns: pendingThenRed(),
     initialReview: { correctness: [], advocate: [] },
     prResult: { opened: true, url: 'https://example.invalid/pr/186d', note: 'stub ready' },
   })
@@ -152,6 +160,23 @@ async function scenarioRunBudgetStopsAskingAboutAdvisory() {
   check('no advisory note', prPrompt.includes('Advisory check'), false)
 }
 
+async function scenarioRunBudgetUnderFloorSkipsAdvisory() {
+  console.log('\n== scenario: a run budget already under its floor never starts the advisory check')
+  const { result, captured } = await run({
+    // 20000 left when the advisory step is reached, under BUDGET_FLOOR.
+    args: { openPr: true, runBudget: 90000 },
+    budgetPerAgentCall: 5000,
+    discovery: withAdvisory,
+    checkRuns: pendingThenRed(),
+    initialReview: { correctness: [], advocate: [] },
+    prResult: { opened: true, url: 'https://example.invalid/pr/186e', note: 'stub ready' },
+  })
+  check('the run does not halt', result.halted_at, undefined)
+  check('no advisory check was dispatched',
+    captured.calls.some(c => c.label.startsWith('checks:run:') && isAdvisoryRun(c.prompt)), false)
+  check('the PR still opened', captured.calls.some(c => c.label === 'pr'), true)
+}
+
 const SCENARIOS = [
   scenarioAdvisoryReportReachesThePr,
   scenarioGreenAdvisoryAddsNothing,
@@ -160,6 +185,7 @@ const SCENARIOS = [
   scenarioMutationBudgetStopsAskingAboutAdvisory,
   scenarioNoBudgetKeepsAskingAboutAdvisory,
   scenarioRunBudgetStopsAskingAboutAdvisory,
+  scenarioRunBudgetUnderFloorSkipsAdvisory,
 ]
 JS_EOF
 
