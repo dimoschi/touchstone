@@ -317,10 +317,14 @@ async function scenarioParserRejects() {
     'a pending line for another id': (good, prompt) => mutationPendingOutput(prompt).replace(' mutation ', ' check:1 '),
     'a pending line with a log outside the run': (good, prompt) => mutationPendingOutput(prompt).replace('/touchstone-gates/', '/elsewhere/'),
   }
+  const notTheGate = ['a trailer that disagrees with the exit', 'exit 0 with no trailer', 'another version of this plugin',
+    'another plugin', 'a bare gate name', 'another script in the plugin']
   for (const [name, mangle] of Object.entries(bad)) {
     const { result, captured } = await run(gated({ args: { maxGateAttempts: 3 }, mutationResult: green,
       mutationRun: (label, prompt) => label.endsWith(':kill') ? { output: '' } : { output: mangle(mutationRunOutput(prompt, 0), prompt) } }))
     check(`${name}: asked once more`, callCount(captured, 'mutation-run:1:retry'), 1)
+    check(`${name}: a new run only when what ran was not the gate`,
+      callCount(captured, 'mutation-run:1:rerun'), notTheGate.includes(name) ? 1 : 0)
     check(`${name}: halted as unmeasured, with both reasons`,
       [result.halted_at, /could not be measured/.test(result.note ?? ''), result.mutation?.run_unmeasured?.reasons?.length], ['Mutation', true, 2])
     check(`${name}: no agent`, agentCalls(captured), 0)
@@ -424,10 +428,127 @@ async function scenarioRerunOfTheSamePlan() {
   }
 }
 
+const replies = (kinds) => {
+  let n = 0
+  return (label, prompt) => {
+    if (label.endsWith(':kill')) return { output: '' }
+    const kind = kinds[n++] ?? 'done'
+    return kind === 'pending' ? { output: mutationPendingOutput(prompt) }
+      : kind === 'garbage' ? { output: 'garbage' } : {}
+  }
+}
+const GLITCH_LIMIT = 5
+
+async function scenarioFlakyRelayDuringLiveRun() {
+  console.log('\n== scenario MO: replies that cannot be read while the run is known alive are asked about again; the gate is killed before any halt')
+  const glitches = (n) => Array(n).fill('garbage')
+  const scattered = await run(gated({ mutationResult: green,
+    mutationRun: replies(['pending', 'garbage', 'pending', 'garbage', 'pending', 'garbage']) }))
+  check('glitches between good polls never end the run: it finishes green, and nothing was killed',
+    [scattered.result.halted_at, scattered.result.mutation?.green, callCount(scattered.captured, 'mutation-run:1:kill')],
+    [undefined, true, 0])
+  check('every glitch was asked about again, in the same run',
+    runLabels(scattered.captured).filter(l => !l.endsWith(':kill')).length, 7)
+  const nearly = await run(gated({ mutationResult: green,
+    mutationRun: replies(['pending', ...glitches(GLITCH_LIMIT - 1)]) }))
+  check('one fewer glitch in a row than the limit is still asked again',
+    [nearly.result.halted_at, nearly.result.mutation?.green, callCount(nearly.captured, 'mutation-run:1:kill')], [undefined, true, 0])
+  const stuck = await run(gated({ mutationResult: green,
+    mutationRun: replies(['pending', ...glitches(GLITCH_LIMIT + 2)]) }))
+  check('the limit of glitches in a row halts as unmeasured', [stuck.result.halted_at, /could not be measured/.test(stuck.result.note ?? '')], ['Mutation', true])
+  check('and sends the kill first, since the process was last seen alive', callCount(stuck.captured, 'mutation-run:1:kill'), 1)
+  check('the kill line is the same run\'s, and passes the gate-pipe hook',
+    fenceOf(promptOf(stuck.captured, 'mutation-run:1:kill')).map(hookExit), [0])
+  check('the note says the gate was killed, names where its log is and what to check',
+    [/killed/.test(stuck.result.note ?? ''), /touchstone-gates\/\S*mutation-run-1\/mutation\.log/.test(stuck.result.note ?? ''),
+     /status and git -C \S+ stash list/.test(stuck.result.note ?? '')], [true, true, true])
+  check('no agent and no second attempt', [agentCalls(stuck.captured), runLabels(stuck.captured).some(l => l.startsWith('mutation-run:2'))], [0, false])
+  const never = await run(gated({ mutationResult: green, mutationRun: replies(['garbage', 'garbage']) }))
+  check('two unreadable replies from the start leave the run in an unknown state: killed too',
+    [never.result.halted_at, callCount(never.captured, 'mutation-run:1:kill')], ['Mutation', 1])
+}
+
+async function scenarioWrongGateGetsAFreshRun() {
+  console.log('\n== scenario MP: a finished run that read as another copy of the gate is read once more, then run again as a new run that can reach the real gate')
+  const dir = scratchRepo()
+  try {
+    await withFakeGate('echo "mutation-check: EXIT=0 MUTATION_OK"', async (gate) => {
+      const outs = []
+      let asked = 0
+      const relayPinnedOnce = (label, prompt) => {
+        const pick = asked++ === 0 ? 'true' : gate
+        return relay(pick, outs, substituteGate(pick))(label, prompt)
+      }
+      const { result, captured } = await run(gated({ args: { maxGateAttempts: 3 }, branchResult: branchAt(dir),
+        mutationRun: relayPinnedOnce, mutationResult: green }))
+      check('the first ask ran the substitute, the retry only read it again, and the new run is its own',
+        [callCount(captured, 'mutation-run:1'), callCount(captured, 'mutation-run:1:retry'), callCount(captured, 'mutation-run:1:rerun')], [1, 1, 1])
+      const rows = outs.map(o => RUN_ROW.exec(o.output.trim())).filter(Boolean)
+      check('the new run is another run id, and it ran the real gate',
+        [new Set(rows.map(r => r[1])).size, rows.pop()?.[7]], [2, gate])
+      check('green, with the agent told this run\'s exit',
+        [result.halted_at, result.mutation?.green, promptOf(captured, 'mutation:1').includes('exited 0')], [undefined, true, true])
+    })
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true })
+  }
+  const miscopy = await run(gated({ mutationResult: green,
+    mutationRun: (label, prompt) => label.endsWith(':retry') ? {}
+      : { output: mutationRunOutput(prompt, 0).replace(PLUGIN_GATE, 'mutation-check.sh') } }))
+  check('a finished run misread once and read fine on the retry is not run again',
+    [callCount(miscopy.captured, 'mutation-run:1:rerun'), miscopy.result.halted_at, miscopy.result.mutation?.green], [0, undefined, true])
+}
+
+async function scenarioFullPassAskedOnGreenIsRun() {
+  console.log('\n== scenario MQ: a pass the agent asks for runs even when --verify already reads green')
+  const runLines = (captured) => captured.calls.filter(c => /^mutation-run:\d+$/.test(c.label))
+    .map(c => fenceOf(c.prompt).join('\n'))
+  for (const next_pass of [{ full: true }, { only: 'pkg/**' }]) {
+    const { result, captured } = await run(gated({ args: { maxGateAttempts: 3 },
+      mutationResult: (attempt) => ({ green: true, head_sha: REVIEWED_THROUGH, scored: false, detail: 'a fixture changed',
+        ...(attempt === 1 ? { next_pass } : {}) }),
+      mutationVerify: () => ({ exit: 0, head: REVIEWED_THROUGH }) }))
+    const lines = runLines(captured)
+    const flag = next_pass.full ? ' --full' : 'MUTATION_ONLY='
+    check(`${JSON.stringify(next_pass)}: a second run follows, with the flag, and a third does not`,
+      [lines.length, lines[0].includes(flag), lines[1]?.includes(flag)], [2, false, true])
+    check(`${JSON.stringify(next_pass)}: the agent read both runs, and the phase is green`,
+      [agentCalls(captured), result.halted_at, result.mutation?.green], [2, undefined, true])
+  }
+}
+
+async function scenarioRunBudgetKillsTheRun() {
+  console.log('\n== scenario MR: a run budget that runs out between polls kills the gate, and the halt names its log')
+  const dir = scratchRepo()
+  try {
+    await withFakeGate('sleep 30', async (gate) => {
+      const outs = []
+      const { result, captured } = await withWait(1, () => run(gated({
+        args: { runBudget: 5_000_000 }, spendAllAfter: 'mutation-run:1',
+        branchResult: branchAt(dir), mutationRun: relay(gate, outs) })))
+      const pending = rowOf(outs, PENDING_ROW)
+      check('the refused poll never ran, and the kill was sent past the spent budget',
+        runLabels(captured), ['mutation-run:1', 'mutation-run:1:kill'])
+      const pid = pidOf(dir, /\/touchstone-gates\/([^/]+)\//.exec(pending?.[2] ?? '')?.[1] ?? '')
+      await new Promise(r => setTimeout(r, 500))
+      check('the gate is no longer running', alive(pid), false)
+      check('halted at Mutation on the run budget', [result.halted_at, /Run budget exhausted/.test(result.note ?? '')], ['Mutation', true])
+      check('the note names the log, says the gate was killed and what to check',
+        [(result.note ?? '').includes(pending?.[2] ?? 'no log'), /killed/.test(result.note ?? ''),
+         /status and git -C .+ stash list/.test(result.note ?? '')], [true, true, true])
+      check('the halt state carries the log', result.mutation?.run_cut_off?.log, pending?.[2])
+    })
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true })
+  }
+}
+
 const SCENARIOS = [scenarioLongRunIsPolled, scenarioFailingRunReachesTheAgent, scenarioSetupExitReachesTheAgent,
   scenarioDeadRunHalts, scenarioBudgetKillsTheRun, scenarioNoBudgetNoCeiling, scenarioNextPassFlags,
   scenarioGateEnvIsEvaluated, scenarioNotTheGate, scenarioParserRejects, scenarioScriptNotFoundRunsAgain,
-  scenarioRerunOfTheSamePlan, scenarioPreLoopVerify, scenarioPromptsAreDirectAboutTheRun]
+  scenarioRerunOfTheSamePlan, scenarioPreLoopVerify, scenarioPromptsAreDirectAboutTheRun,
+  scenarioFlakyRelayDuringLiveRun, scenarioWrongGateGetsAFreshRun, scenarioFullPassAskedOnGreenIsRun,
+  scenarioRunBudgetKillsTheRun]
 JS_EOF
 
 finish

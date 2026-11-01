@@ -385,6 +385,8 @@ const parseMutationVerify = (output, run) => {
 // this row, once the detached gate has left an exit file, or the pending line
 // while its process is alive (1) or gone without one (0). The gate that ran is
 // the one the line recorded when it started it, not the one a later poll names.
+// notTheGate marks a reason that comes from what the shell recorded for the run
+// (its trailer, its gate): asking about that run again reads the same record.
 const MUTATION_RUN_LINE =
   /^TOUCHSTONE_MUTATION_RUN (\S+) (\S+) (\S+) (.+?\/mutation\.log) (\S+) (\S+) (.+)$/
 const MUTATION_PENDING_LINE = /^TOUCHSTONE_MUTATION_PENDING (\S+) ([01]) (.+)$/
@@ -403,10 +405,10 @@ const parseMutationRun = (output, run) => {
   if (r !== run) return { reason: `run line names run ${r}, not ${run}` }
   if (!/^\d+$/.test(exit)) return { reason: 'exit is not an integer' }
   const mismatch = trailerProblem(Number(exit), trailer, RUN_TRAILER_EXITS)
-  if (mismatch) return { reason: mismatch }
+  if (mismatch) return { reason: mismatch, notTheGate: true }
   if (!underRun(log)) return { reason: 'log path is not under this run' }
   const other = Number(exit) === 127 ? null : otherGateCopy(gate, name, version)
-  if (other) return { reason: other }
+  if (other) return { reason: other, notTheGate: true }
   return { exit: Number(exit), log }
 }
 const UNREVIEWED_LINE = /^TOUCHSTONE_UNREVIEWED (\S+) (\S+) (\S+)$/

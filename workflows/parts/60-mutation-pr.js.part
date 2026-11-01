@@ -120,37 +120,78 @@ if (mutationGated) {
 // own trailer, never from a model. Each poll is a fresh relay of the same line.
 let mutationRunAttempt = 0
 const malformedRun = (r) => r.reason && !r.dead && !r.budget
+// A run seen alive is not given up on for a garbled reply: this many in a row
+// and it is the relay that is broken, not flaky.
+const MAX_UNREADABLE_POLLS = 5
+const runLogHint = (run) =>
+  `git -C ${wt.path} rev-parse --git-path touchstone-gates/${run}/mutation.log`
+// Every way out of a run that did not end on its own leaves no gate behind: a
+// halt that left it running would keep mutating (and, for PHP and Python,
+// stashing) the worktree while a person or the next run works in it. The kill
+// is sent past a spent run budget and its own failure never replaces the halt.
 const measureRun = async (label, pass) => {
   mutationRunAttempt++
   const run = `${planId}-mutation-run-${mutationRunAttempt}`
   const promptFor = (first) =>
     runnerPrompt('mutation-run', [mutationRunLineFor(run, pass, first)], MUTATION_CHECK_PATH_NOTE)
+  const killPrompt = runnerPrompt('mutation-run',
+    [killLineFor(run, 'touchstone-gates', 'TOUCHSTONE_MUTATION_KILLED')])
+  const killRun = (at) => treeAgent(killPrompt, { label: at, schema: VERDICT_RUN, model: 'haiku',
+    effort: 'low', pastRunBudget: true }).catch(() => null)
+  let aliveLog = null
+  let unreadable = 0
+  const read = (output) => {
+    const parsed = parseMutationRun(output, run)
+    if (parsed.pending) {
+      aliveLog = parsed.log
+      unreadable = 0
+      return parsed
+    }
+    const glitch = parsed.reason && aliveLog && !parsed.notTheGate && ++unreadable < MAX_UNREADABLE_POLLS
+    return glitch ? { pending: ['mutation'], dead: [], log: aliveLog } : parsed
+  }
   const ask = (suffix) => pollDetached({
     prompt: promptFor(false), firstPrompt: promptFor(!suffix), label: `${label}${suffix}`,
-    schema: VERDICT_RUN, parse: (output) => parseMutationRun(output, run), over: sMut.over,
-    killPrompt: runnerPrompt('mutation-run',
-      [killLineFor(run, 'touchstone-gates', 'TOUCHSTONE_MUTATION_KILLED')]),
-    what: 'mutation',
+    schema: VERDICT_RUN, parse: read, over: sMut.over, killPrompt, what: 'mutation',
   })
-  let got = await ask('')
-  if (malformedRun(got)) {
-    log(`${label}: unmeasured (${got.reason}), asking again`)
-    const again = await ask(':retry')
-    got = malformedRun(again) ? { reasons: [got.reason, again.reason] } : again
+  try {
+    let got = await ask('')
+    if (malformedRun(got)) {
+      log(`${label}: unmeasured (${got.reason}), asking again`)
+      const again = await ask(':retry')
+      got = malformedRun(again)
+        ? { reasons: [got.reason, again.reason], fresh: Boolean(got.notTheGate || again.notTheGate) }
+        : again
+    }
+    if (got.dead) return { run, stop: { run_dead: { log: got.log } } }
+    if (got.budget) return { run, stop: { run_budget: { log: got.log } } }
+    if (got.reasons) {
+      await killRun(`${label}:kill`)
+      return { run, unmeasured: { reasons: got.reasons, fresh: got.fresh } }
+    }
+    return { exit: got.exit, log: got.log, run }
+  } catch (e) {
+    await killRun(`${label}:kill`)
+    mutation = { ...mutation, green: false, run_cut_off: { log: aliveLog ?? runLogHint(run) } }
+    throw e
   }
-  if (got.dead) return { stop: { run_dead: { log: got.log } } }
-  if (got.budget) return { stop: { run_budget: { log: got.log } } }
-  if (got.reasons) return { stop: { run_unmeasured: { reasons: got.reasons, run } } }
-  return { exit: got.exit, log: got.log, run }
 }
+// Asking about a finished run again reads the same record, so a run that read
+// as another copy of the gate (a substituted `true`) can only be fixed by a new
+// run, as the relay that left the bare script name (127) can.
+const reasonOf = (r) => r.exit === SCRIPT_NOT_FOUND
+  ? 'mutation-check.sh was not found (exit 127)' : r.unmeasured.reasons.at(-1)
+const withoutVerdict = (r) => r.exit === SCRIPT_NOT_FOUND || r.unmeasured
+const stopFor = (r) => r.unmeasured
+  ? { stop: { run_unmeasured: { reasons: r.unmeasured.reasons, run: r.run } } } : r
 const runMutation = async (label, pass) => {
   const first = await measureRun(label, pass)
-  if (first.exit !== SCRIPT_NOT_FOUND) return first
-  log(`${label}: mutation-check.sh was not found (exit 127), running it again once`)
+  if (first.exit !== SCRIPT_NOT_FOUND && !first.unmeasured?.fresh) return stopFor(first)
+  log(`${label}: ${reasonOf(first)}, running it again once`)
   const second = await measureRun(`${label}:rerun`, pass)
-  return second.exit !== SCRIPT_NOT_FOUND ? second
-    : { stop: { run_unmeasured: { reasons: ['mutation-check.sh was not found (exit 127)',
-        'mutation-check.sh was not found (exit 127) again'], run: second.run } } }
+  return withoutVerdict(second)
+    ? stopFor({ run: second.run, unmeasured: { reasons: [reasonOf(first), reasonOf(second)] } })
+    : second
 }
 const passFlags = (pass) =>
   `${pass.only ? `MUTATION_ONLY=${shQuote(pass.only)} ` : ''}mutation-check.sh ${wt.path}${pass.full ? ' --full' : ''}`
@@ -162,7 +203,11 @@ let mutationAttempts = 0
 let stalledAttempts = 0
 let headBeforeAttempt = reviewedThrough
 let nextPass = passOf()
-for (let attempt = 1; attempt <= MAX_GATE_ATTEMPTS && !mutation.green
+// A pass the agent asked for is run even when --verify already reads green: the
+// ledger keys only the changed sources, so it cannot see what made the agent ask
+// (a fixture, a compose file, a toolchain pin).
+const asksForPass = (pass) => Boolean(pass.only) || pass.full
+for (let attempt = 1; attempt <= MAX_GATE_ATTEMPTS && (!mutation.green || asksForPass(nextPass))
      && !mutation.unsupported_language
      && !mutation.verdict_unmeasured && !mutation.verify_setup
      && stalledAttempts < STALL_ROUNDS && !outOfBudget() && !sMut.over(); attempt++) {
@@ -240,10 +285,6 @@ for (let attempt = 1; attempt <= MAX_GATE_ATTEMPTS && !mutation.green
 }
 sMut.close()
 
-const INTERRUPTED_RUN_ADVICE =
-  `A gate cut off mid-run (PHP and Python stash the work while they measure) can leave ` +
-  `it in the stash or a file mutated: check git -C ${wt.path} status and ` +
-  `git -C ${wt.path} stash list before running it again.`
 if (!mutation.green) {
   return await halted('Mutation', {
     plan: plan.plan, implemented: impl.summary, gates: gatesPayload(),
@@ -261,20 +302,20 @@ if (!mutation.green) {
       : mutation.run_dead
       ? `The mutation run stopped without recording an exit code, so it has no ` +
         `verdict; log ${mutation.run_dead.log}. No further attempt was made. ` +
-        `${INTERRUPTED_RUN_ADVICE} ${prNote()}. ` +
+        `${interruptedRunAdvice()} ${prNote()}. ` +
         `mutation-pr-gate.py blocks gh pr ready until --verify reads green.`
       : mutation.run_budget
       ? `The mutation stage budget ran out; the run was killed; log ` +
-        `${mutation.run_budget.log}. ${INTERRUPTED_RUN_ADVICE} ${prNote()}. ` +
+        `${mutation.run_budget.log}. ${interruptedRunAdvice()} ${prNote()}. ` +
         `mutation-pr-gate.py blocks gh pr ready until --verify reads green.`
       : mutation.run_unmeasured
       ? `The mutation run could not be measured: the line that runs ` +
         `mutation-check.sh ${wt.path} did not print what the script asked for, or ` +
         `did not find the script (first: ${mutation.run_unmeasured.reasons[0]}; ` +
         `second: ${mutation.run_unmeasured.reasons[1]}). This halt is about ` +
-        `measurement, not about mutants. If the run started, its log is ` +
-        `git -C ${wt.path} rev-parse --git-path ` +
-        `touchstone-gates/${mutation.run_unmeasured.run}/mutation.log. ${prNote()}. ` +
+        `measurement, not about mutants. A gate still running was killed. If the ` +
+        `run started, its log is ${runLogHint(mutation.run_unmeasured.run)}. ` +
+        `${interruptedRunAdvice()} ${prNote()}. ` +
         `mutation-pr-gate.py blocks gh pr ready until --verify reads green.`
       : mutation.verdict_unmeasured
       ? `The mutation gate's verdict could not be measured: the line that runs ` +
@@ -581,6 +622,11 @@ return result
   // alone. Closing every open stage first means the halt's stage_spend is
   // complete even for the stage that was actually running when the budget
   // was refused, not just the ones that reached their own close().
+  const cutOff = budgetHaltState().mutation?.run_cut_off
+  const cutOffNote = cutOff
+    ? `. The mutation gate was still running when this halted: it was killed, and its ` +
+      `log is ${cutOff.log}. ${interruptedRunAdvice()}`
+    : ''
   if (runBudgetSpent) {
     const stillOpen = closeOpenStages()
     // commands/deliver.md tells the invoking session to report the note
@@ -598,7 +644,7 @@ return result
         (stillOpen.length
           ? `; still in progress when the budget was refused: ${stillOpen.join(', ')}`
           : '') +
-        `. ${prNote()}`,
+        `. ${prNote()}${cutOffNote}`,
     })
   }
   // Any other throw (an agent out of structured-output retries, a stall the
@@ -608,6 +654,6 @@ return result
   return await halted(currentPhase ?? 'Setup', {
     ...budgetHaltState(),
     note: `The run stopped on an error in ${currentPhase ?? 'Setup'}: ` +
-      `${e?.message ?? String(e)}. ${prNote()}`,
+      `${e?.message ?? String(e)}. ${prNote()}${cutOffNote}`,
   })
 }

@@ -238,8 +238,11 @@ let runBudgetSpent = null
 // this run's own start.
 const runSpendStart = budget.spent()
 const runSpent = () => budget.spent() - runSpendStart
-const dispatch = async (prompt, opts) => {
-  if (runBudget != null && runSpent() >= runBudget) {
+// pastRunBudget is for the one call that stops a detached process still running
+// in the worktree: refusing it would leave that process mutating files after the
+// halt, which costs more than the call.
+const dispatch = async (prompt, { pastRunBudget = false, ...opts }) => {
+  if (!pastRunBudget && runBudget != null && runSpent() >= runBudget) {
     runBudgetSpent = { refused: opts.label, spent: runSpent() }
     throw new Error(
       `touchstone: run budget (${Math.round(runBudget / 1000)}k output ` +
@@ -323,6 +326,13 @@ const prNote = () => {
     : `PR #${draftPr.number} read as ready for review, ${holds}: it was ready when this run ` +
       `adopted it, and ${draftPr.readyWhy}`
 }
+
+// A function because wt is declared further down, and the catch at the end of
+// the script, outside the try that holds the Mutation phase, reads this too.
+const interruptedRunAdvice = () =>
+  `A gate cut off mid-run (PHP and Python stash the work while they measure) can leave ` +
+  `it in the stash or a file mutated: check git -C ${wt.path} status and ` +
+  `git -C ${wt.path} stash list before running it again.`
 
 // A halt is a result, not an absence of one, and the run record is where it
 // survives the session. It used to be posted as a comment on the draft PR too.

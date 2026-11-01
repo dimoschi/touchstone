@@ -401,7 +401,9 @@ check in `test-static.sh` asserts nothing else does. Every `treeAgent` call and 
 direct `agent()`-style call (`setup`, `branch`, `branch:existing`, `collapseDuplicates`'s
 `review:dedup`) goes through it. `runBudget` is `null`, and `dispatch()` never
 refuses, unless the user set one (`--run-budget` or `.touchstone.json`); it is applied
-right after Triage. From there, `dispatch()` refuses any call once `budget.spent()` has reached it.
+right after Triage. From there, `dispatch()` refuses any call once `budget.spent()` has reached it,
+except one passed `pastRunBudget`: the kill line for a detached mutation run, since refusing
+it would leave that gate running in the worktree after the halt.
 
 Everything after that point runs inside one `try`/`catch`, so a refusal anywhere in the
 run unwinds to a single halt rather than needing its own latch at every call site. Two
@@ -638,7 +640,11 @@ only for this run, with an integer exit, a log ending in
 exit is 0 or 1) and this plugin's own gate (exit 127 is exempt: nothing ran). The first
 ask of a run also clears a run directory an earlier invocation with the same plan id left
 behind, unless a live process still owns it; a later ask never does, so asking again is
-idempotent. A reply that does not parse is asked again once (`mutation-run:N:retry`).
+idempotent. A reply that does not parse is asked again once (`mutation-run:N:retry`),
+under the same run id, which starts nothing a second time. Once a poll has seen the process
+alive, a reply that does not parse is a relay glitch and is asked about again without
+spending that retry: `MAX_UNREADABLE_POLLS` (5) in a row, with no readable reply between
+them, end it as unmeasured.
 
 A run has no time or token ceiling by default: nothing but the run itself ends the asking.
 
@@ -647,9 +653,11 @@ A run has no time or token ceiling by default: nothing but the run itself ends t
 | exit file, exit 0 | the agent is told the exit and the log; `mutation-verify:N` decides green |
 | exit file, exit 1 (survivors), 2 or 4 | the agent gets the exit and the log path, and kills the survivors through the usual loop |
 | exit 127 | the relay left the bare script name: one fresh run (`mutation-run:N:rerun`), then `run_unmeasured` |
+| the finished run read as another copy of the gate (a missing or mismatched trailer, a gate path that is not the plugin's), also after the retry's second read | the record the shell wrote for that run is wrong and asking again reads it again, so one fresh run (`mutation-run:N:rerun`), then `run_unmeasured` |
 | process gone, no exit file | `run_dead`: halt at Mutation, the note names the log, no further attempt |
 | the user set a `mutation` stage budget (`.touchstone.json` or `--stage-budget mutation=N`) and it ran out while the process lives | `mutation-run:N:kill` kills its process group, `run_budget`: halt at Mutation, the note names the log |
-| unparseable twice, a missing or mismatched trailer, another copy of the gate | `run_unmeasured`: halt at Mutation, saying this is about measurement, with both reasons |
+| the user set a run budget (`--run-budget`) and it ran out between two polls, or any other error ended a poll | `mutation-run:N:kill` kills its process group, sent past the spent budget (`pastRunBudget` on `dispatch`), then the error halts the run as it does anywhere else, with the log in `mutation.run_cut_off` and in the note |
+| unparseable twice, or `MAX_UNREADABLE_POLLS` in a row after the process was seen alive, and not the gate's own record | `mutation-run:N:kill` first, since the process may be alive, then `run_unmeasured`: halt at Mutation, saying this is about measurement, with both reasons |
 
 A halt after a run that was cut off tells the user to check `git status` and `git stash
 list` in the worktree, since PHP and Python gates stash the work while they measure.
@@ -658,7 +666,9 @@ The agent cannot run the gate (its prompt says so, bar `--verify`), so a second 
 split build or a fixture change needs is asked for in its answer: `next_pass {only, full}`
 on the `GATE` schema. `only` becomes `MUTATION_ONLY=<globs>` and `full` becomes `--full`
 on the next attempt's run line, quoted once with `shQuote`; the attempt after that starts
-from no flags again.
+from no flags again. A pass the agent asked for runs even when `--verify` already reads
+green, since the ledger keys only the changed sources and cannot see a fixture, a compose
+file or a toolchain pin changing.
 
 The verdict line (`mutation-verify:N`, haiku, low effort, `runnerPrompt`) runs after every
 attempt, including one whose agent returned nothing, and is one line:
