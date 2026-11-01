@@ -29,7 +29,7 @@ export const meta = {
 // against the manifest in scripts/check-version-bump.sh, so drift is a
 // gate's job rather than something this script verifies about itself.
 const PLUGIN_NAME = 'touchstone'
-const PIPELINE_VERSION = '0.40.2'
+const PIPELINE_VERSION = '0.41.0'
 // The plugin's gates are this skill's scripts. A user or project skill with the
 // bare name can resolve first and run an older copy of the gates, whose result
 // would then be read as this version's, so prompts name the namespaced skill.
@@ -164,7 +164,8 @@ const GENERATED_FILES =
 // cannot prevent the spend, it can only discard the finished work, which is why
 // a ceiling on plan or implement only throws finished work away. A ceiling is
 // a real bound only where over() gates a further iteration (the fix rounds,
-// the mutation attempts, the re-review latches). null means uncapped, which
+// the mutation attempts, the re-review latches, and the asking after a detached
+// check or mutation run, which kills that process too). null means uncapped, which
 // every stage is unless stageBudgets names it. The checks ceiling, when set,
 // bounds its two windows (before and after Implement) each on its own; the
 // fix ceiling carries each round's tail review as well as the fixing.

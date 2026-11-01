@@ -177,7 +177,7 @@ async function scenarioPromptsNameNamespacedSkill() {
     verify: () => true, fixHead: () => 'fff0000000000000000000000000000000000001', staleness: () => [] }))
   const named = captured.calls.filter(c => (c.prompt ?? '').includes('crap-controlled-changes'))
   check('the skill is named somewhere', named.length > 0, true)
-  for (const label of ['implementer', 'signals', 'mutation:1', 'mutation-verify:1']) {
+  for (const label of ['implementer', 'signals', 'mutation-run:1', 'mutation:1', 'mutation-verify:1']) {
     check(`${label} names the namespaced skill`, promptOf(captured, label).includes('touchstone:crap-controlled-changes'), true)
   }
   const bare = named.filter(c => c.prompt.replaceAll('touchstone:crap-controlled-changes', '')
@@ -442,7 +442,7 @@ async function scenarioHookAllowsLines() {
       advocate: [] },
     verify: () => true, fixHead: () => 'fff0000000000000000000000000000000000001', staleness: () => [] }))
   const linesOf = (label) => fenceOf(promptOf(captured, label))
-  for (const label of ['mutation-verify:1', 'pr-unreviewed', 'checks:run:1', 'reproduce:review']) {
+  for (const label of ['mutation-run:1', 'mutation-verify:1', 'pr-unreviewed', 'checks:run:1', 'reproduce:review']) {
     const lines = linesOf(label)
     check(`${label}: has lines`, lines.length > 0, true)
     check(`${label}: every line passes the hook`, lines.map(hookExit), lines.map(() => 0))

@@ -369,7 +369,8 @@ Two invariants the script exists to hold:
 - **Ceilings are tripwires, not aborts.** A running agent cannot be stopped from the
   script, so `over()` is read only after an agent returns. That makes a stage budget a
   real bound only where it gates a further iteration (fix rounds, mutation attempts,
-  re-review latches). Every stage is uncapped unless `stageBudgets` names it. Do not
+  re-review latches, and the asking after a detached check or mutation run, which
+  also kills that process). Every stage is uncapped unless `stageBudgets` names it. Do not
   describe these as hard per-call token limits.
 
 `workflows/test-fix-loop-join.sh` drives the real script with stubbed globals, which is
@@ -611,8 +612,56 @@ Two decisions before the PR used to rest on a model's account and are now read f
 line the script builds and the shell prints, the same way as the check and reproducer
 runners (`60-mutation-pr.js.part`, parsers in `10-schemas.js.part`).
 
-**Mutation.** After every `mutation:N` attempt, including one whose agent returned
-nothing, a `mutation-verify:N` agent (haiku, low effort, `runnerPrompt`) runs one line:
+**Mutation.** A gated repo first gets `mutation-verify:0`, the verdict line below, before
+anything runs: exit 0 means the ledger already records a green run for this head, and the
+phase is green with no run and no agent. Otherwise each attempt is three steps, none of
+which asks a model for the gate's verdict. `mutation-run:N` runs `mutation-check.sh` (the
+pipeline runs the gate, not the mutation agent, so no run is bounded by one Bash call).
+The `mutation:N` agent then reads the run's log and kills survivors. `mutation-verify:N`
+decides green.
+
+The run line is the detached-check mechanism of the checks stage (`detachedLineFor`,
+`pollDetached` and `killLineFor` in `30-triage-plan-checks.js.part`), not a copy of it.
+`mutationRunLineFor` starts `mutation-check.sh <worktree>` under `setsid`, in the shell
+that first evaluates the repo's `scripts/gate-env.sh mutation` when there is one, with the
+whole output in `touchstone-gates/<run>/mutation.log` under the worktree's git dir and the
+exit code in `mutation.exit` when it ends. `<run>` is the plan id plus
+`mutation-run-<n>`. The gate path the relay substituted is recorded in `mutation.gate` and
+read back, so a later poll cannot name another copy. The line waits at most 540 seconds
+(`TOUCHSTONE_CHECK_WAIT`), then prints `TOUCHSTONE_MUTATION_PENDING mutation <1|0> <log>`
+(1 while the process is alive, 0 once it is gone with no exit file), and the pipeline sends
+the same line again (`mutation-run:N:poll:M`) for as long as it is 1. A finished line is
+`TOUCHSTONE_MUTATION_RUN <run> <exit> <trailer|-> <log> <name> <version> <gate>`, with the
+trailer read from the log's last line, as for `--verify`. `parseMutationRun` accepts it
+only for this run, with an integer exit, a log ending in
+`/touchstone-gates/<run>/mutation.log`, a trailer equal to the exit (and present when the
+exit is 0 or 1) and this plugin's own gate (exit 127 is exempt: nothing ran). The first
+ask of a run also clears a run directory an earlier invocation with the same plan id left
+behind, unless a live process still owns it; a later ask never does, so asking again is
+idempotent. A reply that does not parse is asked again once (`mutation-run:N:retry`).
+
+A run has no time or token ceiling by default: nothing but the run itself ends the asking.
+
+| How the run ends | What happens |
+|---|---|
+| exit file, exit 0 | the agent is told the exit and the log; `mutation-verify:N` decides green |
+| exit file, exit 1 (survivors), 2 or 4 | the agent gets the exit and the log path, and kills the survivors through the usual loop |
+| exit 127 | the relay left the bare script name: one fresh run (`mutation-run:N:rerun`), then `run_unmeasured` |
+| process gone, no exit file | `run_dead`: halt at Mutation, the note names the log, no further attempt |
+| the user set a `mutation` stage budget (`.touchstone.json` or `--stage-budget mutation=N`) and it ran out while the process lives | `mutation-run:N:kill` kills its process group, `run_budget`: halt at Mutation, the note names the log |
+| unparseable twice, a missing or mismatched trailer, another copy of the gate | `run_unmeasured`: halt at Mutation, saying this is about measurement, with both reasons |
+
+A halt after a run that was cut off tells the user to check `git status` and `git stash
+list` in the worktree, since PHP and Python gates stash the work while they measure.
+
+The agent cannot run the gate (its prompt says so, bar `--verify`), so a second pass that a
+split build or a fixture change needs is asked for in its answer: `next_pass {only, full}`
+on the `GATE` schema. `only` becomes `MUTATION_ONLY=<globs>` and `full` becomes `--full`
+on the next attempt's run line, quoted once with `shQuote`; the attempt after that starts
+from no flags again.
+
+The verdict line (`mutation-verify:N`, haiku, low effort, `runnerPrompt`) runs after every
+attempt, including one whose agent returned nothing, and is one line:
 
 ```
 g=mutation-check.sh && d="$(git -C <worktree> rev-parse --path-format=absolute --git-path touchstone-gates/<run> 2>/dev/null)" && mkdir -p "$d" && h="$(git -C <worktree> rev-parse HEAD 2>/dev/null)" && { "$g" <worktree> --verify >|"$d/mutation-verify.log" 2>&1; e=$?; t="$(sed -n '$s/^mutation-check: EXIT=\([0-9][0-9]*\) .*$/\1/p' "$d/mutation-verify.log")"; m="$(python3 -c 'import json,sys; j=json.load(open(sys.argv[1])); print(j["name"], j["version"])' "${g%/skills/crap-controlled-changes/mutation-check.sh}/.claude-plugin/plugin.json" 2>/dev/null)" || m='- -'; printf 'TOUCHSTONE_MUTATION_VERIFY %s %s %s %s %s %s %s\n' <run> "$e" "${t:--}" "$h" "$d/mutation-verify.log" "$m" "$g"; }
@@ -645,8 +694,9 @@ relay ran a different copy, naming its path and what was read beside it. Exit 12
 exempt from these checks, since nothing ran, and keeps its retry. A substituted
 `true` prints exit 0 with no trailer and is read as unmeasured.
 
-The script keeps the agent's `detail`, `needs_user_run` and `unsupported_language` for
-the halt note and ignores its `green` and `head_sha`, so the post-mutation review range,
+The script keeps the agent's `detail` and `unsupported_language` for the halt note, reads
+its `next_pass` for the next run, and ignores its `green` and `head_sha`, so the
+post-mutation review range,
 the plan-leak probe and the settled re-check all start from git's head. The exit decides
 the rest:
 
@@ -771,7 +821,8 @@ commands, never one that mutates the repo or depends on state a later run cannot
 repeat.
 
 A batch of checks is run by lines the script builds, never by a model copying a
-command or relaying output (`checkLineFor` and `endLineFor` in `30-triage-plan-checks.js.part`). The
+command or relaying output (`checkLineFor`, built on `detachedLineFor`, and `endLineFor`
+in `30-triage-plan-checks.js.part`; the mutation run reuses the same pieces). The
 `checks:run:N` agent is given one fenced line per check, plus an end line, and runs each
 as its own foreground Bash call. A check's line is self-contained: it resolves
 `touchstone-checks/<run>` under the worktree's git dir as `$d`, starts `bash -c 'cd
