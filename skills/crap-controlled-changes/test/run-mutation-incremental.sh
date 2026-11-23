@@ -143,28 +143,30 @@ func TestSign(t *testing.T) {
 	}
 }
 EOF
+# Not Abs: its `x < 0` boundary mutants are equivalent (-0 == 0), and they only
+# looked killed while mutago deduplicated them against Sign's identical line.
 cat >> b/b.go <<'EOF'
 
-func Abs(x int) int {
+func Step(x int) int {
 	if x < 0 {
-		return -x
+		return 0
 	}
-	return x
+	return 1
 }
 EOF
 cat >> b/b_test.go <<'EOF'
 
-func TestAbs(t *testing.T) {
-	cases := map[int]int{-5: 5, -1: 1, 0: 0, 5: 5}
+func TestStep(t *testing.T) {
+	cases := map[int]int{-5: 0, -1: 0, 0: 1, 5: 1}
 	for in, want := range cases {
-		if got := Abs(in); got != want {
-			t.Fatalf("Abs(%d) = %d, want %d", in, got, want)
+		if got := Step(in); got != want {
+			t.Fatalf("Step(%d) = %d, want %d", in, got, want)
 		}
 	}
 }
 EOF
 git add .
-commit -m "feat: add Sign and Abs, fully tested"
+commit -m "feat: add Sign and Step, fully tested"
 
 echo "--- phase 0: the first run on a branch narrows to nothing, both sources measured ---"
 run
