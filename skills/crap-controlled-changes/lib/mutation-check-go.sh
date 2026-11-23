@@ -249,12 +249,10 @@ fi
 total_rows=0
 total_generated=0
 total_exempt=0
-for mod in ${MODS[@]+"${MODS[@]}"}; do
-  status=0
-  TARGETS=()
-  while IFS= read -r t; do
-    [ -n "$t" ] && TARGETS+=("$t")
-  done < <(targets_for "$mod")
+measure_package() { # measure_package <module> <target>...
+  local mod="$1" status=0 prefix rows
+  shift
+  local TARGETS=("$@")
   (cd "$mod" && GOMAXPROCS="$GO_MAXPROCS" \
     ${MUTATION_GO_RUNNER:+$MUTATION_GO_RUNNER} \
     go run "$MUTAGO_PKG@$MUTAGO_VERSION" "${MUTAGO_ARGS[@]}" "${TARGETS[@]}") \
@@ -296,6 +294,23 @@ for mod in ${MODS[@]+"${MODS[@]}"}; do
     printf '%s\n' "$rows"
     total_rows=$((total_rows + $(printf '%s\n' "$rows" | grep -c ' SURVIVED ')))
   fi
+}
+
+# One mutago process per package directory: mutago keeps every package it loads,
+# with its whole dependency graph, until it exits, so a single process over a
+# branch touching 40 packages of one module grew to a 19 GB footprint.
+for mod in ${MODS[@]+"${MODS[@]}"}; do
+  TARGETS=()
+  while IFS= read -r t; do
+    [ -n "$t" ] && TARGETS+=("$t")
+  done < <(targets_for "$mod")
+  while IFS= read -r dir; do
+    PKG_TARGETS=()
+    for t in "${TARGETS[@]}"; do
+      [ "$(dirname "$t")" = "$dir" ] && PKG_TARGETS+=("$t")
+    done
+    measure_package "$mod" "${PKG_TARGETS[@]}"
+  done < <(for t in "${TARGETS[@]}"; do dirname "$t"; done | sort -u)
 done
 
 if [ "$total_rows" -eq 0 ]; then
