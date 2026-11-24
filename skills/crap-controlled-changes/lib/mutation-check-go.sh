@@ -5,7 +5,7 @@
 # rows via parse_mutago.py.
 #
 # A clean working tree is required, and not because mutago touches the tree:
-# v2.8.1 writes each mutant to its own MkdirTemp and substitutes it through
+# v2.10.45 writes each mutant to its own MkdirTemp and substitutes it through
 # `go test -overlay`, so a killed run strands nothing. The reason is the ledger.
 # mutago reads sources from the worktree, while ../mutation-check.sh keys its
 # record on HEAD blobs, so measuring uncommitted content would record a pass for
@@ -81,6 +81,7 @@ BYMOD="$(mktemp)"
 GO_LOCK_SLOT=""
 cleanup() {
   rm -f "$BYMOD" "${RAW_OUT:-}" "${RAW_ERR:-}"
+  [ -n "${MUTAGO_CONFIG:-}" ] && [ -n "${mod:-}" ] && rm -f "$mod/$MUTAGO_CONFIG"
   [ -n "$GO_LOCK_SLOT" ] || return 0
   # Before the release, so the next queued run never starts on a cache this one
   # is still deleting.
@@ -181,13 +182,18 @@ require_free_space "$MUTATION_GOCACHE"
 require_free_space "${TMPDIR:-/tmp}"
 export GOCACHE="$MUTATION_GOCACHE"
 
-MUTAGO_ARGS=(--git-diff-lines --git-diff-base="$MUTATION_BASE" --logger-agentic-json
-             --logger-summary-json --quiet --workers="$WORKERS")
-if [ -n "${MUTATION_GO_TEST_FLAGS:-}" ]; then
-  # `=` is required: go-flags reads `--test-flags -short` as two options and refuses,
-  # so the space form passed no value at all. Several flags in one string are fine.
-  MUTAGO_ARGS+=(--test-flags="$MUTATION_GO_TEST_FLAGS")
-fi
+# -exec=env turns off mutago's darwin test-binary wrapper (engine/gotest.go skips
+# it when the caller passes -exec). The wrapper overwrites one reused binary in
+# place, macOS sometimes SIGKILLs it, and mutago counts that as a killed mutant.
+# `=` is required: go-flags reads `--test-flags -short` as two options and refuses,
+# so the space form passed no value at all. Several flags in one string are fine.
+# The config is copied beside each module's reports, relative to mutago's cwd,
+# because a MUTATION_GO_RUNNER container sees the module dir, not this plugin.
+MUTAGO_CONFIG=".touchstone-mutago.yml"
+MUTAGO_ARGS=(--config="$MUTAGO_CONFIG"
+             --git-diff-lines --git-diff-base="$MUTATION_BASE" --logger-agentic-json
+             --logger-summary-json --quiet --workers="$WORKERS"
+             --test-flags="-exec=env${MUTATION_GO_TEST_FLAGS:+ $MUTATION_GO_TEST_FLAGS}")
 
 # A tag-excluded file yields no mutants, which reads as "nothing mutable
 # changed": a pass on code nothing compiled. go list omits it from GoFiles.
@@ -255,10 +261,12 @@ for mod in ${MODS[@]+"${MODS[@]}"}; do
   while IFS= read -r t; do
     [ -n "$t" ] && TARGETS+=("$t")
   done < <(targets_for "$mod")
+  cp "$SKILL_LIB/mutago.yml" "$mod/$MUTAGO_CONFIG"
   (cd "$mod" && GOMAXPROCS="$GO_MAXPROCS" \
     ${MUTATION_GO_RUNNER:+$MUTATION_GO_RUNNER} \
     go run "$MUTAGO_PKG@$MUTAGO_VERSION" "${MUTAGO_ARGS[@]}" "${TARGETS[@]}") \
     >"$RAW_OUT" 2>"$RAW_ERR" || status=$?
+  rm -f "$mod/$MUTAGO_CONFIG"
   REPORT="$mod/mutago-agentic.json"
 
   if [ "$status" -ne 0 ] || [ ! -f "$REPORT" ]; then

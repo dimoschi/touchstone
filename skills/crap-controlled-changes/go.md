@@ -100,7 +100,7 @@ The helper exists to keep you from getting the stash dance and the join wrong.
 
 ## Signal C: What the mutation gate will do to your Go code
 
-Catalog for the pinned mutago (v2.8.1, `docs/mutators.md` in the module). Read the
+Catalog for the pinned mutago (v2.10.45, `docs/mutators.md` in the module). Read the
 right-hand column as an obligation you take on the moment you write the construct:
 if no test distinguishes the mutant, the gate will find it, and it is cheaper to
 write the assertion now than to come back for it.
@@ -117,7 +117,7 @@ write the assertion now than to come back for it.
 | `statement/remove` | drops an assignment or call statement | asserting the effect of the statement, not that the function returned |
 | `statement/defer-remove` | `defer f()` becomes `f()` | a test that fails if cleanup runs too early (unlock, close) |
 | `expression/context-nil` | passes `nil` where a `ctx` was passed | asserting cancellation or deadline propagation |
-| `expression/recover-clear` | `recover()` becomes `any(nil)`, so a panic propagates | a test that panics and asserts the recovery |
+| `expression/recover-clear` | `recover()` becomes `func() any { return nil }()`, so a panic propagates | a test that panics and asserts the recovery |
 | `composite/field-clear` | drops a field from a struct literal | asserting each field that matters downstream |
 | `arithmetic/*`, `numbers/*` | swaps operators, off-by-one on integer constants | asserting exact numeric values |
 | `concurrency/goroutine-remove`, `select/*` | `go f()` runs inline, drops select arms | asserting the concurrent effect, not just absence of error |
