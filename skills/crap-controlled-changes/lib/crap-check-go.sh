@@ -102,13 +102,39 @@ PROFILE_CACHE_DIR="$(git rev-parse --path-format=absolute --git-common-dir)/crap
 READ_TREE=""
 WRITE_TREE=""
 
+# ignored_in_go_packages prints the ignored paths in or below a directory of
+# tracked Go files, where a test reads its testdata and fixtures. Ignored build
+# output elsewhere (node_modules, a docs build) is in almost every worktree.
+ignored_in_go_packages() {
+  local dirs status=0
+  dirs="$(mktemp)"
+  git ls-files '*.go' | sed -e 's#/[^/]*$##' -e 's#^[^/]*\.go$#.#' | sort -u > "$dirs" &&
+    git ls-files --others --ignored --exclude-standard --directory --no-empty-directory |
+    awk -v dirs="$dirs" '
+      BEGIN { while ((getline d < dirs) > 0) pkg[d] = 1 }
+      {
+        p = $0; sub(/\/$/, "", p)
+        if ("." in pkg) { print; next }
+        while (p != "") {
+          if (p in pkg) { print; next }
+          if (p !~ /\//) break
+          sub(/\/[^\/]*$/, "", p)
+        }
+      }' || status=$?
+  rm -f "$dirs"
+  return "$status"
+}
+
 # A current run measures what a clean checkout of the index would only when
-# nothing outside the index is on disk: no unstaged edit, no untracked or
-# ignored file, no entry git is told not to look at.
+# nothing outside the index can reach its tests: no unstaged edit, no untracked
+# file, no ignored file in a Go package, no entry git is told not to look at.
 checkout_is_index() {
+  local found
   git diff --quiet || return 1
   [ -z "$(git ls-files --others --exclude-standard --directory --no-empty-directory)" ] || return 1
-  [ -z "$(git ls-files --others --ignored --exclude-standard --directory --no-empty-directory)" ] || return 1
+  # A failed listing must not read as a clean checkout.
+  found="$(set -o pipefail; ignored_in_go_packages)" || return 1
+  [ -z "$found" ] || return 1
   # Read to the end: under pipefail, grep -q quitting on a match kills git with
   # SIGPIPE, and the negated failure would read as a clean checkout.
   [ -z "$(git ls-files -v | grep -E '^([a-z]|S) ' || true)" ]
@@ -116,13 +142,26 @@ checkout_is_index() {
 
 # The build configuration is read in the module as checked out for the run, so
 # a go.mod toolchain line at HEAD counts for the baseline.
+build_config() {
+  local root="$1" mod="$2" work top
+  (cd "$root/$mod" && go version && go env GOFLAGS CGO_ENABLED GOOS GOARCH GOEXPERIMENT)
+  git hash-object "$SKILL_LIB/crap-check-go.sh"
+  work="$(cd "$root/$mod" && go env GOWORK)"
+  case "$work" in "" | off) printf 'work=%s\n' "$work"; return ;; esac
+  # The baseline worktree and the repo differ in path, so a go.work in the
+  # checkout is keyed by its path inside it. One outside the checkout never
+  # lists the baseline worktree, whose run then fails to measure.
+  top="$(cd "$root" && pwd -P)"
+  work="$(cd "$(dirname "$work")" && pwd -P)/$(basename "$work")"
+  printf 'work=%s\n' "${work#"$top"/}"
+}
+
 profile_key() {
-  local tree="$1" root="$2" mod="$3" unit="$4"
+  local tree="$1" config="$2" mod="$3" unit="$4"
   {
     printf '%s\n%s\n%s\n' "$tree" "$mod" "$unit"
     printf 'cmd=%s\n' "${GO_TEST_COMMAND:-<changed packages>}"
-    (cd "$root/$mod" && go version && go env GOFLAGS CGO_ENABLED GOOS GOARCH GOEXPERIMENT GOWORK)
-    git hash-object "$SKILL_LIB/crap-check-go.sh"
+    printf '%s\n' "$config"
   } | git hash-object --stdin
 }
 
@@ -139,18 +178,24 @@ pkg_lines() {
 module_profile() {
   local root="$1" mod="$2" prof="$3" phase="$4"
   shift 4
-  if [ -z "$READ_TREE" ] && [ -z "$WRITE_TREE" ]; then
-    gen_coverage "$root/$mod" "$prof" "$phase" "$@" || return 1
-    require_blocks "$prof" "$phase" "$root/$mod"
-    return
-  fi
+  local config=""
+  [ -z "$READ_TREE$WRITE_TREE" ] || config="$(build_config "$root" "$mod")"
+  # With -coverpkg a package's blocks carry the coverage of every package tested
+  # alongside it, so they depend on the tested set and cannot be split per package.
+  case "$config" in
+    "" | *-coverpkg*)
+      gen_coverage "$root/$mod" "$prof" "$phase" "$@" || return 1
+      require_blocks "$prof" "$phase" "$root/$mod"
+      return
+      ;;
+  esac
   local units=() missing=() run_patterns=() unit part run
   if [ -n "$GO_TEST_COMMAND" ]; then units=("$*"); else units=("$@"); fi
   echo 'mode: set' > "$prof"
   : > "$RAW_OUT"
   : > "$RAW_ERR"
   for unit in "${units[@]}"; do
-    part="$PROFILE_CACHE_DIR/$(profile_key "$READ_TREE" "$root" "$mod" "$unit").profile"
+    part="$PROFILE_CACHE_DIR/$(profile_key "$READ_TREE" "$config" "$mod" "$unit").profile"
     if [ -n "$READ_TREE" ] && [ -f "$part" ]; then cat "$part" >> "$prof"; else missing+=("$unit"); fi
   done
   [ "${#missing[@]}" -gt 0 ] || { require_blocks "$prof" "$phase" "$root/$mod"; return; }
@@ -159,7 +204,7 @@ module_profile() {
   run="$(mktemp)"
   gen_coverage "$root/$mod" "$run" "$phase" "${run_patterns[@]}" || { rm -f "$run"; return 1; }
   grep -v '^mode:' "$run" >> "$prof" || true
-  [ -z "$WRITE_TREE" ] || store_parts "$root" "$mod" "$run" "$phase" "${missing[@]}"
+  [ -z "$WRITE_TREE" ] || store_parts "$root" "$mod" "$run" "$phase" "$config" "${missing[@]}"
   rm -f "$run"
   require_blocks "$prof" "$phase" "$root/$mod"
 }
@@ -167,8 +212,8 @@ module_profile() {
 # store_parts saves <run>'s blocks per unit under WRITE_TREE. A block no package
 # claims means the import path was derived wrong, so then nothing is stored.
 store_parts() {
-  local root="$1" mod="$2" run="$3" phase="$4" parts modpath unit key total claimed=0 i=0
-  shift 4
+  local root="$1" mod="$2" run="$3" phase="$4" config="$5" parts modpath unit key total claimed=0 i=0
+  shift 5
   # The tests take minutes, and an edit or `git add` meanwhile means the run
   # measured something other than WRITE_TREE.
   if [ "$phase" = "$PHASE_CURRENT" ]; then
@@ -194,7 +239,7 @@ store_parts() {
     i=0
     for unit in "$@"; do
       i=$((i + 1))
-      key="$PROFILE_CACHE_DIR/$(profile_key "$WRITE_TREE" "$root" "$mod" "$unit").profile"
+      key="$PROFILE_CACHE_DIR/$(profile_key "$WRITE_TREE" "$config" "$mod" "$unit").profile"
       cp "$parts/$i" "$key.$$" && mv "$key.$$" "$key"
     done
   fi

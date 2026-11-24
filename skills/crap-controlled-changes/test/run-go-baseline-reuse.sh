@@ -15,6 +15,7 @@ WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
 REPO="$WORK/repo"
 CALLS="$WORK/go-test.log"
+VERSION_CALLS="$WORK/go-version.log"
 mkdir -p "$REPO" "$WORK/bin"
 cd "$REPO" || exit 1
 
@@ -25,6 +26,7 @@ REAL_GO="$(command -v go)"
 cat > "$WORK/bin/go" <<EOF
 #!/usr/bin/env bash
 [ "\${1:-}" = test ] && printf '%s\n' "\$*" >> "$CALLS"
+[ "\${1:-}" = version ] && echo >> "$VERSION_CALLS"
 if [ "\${1:-}" = test ] && [ -f "$WORK/during" ] && [ "\$(pwd -P)" = "\$(cd "$REPO" && pwd -P)" ]; then
   bash "$WORK/during" && rm -f "$WORK/during"
 fi
@@ -43,12 +45,15 @@ check() { # check <description> <condition-exit-status>
   if [ "$2" -eq 0 ]; then echo "  ok: $1"; else echo "  FAIL: $1"; failures=$((failures + 1)); fi
 }
 
-# gate: one gate run; sets OUT, STATUS and RUNS (the go test calls it made).
+# gate: one gate run; sets OUT, STATUS, RUNS (the go test calls it made) and
+# VERSIONS (its go version calls, one per build configuration it read).
 gate() {
   : > "$CALLS"
+  : > "$VERSION_CALLS"
   STATUS=0
   OUT="$(env -u CRAP_GO_TEST_COMMAND bash "$SCRIPT" 2>&1)" || STATUS=$?
   RUNS="$(wc -l < "$CALLS" | tr -d ' ')"
+  VERSIONS="$(wc -l < "$VERSION_CALLS" | tr -d ' ')"
   check "clean exit (exit $STATUS)" "$STATUS"
   [ "$STATUS" -eq 0 ] || printf '%s\n' "$OUT" | head -25 | sed 's/^/    | /'
 }
@@ -114,6 +119,8 @@ first="$(sed -n 1p "$CALLS")"
 r=1
 case "$first" in *alpha*) ;; *beta*) r=0 ;; esac
 check "baseline run tests beta alone: $first" "$r"
+r=0; [ "$VERSIONS" -eq 2 ] || r=1
+check "build configuration read once per module and phase ($VERSIONS reads, want 2)" "$r"
 fresh
 git reset -q --hard HEAD
 
@@ -139,12 +146,12 @@ expect_runs 2 "baseline measured again"
 fresh
 git reset -q --hard HEAD
 
-echo "case 6: a run with an ignored file is not reused"
+echo "case 6: a run with an ignored file in a Go package is not reused"
 printf 'ignored.txt\n' > .gitignore && git add .gitignore && commit ignore
 write_pkg alpha Sign 8 && git add alpha
-echo x > ignored.txt
+mkdir -p alpha/testdata && echo x > alpha/testdata/ignored.txt
 gate
-rm ignored.txt && commit c5
+rm -r alpha/testdata && commit c5
 write_pkg alpha Sign 9 && git add alpha
 gate
 expect_runs 2 "baseline measured again"
@@ -183,6 +190,46 @@ write_pkg alpha Sign 14 && git add alpha
 gate
 expect_runs 2 "baseline measured again"
 fresh
+git reset -q --hard HEAD
+
+# beta's tests cover alpha.Sign's negative branch, so a run of both stores more
+# coverage for alpha than alpha's own tests give.
+echo "case 9: coverage from other packages' tests (-coverpkg) is not reused"
+export GOFLAGS=-coverpkg=./...
+write_pkg alpha Sign 15 && write_pkg beta Step 3
+printf 'package beta\n\nimport (\n\t"testing"\n\n\t"example.com/br/alpha"\n)\n\nfunc TestNeg(t *testing.T) {\n\tif alpha.Sign(-1) != "neg" {\n\t\tt.Fatal("neg")\n\t}\n}\n' > beta/cross_test.go
+git add alpha beta
+gate
+commit c9
+write_pkg alpha Sign 16 && git add alpha
+gate
+expect_runs 2 "baseline measured again"
+fresh
+unset GOFLAGS
+git reset -q --hard HEAD
+
+echo "case 10: a go.work in the repo does not stop reuse"
+go work init . && git add go.work && commit work
+write_pkg alpha Sign 17 && git add alpha
+gate
+commit c10
+write_pkg alpha Sign 18 && git add alpha
+gate
+expect_runs 1 "only the change measured"
+fresh
+git reset -q --hard HEAD
+
+echo "case 11: an ignored file outside the Go packages does not stop reuse"
+printf 'node_modules/\n' >> .gitignore && git add .gitignore && commit ignore-nm
+mkdir -p node_modules/x && echo x > node_modules/x/index.js
+write_pkg alpha Sign 19 && git add alpha
+gate
+commit c11
+write_pkg alpha Sign 20 && git add alpha
+gate
+expect_runs 1 "only the change measured"
+fresh
+git reset -q --hard HEAD
 
 echo ""
 if [ "$failures" -eq 0 ]; then echo "GO BASELINE REUSE OK"; else echo "FAILED: $failures assertion(s)"; exit 1; fi
