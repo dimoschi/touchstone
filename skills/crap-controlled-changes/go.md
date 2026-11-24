@@ -117,7 +117,7 @@ write the assertion now than to come back for it.
 | `statement/remove` | drops an assignment or call statement | asserting the effect of the statement, not that the function returned |
 | `statement/defer-remove` | `defer f()` becomes `f()` | a test that fails if cleanup runs too early (unlock, close) |
 | `expression/context-nil` | passes `nil` where a `ctx` was passed | asserting cancellation or deadline propagation |
-| `expression/recover-clear` | `recover()` becomes `any(nil)`, so a panic propagates | a test that panics and asserts the recovery |
+| `expression/recover-clear` | `recover()` becomes `func() any { return nil }()`, so a panic propagates | a test that panics and asserts the recovery |
 | `composite/field-clear` | drops a field from a struct literal | asserting each field that matters downstream |
 | `arithmetic/*`, `numbers/*` | swaps operators, off-by-one on integer constants | asserting exact numeric values |
 | `concurrency/goroutine-remove`, `select/*` | `go f()` runs inline, drops select arms | asserting the concurrent effect, not just absence of error |

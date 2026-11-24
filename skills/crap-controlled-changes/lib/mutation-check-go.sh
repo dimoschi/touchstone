@@ -81,6 +81,7 @@ BYMOD="$(mktemp)"
 GO_LOCK_SLOT=""
 cleanup() {
   rm -f "$BYMOD" "${RAW_OUT:-}" "${RAW_ERR:-}"
+  [ -n "${MUTAGO_CONFIG:-}" ] && [ -n "${mod:-}" ] && rm -f "$mod/$MUTAGO_CONFIG"
   [ -n "$GO_LOCK_SLOT" ] || return 0
   # Before the release, so the next queued run never starts on a cache this one
   # is still deleting.
@@ -186,7 +187,10 @@ export GOCACHE="$MUTATION_GOCACHE"
 # place, macOS sometimes SIGKILLs it, and mutago counts that as a killed mutant.
 # `=` is required: go-flags reads `--test-flags -short` as two options and refuses,
 # so the space form passed no value at all. Several flags in one string are fine.
-MUTAGO_ARGS=(--config="$SKILL_LIB/mutago.yml"
+# The config is copied beside each module's reports, relative to mutago's cwd,
+# because a MUTATION_GO_RUNNER container sees the module dir, not this plugin.
+MUTAGO_CONFIG=".touchstone-mutago.yml"
+MUTAGO_ARGS=(--config="$MUTAGO_CONFIG"
              --git-diff-lines --git-diff-base="$MUTATION_BASE" --logger-agentic-json
              --logger-summary-json --quiet --workers="$WORKERS"
              --test-flags="-exec=env${MUTATION_GO_TEST_FLAGS:+ $MUTATION_GO_TEST_FLAGS}")
@@ -257,10 +261,12 @@ for mod in ${MODS[@]+"${MODS[@]}"}; do
   while IFS= read -r t; do
     [ -n "$t" ] && TARGETS+=("$t")
   done < <(targets_for "$mod")
+  cp "$SKILL_LIB/mutago.yml" "$mod/$MUTAGO_CONFIG"
   (cd "$mod" && GOMAXPROCS="$GO_MAXPROCS" \
     ${MUTATION_GO_RUNNER:+$MUTATION_GO_RUNNER} \
     go run "$MUTAGO_PKG@$MUTAGO_VERSION" "${MUTAGO_ARGS[@]}" "${TARGETS[@]}") \
     >"$RAW_OUT" 2>"$RAW_ERR" || status=$?
+  rm -f "$mod/$MUTAGO_CONFIG"
   REPORT="$mod/mutago-agentic.json"
 
   if [ "$status" -ne 0 ] || [ ! -f "$REPORT" ]; then

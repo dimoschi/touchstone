@@ -51,4 +51,25 @@ grep -q -- '--test-flags=-exec=env -short -count=1' "$CALLS" \
   || { echo "FAIL: expected the user's flags after -exec=env"; cat "$CALLS"; exit 1; }
 echo "  ok"
 
+echo "--- phase 3: the config sits in the module dir, where a container runner can read it ---"
+cat > "$WORK/config-runner.sh" <<EOF
+#!/usr/bin/env bash
+for a in "\$@"; do
+  case "\$a" in --config=*) cfg="\${a#--config=}" ;; esac
+done
+case "\$cfg" in /*|'') echo "absolute-or-missing \$cfg" >> "$CALLS"; exit 1 ;; esac
+[ -f "\$cfg" ] && grep -q 'skip_without_test: false' "\$cfg" \
+  && echo "readable \$cfg" >> "$CALLS"
+exit 1
+EOF
+chmod +x "$WORK/config-runner.sh"
+: > "$CALLS"
+MUTATION_BASE=main MUTATION_FILES=ex.go MUTATION_GO_RUNNER="$WORK/config-runner.sh" \
+  "$MODULE" >/dev/null 2>&1
+grep -q '^readable ' "$CALLS" \
+  || { echo "FAIL: expected a relative, readable config in the module dir"; cat "$CALLS"; exit 1; }
+left="$(git status --porcelain --ignored)"
+[ -z "$left" ] || { echo "FAIL: the config copy was left behind"; echo "$left"; exit 1; }
+echo "  ok"
+
 echo "MUTATION GO EXEC OK"
