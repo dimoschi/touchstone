@@ -143,8 +143,9 @@ func TestSign(t *testing.T) {
 	}
 }
 EOF
-# Not Abs: its `x < 0` boundary mutants are equivalent (-0 == 0), and they only
-# looked killed while mutago deduplicated them against Sign's identical line.
+# Not Abs: its `x < 0` boundary mutants are equivalent (-0 == 0). They passed
+# only because they were never run: mutago deduplicated them against Sign's
+# identical line while one process measured both packages.
 cat >> b/b.go <<'EOF'
 
 func Step(x int) int {

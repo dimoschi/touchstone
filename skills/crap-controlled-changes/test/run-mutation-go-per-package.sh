@@ -20,7 +20,7 @@ trap 'rm -rf "$WORK"' EXIT
 REPO="$WORK/repo"
 CALLS="$WORK/calls.log"
 mkdir -p "$REPO"
-cd "$REPO"
+cd "$REPO" || exit 1
 
 cat > "$WORK/runner.sh" <<EOF
 #!/usr/bin/env bash
@@ -93,7 +93,7 @@ git add .
 commit -m "feat: add Double and Triple"
 
 echo "--- phase 1: two packages, one mutago process each ---"
-run $'./alpha/alpha.go\n./beta/beta.go'
+run $'alpha/alpha.go\nbeta/beta.go'
 [ "$RC" -eq 0 ] || { echo "FAIL: expected exit 0, got $RC"; echo "$OUT"; exit 1; }
 calls="$(grep -c 'mutago' "$CALLS")"
 [ "$calls" -eq 2 ] || { echo "FAIL: expected 2 mutago processes, got $calls"; cat "$CALLS"; exit 1; }
@@ -104,9 +104,9 @@ both="$(generated)"
 echo "  ok: 2 processes, $both mutants all killed"
 
 echo "--- phase 2: the total is the sum of the per-package totals ---"
-run ./alpha/alpha.go
+run alpha/alpha.go
 alpha="$(generated)"
-run ./beta/beta.go
+run beta/beta.go
 beta="$(generated)"
 [ "$both" -eq $((alpha + beta)) ] || { echo "FAIL: total $both != $alpha + $beta"; exit 1; }
 echo "  ok: $both = $alpha + $beta"
@@ -123,11 +123,26 @@ func TestTriple(t *testing.T) {
 EOF
 git add .
 commit -m "test: weaken TestTriple"
-run $'./alpha/alpha.go\n./beta/beta.go'
+run $'alpha/alpha.go\nbeta/beta.go'
 printf '%s\n' "$OUT" | grep ' SURVIVED ' | grep -q 'beta/beta.go' \
   || { echo "FAIL: expected a beta survivor"; echo "$OUT"; exit 1; }
 printf '%s\n' "$OUT" | grep ' SURVIVED ' | grep -q 'alpha/alpha.go' \
   && { echo "FAIL: alpha has no survivors"; echo "$OUT"; exit 1; }
 echo "  ok: beta survivor reported, alpha clean"
+
+echo "--- phase 4: a failed run names its package, not only the module ---"
+cat > "$WORK/failing-runner.sh" <<'EOF'
+#!/usr/bin/env bash
+case "$*" in *beta.go*) echo "boom" >&2; exit 1 ;; esac
+exec "$@"
+EOF
+chmod +x "$WORK/failing-runner.sh"
+RC=0
+OUT="$(MUTATION_BASE=main MUTATION_FILES=$'alpha/alpha.go\nbeta/beta.go' \
+       MUTATION_GO_RUNNER="$WORK/failing-runner.sh" "$MODULE" 2>&1)" || RC=$?
+[ "$RC" -eq 4 ] || { echo "FAIL: expected exit 4, got $RC"; echo "$OUT"; exit 1; }
+printf '%s\n' "$OUT" | grep -qE '^  package: +\./beta$' \
+  || { echo "FAIL: expected the failed package ./beta to be named"; echo "$OUT"; exit 1; }
+echo "  ok: failure names ./beta"
 
 echo "MUTATION GO PER PACKAGE OK"

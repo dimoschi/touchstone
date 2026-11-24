@@ -263,6 +263,7 @@ measure_package() { # measure_package <module> <target>...
     {
       echo "mutation-check[go]: FAILED TO MEASURE - mutago produced no report."
       echo "  module:            $mod"
+      echo "  package:           ${TARGETS[0]%/*}"
       echo "  mutago exit:       $status"
       if [ -s "$RAW_ERR" ]; then
         echo "  stderr:"
@@ -307,10 +308,10 @@ for mod in ${MODS[@]+"${MODS[@]}"}; do
   while IFS= read -r dir; do
     PKG_TARGETS=()
     for t in "${TARGETS[@]}"; do
-      [ "$(dirname "$t")" = "$dir" ] && PKG_TARGETS+=("$t")
+      [ "${t%/*}" = "$dir" ] && PKG_TARGETS+=("$t")
     done
     measure_package "$mod" "${PKG_TARGETS[@]}"
-  done < <(for t in "${TARGETS[@]}"; do dirname "$t"; done | sort -u)
+  done < <(for t in "${TARGETS[@]}"; do printf '%s\n' "${t%/*}"; done | sort -u)
 done
 
 if [ "$total_rows" -eq 0 ]; then
