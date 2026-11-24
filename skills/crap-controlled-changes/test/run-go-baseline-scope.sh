@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # The Go gate runs the changed packages' tests, not the whole module, and
-# measures the HEAD baseline once per HEAD, change set and build configuration
+# measures the HEAD baseline once per tree, package set and build configuration
 # rather than on every run.
 
 set -euo pipefail
@@ -41,7 +41,7 @@ cd "$FIXTURE_DIR"
 git reset --hard -q HEAD
 git clean -qfd
 BASELINE_HEAD="$(git rev-parse HEAD)"
-CACHE_DIR="$(git rev-parse --path-format=absolute --git-common-dir)/crap-check-baseline"
+CACHE_DIR="$(git rev-parse --path-format=absolute --git-common-dir)/crap-check-profiles"
 rm -rf "$CACHE_DIR"
 
 COUNTER="$(mktemp)"
