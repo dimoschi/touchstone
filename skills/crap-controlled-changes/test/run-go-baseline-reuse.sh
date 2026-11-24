@@ -231,5 +231,60 @@ expect_runs 1 "only the change measured"
 fresh
 git reset -q --hard HEAD
 
+# git ls-files quotes a path with a non-ASCII byte, so a check comparing it with
+# the package directories by text would not see it.
+echo "case 12: a run with an ignored, quoted file in a Go package is not reused"
+printf '*.fixture\n' >> .gitignore && git add .gitignore && commit ignore-fixture
+write_pkg alpha Sign 21 && git add alpha
+echo x > "alpha/café.fixture"
+gate
+rm "alpha/café.fixture" && commit c12
+write_pkg alpha Sign 22 && git add alpha
+gate
+expect_runs 2 "baseline measured again"
+fresh
+git reset -q --hard HEAD
+
+echo "case 13: a cached profile that cannot be read is measured again"
+write_pkg alpha Sign 23 && write_pkg beta Step 4 && git add alpha beta
+gate
+commit c13
+write_pkg alpha Sign 24 && write_pkg beta Step 5 && git add alpha beta
+grep -l '/alpha/' "$REPO"/.git/crap-check-profiles/*.profile | while read -r f; do chmod 000 "$f"; done
+gate
+expect_runs 2 "alpha's baseline measured again"
+fresh
+chmod 644 "$REPO"/.git/crap-check-profiles/*.profile
+git reset -q --hard HEAD
+
+# The hook moves HEAD, to a tree whose tests cover all of alpha.Sign, after
+# `git worktree add` resolved the baseline's commit and before the gate reads
+# HEAD's tree.
+echo "case 14: a baseline is stored under the tree it measured"
+write_pkg alpha Sign 25 && git add alpha
+{ git show HEAD:alpha/alpha_test.go; printf '\nfunc TestNeg(t *testing.T) {\n\tif Sign(-1) != "neg" {\n\t\tt.Fatal("neg")\n\t}\n}\n'; } > "$WORK/race_test.go"
+cat > .git/hooks/post-checkout <<EOF
+#!/usr/bin/env bash
+[ -f "$WORK/race" ] || exit 0
+rm -f "$WORK/race"
+unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE
+cd "$REPO" || exit 1
+export GIT_INDEX_FILE="$WORK/race-index" GIT_AUTHOR_NAME=t GIT_AUTHOR_EMAIL=t@t GIT_COMMITTER_NAME=t GIT_COMMITTER_EMAIL=t@t
+git read-tree HEAD
+git update-index --cacheinfo "100644,\$(git hash-object -w "$WORK/race_test.go"),alpha/alpha_test.go"
+git update-ref HEAD "\$(git commit-tree "\$(git write-tree)" -p HEAD -m race)"
+EOF
+chmod +x .git/hooks/post-checkout
+touch "$WORK/race"
+gate
+r=0; [ ! -f "$WORK/race" ] || r=1
+check "HEAD moved while the baseline was checked out" "$r"
+git reset -q --hard HEAD
+write_pkg alpha Sign 26 && git add alpha
+gate
+expect_runs 2 "baseline measured again"
+fresh
+git reset -q --hard HEAD
+
 echo ""
 if [ "$failures" -eq 0 ]; then echo "GO BASELINE REUSE OK"; else echo "FAILED: $failures assertion(s)"; exit 1; fi

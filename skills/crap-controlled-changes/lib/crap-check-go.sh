@@ -114,7 +114,8 @@ ignored_in_go_packages() {
       BEGIN { while ((getline d < dirs) > 0) pkg[d] = 1 }
       {
         p = $0; sub(/\/$/, "", p)
-        if ("." in pkg) { print; next }
+        # git quotes an unusual path, which then matches no directory by text.
+        if (p ~ /^"/ || "." in pkg) { print; next }
         while (p != "") {
           if (p in pkg) { print; next }
           if (p !~ /\//) break
@@ -196,7 +197,8 @@ module_profile() {
   : > "$RAW_ERR"
   for unit in "${units[@]}"; do
     part="$PROFILE_CACHE_DIR/$(profile_key "$READ_TREE" "$config" "$mod" "$unit").profile"
-    if [ -n "$READ_TREE" ] && [ -f "$part" ]; then cat "$part" >> "$prof"; else missing+=("$unit"); fi
+    # A profile pruned or unreadable after the lookup is a miss, never no blocks.
+    if [ -n "$READ_TREE" ] && cat "$part" >> "$prof" 2>/dev/null; then :; else missing+=("$unit"); fi
   done
   [ "${#missing[@]}" -gt 0 ] || { require_blocks "$prof" "$phase" "$root/$mod"; return; }
   run_patterns=("${missing[@]}")
@@ -453,7 +455,7 @@ CACHE_ON=1
 # what every cached profile stands for, so this one is both read and stored.
 setup_base_tree
 if [ "$CACHE_ON" = 1 ]; then
-  READ_TREE="$(git rev-parse 'HEAD^{tree}')"
+  READ_TREE="$(git -C "$BASE_TREE" rev-parse 'HEAD^{tree}')"
   WRITE_TREE="$READ_TREE"
 fi
 measure "$BASE" "$PHASE_BASELINE" "$BASE_TREE" || exit $?
