@@ -1,0 +1,5 @@
+# Passed to mutago with --config by mutation-check-go.sh. Since v2.10 both default
+# to true, which drops a changed file whose same-named _test.go is missing or
+# build-tagged before any mutant is made, so an untested file is never measured.
+skip_without_test: false
+skip_with_build_tags: false

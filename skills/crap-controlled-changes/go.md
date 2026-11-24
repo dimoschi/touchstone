@@ -100,7 +100,7 @@ The helper exists to keep you from getting the stash dance and the join wrong.
 
 ## Signal C: What the mutation gate will do to your Go code
 
-Catalog for the pinned mutago (v2.8.1, `docs/mutators.md` in the module). Read the
+Catalog for the pinned mutago (v2.10.45, `docs/mutators.md` in the module). Read the
 right-hand column as an obligation you take on the moment you write the construct:
 if no test distinguishes the mutant, the gate will find it, and it is cheaper to
 write the assertion now than to come back for it.

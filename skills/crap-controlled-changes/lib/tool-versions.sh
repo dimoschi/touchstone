@@ -11,7 +11,7 @@
 # gate whose verdict moves on its own is not a measurement. Bumping is a
 # deliberate, visible act; x/tools tracks the Go toolchain, so expect to bump it
 # when the toolchain moves.
-MUTAGO_VERSION_DEFAULT=v2.8.1
+MUTAGO_VERSION_DEFAULT=v2.10.45
 DEADCODE_VERSION_DEFAULT=v0.49.0
 # unclebob/crapper and unclebob/dryer have no releases to pin, so a commit SHA stands
 # in for a version. Both run through lib/uv-pinned.sh.

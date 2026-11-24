@@ -207,3 +207,14 @@ def test_exempt_count_passes_the_allowed_set_through(monkeypatch, tmp_path):
 def test_path_prefix_allowed_strips_leading_dot_slash():
     _, _, allowed = parse_mutago._path_prefix_allowed(["report.json", "", "./sub/x.go"])
     assert allowed == {"sub/x.go"}
+
+
+def test_path_prefix_allowed_normalises_a_repeated_dot_slash():
+    _, _, allowed = parse_mutago._path_prefix_allowed(["report.json", "", "././sub/x.go"])
+    assert allowed == {"sub/x.go"}
+
+
+def test_collect_rows_matches_a_report_path_written_with_dot_segments():
+    doc = {"mutants": [{"file": "././sub/x.go", "line": 1, "id": "id1"}]}
+    rows = parse_mutago.collect_rows(doc, "mod/", {"sub/x.go"})
+    assert [(path, m["id"]) for path, _, m in rows] == [("mod/sub/x.go", "id1")]

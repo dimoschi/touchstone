@@ -36,6 +36,7 @@ GO_FILES upstream, so nothing in it reaches here to be exempted or listed.
 
 import json
 import os
+import posixpath
 import subprocess
 import sys
 
@@ -84,9 +85,9 @@ def total_mutants_count(summary_path):
 def collect_rows(doc, prefix, allowed):
     rows = []
     for m in doc.get('mutants') or []:
-        # Targets go to mutago as ./path and come back that way; strip it so a
-        # submodule prefix does not compose to "mod/./file.go".
-        f_name = str(m.get('file', '?')).removeprefix('./')
+        # Normalised on both sides: mutago has reported a target back as given
+        # (./x.go) and as cleaned (x.go), and a mismatch silently drops the row.
+        f_name = posixpath.normpath(str(m.get('file', '?')))
         if allowed and f_name not in allowed:
             continue
         try:
@@ -161,7 +162,7 @@ def exempt_count(path, prefix, allowed):
 def _path_prefix_allowed(argv):
     path = argv[0]
     prefix = argv[1] if len(argv) > 1 else ''
-    allowed = {a.removeprefix('./') for a in argv[2:]}
+    allowed = {posixpath.normpath(a) for a in argv[2:]}
     return path, prefix, allowed
 
 
