@@ -20,9 +20,14 @@ cd "$REPO" || exit 1
 
 # Logs each `go test` with its arguments, then runs the real go.
 REAL_GO="$(command -v go)"
+# A test run in the repo itself (the current one, not the baseline worktree)
+# first runs and removes $WORK/during when that exists.
 cat > "$WORK/bin/go" <<EOF
 #!/usr/bin/env bash
 [ "\${1:-}" = test ] && printf '%s\n' "\$*" >> "$CALLS"
+if [ "\${1:-}" = test ] && [ -f "$WORK/during" ] && [ "\$(pwd -P)" = "\$(cd "$REPO" && pwd -P)" ]; then
+  bash "$WORK/during" && rm -f "$WORK/during"
+fi
 exec "$REAL_GO" "\$@"
 EOF
 chmod +x "$WORK/bin/go"
@@ -141,6 +146,40 @@ echo x > ignored.txt
 gate
 rm ignored.txt && commit c5
 write_pkg alpha Sign 9 && git add alpha
+gate
+expect_runs 2 "baseline measured again"
+fresh
+git reset -q --hard HEAD
+
+# The tracked files after alpha's push `git ls-files -v` past a pipe buffer
+# beyond the matching line, so a check that stops reading early is caught.
+echo "case 7: a run with an assume-unchanged file is not reused"
+mkdir zz && for i in $(seq 1 5000); do echo "$i" > "zz/f$i.txt"; done
+git add zz && commit padding
+write_pkg alpha Sign 10 && git add alpha && commit c6
+git update-index --assume-unchanged alpha/alpha_test.go
+write_pkg alpha Sign 11 && git add alpha/alpha.go
+printf '\nfunc TestNeg(t *testing.T) {\n\tif Sign(-1) != "neg" {\n\t\tt.Fatal("neg")\n\t}\n}\n' >> alpha/alpha_test.go
+gate
+git update-index --no-assume-unchanged alpha/alpha_test.go
+git checkout -q -- alpha/alpha_test.go && commit c7
+write_pkg alpha Sign 12 && git add alpha
+gate
+expect_runs 2 "baseline measured again"
+fresh
+git reset -q --hard HEAD
+
+echo "case 8: a checkout changed while the tests run is not reused"
+write_pkg alpha Sign 13 && git add alpha
+cp alpha/alpha_test.go "$WORK/staged_test.go"
+cat > "$WORK/during" <<EOF
+cd "$REPO" && printf '\nfunc TestNeg(t *testing.T) {\n\tif Sign(-1) != "neg" {\n\t\tt.Fatal("neg")\n\t}\n}\n' >> alpha/alpha_test.go && git add alpha/alpha_test.go
+EOF
+gate
+r=0; [ ! -f "$WORK/during" ] || r=1
+check "the edit ran during the current tests" "$r"
+cp "$WORK/staged_test.go" alpha/alpha_test.go && git add alpha && commit c8
+write_pkg alpha Sign 14 && git add alpha
 gate
 expect_runs 2 "baseline measured again"
 fresh

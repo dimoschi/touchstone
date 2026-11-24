@@ -109,7 +109,9 @@ checkout_is_index() {
   git diff --quiet || return 1
   [ -z "$(git ls-files --others --exclude-standard --directory --no-empty-directory)" ] || return 1
   [ -z "$(git ls-files --others --ignored --exclude-standard --directory --no-empty-directory)" ] || return 1
-  ! git ls-files -v | grep -qE '^([a-z]|S) '
+  # Read to the end: under pipefail, grep -q quitting on a match kills git with
+  # SIGPIPE, and the negated failure would read as a clean checkout.
+  [ -z "$(git ls-files -v | grep -E '^([a-z]|S) ' || true)" ]
 }
 
 # The build configuration is read in the module as checked out for the run, so
@@ -157,7 +159,7 @@ module_profile() {
   run="$(mktemp)"
   gen_coverage "$root/$mod" "$run" "$phase" "${run_patterns[@]}" || { rm -f "$run"; return 1; }
   grep -v '^mode:' "$run" >> "$prof" || true
-  [ -z "$WRITE_TREE" ] || store_parts "$root" "$mod" "$run" "${missing[@]}"
+  [ -z "$WRITE_TREE" ] || store_parts "$root" "$mod" "$run" "$phase" "${missing[@]}"
   rm -f "$run"
   require_blocks "$prof" "$phase" "$root/$mod"
 }
@@ -165,8 +167,13 @@ module_profile() {
 # store_parts saves <run>'s blocks per unit under WRITE_TREE. A block no package
 # claims means the import path was derived wrong, so then nothing is stored.
 store_parts() {
-  local root="$1" mod="$2" run="$3" parts modpath unit key total claimed=0 i=0
-  shift 3
+  local root="$1" mod="$2" run="$3" phase="$4" parts modpath unit key total claimed=0 i=0
+  shift 4
+  # The tests take minutes, and an edit or `git add` meanwhile means the run
+  # measured something other than WRITE_TREE.
+  if [ "$phase" = "$PHASE_CURRENT" ]; then
+    checkout_is_index && [ "$(git write-tree 2>/dev/null)" = "$WRITE_TREE" ] || return 0
+  fi
   parts="$(mktemp -d)"
   modpath="$(cd "$root" && python3 "$SKILL_LIB/go_modules.py" modpath "$mod")"
   for unit in "$@"; do
