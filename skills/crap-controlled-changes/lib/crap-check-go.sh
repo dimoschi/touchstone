@@ -108,7 +108,9 @@ WRITE_TREE=""
 ignored_in_go_packages() {
   local dirs status=0
   dirs="$(mktemp)"
-  git ls-files '*.go' | sed -e 's#/[^/]*$##' -e 's#^[^/]*\.go$#.#' | sort -u > "$dirs" &&
+  # A quoted Go path hides its package directory, so it counts as the root's,
+  # which every ignored file is under.
+  git ls-files '*.go' | sed -e 's#^".*#.#' -e 's#/[^/]*$##' -e 's#^[^/]*\.go$#.#' | sort -u > "$dirs" &&
     git ls-files --others --ignored --exclude-standard --directory --no-empty-directory |
     awk -v dirs="$dirs" '
       BEGIN { while ((getline d < dirs) > 0) pkg[d] = 1 }

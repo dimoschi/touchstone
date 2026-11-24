@@ -286,5 +286,20 @@ expect_runs 2 "baseline measured again"
 fresh
 git reset -q --hard HEAD
 
+echo "case 15: an ignored file in a package of quoted Go file names is not reused"
+mkdir gamma
+printf 'package gamma\n\nfunc G() int {\n\treturn 1\n}\n' > "gamma/café.go"
+printf 'package gamma\n\nimport "testing"\n\nfunc TestG(t *testing.T) {\n\tif G() != 1 {\n\t\tt.Fatal("G")\n\t}\n}\n' > "gamma/café_test.go"
+git add gamma && commit gamma
+write_pkg alpha Sign 27 && git add alpha
+mkdir -p gamma/testdata && echo x > gamma/testdata/ignored.txt
+gate
+rm -r gamma/testdata && commit c15
+write_pkg alpha Sign 28 && git add alpha
+gate
+expect_runs 2 "baseline measured again"
+fresh
+git reset -q --hard HEAD
+
 echo ""
 if [ "$failures" -eq 0 ]; then echo "GO BASELINE REUSE OK"; else echo "FAILED: $failures assertion(s)"; exit 1; fi
